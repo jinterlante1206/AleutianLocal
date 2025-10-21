@@ -1,0 +1,36 @@
+# podman-compose.override.yml (User creates this file)
+version: '0.0.1'
+
+services:
+  # Override the LLM command if you've downloaded a different model
+  # llm-server:
+  #   command: -m /models/my-other-model.gguf -c 8192 --n_gpu_layers -1
+
+  # Add the custom financial analysis engine
+  finance-engine:
+    build:
+      context: ./path/to/their/finance-engine-code # Or use a pre-built image: image: my-finance-image:latest
+    container_name: user-financial-analysis-engine
+    ports:
+      - "12129:8000" # Expose your service on port 12129
+    networks:
+      - aleutian-network # Connect to the shared network defined in the main compose file
+
+  # Add the InfluxDB instance
+  influxdb:
+    image: influxdb:latest
+    container_name: user-influxdb
+    ports:
+      - "12130:8086" # Expose your service on port 12130
+    volumes:
+      - influxdb_data:/var/lib/influxdb2 # Persist InfluxDB data
+    networks:
+      - aleutian-network
+
+volumes:
+  influxdb_data:
+    - "/tmp/influxdb_data/"
+
+networks:
+  aleutian-network:
+    external: true

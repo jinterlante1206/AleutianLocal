@@ -1,0 +1,4 @@
+# services/converter/requirements.txt
+fastapi
+uvicorn[standard]
+huggingface_hub

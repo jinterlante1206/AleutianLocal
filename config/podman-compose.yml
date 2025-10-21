@@ -1,0 +1,93 @@
+# podman-compose.yml (in aleutian-cli repo)
+version: '3.8'
+
+services:
+  # The Core LLM (Llama.cpp for Metal support)
+  llm-server:
+    image: ${LLM_IMAGE:-ghcr.io/ggerganov/llama.cpp:server} # Defaults to llama.cpp server image
+    container_name: aleutian-llm-server
+    ports: ["${LLM_PORT:-12128}:8080"]
+    volumes:
+      - ./models:/models # User places their GGUF model files here
+    # Default command uses Gemma 2 27B IT, user can override via env var or override file
+    command: ${LLM_COMMAND:--m /models/gemma-2-27b-it.gguf -c 4096 --n_gpu_layers -1}
+    cap_add: [IPC_LOCK]
+    networks:
+      - aleutian-network
+
+  # The Embedding server (Built from source in this repo)
+  embedding-server:
+    build:
+      context: ./services/embeddings # Points to the embeddings source code included in this repo
+    container_name: aleutian-embedding-server
+    ports: ["${EMBEDDING_PORT:-12126}:8000"] # Assuming your embeddings server runs on 8000 internally
+    environment:
+      MODEL_NAME: ${EMBEDDING_MODEL_ID:-google/embeddinggemma-300m} # Defaults to Gemma embeddings
+    volumes:
+      - ./models_cache:/root/.cache/huggingface/ # Cache models locally
+    networks:
+      - aleutian-network
+
+  # The Orchestrator (Built from source in this repo)
+  orchestrator:
+    build:
+      context: . # Assumes Dockerfile is in the root, pointing to ./services/orchestrator
+      dockerfile: ./services/orchestrator/Dockerfile
+    container_name: aleutian-go-orchestrator
+    ports: ["${ORCHESTRATOR_PORT:-12210}:12210"] # Use configured port
+    environment:
+      PORT: ${ORCHESTRATOR_PORT:-12210}
+      EMBEDDING_SERVICE_URL: http://embedding-server:8000/embed # Points to the internal port
+      VLLM_SERVICE_URL: http://llm-server:8080/completion # Llama.cpp endpoint
+      WEAVIATE_SERVICE_URL: http://weaviate-db:8080
+      POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: /app/internal/policy_engine/enforcement/data_classification_patterns.yaml
+      # --- Dynamic Tool Integration ---
+      # Users can set these environment variables to integrate their custom containers
+      ALEUTIAN_CUSTOM_TOOL_FINANCE: ${ALEUTIAN_CUSTOM_TOOL_FINANCE:-}
+      ALEUTIAN_CUSTOM_TOOL_INFLUX: ${ALEUTIAN_CUSTOM_TOOL_INFLUX:-}
+    volumes:
+      # Mount the policy file so users can customize it locally
+      - ./internal/policy_engine/enforcement/data_classification_patterns.yaml:/app/internal/policy_engine/enforcement/data_classification_patterns.yaml:ro
+    networks:
+      - aleutian-network
+    depends_on:
+      - llm-server
+      - embedding-server
+      - weaviate-db
+
+  # The Vector Database
+  weaviate-db:
+    image: cr.weaviate.io/semitechnologies/weaviate:latest
+    container_name: aleutian-weaviate-db
+    platform: linux/arm64 # Good default for Mac users
+    ports: ["${WEAVIATE_PORT:-12127}:8080", "50051:50051"]
+    volumes:
+      - weaviate_data:/var/lib/weaviate # Use a named volume for data persistence
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      CLUSTER_HOSTNAME: 'weaviate-db'
+    networks:
+      - aleutian-network
+
+  gguf-converter:
+    build:
+      context: .
+      dockerfile: ./services/gguf_converter/Dockerfile
+    container_name: aleutian-gguf-converter
+    ports:
+      - "12140:8000"
+    volumes:
+      - ./models:/models
+    networks:
+      - aleutian-network
+
+volumes:
+  weaviate_data:
+  models_cache: # Named volume for caching Hugging Face models
+
+networks:
+  aleutian-network:
+    driver: bridge
+    name: aleutian-network # Explicitly name the network for easier overrides
