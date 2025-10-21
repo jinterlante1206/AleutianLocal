@@ -1,1 +1,5 @@
-secrets/*
+secrets/
+models/
+models_cache/
+*.idea
+*.test.yml
