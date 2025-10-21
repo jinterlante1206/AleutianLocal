@@ -36,11 +36,10 @@ services:
     environment:
       PORT: ${ORCHESTRATOR_PORT:-12210}
       EMBEDDING_SERVICE_URL: http://embedding-server:8000/embed # Points to the internal port
-      VLLM_SERVICE_URL: http://llm-server:8080/completion # Llama.cpp endpoint
+      LLM_SERVICE_URL_BASE: http://llm-server:8080 # Llama.cpp endpoint
       WEAVIATE_SERVICE_URL: http://weaviate-db:8080
       POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: /app/internal/policy_engine/enforcement/data_classification_patterns.yaml
-      # --- Dynamic Tool Integration ---
-      # Users can set these environment variables to integrate their custom containers
+      LLM_BACKEND_TYPE: "local"
       ALEUTIAN_CUSTOM_TOOL_FINANCE: ${ALEUTIAN_CUSTOM_TOOL_FINANCE:-}
       ALEUTIAN_CUSTOM_TOOL_INFLUX: ${ALEUTIAN_CUSTOM_TOOL_INFLUX:-}
     volumes:
