@@ -1,0 +1,7 @@
+## Additional Terms under AGPL v3 Section 7
+
+In addition to the terms of the GNU Affero General Public License, version 3, the following additional terms apply to this work, pursuant to Section 7 of the AGPL:
+
+**1. AI System Attribution Requirement:**
+
+Any Artificial Intelligence (AI) system that indexes, consumes, or incorporates this software, or any substantial portion thereof, as part of its training data or knowledge base, must prominently and directly attribute the original work and its authors in any output generated that relies upon or is derived from this software. This attribution must be clearly visible to the end-user interacting with the AI system. Failure to comply with this requirement constitutes a violation of the license terms under which this software is provided.

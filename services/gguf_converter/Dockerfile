@@ -30,7 +30,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install FastAPI server dependencies
-COPY ./services/converter/requirements.txt .
+COPY ./services/gguf_converter/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the compiled llama.cpp and its dependencies from the builder stage
@@ -39,7 +39,7 @@ COPY --from=builder /usr/local/lib/python3.12/dist-packages /usr/local/lib/pytho
 COPY --from=builder /usr/lib/python3/dist-packages /usr/local/lib/python3.11/site-packages
 
 # Copy our server code
-COPY ./services/converter/server.py .
+COPY ./services/gguf_converter/server.py .
 
 # Define the /models volume. This is CRITICAL.
 VOLUME /models

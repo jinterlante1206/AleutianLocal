@@ -24,7 +24,7 @@ services:
     environment:
       MODEL_NAME: ${EMBEDDING_MODEL_ID:-google/embeddinggemma-300m} # Defaults to Gemma embeddings
     volumes:
-      - ./models_cache:/root/.cache/huggingface/ # Cache models locally
+      - ./models_cache:/root/.cache/huggingface/
     networks:
       - aleutian-network
 
@@ -80,6 +80,7 @@ services:
       - "12140:8000"
     volumes:
       - ./models:/models
+      - ./models_cache:/root/.cache/huggingface/
     networks:
       - aleutian-network
 
