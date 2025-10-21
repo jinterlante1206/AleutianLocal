@@ -757,8 +757,8 @@ func runConvertCommand(cmd *cobra.Command, args []string) {
 	})
 	fmt.Printf("Sending the conversion request for %s (type: %s). This may take some time.\n",
 		modelId, quantizeType)
-	client := &http.Client{Timeout: 30 * time.Minute}
-	resp, err := http.Post(converterURL, "application/json", bytes.NewBuffer(payload))
+	client := &http.Client{Timeout: 45 * time.Minute}
+	resp, err := client.Post(converterURL, "application/json", bytes.NewBuffer(payload))
 	if err != nil {
 		log.Fatalf("Failed to call the GGUF converter service: %v", err)
 	}

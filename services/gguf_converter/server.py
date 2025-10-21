@@ -9,7 +9,6 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 """
-
 import os
 import subprocess
 import tempfile
@@ -40,8 +39,22 @@ app = FastAPI(
 )
 
 LLAMA_CPP_DIR = "/app/llama.cpp"
-CONVERT_SCRIPT = os.path.join(LLAMA_CPP_DIR, "convert.py")
+CONVERT_SCRIPT = os.path.join(LLAMA_CPP_DIR, "convert_hf_to_gguf.py")
 OUTPUT_DIR = "/models"
+
+def get_hf_token():
+    secret_path = "/run/secrets/huggingface_token"
+    try:
+        with open(secret_path, 'r') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.warning(f"Hugging Face token secret not found at {secret_path}. Downloads may fail for private models.")
+        return None
+    except Exception as e:
+        logger.error(f"Error reading Hugging Face token secret: {e}")
+        return None
+
+HUGGINGFACE_TOKEN = get_hf_token()
 
 @app.post("/convert")
 async def convert_model_to_gguf(request: ConvertRequest):
@@ -68,7 +81,8 @@ async def convert_model_to_gguf(request: ConvertRequest):
                 local_dir=model_input_dir,
                 local_dir_use_symlinks=False,
                 revision="main",
-                cache_dir="/root/.cache/huggingface/"
+                cache_dir="/root/.cache/huggingface/",
+                token=HUGGINGFACE_TOKEN
             )
             logger.info("Download complete.")
         except Exception as e:

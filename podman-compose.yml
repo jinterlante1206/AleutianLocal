@@ -1,6 +1,3 @@
-# podman-compose.yml (in aleutian-cli repo)
-version: '3.8'
-
 services:
   # The Core LLM (Llama.cpp for Metal support)
   llm-server:
@@ -10,7 +7,7 @@ services:
     volumes:
       - ./models:/models # User places their GGUF model files here
     # Default command uses Gemma 2 27B IT, user can override via env var or override file
-    command: ${LLM_COMMAND:--m /models/gemma-2-27b-it.gguf -c 4096 --n_gpu_layers -1}
+    command: ${LLM_COMMAND:--m /models/gemma-3-27b-it.gguf -c 4096 --n_gpu_layers -1}
     cap_add: [IPC_LOCK]
     networks:
       - aleutian-network
@@ -23,6 +20,9 @@ services:
     ports: ["${EMBEDDING_PORT:-12126}:8000"] # Assuming your embeddings server runs on 8000 internally
     environment:
       MODEL_NAME: ${EMBEDDING_MODEL_ID:-google/embeddinggemma-300m} # Defaults to Gemma embeddings
+    secrets:
+      - source: aleutian_hf_token
+        target: huggingface_token
     volumes:
       - ./models_cache:/root/.cache/huggingface/
     networks:
@@ -48,6 +48,9 @@ services:
     volumes:
       # Mount the policy file so users can customize it locally
       - ./internal/policy_engine/enforcement/data_classification_patterns.yaml:/app/internal/policy_engine/enforcement/data_classification_patterns.yaml:ro
+    secrets:
+      - source: aleutian_hf_token
+        target: huggingface_token
     networks:
       - aleutian-network
     depends_on:
@@ -75,18 +78,25 @@ services:
     build:
       context: .
       dockerfile: ./services/gguf_converter/Dockerfile
-    container_name: aleutian-gguf-converter
+    container_name: aleutian-gguf-converter-test
     ports:
       - "12140:8000"
     volumes:
       - ./models:/models
       - ./models_cache:/root/.cache/huggingface/
+    secrets:
+      - source: aleutian_hf_token
+        target: huggingface_token
     networks:
       - aleutian-network
 
+secrets:
+  aleutian_hf_token:
+    external: true
+
 volumes:
   weaviate_data:
-  models_cache: # Named volume for caching Hugging Face models
+  models_cache: {}
 
 networks:
   aleutian-network:
