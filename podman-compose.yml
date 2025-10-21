@@ -6,8 +6,7 @@ services:
     ports: ["${LLM_PORT:-12128}:8080"]
     volumes:
       - ./models:/models # User places their GGUF model files here
-    # Default command uses Gemma 2 27B IT, user can override via env var or override file
-    command: ${LLM_COMMAND:--m /models/gemma-3-27b-it.gguf -c 4096 --n_gpu_layers -1}
+    command: ${LLM_COMMAND:--m /models/Qwen3-4B-Instruct-2507-bf16.gguf -c 4096 --n_gpu_layers -1}
     cap_add: [IPC_LOCK]
     networks:
       - aleutian-network
@@ -22,7 +21,6 @@ services:
       MODEL_NAME: ${EMBEDDING_MODEL_ID:-google/embeddinggemma-300m} # Defaults to Gemma embeddings
     secrets:
       - source: aleutian_hf_token
-        target: huggingface_token
     volumes:
       - ./models_cache:/root/.cache/huggingface/
     networks:
@@ -50,7 +48,6 @@ services:
       - ./internal/policy_engine/enforcement/data_classification_patterns.yaml:/app/internal/policy_engine/enforcement/data_classification_patterns.yaml:ro
     secrets:
       - source: aleutian_hf_token
-        target: huggingface_token
     networks:
       - aleutian-network
     depends_on:
@@ -86,7 +83,6 @@ services:
       - ./models_cache:/root/.cache/huggingface/
     secrets:
       - source: aleutian_hf_token
-        target: huggingface_token
     networks:
       - aleutian-network
 

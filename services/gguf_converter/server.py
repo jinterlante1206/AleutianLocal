@@ -16,7 +16,7 @@ import logging
 from enum import Enum
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, login
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -43,10 +43,12 @@ CONVERT_SCRIPT = os.path.join(LLAMA_CPP_DIR, "convert_hf_to_gguf.py")
 OUTPUT_DIR = "/models"
 
 def get_hf_token():
-    secret_path = "/run/secrets/huggingface_token"
+    secret_path = "/run/secrets/aleutian_hf_token"
     try:
         with open(secret_path, 'r') as f:
-            return f.read().strip()
+            token = f.read().strip()
+            login(token=token)
+            return token
     except FileNotFoundError:
         logger.warning(f"Hugging Face token secret not found at {secret_path}. Downloads may fail for private models.")
         return None
