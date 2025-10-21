@@ -26,10 +26,6 @@ WORKDIR /app/llama.cpp/build
 RUN cmake ..
 RUN cmake --build . --config Release
 
-# Install llama.cpp's python dependencies
-WORKDIR /app/llama.cpp
-RUN python3 -m venv venv
-RUN ./venv/bin/pip install -r requirements.txt
 
 
 # --- Stage 2: Create the final server image ---
@@ -48,13 +44,27 @@ LABEL maintainer="jinterlante@aleutian.ai"
 LABEL app.version=$VERSION
 LABEL build.timestamp=$BUILD_TIMESTAMP
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install FastAPI server dependencies
 COPY ./services/gguf_converter/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir \
+    -r requirements.txt \
+    numpy \
+    sentencepiece \
+    gguf>=0.1.0a1 \
+    mistral_common \
+    transformers>=4.20.0 \
+    torch \
+    regex
 
 # Copy the compiled llama.cpp and its dependencies from the builder stage
 COPY --from=builder /app/llama.cpp /app/llama.cpp
-COPY --from=builder /app/llama.cpp/venv/lib/python3.12/site-packages /usr/local/lib/python3.11/site-packages
 
 # Copy our server code
 COPY ./services/gguf_converter/server.py .
