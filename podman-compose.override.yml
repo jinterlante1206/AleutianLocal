@@ -2,6 +2,13 @@
 version: '0.0.1'
 
 services:
+  orchestrator:
+    environment:
+      OPENAI_API_KEY: ""
+      OPENAI_model: ""
+      OLLAMA_BASE_URL: ""
+      OLLAMA_MODEL: ""
+      SYSTEM_ROLE_PROMPT_PERSONA: "You are an expert systems engineer."
   # Override the LLM command if you've downloaded a different model
   # llm-server:
   #   command: -m /models/my-other-model.gguf -c 8192 --n_gpu_layers -1

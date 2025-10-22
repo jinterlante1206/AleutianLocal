@@ -76,7 +76,10 @@ func main() {
 	case "openai":
 		globalLLMClient, err = llm.NewOpenAIClient()
 		slog.Info("Using OpenAI LLM backend")
-	// TODO: add cases for "gemini", "ollama", etc.
+	case "ollama":
+		globalLLMClient, err = llm.NewOllamaClient()
+		slog.Info("Using Ollama LLM backend")
+	// TODO: add cases for "gemini", "huggingface", "anthropic", etc.
 	default:
 		slog.Warn("LLM_BACKEND_TYPE not set or invalid, defaulting to local")
 		globalLLMClient, err = llm.NewLocalLlamaCppClient()
