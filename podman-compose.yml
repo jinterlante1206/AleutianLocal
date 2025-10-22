@@ -1,16 +1,4 @@
 services:
-  # The Core LLM (Llama.cpp for Metal support)
-  llm-server:
-    image: ${LLM_IMAGE:-ghcr.io/ggerganov/llama.cpp:server} # Defaults to llama.cpp server image
-    container_name: aleutian-llm-server
-    ports: ["${LLM_PORT:-12128}:8080"]
-    volumes:
-      - ./models:/models # User places their GGUF model files here
-    command: ${LLM_COMMAND:--m /models/Qwen3-4B-Instruct-2507-bf16.gguf -c 4096 --n_gpu_layers -1}
-    cap_add: [IPC_LOCK]
-    networks:
-      - aleutian-network
-
   # The Embedding server (Built from source in this repo)
   embedding-server:
     build:
@@ -36,10 +24,11 @@ services:
     environment:
       PORT: ${ORCHESTRATOR_PORT:-12210}
       EMBEDDING_SERVICE_URL: http://embedding-server:8000/embed # Points to the internal port
-      LLM_SERVICE_URL_BASE: http://llm-server:8080 # Llama.cpp endpoint
+      LLM_BACKEND_TYPE: "ollama" # this governs the switch statement in main.go
+      OLLAMA_BASE_URL: "http://host.containers.internal:11434" # Point to host Ollama
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
       WEAVIATE_SERVICE_URL: http://weaviate-db:8080
       POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: /app/internal/policy_engine/enforcement/data_classification_patterns.yaml
-      LLM_BACKEND_TYPE: "local"
       ALEUTIAN_CUSTOM_TOOL_FINANCE: ${ALEUTIAN_CUSTOM_TOOL_FINANCE:-}
       ALEUTIAN_CUSTOM_TOOL_INFLUX: ${ALEUTIAN_CUSTOM_TOOL_INFLUX:-}
     volumes:
@@ -50,7 +39,6 @@ services:
     networks:
       - aleutian-network
     depends_on:
-      - llm-server
       - embedding-server
       - weaviate-db
 
@@ -58,7 +46,6 @@ services:
   weaviate-db:
     image: cr.weaviate.io/semitechnologies/weaviate:latest
     container_name: aleutian-weaviate-db
-    platform: linux/arm64 # Good default for Mac users
     ports: ["${WEAVIATE_PORT:-12127}:8080", "50051:50051"]
     volumes:
       - weaviate_data:/var/lib/weaviate # Use a named volume for data persistence

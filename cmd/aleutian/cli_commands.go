@@ -198,6 +198,7 @@ func init() {
 	rootCmd.AddCommand(convertCmd)
 	convertCmd.Flags().StringVar(&quantizeType, "quantize", "q8_0", "Quantization type (f32, q8_0, bf16, f16)")
 	convertCmd.Flags().BoolVar(&isLocalPath, "is-local-path", false, "Treat the model-id as a local path inside the container")
+	convertCmd.Flags().Bool("register", false, "Register the model with ollama")
 
 	// session commands
 	rootCmd.AddCommand(sessionCmd)
@@ -220,6 +221,7 @@ func init() {
 	rootCmd.AddCommand(uploadCmd)
 	uploadCmd.AddCommand(uploadLogsCmd)
 	uploadCmd.AddCommand(uploadBackupsCmd)
+
 }
 
 func populateVectorDB(cmd *cobra.Command, args []string) {
@@ -772,8 +774,43 @@ func runConvertCommand(cmd *cobra.Command, args []string) {
 		log.Fatalf("Failed to parse response from converter: %v", err)
 	}
 
+	register, _ := cmd.Flags().GetBool("register")
+	if register {
+		fmt.Println("Registering the gguf model file with ollama")
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current directory: %v", err)
+		}
+		hostGgufPath := filepath.Join(cwd, convertResp.OutputPath)
+		if _, err := os.Stat(hostGgufPath); os.IsNotExist(err) {
+			log.Fatalf("Could not find converted GGUF file on host at %s: %v", hostGgufPath, err)
+		}
+		modelFileContent := fmt.Sprintf("FROM %s", hostGgufPath)
+
+		osTmpFile, err := os.CreateTemp("", "Modelfile-*")
+		if err != nil {
+			log.Fatalf("Failed to create the temporary modelfile: %v", err)
+		}
+		defer osTmpFile.Close()
+		defer os.Remove(osTmpFile.Name())
+		_, err = osTmpFile.WriteString(modelFileContent)
+		if err != nil {
+			log.Fatalf("Failed to write to the tmpfile %v", err)
+		}
+		osTmpFile.Name()
+		ollamaCreate := exec.Command("ollama", "create", modelId+"_local", "-f", osTmpFile.Name())
+		ollamaCreate.Stdout = os.Stdout
+		ollamaCreate.Stderr = os.Stderr
+		if err = ollamaCreate.Run(); err != nil {
+			log.Fatalf("Ollama failed to register your gguf model %s: %v", modelId, err)
+		}
+	}
+
 	fmt.Printf("\n🎉 %s\n", convertResp.Message)
 	fmt.Printf("   Output File: %s\n", convertResp.OutputPath)
+	if register {
+		fmt.Println("Registered the output file with Ollama")
+	}
 	fmt.Println("--- Conversion Logs ---")
 	fmt.Println(convertResp.Logs)
 	fmt.Println("-----------------------")

@@ -19,6 +19,17 @@ else
     echo "Podman found."
 fi
 
+# Check for Ollama
+if ! command -v ollama &> /dev/null; then
+    echo "Ollama not found. Attempting to install via Homebrew..."
+    brew install ollama || { echo "Ollama installation failed."; exit 1; }
+    echo "Ollama installed. Please ensure Ollama is running (e.g., via the menu bar icon or 'ollama serve')."
+    # Optional: Prompt user to start Ollama
+     read -p "Press Enter once Ollama is running..."
+else
+    echo "Ollama found."
+fi
+
 # --- Directory Setup ---
 echo "Creating necessary directories..."
 mkdir -p ./models
