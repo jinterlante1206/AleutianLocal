@@ -17,9 +17,6 @@ from weaviate.connect import ConnectionParams
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-import services.rag_engine.pipelines.raptor
-import services.rag_engine.pipelines.reranking
-import services.rag_engine.pipelines.graph
 
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor

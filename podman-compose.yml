@@ -28,6 +28,7 @@ services:
       OLLAMA_BASE_URL: "http://host.containers.internal:11434" # Point to host Ollama
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
       OPENAI_URL_BASE: "https://api.openai.com/v1"
+      RAG_ENGINE_URL: http://aleutian-rag-engine:8000
       WEAVIATE_SERVICE_URL: http://weaviate-db:8080
       POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: /app/internal/policy_engine/enforcement/data_classification_patterns.yaml
       ALEUTIAN_CUSTOM_TOOL_FINANCE: ${ALEUTIAN_CUSTOM_TOOL_FINANCE:-}
@@ -42,6 +43,7 @@ services:
     depends_on:
       - embedding-server
       - weaviate-db
+      - aleutian-rag-engine
 
   # The Vector Database
   weaviate-db:
@@ -73,9 +75,9 @@ services:
     networks:
       - aleutian-network
 
-  rag-engine:
+  aleutian-rag-engine:
     build:
-      context: ./services/rag-engine # Path to the rag-engine source code
+      context: ./services/rag_engine
       dockerfile: Dockerfile
     container_name: aleutian-rag-engine
     ports:
@@ -90,7 +92,7 @@ services:
       LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-[http://host.containers.internal:11434](http://host.containers.internal:11434)}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
-      LLM_SERVICE_URL_BASE: ${LLM_SERVICE_URL_BASE:-http://llm-server:8080} # For 'local' backend
+      LLM_SERVICE_URL_BASE: ${LLM_SERVICE_URL_BASE:-http://llm-server:8080}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_URL_BASE: ${OPENAI_URL_BASE:-[https://api.openai.com/v1](https://api.openai.com/v1)}
       HF_SERVER_URL: ${HF_SERVER_URL:-http://hf-server:8000} # Add if using hf-transformers
@@ -120,6 +122,8 @@ services:
 
 secrets:
   aleutian_hf_token:
+    external: true
+  openai_api_key:
     external: true
 
 volumes:

@@ -8,15 +8,15 @@ RUN apt-get update && \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY ./services/rag-engine/requirements.txt .
+COPY requirements.txt .
 
 RUN pip install --no-cache-dir \
     -r requirements.txt \
     torch \
     sentence-transformers
 
-COPY ./services/rag-engine/server.py .
-COPY ./services/rag-engine/pipelines /app/pipelines
+COPY server.py .
+COPY ./pipelines /app/pipelines
 
 EXPOSE 8000
 

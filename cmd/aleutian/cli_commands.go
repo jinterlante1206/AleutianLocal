@@ -57,6 +57,7 @@ var (
 		Args:  cobra.MinimumNArgs(1),
 		Run:   runAskCommand,
 	}
+	pipelineType string
 
 	populateCmd = &cobra.Command{
 		Use:   "populate",
@@ -184,6 +185,8 @@ var (
 // init() runs when the Go program starts
 func init() {
 	rootCmd.AddCommand(askCmd)
+	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "standard",
+		"RAG pipeline to use(e.g., standard, reranking, raptor, graph, rig, semantic")
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
 
@@ -450,7 +453,7 @@ func runDeleteSession(cmd *cobra.Command, args []string) {
 	fmt.Printf("Successfully deleted session: %s\n", sessionId)
 }
 
-func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
+func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResponse, error) {
 	var host string
 	if config.Target == "local" {
 		host = "localhost"
@@ -461,6 +464,7 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 	postBody, err := json.Marshal(map[string]string{
 		"query":      question,
 		"session_id": sessionId,
+		"pipeline":   pipeline,
 	})
 	if err != nil {
 		return ragResp, fmt.Errorf("failed to create request body: %w", err)
@@ -472,7 +476,8 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 		config.Services["orchestrator"].Port,
 	)
 
-	resp, err := http.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
+	client := &http.Client{Timeout: 3 * time.Minute}
+	resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
 	if err != nil {
 		return ragResp, fmt.Errorf("failed to send question to orchestrator: %w", err)
 	}
@@ -484,6 +489,7 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 	}
 
 	if err := json.Unmarshal(bodyBytes, &ragResp); err != nil {
+		log.Printf("Raw response from orchestrator: %s", string(bodyBytes))
 		return ragResp, fmt.Errorf("failed to parse response from orchestrator: %w", err)
 	}
 	return ragResp, nil
@@ -491,14 +497,15 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 
 func runAskCommand(cmd *cobra.Command, args []string) {
 	question := strings.Join(args, " ")
-	fmt.Printf("Asking: %s\n", question)
-
+	fmt.Printf("Asking (using pipeline '%s'): %s\n", pipelineType, question)
 	// A blank session ID means the orchestrator will create a new one.
-	ragResp, err := sendRAGRequest(question, "")
+	ragResp, err := sendRAGRequest(question, "", pipelineType)
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
 
+	// --- Enhanced Feedback ---
+	fmt.Println("\n---") // Separator
 	fmt.Printf("Answer: %s\n", ragResp.Answer)
 }
 
@@ -537,7 +544,7 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 			currentSessionId = ""
 		}
 
-		ragResp, err := sendRAGRequest(input, currentSessionId)
+		ragResp, err := sendRAGRequest(input, currentSessionId, pipelineType)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
