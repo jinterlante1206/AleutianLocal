@@ -12,3 +12,5 @@ opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-fastapi
 opentelemetry-exporter-otlp
+pydantic
+httpx

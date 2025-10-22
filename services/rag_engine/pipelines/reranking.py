@@ -133,9 +133,12 @@ class RerankingPipeline(BaseRAGPipeline):
                 return_metadata=wvc.query.MetadataQuery(distance=True),
                 return_properties=["content", "source"]
             )
-            context_docs = [obj.properties for obj in response.objects]
-            logger.info(f"Retrieved {len(context_docs)} initial documents from Weaviate (limit={self.top_k_initial})")
-            return context_docs
+            context_docs_with_meta = [
+                {"properties": obj.properties, "metadata": obj.metadata}
+                for obj in response.objects
+            ]
+            logger.info(f"Retrieved {len(context_docs_with_meta)} initial documents ...")
+            return context_docs_with_meta
         except WeaviateQueryException as e:
             logger.error(f"Weaviate initial query failed: {e}")
             raise RuntimeError(f"Weaviate initial search failed: {e}")
@@ -143,15 +146,15 @@ class RerankingPipeline(BaseRAGPipeline):
             logger.error(f"Failed initial Weaviate search: {e}", exc_info=True)
             raise RuntimeError(f"Weaviate interaction failed: {e}")
 
-    async def _rerank_docs(self, query: str, initial_docs: list[dict]) -> list[dict]:
+    async def _rerank_docs(self, query: str, initial_docs_with_meta: list[dict]) -> list[dict]:
         """Reranks the initial documents using the cross-encoder."""
-        if not self.reranker or not initial_docs:
+        if not self.reranker or not initial_docs_with_meta:
             logger.warning("Skipping reranking (no model or no initial docs).")
             # Return top N of the initial results if reranker isn't available
-            return initial_docs[:self.top_k_final]
+            return initial_docs_with_meta[:self.top_k_final]
 
-        logger.debug(f"Preparing {len(initial_docs)} passages for reranking...")
-        passages = [doc.get("content", "") for doc in initial_docs]
+        logger.debug(f"Preparing {len(initial_docs_with_meta)} passages for reranking...")
+        passages = [d["properties"].get("content", "") for d in initial_docs_with_meta]
         query_passage_pairs = [[query, passage] for passage in passages if passage]
 
         if not query_passage_pairs:
@@ -165,21 +168,24 @@ class RerankingPipeline(BaseRAGPipeline):
              logger.debug("Reranking complete.")
         except Exception as e:
              logger.error(f"Error during reranker prediction: {e}. Skipping reranking.", exc_info=True)
-             return initial_docs[:self.top_k_final] # Fallback
+             return initial_docs_with_meta[:self.top_k_final] # Fallback
 
-        valid_initial_docs = [doc for doc in initial_docs if doc.get("content", "")]
+        valid_initial_docs = [d for d in initial_docs_with_meta if
+                              d["properties"].get("content", "")]
         if len(scores) != len(valid_initial_docs):
              logger.error(f"Mismatch score/passage count. Skipping reranking.")
-             return initial_docs[:self.top_k_final] # Fallback
+             return initial_docs_with_meta[:self.top_k_final] # Fallback
 
         scored_docs = list(zip(scores, valid_initial_docs))
         scored_docs.sort(key=lambda x: x[0], reverse=True)
 
-        reranked_docs = [doc for score, doc in scored_docs[:self.top_k_final]]
-        logger.info(f"Reranked from {len(initial_docs)} down to {len(reranked_docs)} documents.")
-        return reranked_docs
+        reranked_docs_with_meta = [doc for score, doc in scored_docs[:self.top_k_final]]
+        logger.info(f"Reranked from {len(initial_docs_with_meta)} down to {len(reranked_docs)} documents.")
+        for i, (score, doc) in enumerate(scored_docs[:self.top_k_final]):
+                reranked_docs_with_meta[i]["metadata"].rerank_score = score
+        return reranked_docs_with_meta
 
-    async def run(self, query: str) -> str:
+    async def run(self, query: str) -> tuple[str, list[dict]]:
         """Executes the RAG pipeline with reranking."""
         tracer = trace.get_tracer("aleutian.rag.reranking")
         with tracer.start_as_current_span("reranking_pipeline.run") as span:
@@ -190,15 +196,16 @@ class RerankingPipeline(BaseRAGPipeline):
                 query_vector = await self._get_embedding(query)
 
             with tracer.start_as_current_span("initial_search"):
-                initial_docs = await self._search_weaviate_initial(query_vector)
-                span.set_attribute("retrieved.initial_count", len(initial_docs))
+                initial_docs_with_meta = await self._search_weaviate_initial(query_vector)
+                span.set_attribute("retrieved.initial_count", len(initial_docs_with_meta))
 
             with tracer.start_as_current_span("rerank_docs"):
-                context_docs = await self._rerank_docs(query, initial_docs)
-                span.set_attribute("retrieved.final_count", len(context_docs))
+                context_docs_with_meta = await self._rerank_docs(query, initial_docs_with_meta)
+                context_docs_props = [d["properties"] for d in context_docs_with_meta]
+                span.set_attribute("retrieved.final_count", len(context_docs_props))
 
             with tracer.start_as_current_span("build_prompt"):
-                prompt = self._build_prompt(query, context_docs)
+                prompt = self._build_prompt(query, context_docs_props)
                 span.set_attribute("prompt.length", len(prompt))
 
             with tracer.start_as_current_span("call_llm"):
@@ -207,4 +214,12 @@ class RerankingPipeline(BaseRAGPipeline):
                 span.set_attribute("answer.length", len(answer))
 
             logger.info("Reranking RAG run finished.")
-            return answer
+            sources = [
+                {
+                    "source": d["properties"].get("source", "Unknown"),
+                    "distance": d["metadata"].distance if d.get("metadata") else None,
+                    "score": d["metadata"].rerank_score if d.get("metadata") else None,
+                } for d in context_docs_with_meta
+            ]
+
+            return answer, sources  # Return both

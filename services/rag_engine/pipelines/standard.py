@@ -44,9 +44,13 @@ class StandardRAGPipeline(BaseRAGPipeline):
                 return_metadata=wvc.query.MetadataQuery(distance=True),
                 return_properties=["content", "source"]
             )
-            context_docs = [obj.properties for obj in response.objects]
-            logger.info(f"Retrieved {len(context_docs)} documents from Weaviate (limit={self.search_limit})")
-            return context_docs
+            context_docs_with_meta = [
+                {"properties": obj.properties, "metadata": obj.metadata}
+                for obj in response.objects
+            ]
+            logger.info(
+                f"Retrieved {len(context_docs_with_meta)} documents from Weaviate (limit={self.search_limit})")
+            return context_docs_with_meta
         except WeaviateQueryException as e:
             logger.error(f"Weaviate query failed: {e}")
             raise RuntimeError(f"Weaviate search failed: {e}")
@@ -55,7 +59,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
             raise RuntimeError(f"Weaviate interaction failed: {e}")
 
 
-    async def run(self, query: str) -> str:
+    async def run(self, query: str) -> tuple[str, list[dict]]:
         """Executes the standard RAG pipeline."""
         logger.info(f"Standard RAG run started for query: {query[:50]}...")
 
@@ -64,18 +68,27 @@ class StandardRAGPipeline(BaseRAGPipeline):
         query_vector = await self._get_embedding(query)
         logger.debug("Query embedding received.")
 
+        context_docs_with_meta = await self._search_weaviate(query_vector)
+
         # 2. Search for relevant documents (uses *this* class's _search_weaviate)
         logger.debug("Searching Weaviate...")
-        context_docs = await self._search_weaviate(query_vector)
-        logger.debug(f"Found {len(context_docs)} context documents.")
+        context_docs_props = [d["properties"] for d in context_docs_with_meta]
+        logger.debug(f"Found {len(context_docs_props)} context documents.")
 
         # 3. Build the prompt (uses inherited _build_prompt)
         logger.debug("Building prompt...")
-        prompt = self._build_prompt(query, context_docs)
+        prompt = self._build_prompt(query, context_docs_props)
 
         # 4. Call the LLM (uses inherited _call_llm)
         logger.debug("Calling LLM...")
         answer = await self._call_llm(prompt)
         logger.info("Standard RAG run finished.")
 
-        return answer
+        sources = [
+            {
+                "source": d["properties"].get("source", "Unknown"),
+                "distance": d["metadata"].distance if d.get("metadata") else None,
+            } for d in context_docs_with_meta
+        ]
+
+        return answer, sources

@@ -11,8 +11,11 @@
 """
 import os
 import logging
+import time
+
 import weaviate
 import weaviate.classes as wvc
+from sympy import false
 from weaviate.connect import ConnectionParams
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -71,39 +74,63 @@ embedding_service_url = os.getenv("EMBEDDING_SERVICE_URL", "http://embedding-ser
 llm_backend_type = os.getenv("LLM_BACKEND_TYPE", "ollama")  # Get backend type
 ollama_model = os.getenv("OLLAMA_MODEL", "llama3")  # Get ollama model if used
 
+class SourceDocument(BaseModel):
+    source: str
+    distance: float | None = None
+
+class RAGEngineResponse(BaseModel):
+    answer: str
+    sources: list[SourceDocument] = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global weaviate_client
     logger.info("RAG Engine Lifespan: Startup sequence initiating.")
-    try:
-        logger.info(f"Attempting to connect to Weaviate: http at {WEAVIATE_SERVICE_URL}, grpc at port {WEAVIATE_GRPC_PORT}")
-        weaviate_client = weaviate.connect_to_custom(
-            http_host=WEAVIATE_SERVICE_URL.replace("http://", "").split(":")[0],
-            http_port=int(WEAVIATE_SERVICE_URL.split(":")[-1]),
-            http_secure=False,
-            grpc_host=WEAVIATE_SERVICE_URL.replace("http://", "").split(":")[0],
-            grpc_port=WEAVIATE_GRPC_PORT,
-            grpc_secure=False,
-            # auth_client_secret=wvc.auth.AuthApiKey(api_key="YOUR-WEAVIATE-API-KEY"),
-        )
-        weaviate_client.connect()
-        if weaviate_client.is_ready():
-            logger.info("Successfully connected to Weaviate.")
-            # Optional: Log schema or node status
-            meta = weaviate_client.get_meta()
-            logger.info(f"Weaviate Meta: {meta}")
-        else:
-            logger.error("Weaviate connection check failed.")
-            raise RuntimeError("Failed to connect to Weaviate")
-        logger.info("RAG Engine Lifespan: Startup complete.")
-    except Exception as e:
-        logger.error(f"Error during RAG Engine startup (Weaviate connection?): {e}", exc_info=True)
-        raise e
+    max_retries = 10
+    retry_delay_seconds = 5
+    connected = False
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempting to connect to Weaviate: http at {WEAVIATE_SERVICE_URL}, grpc at port {WEAVIATE_GRPC_PORT}")
+            weaviate_client = weaviate.connect_to_custom(
+                http_host=WEAVIATE_SERVICE_URL.replace("http://", "").split(":")[0],
+                http_port=int(WEAVIATE_SERVICE_URL.split(":")[-1]),
+                http_secure=False,
+                grpc_host=WEAVIATE_SERVICE_URL.replace("http://", "").split(":")[0],
+                grpc_port=WEAVIATE_GRPC_PORT,
+                grpc_secure=False,
+                # auth_client_secret=wvc.auth.AuthApiKey(api_key="YOUR-WEAVIATE-API-KEY"),
+            )
+            weaviate_client.connect()
+            if weaviate_client.is_ready():
+                logger.info("Successfully connected to Weaviate.")
+                # Optional: Log schema or node status
+                meta = weaviate_client.get_meta()
+                logger.info(f"Weaviate Meta: {meta}")
+                connected = True
+                break
+            else:
+                logger.error("Weaviate connection check failed.")
+                raise RuntimeError("Failed to connect to Weaviate")
+            logger.info("RAG Engine Lifespan: Startup complete.")
+        except Exception as e:
+            logger.warning(
+                f"Error during Weaviate connection attempt: {e}. Retrying in {retry_delay_seconds}s...")
+            if weaviate_client and weaviate_client.is_connected():
+                try:
+                    weaviate_client.close()
+                except Exception as close_e:
+                    logger.error(f"Error during close on failure: {close_e}")
+
+        time.sleep(retry_delay_seconds)
+    if not connected:
+        logger.error("Failed to connect to Weaviate after all retries")
+        raise RuntimeError("Failed to connect to Weaviate")
+
     yield
     if weaviate_client and weaviate_client.is_connected():
         try:
-            weaviate_client.disconnect()
+            weaviate_client.close()
             logger.info("Weaviate connection closed.")
         except Exception as e:
             logger.error(f"Error disconnecting from Weaviate: {e}")
@@ -139,8 +166,8 @@ async def run_standard_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = standard.StandardRAGPipeline(weaviate_client, pipeline_config)
-        answer = await pipeline.run(request.query)
-        return RAGEngineResponse(answer=answer)
+        answer, source_docs = await pipeline.run(request.query)
+        return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in standard RAG pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -152,8 +179,8 @@ async def run_reranking_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = reranking.RerankingPipeline(weaviate_client, pipeline_config)
-        answer = await pipeline.run(request.query)
-        return RAGEngineResponse(answer=answer)
+        answer, source_docs = await pipeline.run(request.query)
+        return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in reranking RAG pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

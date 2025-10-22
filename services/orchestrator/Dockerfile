@@ -8,7 +8,7 @@ WORKDIR /src
 
 # Copy the Go module files first to leverage Docker layer caching
 COPY go.mod go.sum ./
-RUN go mod download -v
+RUN go mod download
 
 # Copy the rest of the source code for the entire project
 COPY services/ ./services/

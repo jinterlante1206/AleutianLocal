@@ -31,9 +31,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type SourceInfo struct {
+	Source   string  `json:"source"`
+	Distance float64 `json:"distance,omitempty"`
+	Score    float64 `json:"score,omitempty"`
+}
+
 type RAGResponse struct {
-	Answer    string `json:"answer"`
-	SessionId string `json:"session_id"`
+	Answer    string       `json:"answer"`
+	SessionId string       `json:"session_id"`
+	Sources   []SourceInfo `json:"sources,omitempty"`
 }
 
 type ConvertResponse struct {
@@ -185,7 +192,7 @@ var (
 // init() runs when the Go program starts
 func init() {
 	rootCmd.AddCommand(askCmd)
-	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "standard",
+	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking",
 		"RAG pipeline to use(e.g., standard, reranking, raptor, graph, rig, semantic")
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
@@ -485,6 +492,7 @@ func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResp
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error: Orchestrator returned status %d. Response Body: %s", resp.StatusCode, string(bodyBytes))
 		return ragResp, fmt.Errorf("orchestrator returned an error (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
@@ -497,16 +505,32 @@ func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResp
 
 func runAskCommand(cmd *cobra.Command, args []string) {
 	question := strings.Join(args, " ")
+	// Show pipeline being used
 	fmt.Printf("Asking (using pipeline '%s'): %s\n", pipelineType, question)
-	// A blank session ID means the orchestrator will create a new one.
+	fmt.Println("---") // Separator
+	// Pass the pipelineType flag value to sendRAGRequest
 	ragResp, err := sendRAGRequest(question, "", pipelineType)
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
-
-	// --- Enhanced Feedback ---
-	fmt.Println("\n---") // Separator
-	fmt.Printf("Answer: %s\n", ragResp.Answer)
+	// --- Enhanced Feedback: Answer + Sources ---
+	fmt.Printf("\nAnswer:\n%s\n", ragResp.Answer) // Add newline for readability
+	// Display sources if available
+	if len(ragResp.Sources) > 0 {
+		fmt.Println("\nSources Used:")
+		for i, source := range ragResp.Sources {
+			scoreInfo := ""
+			if source.Distance != 0 { // Weaviate provides distance
+				scoreInfo = fmt.Sprintf("(Distance: %.4f)", source.Distance)
+			} else if source.Score != 0 {
+				scoreInfo = fmt.Sprintf("(Score: %.4f)", source.Score)
+			}
+			fmt.Printf("%d. %s %s\n", i+1, source.Source, scoreInfo)
+		}
+	} else {
+		fmt.Println("\n(No specific sources identified by the RAG pipeline)")
+	}
+	fmt.Println("\n---")
 }
 
 func runChatCommand(cmd *cobra.Command, args []string) {
@@ -522,7 +546,6 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 		// Create a new session ID for this chat
 		fmt.Printf("Starting new chat session: %s\n", sessionId)
 	}
-
 	fmt.Println("Type 'exit' or 'quit' to end the session.")
 	reader := bufio.NewReader(os.Stdin)
 
