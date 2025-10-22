@@ -1,0 +1,13 @@
+# Exclude model data and caches
+models_cache/
+models/
+
+# Exclude Python virtual environment
+.venv/
+
+# Exclude Git history
+.git/
+
+# Exclude Python cache files
+__pycache__/
+*.pyc

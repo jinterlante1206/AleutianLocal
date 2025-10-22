@@ -1,3 +1,9 @@
+secrets:
+  aleutian_hf_token:
+    external: true
+  openai_api_key:
+    external: true
+
 services:
   # The Embedding server (Built from source in this repo)
   embedding-server:
@@ -17,7 +23,7 @@ services:
   # The Orchestrator (Built from source in this repo)
   orchestrator:
     build:
-      context: . # Assumes Dockerfile is in the root, pointing to ./services/orchestrator
+      context: .
       dockerfile: ./services/orchestrator/Dockerfile
     container_name: aleutian-go-orchestrator
     ports: ["${ORCHESTRATOR_PORT:-12210}:12210"] # Use configured port
@@ -64,7 +70,7 @@ services:
     build:
       context: .
       dockerfile: ./services/gguf_converter/Dockerfile
-    container_name: aleutian-gguf-converter-test
+    container_name: aleutian-gguf-converter
     ports:
       - "12140:8000"
     volumes:
@@ -118,13 +124,9 @@ services:
       - aleutian-network
     depends_on:
       - embedding-server
-      - weaviate-db
+#      - weaviate-db
 
-secrets:
-  aleutian_hf_token:
-    external: true
-  openai_api_key:
-    external: true
+
 
 volumes:
   weaviate_data:
