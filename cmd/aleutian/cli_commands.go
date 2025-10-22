@@ -786,6 +786,11 @@ func runConvertCommand(cmd *cobra.Command, args []string) {
 			log.Fatalf("Could not find converted GGUF file on host at %s: %v", hostGgufPath, err)
 		}
 		modelFileContent := fmt.Sprintf("FROM %s", hostGgufPath)
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "</answer>") // Use %q for quoting
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "</s>")      // Common EOS token, good to include
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "Done")
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "End")
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "Response complete")
 
 		osTmpFile, err := os.CreateTemp("", "Modelfile-*")
 		if err != nil {
