@@ -34,6 +34,10 @@ services:
     networks:
       - aleutian-network
 
+  rag-engine:
+    environment:
+      RAG_PROMPT_TEMPLATE: "Context: {context}\n\nBased ONLY on the context, answer: {query}\nAnswer:"
+
 # Uncomment the gguf-converter if you want to use a local model instead of one from HF.
 #  gguf-converter:
 #    volumes:
