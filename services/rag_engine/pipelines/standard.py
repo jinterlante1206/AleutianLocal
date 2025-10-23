@@ -38,7 +38,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
             return []
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
-            response = await documents_collection.query.near_vector(
+            response = documents_collection.query.near_vector(
                 near_vector=query_vector,
                 limit=self.search_limit,
                 return_metadata=wvc.query.MetadataQuery(distance=True),

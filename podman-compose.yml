@@ -37,7 +37,7 @@ services:
       EMBEDDING_SERVICE_URL: http://embedding-server:8000/embed
       LLM_BACKEND_TYPE: "ollama"
       OLLAMA_BASE_URL: "http://host.containers.internal:11434"
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
       OPENAI_URL_BASE: "https://api.openai.com/v1"
       RAG_ENGINE_URL: http://aleutian-rag-engine:8000
       WEAVIATE_SERVICE_URL: http://weaviate-db:8080

@@ -127,7 +127,7 @@ class RerankingPipeline(BaseRAGPipeline):
         if not query_vector: return []
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
-            response = await documents_collection.query.near_vector(
+            response = documents_collection.query.near_vector(
                 near_vector=query_vector,
                 limit=self.top_k_initial, # Use initial K
                 return_metadata=wvc.query.MetadataQuery(distance=True),
