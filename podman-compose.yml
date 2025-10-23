@@ -39,6 +39,7 @@ services:
       OLLAMA_BASE_URL: "http://host.containers.internal:11434"
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
       OPENAI_URL_BASE: "https://api.openai.com/v1"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
       RAG_ENGINE_URL: http://aleutian-rag-engine:8000
       WEAVIATE_SERVICE_URL: http://weaviate-db:8080
       POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: /app/internal/policy_engine/enforcement/data_classification_patterns.yaml
@@ -119,18 +120,15 @@ services:
       # --- Connection Info ---
       WEAVIATE_SERVICE_URL: ${WEAVIATE_SERVICE_URL:-http://weaviate-db:8080}
       EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://embedding-server:8000/embed}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317} # For OTel
-
-      # --- LLM Backend Configuration (Mirrors orchestrator) ---
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.containers.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
       LLM_SERVICE_URL_BASE: ${LLM_SERVICE_URL_BASE:-http://llm-server:8080}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_URL_BASE: ${OPENAI_URL_BASE:-https://api.openai.com/v1}
-      HF_SERVER_URL: ${HF_SERVER_URL:-http://hf-server:8000} # Add if using hf-transformers
+      HF_SERVER_URL: ${HF_SERVER_URL:-http://hf-server:8000}
       # Add others (CLAUDE_MODEL etc.) if implementing those clients
-
       # --- Pipeline Configuration ---
       LLM_DEFAULT_TEMPERATURE: ${LLM_DEFAULT_TEMPERATURE:-0.5}
       LLM_DEFAULT_MAX_TOKENS: ${LLM_DEFAULT_MAX_TOKENS:-1024}
@@ -159,11 +157,63 @@ services:
       weaviate-db:
         condition: service_healthy
 
+  # --- Observability Stack ---
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: aleutian-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel_collector_config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"  # OTLP gRPC (used by your apps)
+      - "4318:4318"  # OTLP HTTP
+      - "8889:8889"  # Prometheus exporter (for prometheus to scrape)
+      - "14250:14250" # Jaeger gRPC exporter (for jaeger to receive)
+    networks:
+      - aleutian-network
+    depends_on:
+      - aleutian-jaeger
 
+  aleutian-jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: aleutian-jaeger
+    ports:
+      - "16686:16686"
+    networks:
+      - aleutian-network
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: aleutian-prometheus
+    volumes:
+      - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - aleutian-network
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: aleutian-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana # persistent data volume for dashboards, etc.
+    networks:
+      - aleutian-network
+    depends_on:
+      - prometheus
+      - aleutian-jaeger
 
 volumes:
   weaviate_data:
   models_cache: {}
+  grafana_data: {}
 
 networks:
   aleutian-network:

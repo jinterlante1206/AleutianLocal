@@ -21,8 +21,11 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
-from opentelemetry import trace
+from opentelemetry import trace, metrics
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -44,7 +47,7 @@ LOCAL_LLM_URL_BASE = os.getenv("LLM_SERVICE_URL_BASE") # Base URL for llama.cpp 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_URL_BASE = os.getenv("OPENAI_URL_BASE", "https://api.openai.com/v1")
 HF_SERVER_URL = os.getenv("HF_SERVER_URL")
-OTEL_URL = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
+OTEL_URL = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "aleutian-otel-collector:4317")
 
 # Add env vars for other backends (Claude, Gemini etc.)
 # CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
@@ -67,6 +70,16 @@ processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_URL, insecure=True
 provider.add_span_processor(processor)
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
+reader = PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=OTEL_URL, insecure=True))
+meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
+metrics.set_meter_provider(meter_provider)
+meter = metrics.get_meter(__name__)
+
+rag_request_counter = meter.create_counter(
+    name="rag.requests.total",
+    description="Total number of RAG requests",
+    unit="1"
+)
 
 # --- Global Resources / Clients (Load on Startup) ---
 weaviate_client: weaviate.WeaviateClient = None
@@ -146,9 +159,6 @@ class RAGEngineRequest(BaseModel):
     query: str
     session_id: str | None = None
 
-class RAGEngineResponse(BaseModel):
-    answer: str
-
 pipeline_config = {
     "embedding_url": EMBEDDING_SERVICE_URL,
     "llm_backend_type": LLM_BACKEND_TYPE,
@@ -161,6 +171,7 @@ pipeline_config = {
 
 @app.post("/rag/standard", response_model=RAGEngineResponse)
 async def run_standard_rag(request: RAGEngineRequest):
+    rag_request_counter.add(1, {"pipeline": "standard"})
     logger.info(f"Running Standard RAG for query: {request.query[:50]}...")
     if not weaviate_client or not weaviate_client.is_connected():
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
@@ -174,6 +185,7 @@ async def run_standard_rag(request: RAGEngineRequest):
 
 @app.post("/rag/reranking", response_model=RAGEngineResponse)
 async def run_reranking_rag(request: RAGEngineRequest):
+    rag_request_counter.add(1, {"pipeline": "reranking"})
     logger.info(f"Running Reranking RAG for query: {request.query[:50]}...")
     if not weaviate_client or not weaviate_client.is_connected():
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
@@ -188,6 +200,7 @@ async def run_reranking_rag(request: RAGEngineRequest):
 
 @app.post("/rag/raptor", response_model=RAGEngineResponse)
 async def run_raptor_rag(request: RAGEngineRequest):
+    rag_request_counter.add(1, {"pipeline": "raptor"})
     logger.info(f"Running RAPTOR RAG for query: {request.query[:50]}...")
     if not weaviate_client or not weaviate_client.is_connected():
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
@@ -205,6 +218,7 @@ async def run_raptor_rag(request: RAGEngineRequest):
 
 @app.post("/rag/graph", response_model=RAGEngineResponse)
 async def run_graph_rag(request: RAGEngineRequest):
+    rag_request_counter.add(1, {"pipeline": "graph"})
     logger.info(f"Running Graph RAG for query: {request.query[:50]}...")
     if not weaviate_client or not weaviate_client.is_connected():
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
@@ -218,6 +232,10 @@ async def run_graph_rag(request: RAGEngineRequest):
     except Exception as e:
         logger.error(f"Error in Graph RAG pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# TODO: add semantic RAG
+
+# TODO: add RIG
 
 
 @app.get("/health")
