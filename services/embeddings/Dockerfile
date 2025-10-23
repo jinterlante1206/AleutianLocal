@@ -9,6 +9,7 @@ RUN apt-get update && \
         python3-pip \
         python3-venv \
         git \
+        curl \
         python3-dev \
         build-essential \
     && rm -rf /var/lib/apt/lists/*

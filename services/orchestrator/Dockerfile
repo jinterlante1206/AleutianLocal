@@ -12,6 +12,7 @@ RUN go mod download
 
 # Copy the rest of the source code for the entire project
 COPY services/ ./services/
+COPY internal/ ./internal/
 
 # Build the orchestrator binary, pointing to its package path from the root
 RUN CGO_ENABLED=0 go build -o /app/orchestrator ./services/orchestrator
@@ -20,8 +21,21 @@ RUN CGO_ENABLED=0 go build -o /app/orchestrator ./services/orchestrator
 FROM alpine:latest
 WORKDIR /app
 
+RUN apk update && \
+    apk add --no-cache \
+        git \
+        curl
+
 # Copy only the compiled binary from the builder stage
 COPY --from=builder /app/orchestrator .
+
+# ADD THIS LINE to copy the needed policy file
+# Ensure the target directory structure exists
+RUN mkdir -p /app/internal/policy_engine/enforcement
+COPY --from=builder /src/internal/policy_engine/enforcement/data_classification_patterns.yaml /app/internal/policy_engine/enforcement/
+
+# The CMD should start the server
+CMD ["/app/orchestrator"]
 
 
 # The CMD should start the server

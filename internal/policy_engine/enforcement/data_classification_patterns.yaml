@@ -1,0 +1,194 @@
+# Data Classification Patterns (v2 - Expanded)
+# ----------------------------------------------
+# This file defines the patterns the Data Classification Engine uses to identify and
+# label sensitive data. The engine applies the classification with the highest
+# priority level in case of multiple matches.
+#
+# Levels:
+#   - secret (100): Highest sensitivity. Direct security credentials.
+#   - phi (60): Protected Health Information. Subject to HIPAA.
+#   - pii (50): Personally Identifiable Information. Subject to privacy laws.
+#   - confidential (20): Proprietary business information.
+#   - public (0): Default. No sensitive data detected.
+
+classifications:
+  - name: secret
+    description: "Represents critical security credentials like API keys, private keys, and passwords that provide direct access to systems."
+    priority: 100
+    patterns:
+      # --- Cloud Provider Keys (GCP Focus) ---
+      - id: GCP_API_KEY
+        description: "Detects Google Cloud Platform API Keys."
+        regex: 'AIza[0-9A-Za-z\\-_]{35}'
+        confidence: high
+      - id: GCP_OAUTH_TOKEN
+        description: "Detects Google Cloud Platform OAuth 2.0 access tokens."
+        regex: 'ya29\\.[0-9A-Za-z\\-_]+'
+        confidence: high
+      - id: GCP_SERVICE_ACCOUNT_KEY
+        description: "Detects a full GCP Service Account JSON key file by looking for key fields."
+        regex: '"type": "service_account",(.|\\n)*"private_key_id":'
+        confidence: high
+      # --- SaaS & Third-Party API Keys ---
+      - id: AUTH0_CLIENT_SECRET
+        description: "Detects Auth0 Client Secrets."
+        regex: '[a-zA-Z0-9\\-_]{40,}'
+        confidence: medium
+      - id: STRIPE_API_KEY
+        description: "Detects Stripe API keys."
+        regex: '(sk|pk)_(test|live)_[0-9a-zA-Z]{24,99}'
+        confidence: high
+      - id: SLACK_TOKEN
+        description: "Detects Slack tokens (Bot, User, App)."
+        regex: 'xox[pbar]-(.*)'
+        confidence: high
+      - id: TWILIO_CREDENTIALS
+        description: "Detects Twilio Account SID and Auth Token."
+        regex: 'AC[a-f0-9]{32}|SK[a-f0-9]{32}'
+        confidence: high
+      - id: SENDGRID_API_KEY
+        description: "Detects SendGrid API Keys."
+        regex: 'SG\\.[a-zA-Z0-9_\\-]{22}\\.[a-zA-Z0-9_\\-]{43}'
+        confidence: high
+
+      # --- Framework-Specific Secrets ---
+      - id: DJANGO_SECRET_KEY
+        description: "Detects Django secret keys, especially insecure default keys."
+        regex: 'SECRET_KEY\s*=\s*["'' ]django-insecure-.*["'']'
+        confidence: high
+      - id: GENERIC_GO_SIGNING_KEY
+        description: "Detects common patterns for signing or auth keys in Go code."
+        regex: "var\\s+(signingKey|authKey|secretKey)\\s*=\\s*\\[\\]byte\\(\\\"[^\\\"]+\\\"\\)"
+        confidence: medium
+
+      # --- Cryptocurrency & Wallet Keys ---
+      - id: CRYPTO_PRIVATE_KEY_WIF
+        description: "Detects cryptocurrency private keys in Wallet Import Format (WIF)."
+        regex: '^[5KL][1-9A-HJ-NP-Za-km-z]{50,51}$'
+        confidence: high
+      - id: CRYPTO_SEED_PHRASE
+        description: "Detects 12 or 24-word mnemonic seed phrases for crypto wallets."
+        regex: '\b(\w+\s+){11,23}\w+\b'
+        confidence: low # High potential for false positives, but critical to catch
+      - id: ETHEREUM_PRIVATE_KEY
+        description: "Detects a 64-character hexadecimal string, a common format for Ethereum private keys."
+        regex: '\b(0x)?[a-fA-F0-9]{64}\b'
+        confidence: medium
+
+      # --- Generic Credentials & Keys ---
+      - id: PRIVATE_KEY_BLOCK
+        description: "Detects the header of a generic private key block (more broad than just SSH)."
+        regex: '-----BEGIN (?:RSA|EC|PGP|OPENSSH|ANY)? ?PRIVATE KEY-----'
+        confidence: high
+      - id: JSON_WEB_TOKEN
+        description: "Detects generic JSON Web Tokens (JWTs)."
+        regex: 'eyJ[A-Za-z0-9-_=]+\\.[A-Za-z0-9-_=]+\\.[A-Za-z0-9-_.+/=]*'
+        confidence: medium
+      - id: HTTP_BASIC_AUTH
+        description: "Detects credentials in an HTTP Basic Authentication header."
+        regex: 'Authorization: Basic [A-Za-z0-9+/=]{10,}'
+        confidence: high
+      - id: PASSWORD_LITERAL_VERBOSE
+        description: "Detects password literals in various configuration formats (e.g., code, YAML, XML)."
+        regex: "(?i)(password|pass|secret|token|pwd|auth_token)\\s*[:=>]\\s*['\\\"][^'\\\"]{8,}['\\\"]"
+        confidence: medium
+
+  - name: phi
+    description: "Protected Health Information (PHI) under HIPAA regulations. Includes medical records, patient identifiers, and health status."
+    priority: 60
+    patterns:
+      - id: MEDICAL_RECORD_NUMBER
+        description: "Detects common Medical Record Number (MRN) formats."
+        regex: '\b(MRN|Medical Record Number)(?:\s*[:\s]\s*)?[A-Za-z0-9-]{4,}\b'
+        confidence: high
+      - id: US_DEA_NUMBER
+        description: "Detects U.S. Drug Enforcement Administration (DEA) numbers."
+        regex: '\b[ABFGM][A-Z][0-9]{7}\b'
+        confidence: high
+      - id: US_NPI_NUMBER
+        description: "Detects U.S. National Provider Identifier (NPI) numbers."
+        regex: '\b[1-9][0-9]{9}\b'
+        confidence: high
+      - id: US_NDC_CODE
+        description: "Detects U.S. National Drug Codes (NDC)."
+        regex: '\b[0-9]{4}-[0-9]{4}-[0-9]{2}|[0-9]{5}-[0-9]{3}-[0-9]{2}|[0-9]{5}-[0-9]{4}-[0-9]{1}\b'
+        confidence: high
+      - id: ICD_10_CODE
+        description: "Detects ICD-10 medical diagnosis codes (e.g., A01.0, Z99.89)."
+        regex: '\b[A-TV-Z][0-9][0-9AB](?:\.[0-9A-Z]{1,4})?\b'
+        confidence: medium
+      - id: PHI_KEYWORDS
+        description: "Detects keywords strongly associated with PHI."
+        regex: '(?i)\b(diagnosis|patient name|date of birth|medical history|prescription|symptoms|treatment plan|clinical trial|medication|blood type|HIPAA)\b'
+        confidence: medium
+
+  - name: pii
+    description: "Personally Identifiable Information (PII) that can be used to identify an individual. Subject to privacy laws like GDPR and CCPA."
+    priority: 50
+    patterns:
+      - id: EMAIL_ADDRESS
+        description: "Detects email addresses."
+        regex: '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        confidence: high
+      - id: CREDIT_CARD_NUMBER
+        description: "Detects common credit card number patterns."
+        regex: '\b(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\b'
+        confidence: high
+      - id: US_SOCIAL_SECURITY_NUMBER
+        description: "Detects U.S. Social Security Numbers (SSN)."
+        regex: '\b([1-8][0-9]{2}|0[1-9][0-9]|00[1-9])-(0[1-9]|[1-9][0-9])-(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b'
+        confidence: high
+      - id: US_DRIVERS_LICENSE
+        description: "Detects common patterns for U.S. driver's license numbers."
+        regex: '\b[A-Z][0-9]{6,12}\b'
+        confidence: low
+      - id: US_PASSPORT_NUMBER
+        description: "Detects U.S. passport numbers."
+        regex: '\b[0-9]{9}\b'
+        confidence: medium
+      - id: US_ABA_ROUTING_NUMBER
+        description: "Detects U.S. ABA routing numbers."
+        regex: '\b[0-9]{9}\b'
+        confidence: medium
+      - id: DATE_OF_BIRTH
+        description: "Detects common date of birth formats."
+        regex: '\b(DOB|Date of Birth)\s*[:\s]\s*(0[1-9]|1[0-2])[-/](0[1-9]|[12][0-9]|3[01])[-/](19|20)\d\d\b'
+        confidence: high
+
+  - name: confidential
+    description: "Represents proprietary business information, internal project names, or data not meant for public disclosure."
+    priority: 20
+    patterns:
+      - id: CONFIDENTIALITY_MARKERS
+        description: "Detects common confidentiality markers in text or comments."
+        regex: '(?i)\b(confidential|proprietary|internal use only|trade secret|sensitive)\b'
+        confidence: high
+      - id: FINANCIAL_TERMS
+        description: "Detects keywords related to sensitive financial reporting."
+        regex: '(?i)\b(quarterly report|financial statement|M&A|EBITDA|revenue projection|stock price)\b'
+        confidence: medium
+      - id: LEGAL_TERMS
+        description: "Detects keywords related to sensitive legal matters."
+        regex: '(?i)\b(attorney-client privilege|legal hold|settlement agreement|litigation)\b'
+        confidence: medium
+
+  - name: technical_ip
+    description: "Represents sensitive technical intellectual property (IP), including project plans, architecture documents, and proprietary designs."
+    priority: 40
+    patterns:
+      - id: PLANNING_KEYWORDS
+        description: "Detects keywords related to project management and strategic planning."
+        regex: '(?i)\b(gantt chart|project plan|product roadmap|sprint planning|Q[1-4] goals|milestone|deadline)\b'
+        confidence: medium
+      - id: ARCHITECTURE_KEYWORDS
+        description: "Detects keywords from system architecture and design documents."
+        regex: '(?i)\b(architecture specification|system design|data flow diagram|schematic|technical blueprint|sequence diagram)\b'
+        confidence: high
+      - id: DIAGRAM_AS_CODE_MARKERS
+        description: "Detects common markers for text-based diagramming tools like Mermaid or PlantUML."
+        regex: 'graph (TD|LR|BT|RL);|@startuml'
+        confidence: high
+      - id: IP_LEGAL_MARKERS
+        description: "Detects legal markers indicating intellectual property within source code or documents."
+        regex: '(?i)\b(proprietary algorithm|patent pending|trade secret|internal design document)\b'
+        confidence: high

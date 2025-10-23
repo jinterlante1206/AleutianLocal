@@ -239,7 +239,8 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	var allFiles []string
 	var allFindings []policy_engine.ScanFinding
 	// 1. Initialize the Policy Engine
-	policyEngine, err := policy_engine.NewPolicyEngine("internal/policy_engine/enforcement/data_classification_patterns.yaml")
+	policyEngine, err := policy_engine.NewPolicyEngine(
+		"internal/policy_engine/enforcement/data_classification_patterns.yaml")
 	if err != nil {
 		log.Fatalf("FATAL: Could not initialize the policy engine: %v", err)
 	}
