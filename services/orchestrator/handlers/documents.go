@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -41,6 +42,7 @@ func CreateDocument(client *weaviate.Client) gin.HandlerFunc {
 		// Use the first 16 bytes of the SHA-256 to create a valid UUID
 		docUUID, _ := uuid.FromBytes(hash[:16])
 		docId := docUUID.String()
+		// Get embeddings
 		var embResp datatypes.EmbeddingResponse
 		if err := embResp.Get(req.Content); err != nil {
 			slog.Error("error getting the embedding for document", "source", req.Source, "error", err)
@@ -48,6 +50,7 @@ func CreateDocument(client *weaviate.Client) gin.HandlerFunc {
 				gin.H{"error": "failed to get the embeddings for the source document"})
 			return
 		}
+		// Prepare properties
 		properties := map[string]interface{}{
 			"content": req.Content,
 			"source":  req.Source,
@@ -61,6 +64,11 @@ func CreateDocument(client *weaviate.Client) gin.HandlerFunc {
 			Do(context.Background())
 
 		if err != nil {
+			if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "status code: 422") {
+				slog.Warn("Document likely already exists in Weaviate, skipping.", "source", req.Source, "weaviate_error", err.Error())
+				c.JSON(http.StatusOK, gin.H{"status": "skipped", "message": "Document likely already exists."})
+				return
+			}
 			slog.Error("Failed to create document object in Weaviate", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "The vectorDB returned an error"})
 			return

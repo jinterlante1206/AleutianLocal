@@ -65,6 +65,7 @@ type RAGRequest struct {
 	Query     string `json:"query"`
 	SessionId string `json:"session_id"`
 	Pipeline  string `json:"pipeline"`
+	NoRag     bool   `json:"no_rag"`
 }
 
 type SourceInfo struct {

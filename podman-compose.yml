@@ -135,7 +135,6 @@ services:
       LLM_DEFAULT_TOP_K: ${LLM_DEFAULT_TOP_K:-40}
       LLM_DEFAULT_TOP_P: ${LLM_DEFAULT_TOP_P:-0.9}
       LLM_DEFAULT_STOP_SEQUENCES: '["\\n"]'
-      RAG_PROMPT_TEMPLATE: ${RAG_PROMPT_TEMPLATE:-"You are a helpful assistant..."} # Put default here or keep in code
       RERANKER_MODEL: "cross-encoder/ms-marco-MiniLM-L-6-v2"
       RERANK_INITIAL_K: ${RERANK_INITIAL_K:-20}
       RERANK_FINAL_K: ${RERANK_FINAL_K:-5}
