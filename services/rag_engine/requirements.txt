@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+langchain
+langchain-community
+langchain-openai
+llama-index
+weaviate-client
+sentence-transformers
+requests
+python-dotenv
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-exporter-otlp
+pydantic
+httpx

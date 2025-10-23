@@ -105,7 +105,8 @@ func HandleRAGRequest(client *weaviate.Client, globalLLMClient llm.LLMClient) gi
 		}
 
 		finalAnswer := engineResponse.Answer
-		slog.Info("Received answer from RAG engine", "answer_length", len(finalAnswer))
+		sources := engineResponse.Sources
+		slog.Info("Received answer from RAG engine", "answer_length", len(finalAnswer), "sources_count", len(sources))
 
 		// --- Save Conversation Turn ---
 		convo := datatypes.Conversation{
@@ -130,7 +131,8 @@ func HandleRAGRequest(client *weaviate.Client, globalLLMClient llm.LLMClient) gi
 		// Return the final response to the original caller
 		c.JSON(http.StatusOK, datatypes.RAGResponse{
 			Answer:    finalAnswer,
-			SessionId: sessionId, // Use consistent sessionId variable
+			SessionId: sessionId,
+			Sources:   sources,
 		})
 	}
 }

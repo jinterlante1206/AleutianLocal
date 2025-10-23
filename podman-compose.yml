@@ -1,22 +1,16 @@
-services:
-  # The Core LLM (Llama.cpp for Metal support)
-  llm-server:
-    image: ${LLM_IMAGE:-ghcr.io/ggerganov/llama.cpp:server} # Defaults to llama.cpp server image
-    container_name: aleutian-llm-server
-    ports: ["${LLM_PORT:-12128}:8080"]
-    volumes:
-      - ./models:/models # User places their GGUF model files here
-    command: ${LLM_COMMAND:--m /models/Qwen3-4B-Instruct-2507-bf16.gguf -c 4096 --n_gpu_layers -1}
-    cap_add: [IPC_LOCK]
-    networks:
-      - aleutian-network
+secrets:
+  aleutian_hf_token:
+    external: true
+  openai_api_key:
+    external: true
 
+services:
   # The Embedding server (Built from source in this repo)
   embedding-server:
     build:
       context: ./services/embeddings # Points to the embeddings source code included in this repo
     container_name: aleutian-embedding-server
-    ports: ["${EMBEDDING_PORT:-12126}:8000"] # Assuming your embeddings server runs on 8000 internally
+    ports: ["${EMBEDDING_PORT:-12126}:8000"]
     environment:
       MODEL_NAME: ${EMBEDDING_MODEL_ID:-google/embeddinggemma-300m} # Defaults to Gemma embeddings
     secrets:
@@ -25,21 +19,29 @@ services:
       - ./models_cache:/root/.cache/huggingface/
     networks:
       - aleutian-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
   # The Orchestrator (Built from source in this repo)
   orchestrator:
     build:
-      context: . # Assumes Dockerfile is in the root, pointing to ./services/orchestrator
+      context: .
       dockerfile: ./services/orchestrator/Dockerfile
     container_name: aleutian-go-orchestrator
-    ports: ["${ORCHESTRATOR_PORT:-12210}:12210"] # Use configured port
+    ports: ["${ORCHESTRATOR_PORT:-12210}:12210"]
     environment:
       PORT: ${ORCHESTRATOR_PORT:-12210}
-      EMBEDDING_SERVICE_URL: http://embedding-server:8000/embed # Points to the internal port
-      LLM_SERVICE_URL_BASE: http://llm-server:8080 # Llama.cpp endpoint
+      EMBEDDING_SERVICE_URL: http://embedding-server:8000/embed
+      LLM_BACKEND_TYPE: "ollama"
+      OLLAMA_BASE_URL: "http://host.containers.internal:11434"
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
+      OPENAI_URL_BASE: "https://api.openai.com/v1"
+      RAG_ENGINE_URL: http://aleutian-rag-engine:8000
       WEAVIATE_SERVICE_URL: http://weaviate-db:8080
       POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: /app/internal/policy_engine/enforcement/data_classification_patterns.yaml
-      LLM_BACKEND_TYPE: "local"
       ALEUTIAN_CUSTOM_TOOL_FINANCE: ${ALEUTIAN_CUSTOM_TOOL_FINANCE:-}
       ALEUTIAN_CUSTOM_TOOL_INFLUX: ${ALEUTIAN_CUSTOM_TOOL_INFLUX:-}
     volumes:
@@ -49,16 +51,24 @@ services:
       - source: aleutian_hf_token
     networks:
       - aleutian-network
+    restart: unless-stopped
     depends_on:
-      - llm-server
-      - embedding-server
-      - weaviate-db
+      aleutian-rag-engine:
+        condition: service_healthy
+      embedding-server:
+        condition: service_healthy
+      weaviate-db:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:12210/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
   # The Vector Database
   weaviate-db:
     image: cr.weaviate.io/semitechnologies/weaviate:latest
     container_name: aleutian-weaviate-db
-    platform: linux/arm64 # Good default for Mac users
     ports: ["${WEAVIATE_PORT:-12127}:8080", "50051:50051"]
     volumes:
       - weaviate_data:/var/lib/weaviate # Use a named volume for data persistence
@@ -67,14 +77,20 @@ services:
       PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
       DEFAULT_VECTORIZER_MODULE: 'none'
       CLUSTER_HOSTNAME: 'weaviate-db'
+    restart: unless-stopped
     networks:
       - aleutian-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
   gguf-converter:
     build:
       context: .
       dockerfile: ./services/gguf_converter/Dockerfile
-    container_name: aleutian-gguf-converter-test
+    container_name: aleutian-gguf-converter
     ports:
       - "12140:8000"
     volumes:
@@ -82,12 +98,68 @@ services:
       - ./models_cache:/root/.cache/huggingface/
     secrets:
       - source: aleutian_hf_token
+    restart: unless-stopped
     networks:
       - aleutian-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
-secrets:
-  aleutian_hf_token:
-    external: true
+  aleutian-rag-engine:
+    build:
+      context: ./services/rag_engine
+      dockerfile: Dockerfile
+    container_name: aleutian-rag-engine
+    restart: unless-stopped
+    ports:
+      - "${RAG_ENGINE_PORT:-12125}:8000" # Expose internal port 8000 on host
+    environment:
+      # --- Connection Info ---
+      WEAVIATE_SERVICE_URL: ${WEAVIATE_SERVICE_URL:-http://weaviate-db:8080}
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://embedding-server:8000/embed}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317} # For OTel
+
+      # --- LLM Backend Configuration (Mirrors orchestrator) ---
+      LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.containers.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      LLM_SERVICE_URL_BASE: ${LLM_SERVICE_URL_BASE:-http://llm-server:8080}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_URL_BASE: ${OPENAI_URL_BASE:-https://api.openai.com/v1}
+      HF_SERVER_URL: ${HF_SERVER_URL:-http://hf-server:8000} # Add if using hf-transformers
+      # Add others (CLAUDE_MODEL etc.) if implementing those clients
+
+      # --- Pipeline Configuration ---
+      LLM_DEFAULT_TEMPERATURE: ${LLM_DEFAULT_TEMPERATURE:-0.5}
+      LLM_DEFAULT_MAX_TOKENS: ${LLM_DEFAULT_MAX_TOKENS:-1024}
+      LLM_DEFAULT_TOP_K: ${LLM_DEFAULT_TOP_K:-40}
+      LLM_DEFAULT_TOP_P: ${LLM_DEFAULT_TOP_P:-0.9}
+      LLM_DEFAULT_STOP_SEQUENCES: '["\\n"]'
+      RAG_PROMPT_TEMPLATE: ${RAG_PROMPT_TEMPLATE:-"You are a helpful assistant..."} # Put default here or keep in code
+      RERANKER_MODEL: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+      RERANK_INITIAL_K: ${RERANK_INITIAL_K:-20}
+      RERANK_FINAL_K: ${RERANK_FINAL_K:-5}
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    secrets:
+      # Mount secrets needed by the pipelines (e.g., API keys)
+      - source: openai_api_key # Read by StandardRAGPipeline._read_secret
+      # Add other secrets (anthropic_api_key, etc.) if needed
+      # - source: anthropic_api_key
+    networks:
+      - aleutian-network
+    depends_on:
+      embedding-server:
+        condition: service_healthy
+      weaviate-db:
+        condition: service_healthy
+
+
 
 volumes:
   weaviate_data:

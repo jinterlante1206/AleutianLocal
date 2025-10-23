@@ -68,32 +68,31 @@ def load_llm_configuration():
     global model, tokenizer, device, model_ready
     try:
         try:
-            with open('/run/secrets/huggingface_token', 'r') as f:
-                huggingface_token = f.read().strip()
-                if huggingface_token:
-                    login(token=huggingface_token)
+            with open('/run/secrets/aleutian_hf_token', 'r') as f:
+                aleutian_hf_token = f.read().strip()
+                if aleutian_hf_token:
+                    login(token=aleutian_hf_token)
                 else:
                     print("FATAL ERROR: Could not load HuggingFace Token")
         except FileNotFoundError:
             print("Huggingface Secret Token not found")
         logger.info(f"Loading LLM Model...")
-        device_str = "cuda" if torch.cuda.is_available() else "cpu"
-        device = torch.device(device_str)
-        if device_str == "cuda":
-            logger.info(f"CUDA Version PyTorch: {torch.version.cuda}")
-            logger.info(f"Number of GPUs: {torch.cuda.device_count()}")
-            if torch.cuda.device_count() > 0:
-                logger.info(f"GPU Name: {torch.cuda.get_device_name(0)}")
-                logger.info(f"GPU Compute Capability: {torch.cuda.get_device_capability(0)}")
 
+        if torch.backends.mps.is_available():
+            device_str = "mps"
+            logger.info("MPS device found. Using Apple MetalKit")
+        elif torch.cuda.is_available():
+            device_str = "cuda"
+            logger.info("CUDA device found. Using NVIDIA GPU")
+        else:
+            device_str = "cpu"
+            logger.info("No GPU acceleration found; using the CPU")
+        device = torch.device(device_str)
         model = AutoModel.from_pretrained(
             MODEL_NAME,
-            token=True,
             torch_dtype="auto",
-            device_map="auto",
-        )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=True)
-        model.to(device)
+        ).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model_ready = True
     except Exception as e:
         print(f"ERROR: {e}")
@@ -103,17 +102,25 @@ def get_embedding(text: str) -> List[float]:
     if not model_ready or not model or not tokenizer:
         logger.error("LLM Resources are not available. Check startup logs.")
         raise HTTPException(status_code=503, detail="LLM service not ready or model not loaded")
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512).to(device)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    embeddings = outputs.last_hidden_state.mean(dim=1)
-    normalized_embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-    return normalized_embeddings.cpu().numpy().tolist()[0]
+    try:
+        inputs = tokenizer(
+            text,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512
+        ).to(device)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+        # Consistent embedding extraction (mean pooling)
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+        # Normalization (L2 norm) is common for embeddings
+        normalized_embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        return normalized_embeddings.cpu().numpy().tolist()[0]
+    except Exception as e:
+        logger.error(f"Error during embedding generation: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate embeddings")
 
 @app.post("/embed", response_model=EmbeddingResponse)
 async def create_embeddings(message: EmbeddingRequest):
@@ -141,6 +148,6 @@ async def health_check():
 
 
 if __name__ == "__main__":
-    port_to_run = int(os.getenv("PORT", "12126"))
+    port_to_run = 8000
     log_level = os.getenv("LOG_LEVEL", "info")
     uvicorn.run(app, host="0.0.0.0", port=port_to_run, log_level=log_level)

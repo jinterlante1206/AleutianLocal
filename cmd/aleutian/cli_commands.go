@@ -31,9 +31,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type SourceInfo struct {
+	Source   string  `json:"source"`
+	Distance float64 `json:"distance,omitempty"`
+	Score    float64 `json:"score,omitempty"`
+}
+
 type RAGResponse struct {
-	Answer    string `json:"answer"`
-	SessionId string `json:"session_id"`
+	Answer    string       `json:"answer"`
+	SessionId string       `json:"session_id"`
+	Sources   []SourceInfo `json:"sources,omitempty"`
 }
 
 type ConvertResponse struct {
@@ -57,6 +64,7 @@ var (
 		Args:  cobra.MinimumNArgs(1),
 		Run:   runAskCommand,
 	}
+	pipelineType string
 
 	populateCmd = &cobra.Command{
 		Use:   "populate",
@@ -184,6 +192,8 @@ var (
 // init() runs when the Go program starts
 func init() {
 	rootCmd.AddCommand(askCmd)
+	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking",
+		"RAG pipeline to use(e.g., standard, reranking, raptor, graph, rig, semantic")
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
 
@@ -198,6 +208,7 @@ func init() {
 	rootCmd.AddCommand(convertCmd)
 	convertCmd.Flags().StringVar(&quantizeType, "quantize", "q8_0", "Quantization type (f32, q8_0, bf16, f16)")
 	convertCmd.Flags().BoolVar(&isLocalPath, "is-local-path", false, "Treat the model-id as a local path inside the container")
+	convertCmd.Flags().Bool("register", false, "Register the model with ollama")
 
 	// session commands
 	rootCmd.AddCommand(sessionCmd)
@@ -220,6 +231,7 @@ func init() {
 	rootCmd.AddCommand(uploadCmd)
 	uploadCmd.AddCommand(uploadLogsCmd)
 	uploadCmd.AddCommand(uploadBackupsCmd)
+
 }
 
 func populateVectorDB(cmd *cobra.Command, args []string) {
@@ -227,7 +239,8 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	var allFiles []string
 	var allFindings []policy_engine.ScanFinding
 	// 1. Initialize the Policy Engine
-	policyEngine, err := policy_engine.NewPolicyEngine("internal/policy_engine/enforcement/data_classification_patterns.yaml")
+	policyEngine, err := policy_engine.NewPolicyEngine(
+		"internal/policy_engine/enforcement/data_classification_patterns.yaml")
 	if err != nil {
 		log.Fatalf("FATAL: Could not initialize the policy engine: %v", err)
 	}
@@ -448,7 +461,7 @@ func runDeleteSession(cmd *cobra.Command, args []string) {
 	fmt.Printf("Successfully deleted session: %s\n", sessionId)
 }
 
-func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
+func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResponse, error) {
 	var host string
 	if config.Target == "local" {
 		host = "localhost"
@@ -459,6 +472,7 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 	postBody, err := json.Marshal(map[string]string{
 		"query":      question,
 		"session_id": sessionId,
+		"pipeline":   pipeline,
 	})
 	if err != nil {
 		return ragResp, fmt.Errorf("failed to create request body: %w", err)
@@ -470,7 +484,8 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 		config.Services["orchestrator"].Port,
 	)
 
-	resp, err := http.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
+	client := &http.Client{Timeout: 3 * time.Minute}
+	resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
 	if err != nil {
 		return ragResp, fmt.Errorf("failed to send question to orchestrator: %w", err)
 	}
@@ -478,10 +493,12 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error: Orchestrator returned status %d. Response Body: %s", resp.StatusCode, string(bodyBytes))
 		return ragResp, fmt.Errorf("orchestrator returned an error (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	if err := json.Unmarshal(bodyBytes, &ragResp); err != nil {
+		log.Printf("Raw response from orchestrator: %s", string(bodyBytes))
 		return ragResp, fmt.Errorf("failed to parse response from orchestrator: %w", err)
 	}
 	return ragResp, nil
@@ -489,15 +506,32 @@ func sendRAGRequest(question string, sessionId string) (RAGResponse, error) {
 
 func runAskCommand(cmd *cobra.Command, args []string) {
 	question := strings.Join(args, " ")
-	fmt.Printf("Asking: %s\n", question)
-
-	// A blank session ID means the orchestrator will create a new one.
-	ragResp, err := sendRAGRequest(question, "")
+	// Show pipeline being used
+	fmt.Printf("Asking (using pipeline '%s'): %s\n", pipelineType, question)
+	fmt.Println("---") // Separator
+	// Pass the pipelineType flag value to sendRAGRequest
+	ragResp, err := sendRAGRequest(question, "", pipelineType)
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
-
-	fmt.Printf("Answer: %s\n", ragResp.Answer)
+	// --- Enhanced Feedback: Answer + Sources ---
+	fmt.Printf("\nAnswer:\n%s\n", ragResp.Answer) // Add newline for readability
+	// Display sources if available
+	if len(ragResp.Sources) > 0 {
+		fmt.Println("\nSources Used:")
+		for i, source := range ragResp.Sources {
+			scoreInfo := ""
+			if source.Distance != 0 { // Weaviate provides distance
+				scoreInfo = fmt.Sprintf("(Distance: %.4f)", source.Distance)
+			} else if source.Score != 0 {
+				scoreInfo = fmt.Sprintf("(Score: %.4f)", source.Score)
+			}
+			fmt.Printf("%d. %s %s\n", i+1, source.Source, scoreInfo)
+		}
+	} else {
+		fmt.Println("\n(No specific sources identified by the RAG pipeline)")
+	}
+	fmt.Println("\n---")
 }
 
 func runChatCommand(cmd *cobra.Command, args []string) {
@@ -513,7 +547,6 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 		// Create a new session ID for this chat
 		fmt.Printf("Starting new chat session: %s\n", sessionId)
 	}
-
 	fmt.Println("Type 'exit' or 'quit' to end the session.")
 	reader := bufio.NewReader(os.Stdin)
 
@@ -535,7 +568,7 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 			currentSessionId = ""
 		}
 
-		ragResp, err := sendRAGRequest(input, currentSessionId)
+		ragResp, err := sendRAGRequest(input, currentSessionId, pipelineType)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
@@ -772,8 +805,48 @@ func runConvertCommand(cmd *cobra.Command, args []string) {
 		log.Fatalf("Failed to parse response from converter: %v", err)
 	}
 
+	register, _ := cmd.Flags().GetBool("register")
+	if register {
+		fmt.Println("Registering the gguf model file with ollama")
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current directory: %v", err)
+		}
+		hostGgufPath := filepath.Join(cwd, convertResp.OutputPath)
+		if _, err := os.Stat(hostGgufPath); os.IsNotExist(err) {
+			log.Fatalf("Could not find converted GGUF file on host at %s: %v", hostGgufPath, err)
+		}
+		modelFileContent := fmt.Sprintf("FROM %s", hostGgufPath)
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "</answer>") // Use %q for quoting
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "</s>")      // Common EOS token, good to include
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "Done")
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "End")
+		modelFileContent += fmt.Sprintf("\nPARAMETER stop %q", "Response complete")
+
+		osTmpFile, err := os.CreateTemp("", "Modelfile-*")
+		if err != nil {
+			log.Fatalf("Failed to create the temporary modelfile: %v", err)
+		}
+		defer osTmpFile.Close()
+		defer os.Remove(osTmpFile.Name())
+		_, err = osTmpFile.WriteString(modelFileContent)
+		if err != nil {
+			log.Fatalf("Failed to write to the tmpfile %v", err)
+		}
+		osTmpFile.Name()
+		ollamaCreate := exec.Command("ollama", "create", modelId+"_local", "-f", osTmpFile.Name())
+		ollamaCreate.Stdout = os.Stdout
+		ollamaCreate.Stderr = os.Stderr
+		if err = ollamaCreate.Run(); err != nil {
+			log.Fatalf("Ollama failed to register your gguf model %s: %v", modelId, err)
+		}
+	}
+
 	fmt.Printf("\n🎉 %s\n", convertResp.Message)
 	fmt.Printf("   Output File: %s\n", convertResp.OutputPath)
+	if register {
+		fmt.Println("Registered the output file with Ollama")
+	}
 	fmt.Println("--- Conversion Logs ---")
 	fmt.Println(convertResp.Logs)
 	fmt.Println("-----------------------")
