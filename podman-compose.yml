@@ -123,7 +123,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.containers.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
       LLM_SERVICE_URL_BASE: ${LLM_SERVICE_URL_BASE:-http://llm-server:8080}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       OPENAI_URL_BASE: ${OPENAI_URL_BASE:-https://api.openai.com/v1}
