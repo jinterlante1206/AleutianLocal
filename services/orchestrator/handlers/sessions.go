@@ -11,7 +11,6 @@
 package handlers
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 
@@ -19,10 +18,15 @@ import (
 	"github.com/weaviate/weaviate-go-client/v4/weaviate"
 	"github.com/weaviate/weaviate-go-client/v4/weaviate/filters"
 	"github.com/weaviate/weaviate-go-client/v4/weaviate/graphql"
+	"go.opentelemetry.io/otel"
 )
+
+var tracer = otel.Tracer("aleutian.orchestrator.handlers")
 
 func ListSessions(client *weaviate.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "ListSessions.handler")
+		defer span.End()
 		slog.Info("Received request to list sessions")
 		fields := []graphql.Field{
 			{Name: "session_id"},
@@ -32,9 +36,10 @@ func ListSessions(client *weaviate.Client) gin.HandlerFunc {
 		result, err := client.GraphQL().Get().
 			WithClassName("Session").
 			WithFields(fields...).
-			Do(context.Background())
+			Do(ctx)
 		if err != nil {
 			slog.Error("failed to query Weaviate for sessions", "error", err)
+			span.RecordError(err)
 			c.JSON(http.StatusInternalServerError,
 				gin.H{"error": "failed to query Weaviate for sessions"})
 			return
@@ -45,6 +50,8 @@ func ListSessions(client *weaviate.Client) gin.HandlerFunc {
 
 func DeleteSessions(client *weaviate.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "DeleteSessions.handler")
+		defer span.End()
 		session := c.Param("sessionId")
 		slog.Info("Received a request to delete a session", "sessionId", session)
 
@@ -58,18 +65,20 @@ func DeleteSessions(client *weaviate.Client) gin.HandlerFunc {
 			WithClassName("Conversation").
 			WithOutput("minimal").
 			WithWhere(whereFilter).
-			Do(context.Background())
+			Do(ctx)
 		if err != nil {
 			slog.Error("failed to delete objects from the Weaviate DB", "error", err)
+			span.RecordError(err)
 		}
 		// 2. Delete the main Session object itself
 		_, err = client.Batch().ObjectsBatchDeleter().
 			WithClassName("Session").
 			WithOutput("minimal").
 			WithWhere(whereFilter).
-			Do(context.Background())
+			Do(ctx)
 		if err != nil {
 			slog.Error("failed to delete session object from the Weaviate DB", "error", err)
+			span.RecordError(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fully delete session"})
 			return
 		}

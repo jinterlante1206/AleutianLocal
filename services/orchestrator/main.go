@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
@@ -24,10 +25,61 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v4/weaviate"
 	"github.com/weaviate/weaviate/entities/models"
+	"google.golang.org/grpc/credentials/insecure"
+
+	// --- OpenTelemetry imports ---
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"google.golang.org/grpc"
 )
 
 var policyEngine *policy_engine.PolicyEngine
 var globalLLMClient llm.LLMClient
+
+func initTracer() (func(context.Context), error) {
+	ctx := context.Background()
+
+	// Get the collector URL from the env var we set in podman-compose.yml
+	otelEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if otelEndpoint == "" {
+		otelEndpoint = "aleutian-otel-collector:4317"
+	}
+	conn, err := grpc.NewClient(otelEndpoint,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
+	if err != nil {
+		return nil, err
+	}
+	res, err := resource.New(ctx,
+		resource.WithAttributes(semconv.ServiceNameKey.String("orchestrator-service")))
+	if err != nil {
+		return nil, err
+	}
+	bsp := sdktrace.NewBatchSpanProcessor(traceExporter)
+	traceProvider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithResource(res),
+		sdktrace.WithSpanProcessor(bsp))
+	otel.SetTracerProvider(traceProvider)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.
+		TraceContext{}, propagation.Baggage{}))
+
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+		defer cancel()
+		if err := traceExporter.Shutdown(ctx); err != nil {
+			slog.Error("failed to shutdown OTLP exporter", "error", err)
+		}
+	}, nil
+}
 
 func main() {
 	port := os.Getenv("ORCHESTRATOR_PORT")
@@ -43,6 +95,13 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(logFile, nil))
 	slog.SetDefault(logger)
+
+	// --- Init the tracer ---
+	cleanup, err := initTracer()
+	if err != nil {
+		log.Fatalf("failed to setup the OTLP tracer: %v", err)
+	}
+	defer cleanup(context.Background())
 
 	weaviateURL := os.Getenv("WEAVIATE_SERVICE_URL")
 	parsedURL, err := url.Parse(weaviateURL)
@@ -88,6 +147,8 @@ func main() {
 		log.Fatalf("Failed to initialize LLM client: %v", err)
 	}
 	router := gin.Default()
+	router.Use(otelgin.Middleware("orchestrator-service"))
+
 	routes.SetupRoutes(router, weaviateClient, globalLLMClient)
 	log.Println("started up the container")
 
