@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 )
 
 type LocalLlamaCppClient struct {
@@ -104,4 +106,11 @@ func (l *LocalLlamaCppClient) Generate(ctx context.Context, prompt string,
 
 type llamaCppResp struct {
 	Content string `json:"content"`
+}
+
+// Chat TODO: Implement
+func (l *LocalLlamaCppClient) Chat(ctx context.Context, messages []datatypes.Message,
+	params GenerationParams) (string, error) {
+	slog.Warn("LocalLlamaCppClient.Chat is not fully implemented yet. Using Generate with last message.")
+	return "", fmt.Errorf("chat method not implemented for LocalLlamaCppClient")
 }

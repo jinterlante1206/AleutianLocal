@@ -180,7 +180,7 @@ class RerankingPipeline(BaseRAGPipeline):
         scored_docs.sort(key=lambda x: x[0], reverse=True)
 
         reranked_docs_with_meta = [doc for score, doc in scored_docs[:self.top_k_final]]
-        logger.info(f"Reranked from {len(initial_docs_with_meta)} down to {len(reranked_docs)} documents.")
+        logger.info(f"Reranked from {len(initial_docs_with_meta)} down to {len(reranked_docs_with_meta)} documents.")
         for i, (score, doc) in enumerate(scored_docs[:self.top_k_final]):
                 reranked_docs_with_meta[i]["metadata"].rerank_score = score
         return reranked_docs_with_meta

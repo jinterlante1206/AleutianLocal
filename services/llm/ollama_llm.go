@@ -11,7 +11,14 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
+
+var tracer = otel.Tracer("aleutian.llm.ollama") // Specific tracer name
 
 type OllamaClient struct {
 	httpClient *http.Client
@@ -32,6 +39,19 @@ type ollamaGenerateResponse struct {
 	CreatedAt string `json:"created_at"`
 	Response  string `json:"response"`
 	Done      bool   `json:"done"`
+}
+
+type ollamaChatRequest struct {
+	Model    string                 `json:"model"`
+	Messages []datatypes.Message    `json:"messages"`
+	Stream   bool                   `json:"stream"`
+	Options  map[string]interface{} `json:"options,omitempty"`
+}
+
+type ollamaChatResponse struct {
+	Message   datatypes.Message `json:"message"`
+	CreatedAt string            `json:"created_at"`
+	Done      bool              `json:"done"`
 }
 
 func NewOllamaClient() (*OllamaClient, error) {
@@ -57,6 +77,9 @@ func NewOllamaClient() (*OllamaClient, error) {
 func (o *OllamaClient) Generate(ctx context.Context, prompt string,
 	params GenerationParams) (string, error) {
 
+	ctx, span := tracer.Start(ctx, "OllamaClient.Generate")
+	defer span.End()
+	span.SetAttributes(attribute.String("llm.model", o.model))
 	slog.Debug("Generating text via Ollama", "model", o.model)
 	generateURL := o.baseURL + "/api/generate"
 	options := make(map[string]interface{})
@@ -96,10 +119,14 @@ func (o *OllamaClient) Generate(ctx context.Context, prompt string,
 
 	reqBodyBytes, err := json.Marshal(payload)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", fmt.Errorf("failed to marshal request to Ollama: %w", err)
 	}
 	resp, err := o.httpClient.Post(generateURL, "application/json", bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		slog.Error("Ollama API call failed", "error", err)
 		return "", fmt.Errorf("Ollama API call failed: %w", err)
 	}
@@ -107,20 +134,103 @@ func (o *OllamaClient) Generate(ctx context.Context, prompt string,
 
 	respBodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", fmt.Errorf("failed to read response body from Ollama: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+
 		slog.Error("Ollama returned an error", "status_code", resp.StatusCode, "response", string(respBodyBytes))
 		return "", fmt.Errorf("Ollama failed with status %d: %s", resp.StatusCode, string(respBodyBytes))
 	}
 
 	var ollamaResp ollamaGenerateResponse
 	if err := json.Unmarshal(respBodyBytes, &ollamaResp); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		slog.Error("Failed to parse JSON response from Ollama", "error", err, "response", string(respBodyBytes))
 		return "", fmt.Errorf("failed to parse Ollama response: %w", err)
 	}
 
 	slog.Debug("Received response from Ollama")
 	return ollamaResp.Response, nil
+}
+
+func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
+	params GenerationParams) (string, error) {
+
+	ctx, span := tracer.Start(ctx, "OllamaClient.Chat")
+	defer span.End()
+	span.SetAttributes(attribute.String("llm.model", o.model))
+	span.SetAttributes(attribute.Int("llm.num_messages", len(messages)))
+
+	slog.Debug("Generating text via Ollama", "model", o.model)
+	chatURL := o.baseURL + "/api/chat"
+	options := make(map[string]interface{})
+	if params.Temperature != nil {
+		options["temperature"] = *params.Temperature
+	} else {
+		defaultTemp := float32(0.2)
+		options["temperature"] = &defaultTemp
+	}
+	if params.TopK != nil {
+		options["top_k"] = *params.TopK
+	} else {
+		defaultTopK := 20
+		options["top_k"] = defaultTopK
+	}
+	if params.TopP != nil {
+		options["top_p"] = *params.TopP
+	} else {
+		defaultTopP := float32(0.9)
+		options["top_p"] = defaultTopP
+	}
+	if params.MaxTokens != nil {
+		options["num_predict"] = *params.MaxTokens
+	} else {
+		defaultMaxTokens := 8192
+		options["num_predict"] = defaultMaxTokens
+	}
+	if len(params.Stop) > 0 {
+		options["stop"] = params.Stop
+	}
+	payload := ollamaChatRequest{
+		Model:    o.model,
+		Messages: messages,
+		Stream:   false,
+		Options:  options,
+	}
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal chat request to Ollama: %w", err)
+	}
+	resp, err := o.httpClient.Post(chatURL, "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("failed to send the request to %s: %v", chatURL, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("Ollama chat returned an error", "status_code", resp.StatusCode,
+			"response", string(respBody))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("ollama chat failed with status %d: %s", resp.StatusCode,
+			string(respBody))
+	}
+	var ollamaResp ollamaChatResponse
+	if err = json.Unmarshal(respBody, &ollamaResp); err != nil {
+		slog.Error("Failed to parse JSON chat response from Ollama", "error", err,
+			"response", string(respBody))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("failed to marshal the response from the ollama Chat")
+	}
+	if ollamaResp.Message.Role != "assistant" {
+		slog.Warn("Ollama chat response message role was not 'assistant'", "role", ollamaResp.Message.Role)
+	}
+	return ollamaResp.Message.Content, nil
 }

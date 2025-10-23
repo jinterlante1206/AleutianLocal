@@ -25,6 +25,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 	{
 		v1.POST("/documents", handlers.CreateDocument(client))
 		v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient))
+		v1.POST("/chat/direct", handlers.HandleDirectChat(globalLLMClient))
 		// Session administration routes
 		sessions := v1.Group("/sessions")
 		{

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/gcs"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/spf13/cobra"
 )
@@ -50,6 +51,13 @@ type ConvertResponse struct {
 	Logs       string `json:"logs"`
 }
 
+type DirectChatRequest struct {
+	Messages []datatypes.Message `json:"messages"`
+}
+type DirectChatResponse struct {
+	Answer string `json:"answer"`
+}
+
 var (
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
@@ -65,6 +73,7 @@ var (
 		Run:   runAskCommand,
 	}
 	pipelineType string
+	noRag        bool
 
 	populateCmd = &cobra.Command{
 		Use:   "populate",
@@ -194,6 +203,7 @@ func init() {
 	rootCmd.AddCommand(askCmd)
 	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking",
 		"RAG pipeline to use(e.g., standard, reranking, raptor, graph, rig, semantic")
+	askCmd.Flags().BoolVar(&noRag, "no-rag", false, "Skip the RAG pipeline and ask the LLM directly.")
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
 
@@ -469,10 +479,11 @@ func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResp
 		host = config.ServerHost
 	}
 	var ragResp RAGResponse
-	postBody, err := json.Marshal(map[string]string{
+	postBody, err := json.Marshal(map[string]interface{}{
 		"query":      question,
 		"session_id": sessionId,
 		"pipeline":   pipeline,
+		"no_rag":     noRag,
 	})
 	if err != nil {
 		return ragResp, fmt.Errorf("failed to create request body: %w", err)
@@ -535,53 +546,118 @@ func runAskCommand(cmd *cobra.Command, args []string) {
 }
 
 func runChatCommand(cmd *cobra.Command, args []string) {
-	var sessionId string
-	isFirstTurn := true
-	// Check if the --resume flag was used
-	resumeId, _ := cmd.Flags().GetString("resume")
-	if resumeId != "" {
-		sessionId = resumeId
-		isFirstTurn = false
-		fmt.Printf("Resuming session: %s\n", sessionId)
+	var host string
+	if config.Target == "local" {
+		host = "localhost"
 	} else {
-		// Create a new session ID for this chat
-		fmt.Printf("Starting new chat session: %s\n", sessionId)
+		host = config.ServerHost
 	}
-	fmt.Println("Type 'exit' or 'quit' to end the session.")
+	orchestratorURL := fmt.Sprintf("http://%s:%d/v1/chat/direct", host,
+		config.Services["orchestrator"].Port)
+	messages := []datatypes.Message{
+		{
+			Role:    "system",
+			Content: "You are a helpful, technically gifted assistant",
+		},
+	}
+	// TODO: Add in session, --resume, and state here
+	fmt.Println("starting a new chat session (no RAG). Type 'exit' or 'quit' to end")
 	reader := bufio.NewReader(os.Stdin)
-
 	for {
 		fmt.Print("> ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
-
 		if input == "exit" || input == "quit" {
-			fmt.Println("Ending chat session.")
+			fmt.Println("ending chat")
 			break
 		}
-
 		if input == "" {
 			continue
 		}
-		currentSessionId := sessionId
-		if isFirstTurn {
-			currentSessionId = ""
-		}
-
-		ragResp, err := sendRAGRequest(input, currentSessionId, pipelineType)
+		// ---- add the user's message to the history ----
+		messages = append(messages, datatypes.Message{Role: "user", Content: input})
+		reqBody := DirectChatRequest{Messages: messages}
+		postBody, err := json.Marshal(reqBody)
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
+			fmt.Printf("Error: failed to create the chat request: %v", err)
 			continue
 		}
-		if isFirstTurn {
-			sessionId = ragResp.SessionId
-			isFirstTurn = false
-			fmt.Printf("(Session started: %s)\n", sessionId)
+		// --- send the request to the orchestrator ---
+		client := &http.Client{Timeout: 3 * time.Minute}
+		resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
+		if err != nil {
+			fmt.Printf("failed to send the request to the orchestrator: %v", err)
+			continue
 		}
+		defer resp.Body.Close()
+		bodyBytes, _ := io.ReadAll(resp.Body)
 
-		fmt.Println(ragResp.Answer)
+		if resp.StatusCode != http.StatusOK {
+			fmt.Printf("error: Orchestrator returned status %d: %s\n", http.StatusOK,
+				string(bodyBytes))
+			messages = messages[:len(messages)-1] // remove the last failed message from the context
+			continue
+		}
+		// ---- parse the response and add it to the chat history ----
+		var chatResp DirectChatResponse
+		if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
+			fmt.Printf("Failed to parse the chat response: %v", err)
+			messages = messages[:len(messages)-1]
+			continue
+		}
+		messages = append(messages, datatypes.Message{Role: "assistant", Content: chatResp.Answer})
+		fmt.Println(chatResp.Answer)
 	}
 }
+
+//func runChatCommand(cmd *cobra.Command, args []string) {
+//	var sessionId string
+//	isFirstTurn := true
+//	// Check if the --resume flag was used
+//	resumeId, _ := cmd.Flags().GetString("resume")
+//	if resumeId != "" {
+//		sessionId = resumeId
+//		isFirstTurn = false
+//		fmt.Printf("Resuming session: %s\n", sessionId)
+//	} else {
+//		// Create a new session ID for this chat
+//		fmt.Printf("Starting new chat session: %s\n", sessionId)
+//	}
+//	fmt.Println("Type 'exit' or 'quit' to end the session.")
+//	reader := bufio.NewReader(os.Stdin)
+//
+//	for {
+//		fmt.Print("> ")
+//		input, _ := reader.ReadString('\n')
+//		input = strings.TrimSpace(input)
+//
+//		if input == "exit" || input == "quit" {
+//			fmt.Println("Ending chat session.")
+//			break
+//		}
+//
+//		if input == "" {
+//			continue
+//		}
+//		currentSessionId := sessionId
+//		if isFirstTurn {
+//			currentSessionId = ""
+//		}
+//
+//		ragResp, err := sendRAGRequest(input, currentSessionId, pipelineType)
+//		if err != nil {
+//			fmt.Printf("Error: %v\n", err)
+//			continue
+//		}
+//		if isFirstTurn {
+//			sessionId = ragResp.SessionId
+//			isFirstTurn = false
+//			fmt.Printf("(Session started: %s)\n", sessionId)
+//		}
+//
+//		fmt.Println(ragResp.Answer)
+//	}
+//}
 
 func runWeaviateWipeout(cmd *cobra.Command, args []string) {
 	var host string

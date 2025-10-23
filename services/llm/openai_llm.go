@@ -3,10 +3,12 @@ package llm
 import (
 	"context"
 	"fmt"
-	"github.com/sashabaranov/go-openai"
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/sashabaranov/go-openai"
 )
 
 type OpenAIClient struct {
@@ -78,4 +80,10 @@ func (o *OpenAIClient) Generate(ctx context.Context, prompt string, params Gener
 	}
 	slog.Debug("Received response from OpenAI", "finish_reason", resp.Choices[0].FinishReason)
 	return resp.Choices[0].Message.Content, nil
+}
+
+// Chat TODO: Implement
+func (o *OpenAIClient) Chat(ctx context.Context, messages []datatypes.Message, params GenerationParams) (string, error) {
+	slog.Warn("OpenAIClient.Chat is not fully implemented yet. Using Generate with last message.")
+	return "", fmt.Errorf("Chat method not implemented for OpenAIClient")
 }
