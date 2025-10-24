@@ -764,57 +764,93 @@ func extractTarGz(gzipStream io.Reader, targetDir string) error {
 	defer uncompressedStream.Close()
 
 	tarReader := tar.NewReader(uncompressedStream)
-	var rootDirStripped string = ""
+	var rootDirToStrip string = ""
 
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("tarReader.Next failed: %w", err)
+	firstHeader, err := tarReader.Next()
+	if err == io.EOF {
+		return fmt.Errorf("tarball appears to be empty")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read first tar entry: %w", err)
+	}
+
+	parts := strings.SplitN(firstHeader.Name, string(filepath.Separator), 2)
+	if len(parts) > 0 && parts[0] != "" {
+		rootDirToStrip = parts[0] + string(filepath.Separator)
+		fmt.Printf("    (Identified base directory to strip: %s)\n", rootDirToStrip)
+	} else {
+		return fmt.Errorf("unable to determine base directory from first entry: '%s'", firstHeader.Name)
+	}
+
+	processHeader := func(header *tar.Header, reader io.Reader) error {
+		if rootDirToStrip == "" {
+			return fmt.Errorf("internal error: rootDirToStrip was not set")
 		}
 
-		if rootDirStripped == "" {
-			if header.Typeflag == tar.TypeDir {
-				rootDirStripped = header.Name
-				fmt.Printf("    (Stripping base directory: %s)\n", rootDirStripped)
-				continue
-			} else {
-				return fmt.Errorf("tarball does not start with a single directory")
-			}
+		// Ensure the header name actually starts with the root dir (sanity check)
+		if !strings.HasPrefix(header.Name, rootDirToStrip) {
+			// This could happen if the tarball isn't structured as expected (multiple roots?)
+			fmt.Printf("    (Warning: Skipping entry '%s' outside expected root '%s')\n", header.Name, rootDirToStrip)
+			return nil // Use nil to indicate skip, not fatal error
 		}
-		relPath := strings.TrimPrefix(header.Name, rootDirStripped)
+
+		relPath := strings.TrimPrefix(header.Name, rootDirToStrip)
 		if relPath == "" {
-			continue
+			return nil
 		}
 		targetPath := filepath.Join(targetDir, relPath)
+		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(targetDir)+string(filepath.Separator)) && targetPath != filepath.Clean(targetDir) {
+			return fmt.Errorf("invalid file path in tarball (potential traversal): '%s'", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0755); err != nil {
+			if err := os.MkdirAll(targetPath, 0755); err != nil && !os.IsExist(err) {
 				return fmt.Errorf("MkdirAll %s failed: %w", targetPath, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				return fmt.Errorf("MkdirAll %s failed: %w", filepath.Dir(targetPath), err)
+			parentDir := filepath.Dir(targetPath)
+			if err := os.MkdirAll(parentDir, 0755); err != nil && !os.IsExist(err) {
+				return fmt.Errorf("MkdirAll parent %s failed: %w", parentDir, err)
 			}
 
 			outFile, err := os.Create(targetPath)
 			if err != nil {
 				return fmt.Errorf("Create %s failed: %w", targetPath, err)
 			}
-			if _, err := io.Copy(outFile, tarReader); err != nil {
+
+			if _, err := io.Copy(outFile, reader); err != nil {
 				outFile.Close()
 				return fmt.Errorf("Copy to %s failed: %w", targetPath, err)
 			}
 			outFile.Close()
-			os.Chmod(targetPath, os.FileMode(header.Mode))
+			if err := os.Chmod(targetPath, os.FileMode(header.Mode)); err != nil {
+				fmt.Printf("    (Warning: Could not set mode %o on %s: %v)\n", header.Mode, targetPath, err)
+			}
 
 		default:
 			fmt.Printf("    (Skipping unsupported type %c for %s)\n", header.Typeflag, header.Name)
 		}
+		return nil
 	}
+
+	if err := processHeader(firstHeader, tarReader); err != nil {
+		return err
+	}
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break // End of archive
+		}
+		if err != nil {
+			return fmt.Errorf("tarReader.Next failed: %w", err)
+		}
+		if err := processHeader(header, tarReader); err != nil {
+			return err // Return the actual error from processing
+		}
+	}
+
 	return nil
 }
 
