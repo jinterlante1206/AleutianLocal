@@ -766,38 +766,38 @@ func extractTarGz(gzipStream io.Reader, targetDir string) error {
 	tarReader := tar.NewReader(uncompressedStream)
 	var rootDirToStrip string = ""
 
-	firstHeader, err := tarReader.Next()
-	if err == io.EOF {
-		return fmt.Errorf("tarball appears to be empty")
-	}
-	if err != nil {
-		return fmt.Errorf("failed to read first tar entry: %w", err)
-	}
-
-	parts := strings.SplitN(firstHeader.Name, string(filepath.Separator), 2)
-	if len(parts) > 0 && parts[0] != "" {
-		rootDirToStrip = parts[0] + string(filepath.Separator)
-		fmt.Printf("    (Identified base directory to strip: %s)\n", rootDirToStrip)
-	} else {
-		return fmt.Errorf("unable to determine base directory from first entry: '%s'", firstHeader.Name)
-	}
-
 	processHeader := func(header *tar.Header, reader io.Reader) error {
 		if rootDirToStrip == "" {
-			return fmt.Errorf("internal error: rootDirToStrip was not set")
+			if strings.Contains(header.Name, "pax_global_header") || strings.HasPrefix(filepath.Base(header.Name), "._") {
+				fmt.Printf("    (Skipping metadata header: %s)\n", header.Name)
+				return nil
+			}
+			parts := strings.SplitN(header.Name, string(filepath.Separator), 2)
+			if len(parts) > 0 && parts[0] != "" {
+				if strings.Contains(parts[0], "AleutianLocal") {
+					rootDirToStrip = parts[0] + string(filepath.Separator)
+					fmt.Printf("    (Identified base directory to strip: %s)\n", rootDirToStrip)
+				} else {
+					return fmt.Errorf("could not reliably determine base directory from first valid entry: '%s'", header.Name)
+				}
+			} else {
+				return fmt.Errorf("unable to determine base directory from first valid entry: '%s'", header.Name)
+			}
 		}
-
-		// Ensure the header name actually starts with the root dir (sanity check)
+		if rootDirToStrip == "" {
+			return fmt.Errorf("internal error: rootDirToStrip could not be determined")
+		}
 		if !strings.HasPrefix(header.Name, rootDirToStrip) {
-			// This could happen if the tarball isn't structured as expected (multiple roots?)
 			fmt.Printf("    (Warning: Skipping entry '%s' outside expected root '%s')\n", header.Name, rootDirToStrip)
-			return nil // Use nil to indicate skip, not fatal error
+			return nil
 		}
 
 		relPath := strings.TrimPrefix(header.Name, rootDirToStrip)
 		if relPath == "" {
 			return nil
 		}
+		relPath = strings.TrimPrefix(relPath, string(filepath.Separator))
+
 		targetPath := filepath.Join(targetDir, relPath)
 		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(targetDir)+string(filepath.Separator)) && targetPath != filepath.Clean(targetDir) {
 			return fmt.Errorf("invalid file path in tarball (potential traversal): '%s'", header.Name)
@@ -805,6 +805,9 @@ func extractTarGz(gzipStream io.Reader, targetDir string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil && !os.IsExist(err) {
+				return fmt.Errorf("MkdirAll parent %s failed: %w", filepath.Dir(targetPath), err)
+			}
 			if err := os.MkdirAll(targetPath, 0755); err != nil && !os.IsExist(err) {
 				return fmt.Errorf("MkdirAll %s failed: %w", targetPath, err)
 			}
@@ -834,23 +837,21 @@ func extractTarGz(gzipStream io.Reader, targetDir string) error {
 		return nil
 	}
 
-	if err := processHeader(firstHeader, tarReader); err != nil {
-		return err
-	}
-
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
-			break // End of archive
+			break
 		}
 		if err != nil {
 			return fmt.Errorf("tarReader.Next failed: %w", err)
 		}
 		if err := processHeader(header, tarReader); err != nil {
-			return err // Return the actual error from processing
+			return err
 		}
 	}
-
+	if rootDirToStrip == "" {
+		return fmt.Errorf("could not find a valid top-level directory structure in the tarball")
+	}
 	return nil
 }
 
