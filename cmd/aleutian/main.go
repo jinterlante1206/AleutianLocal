@@ -12,10 +12,6 @@ package main
 
 import (
 	"log"
-	"os"
-
-	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var config Config
@@ -33,16 +29,4 @@ func main() {
 func init() {
 	rootCmd.Version = version
 	rootCmd.Flags().BoolP("version", "v", false, "print the version number")
-	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		configPath := "config.yaml"
-		yamlFile, err := os.ReadFile(configPath)
-		if err != nil {
-			log.Fatalf("Error reading config.yaml: %v. Please ensure it exists.", err)
-		}
-
-		if err := yaml.Unmarshal(yamlFile, &config); err != nil {
-			log.Fatalf("Error parsing config.yaml: %v", err)
-		}
-		log.Println("Configuration loaded successfully.")
-	}
 }

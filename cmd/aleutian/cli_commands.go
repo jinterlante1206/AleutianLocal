@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -30,6 +31,7 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 type SourceInfo struct {
@@ -106,7 +108,7 @@ var (
 	deployCmd = &cobra.Command{
 		Use:   "start",
 		Short: "Start all local Aleutian services",
-		Run:   runDeploy,
+		Run:   runStart,
 	}
 	stopCmd = &cobra.Command{
 		Use:   "stop",
@@ -241,10 +243,38 @@ func init() {
 	rootCmd.AddCommand(uploadCmd)
 	uploadCmd.AddCommand(uploadLogsCmd)
 	uploadCmd.AddCommand(uploadBackupsCmd)
+}
 
+func loadConfigFromStackDir(stackDir string) (Config, error) {
+	var cfg Config
+	configFilePath := filepath.Join(stackDir, "config.yaml")
+	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+		return cfg, fmt.Errorf("config file not found at %s. Run 'aleutian stack start' first", configFilePath)
+	} else if err != nil {
+		return cfg, fmt.Errorf("error checking config file %s: %w", configFilePath, err)
+	}
+	v := viper.New()
+	v.SetConfigFile(configFilePath)
+	v.SetConfigType("yaml")
+
+	if err := v.ReadInConfig(); err != nil {
+		return cfg, fmt.Errorf("error reading config file %s: %w", configFilePath, err)
+	}
+	if err := v.Unmarshal(&cfg); err != nil {
+		return cfg, fmt.Errorf("error unmarshalling config file %s: %w", configFilePath, err)
+	}
+	return cfg, nil
 }
 
 func populateVectorDB(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	fmt.Println("Initializing the VectorDB population process")
 	var allFiles []string
 	var allFindings []policy_engine.ScanFinding
@@ -339,16 +369,16 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 				continue
 			}
 			var host string
-			if config.Target == "local" {
+			if loadedConfig.Target == "local" {
 				host = "localhost"
 			} else {
-				host = config.ServerHost
+				host = loadedConfig.ServerHost
 			}
 			// Send the request to the orchestrator
 			orchestratorURL := fmt.Sprintf(
 				"http://%s:%d/v1/documents",
 				host,
-				config.Services["orchestrator"].Port)
+				loadedConfig.Services["orchestrator"].Port)
 			resp, err := http.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
 			if err != nil {
 				log.Printf("Failed to send data for %s to the orchestrator: %v", file, err)
@@ -397,16 +427,24 @@ func logFindingsToFile(findings []policy_engine.ScanFinding) {
 }
 
 func runListSessions(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	var host string
-	if config.Target == "local" {
+	if loadedConfig.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	orchestratorURL := fmt.Sprintf(
 		"http://%s:%d/v1/sessions",
 		host,
-		config.Services["orchestrator"].Port,
+		loadedConfig.Services["orchestrator"].Port,
 	)
 
 	resp, err := http.Get(orchestratorURL)
@@ -439,17 +477,25 @@ func runListSessions(cmd *cobra.Command, args []string) {
 }
 
 func runDeleteSession(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	var host string
-	if config.Target == "local" {
+	if loadedConfig.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	sessionId := args[0]
 	orchestratorURL := fmt.Sprintf(
 		"http://%s:%d/v1/sessions/%s",
 		host,
-		config.Services["orchestrator"].Port,
+		loadedConfig.Services["orchestrator"].Port,
 		sessionId,
 	)
 
@@ -471,12 +517,13 @@ func runDeleteSession(cmd *cobra.Command, args []string) {
 	fmt.Printf("Successfully deleted session: %s\n", sessionId)
 }
 
-func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResponse, error) {
+func sendRAGRequest(loadedConfig Config, question string, sessionId string,
+	pipeline string) (RAGResponse, error) {
 	var host string
-	if config.Target == "local" {
+	if loadedConfig.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	var ragResp RAGResponse
 	postBody, err := json.Marshal(map[string]interface{}{
@@ -492,7 +539,7 @@ func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResp
 	orchestratorURL := fmt.Sprintf(
 		"http://%s:%d/v1/rag",
 		host,
-		config.Services["orchestrator"].Port,
+		loadedConfig.Services["orchestrator"].Port,
 	)
 
 	client := &http.Client{Timeout: 3 * time.Minute}
@@ -516,12 +563,20 @@ func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResp
 }
 
 func runAskCommand(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading config: %v", err)
+	}
 	question := strings.Join(args, " ")
 	// Show pipeline being used
 	fmt.Printf("Asking (using pipeline '%s'): %s\n", pipelineType, question)
 	fmt.Println("---") // Separator
 	// Pass the pipelineType flag value to sendRAGRequest
-	ragResp, err := sendRAGRequest(question, "", pipelineType)
+	ragResp, err := sendRAGRequest(loadedConfig, question, "", pipelineType)
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
@@ -546,14 +601,22 @@ func runAskCommand(cmd *cobra.Command, args []string) {
 }
 
 func runChatCommand(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	var host string
-	if config.Target == "local" {
+	if loadedConfig.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	orchestratorURL := fmt.Sprintf("http://%s:%d/v1/chat/direct", host,
-		config.Services["orchestrator"].Port)
+		loadedConfig.Services["orchestrator"].Port)
 	messages := []datatypes.Message{
 		{
 			Role:    "system",
@@ -610,61 +673,130 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 	}
 }
 
-//func runChatCommand(cmd *cobra.Command, args []string) {
-//	var sessionId string
-//	isFirstTurn := true
-//	// Check if the --resume flag was used
-//	resumeId, _ := cmd.Flags().GetString("resume")
-//	if resumeId != "" {
-//		sessionId = resumeId
-//		isFirstTurn = false
-//		fmt.Printf("Resuming session: %s\n", sessionId)
-//	} else {
-//		// Create a new session ID for this chat
-//		fmt.Printf("Starting new chat session: %s\n", sessionId)
-//	}
-//	fmt.Println("Type 'exit' or 'quit' to end the session.")
-//	reader := bufio.NewReader(os.Stdin)
-//
-//	for {
-//		fmt.Print("> ")
-//		input, _ := reader.ReadString('\n')
-//		input = strings.TrimSpace(input)
-//
-//		if input == "exit" || input == "quit" {
-//			fmt.Println("Ending chat session.")
-//			break
-//		}
-//
-//		if input == "" {
-//			continue
-//		}
-//		currentSessionId := sessionId
-//		if isFirstTurn {
-//			currentSessionId = ""
-//		}
-//
-//		ragResp, err := sendRAGRequest(input, currentSessionId, pipelineType)
-//		if err != nil {
-//			fmt.Printf("Error: %v\n", err)
-//			continue
-//		}
-//		if isFirstTurn {
-//			sessionId = ragResp.SessionId
-//			isFirstTurn = false
-//			fmt.Printf("(Session started: %s)\n", sessionId)
-//		}
-//
-//		fmt.Println(ragResp.Answer)
-//	}
-//}
+func getStackDir() (string, error) {
+	usr, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("Failed to get the current user %w", err)
+	}
+	return filepath.Join(usr.HomeDir, ".aleutian", "stack"), nil
+}
+
+func ensureStackDir() (string, error) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		return "", err
+	}
+	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
+	configFilePath := filepath.Join(stackDir, "config.yaml")
+	defaultConfigTemplatePath := filepath.Join(stackDir, "config", "community.yaml")
+	if _, err := os.Stat(composeFilePath); errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("Stack files not found in %s. Downloading...\n", stackDir)
+		if err := downloadStackFiles(stackDir); err != nil {
+			return "", fmt.Errorf("failed to download stack files: %w", err)
+		}
+
+		if _, err := os.Stat(defaultConfigTemplatePath); err == nil {
+			fmt.Println("Copying default config/community.yaml to config.yaml...")
+			err = copyFile(defaultConfigTemplatePath, configFilePath)
+			if err != nil {
+				return "", fmt.Errorf("failed to copy default config: %w", err)
+			}
+		} else {
+			fmt.Printf("Warning: Default config template not found at %s after download.\n", defaultConfigTemplatePath)
+		}
+
+	} else if err != nil {
+		return "", fmt.Errorf("failed to check stack directory %s: %w", stackDir, err)
+	} else {
+		fmt.Printf("Using existing stack files in %s\n", stackDir)
+	}
+	if _, err := os.Stat(configFilePath); errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(defaultConfigTemplatePath); err == nil {
+			fmt.Println("config.yaml not found. Copying default config/community.yaml...")
+			err = copyFile(defaultConfigTemplatePath, configFilePath)
+			if err != nil {
+				return "", fmt.Errorf("failed to copy default config: %w", err)
+			}
+		} else {
+			fmt.Println("Warning: config.yaml and default template not found. Please ensure configuration is correct.")
+		}
+	}
+	return stackDir, nil
+}
+
+func downloadStackFiles(targetDir string) error {
+	baseURL := "https://raw.githubusercontent.com/jinterlante1206/AleutianLocal/main/"
+	filesToDownload := map[string]string{
+		"podman-compose.yml":    "podman-compose.yml",
+		"config/community.yaml": "config/community.yaml",
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create target directory %s: %w", targetDir, err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	for repoPath, localPath := range filesToDownload {
+		url := baseURL + repoPath
+		destPath := filepath.Join(targetDir, localPath)
+		destDir := filepath.Dir(destPath)
+		fmt.Printf("  Downloading %s to %s...\n", repoPath, destPath)
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", destDir, err)
+		}
+		resp, err := client.Get(url)
+		if err != nil {
+			return fmt.Errorf("failed to download %s: %w", url, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("failed to download %s: received status code %d", url, resp.StatusCode)
+		}
+
+		outFile, err := os.Create(destPath)
+		if err != nil {
+			return fmt.Errorf("failed to create file %s: %w", destPath, err)
+		}
+		defer outFile.Close()
+		_, err = io.Copy(outFile, resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to write file %s: %w", destPath, err)
+		}
+	}
+	fmt.Println("Stack files downloaded successfully.")
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+	destinationFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destinationFile.Close()
+	_, err = io.Copy(destinationFile, sourceFile)
+	return err
+}
 
 func runWeaviateWipeout(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	var host string
 	if config.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	// Check if the --force flag was provided.
 	force, _ := cmd.Flags().GetBool("force")
@@ -688,7 +820,7 @@ func runWeaviateWipeout(cmd *cobra.Command, args []string) {
 	orchestratorURL := fmt.Sprintf(
 		"http://%s:%d/v1/weaviate/data",
 		host,
-		config.Services["orchestrator"].Port)
+		loadedConfig.Services["orchestrator"].Port)
 	req, _ := http.NewRequest(http.MethodDelete, orchestratorURL, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -700,11 +832,19 @@ func runWeaviateWipeout(cmd *cobra.Command, args []string) {
 }
 
 func runWeaviateBackup(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	var host string
-	if config.Target == "local" {
+	if loadedConfig.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	backupId := args[0]
 	fmt.Printf("Starting Weaviate backup with ID: %s\n", backupId)
@@ -712,7 +852,7 @@ func runWeaviateBackup(cmd *cobra.Command, args []string) {
 	orchestratorURL := fmt.Sprintf(
 		"http://%s:%d/v1/weaviate/backups",
 		host,
-		config.Services["orchestrator"].Port)
+		loadedConfig.Services["orchestrator"].Port)
 
 	resp, err := http.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
 	if err != nil {
@@ -724,17 +864,25 @@ func runWeaviateBackup(cmd *cobra.Command, args []string) {
 }
 
 func runWeaviateRestore(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	var host string
-	if config.Target == "local" {
+	if loadedConfig.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	backupId := args[0]
 	fmt.Printf("Restoring Weaviate from backup ID: %s\n", backupId)
 	postBody, _ := json.Marshal(map[string]string{"id": backupId, "action": "restore"})
 	orchestratorURL := fmt.Sprintf("http://%s:%d/v1/weaviate/backups", host,
-		config.Services["orchestrator"].Port)
+		loadedConfig.Services["orchestrator"].Port)
 
 	resp, err := http.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
 	if err != nil {
@@ -746,15 +894,23 @@ func runWeaviateRestore(cmd *cobra.Command, args []string) {
 }
 
 func runWeaviateSummary(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	var host string
-	if config.Target == "local" {
+	if loadedConfig.Target == "local" {
 		host = "localhost"
 	} else {
-		host = config.ServerHost
+		host = loadedConfig.ServerHost
 	}
 	fmt.Println("Fetching Weaviate summary...")
 	orchestratorURL := fmt.Sprintf("http://%s:%d/v1/weaviate/summary", host,
-		config.Services["orchestrator"].Port)
+		loadedConfig.Services["orchestrator"].Port)
 	resp, err := http.Get(orchestratorURL)
 	if err != nil {
 		log.Fatalf("Failed to send summary request: %v", err)
@@ -770,15 +926,23 @@ func runWeaviateSummary(cmd *cobra.Command, args []string) {
 }
 
 func runUploadLogs(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	localDir := args[0]
 	fmt.Printf("Preparing to upload logs from '%s' to GCS...\n", localDir)
 
-	// Get GCS config from your global config object
-	gcsConfig := config.Storage.GCS
+	// Get GCS loadedConfig from your global config object
+	gcsConfig := loadedConfig.Storage.GCS
 	saKeyPath := "internal/ansible/secrets/gcp_keys/ansible_orchestrator_sa.json" // Path to your key
 
 	ctx := context.Background()
-	gcsClient, err := gcs.NewClient(ctx, config.Cloud.GCPProjectID, gcsConfig.BucketName, saKeyPath)
+	gcsClient, err := gcs.NewClient(ctx, loadedConfig.Cloud.GCPProjectID, gcsConfig.BucketName, saKeyPath)
 	if err != nil {
 		log.Fatalf("Failed to create GCS client: %v", err)
 	}
@@ -792,14 +956,22 @@ func runUploadLogs(cmd *cobra.Command, args []string) {
 }
 
 func runUploadBackups(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	localDir := args[0]
 	fmt.Printf("Preparing to upload backups from '%s' to GCS...\n", localDir)
 
-	gcsConfig := config.Storage.GCS
+	gcsConfig := loadedConfig.Storage.GCS
 	saKeyPath := "internal/ansible/secrets/gcp_keys/ansible_orchestrator_sa.json"
 
 	ctx := context.Background()
-	gcsClient, err := gcs.NewClient(ctx, config.Cloud.GCPProjectID, gcsConfig.BucketName, saKeyPath)
+	gcsClient, err := gcs.NewClient(ctx, loadedConfig.Cloud.GCPProjectID, gcsConfig.BucketName, saKeyPath)
 	if err != nil {
 		log.Fatalf("Failed to create GCS client: %v", err)
 	}
@@ -813,28 +985,60 @@ func runUploadBackups(cmd *cobra.Command, args []string) {
 	fmt.Println("\nBackup upload complete.")
 }
 
-func runPodmanCompose(args ...string) {
-	fmt.Printf("Executing: podman-compose %s\n", strings.Join(args, " "))
-	cmd := exec.Command("podman-compose", args...)
+func runPodmanCompose(stackDir string, args ...string) error {
+	fmt.Printf("Executing: podman-compose %s (in %s)\n", strings.Join(args, " "), stackDir)
+
+	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
+	cmdArgs := append([]string{"-f", composeFilePath}, args...)
+
+	cmd := exec.Command("podman-compose", cmdArgs...)
+	cmd.Dir = stackDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("podman-compose command failed: %v", err)
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("podman-compose command failed: %w", err)
 	}
+	return nil
 }
 
-func runDeploy(cmd *cobra.Command, args []string) {
-	fmt.Println("Starting local Aleutian appliance")
-	runPodmanCompose("up", "-d")
-	fmt.Println("\nLocal Aleutian podman cluster started")
-	fmt.Printf("Orchestrator is available at http://localhost:%d\n",
-		config.Services["orchestrator"].Port)
+func runStart(cmd *cobra.Command, args []string) {
+	stackDir, err := ensureStackDir() // Ensure files are present/downloaded
+	if err != nil {
+		log.Fatalf("Failed to prepare stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Failed to load configuration after setup: %v", err)
+	}
+	// Pass stackDir to runPodmanCompose
+	err = runPodmanCompose(stackDir, "up", "-d", "--build")
+	if err != nil {
+		log.Fatalf("Failed to start services: %v", err)
+	}
+	fmt.Println("\nLocal Aleutian appliance started.")
+	fmt.Printf("Orchestrator port configured in %s (default: %d)\n", filepath.Join(stackDir, "config.yaml"), loadedConfig.Services["orchestrator"].Port)
+	fmt.Println("Check 'podman ps' for exposed host ports.")
 }
 
 func runStop(cmd *cobra.Command, args []string) {
-	fmt.Println("Stopping the whole Aleutian system (all containers)")
-	runPodmanCompose("down")
-	fmt.Println("\nLocal appliance stopped")
+	fmt.Println("Stopping local Aleutian services...")
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Printf("Warning: Could not determine stack directory (%v), attempting run from current dir.", err)
+		stackDir = "."
+	}
+	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
+	if _, err := os.Stat(composeFilePath); os.IsNotExist(err) {
+		log.Println("Stack files not found. Nothing to stop.")
+		return
+	}
+	err = runPodmanCompose(stackDir, "down")
+	if err != nil {
+		log.Fatalf("Failed to stop services: %v", err)
+	}
+	fmt.Println("\nLocal Aleutian services stopped.")
 }
 
 func runDestroy(cmd *cobra.Command, args []string) {
@@ -850,15 +1054,58 @@ func runDestroy(cmd *cobra.Command, args []string) {
 		fmt.Println("Aborted. No changes were made")
 		return
 	}
-	fmt.Println("Destroying local Aleutian instance and all associated data.")
-	runPodmanCompose("down", "-v")
-	fmt.Println("Local Aleutian instance and all associated data destroyed.")
+	fmt.Println("Destroying local Aleutian instance and data...")
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Printf("Warning: Could not determine stack directory (%v), attempting run from current dir.", err)
+		stackDir = "."
+	}
+	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
+	if _, err := os.Stat(composeFilePath); os.IsNotExist(err) {
+		log.Println("Stack files not found. Nothing to destroy.")
+		return
+	}
+
+	err = runPodmanCompose(stackDir, "down", "-v") // Add -v flag
+	if err != nil {
+		log.Fatalf("Failed to destroy services and volumes: %v", err)
+	}
+	fmt.Print("Do you want to remove the downloaded stack files from ~/.aleutian/stack? (yes/no): ")
+	reader = bufio.NewReader(os.Stdin)
+	input, _ = reader.ReadString('\n')
+	if strings.TrimSpace(strings.ToLower(input)) == "yes" {
+		fmt.Printf("Removing %s...\n", stackDir)
+		err := os.RemoveAll(stackDir)
+		if err != nil {
+			log.Printf("Warning: Failed to remove stack directory %s: %v\n", stackDir, err)
+		}
+	}
+
+	fmt.Println("\nLocal Aleutian instance and data destroyed.")
 
 }
 
 func runConvertCommand(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("Could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("Error loading configuration: %v", err)
+	}
 	modelId := args[0]
-	converterURL := "http://localhost:12140/convert"
+	converterPort := 12140
+	if serviceConfig, ok := loadedConfig.Services["gguf-converter"]; ok && serviceConfig.Port > 0 {
+		converterPort = serviceConfig.Port
+	} else {
+		log.Printf("Warning: Could not find 'gguf-converter' port in config.yaml, using default %d", converterPort)
+	}
+	converterHost := "localhost"
+	if loadedConfig.Target != "local" && loadedConfig.ServerHost != "" {
+		converterHost = loadedConfig.ServerHost
+	}
+	converterURL := fmt.Sprintf("http://%s:%d/convert", converterHost, converterPort)
 	payload, _ := json.Marshal(map[string]interface{}{
 		"model_id":      modelId,
 		"quantize_type": quantizeType,
@@ -937,9 +1184,21 @@ func runLogsCommand(cmd *cobra.Command, args []string) {
 	} else {
 		fmt.Println("Streaming the logs for all services")
 	}
-	fmt.Println("(press ctrl+c to exit)")
-	runPodmanCompose(logArgs...)
-	fmt.Println("\nLog streaming stopped.")
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Printf("Warning: could not determine the stack directory %v", err)
+		stackDir = "."
+	}
+	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
+	if _, err := os.Stat(composeFilePath); os.IsNotExist(err) {
+		log.Fatalf("stack files not found in %s: %v", composeFilePath, err)
+	}
+	err = runPodmanCompose(stackDir, logArgs...)
+	if err != nil {
+		fmt.Println("\nLog streaming stopped or encountered an error")
+	} else {
+		fmt.Println("\nLog streaming finished")
+	}
 }
 
 type SessionInfo struct {
