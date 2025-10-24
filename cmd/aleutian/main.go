@@ -20,6 +20,8 @@ import (
 
 var config Config
 
+var version = "dev"
+
 func main() {
 	log.Println("Starting up Aleutian Deployment")
 	// Execute the root command. Cobra handles parsing the arguments.
@@ -29,6 +31,8 @@ func main() {
 }
 
 func init() {
+	rootCmd.Version = version
+	rootCmd.Flags().BoolP("version", "v", false, "print the version number")
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
 		configPath := "config.yaml"
 		yamlFile, err := os.ReadFile(configPath)

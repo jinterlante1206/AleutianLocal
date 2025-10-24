@@ -1,0 +1,72 @@
+# Project metadata
+project_name: aleutian
+env:
+  - CGO_ENABLED=0
+
+# execute before the build
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  -
+    id: aleutian-cli
+    main: ./cmd/aleutian
+    binary: aleutian
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+# Create the tar.gz archives
+archives:
+  - format: tar.gz
+    files:
+      - LICENSE.txt
+      - README.txt
+      - NOTICE.txt
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title. Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    builds:
+      - aleutian-cli
+
+# Generate a checksum file
+checksum:
+  name_template: 'checksums.txt'
+
+# Create Git tag and Github release
+release:
+  changelog:
+    sort: asc
+    filters:
+      exclude:
+        - '^docs:'
+        - '^test:'
+        - 'merge conflict'
+        - 'Merge pull request'
+        - 'Merge branch'
+
+## update homebrew tap automatically
+#brews:
+#  - name: aleutian
+#    tap:
+#      owner: jinterlante1206
+#      name: homebrew-aleutian
+#      download_strategy: CurlDownloadStrategy
+#      commit_msg_template: "Brew formula update for aleutian version {{ .Tag }}"
+#      folder: Formula
+#      homepage: "https://github.com/jinterlante1206/AleutianLocal"
+#      description: "Aleutian Local: MLOps Control Plane for LLM Apps"
+#      dependencies:
+#        - name: podman
+#        - name: podman-compose
+#      install: |
+#        bin.install "aleutian"
