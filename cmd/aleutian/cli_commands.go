@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"archive/tar"
+	"compress/gzip"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/gcs"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
@@ -681,7 +683,7 @@ func getStackDir() (string, error) {
 	return filepath.Join(usr.HomeDir, ".aleutian", "stack"), nil
 }
 
-func ensureStackDir() (string, error) {
+func ensureStackDir(cliVersion string) (string, error) {
 	stackDir, err := getStackDir()
 	if err != nil {
 		return "", err
@@ -691,8 +693,9 @@ func ensureStackDir() (string, error) {
 	defaultConfigTemplatePath := filepath.Join(stackDir, "config", "community.yaml")
 	if _, err := os.Stat(composeFilePath); errors.Is(err, os.ErrNotExist) {
 		fmt.Printf("Stack files not found in %s. Downloading...\n", stackDir)
-		if err := downloadStackFiles(stackDir); err != nil {
-			return "", fmt.Errorf("failed to download stack files: %w", err)
+		if err := downloadAndExtractStackFiles(stackDir, cliVersion); err != nil {
+			_ = os.RemoveAll(stackDir)
+			return "", fmt.Errorf("failed to download or extract stack files: %w", err)
 		}
 
 		if _, err := os.Stat(defaultConfigTemplatePath); err == nil {
@@ -724,47 +727,94 @@ func ensureStackDir() (string, error) {
 	return stackDir, nil
 }
 
-func downloadStackFiles(targetDir string) error {
-	baseURL := "https://raw.githubusercontent.com/jinterlante1206/AleutianLocal/main/"
-	filesToDownload := map[string]string{
-		"podman-compose.yml":    "podman-compose.yml",
-		"config/community.yaml": "config/community.yaml",
+func downloadAndExtractStackFiles(targetDir string, versionTag string) error {
+	tarballURL := fmt.Sprintf("https://github.com/jinterlante1206/AleutianLocal/archive/refs/tags/%s.tar.gz", versionTag)
+
+	fmt.Printf("  Downloading %s...\n", tarballURL)
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(tarballURL)
+	if err != nil {
+		return fmt.Errorf("failed to download %s: %w", tarballURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to download %s: received status code %d", tarballURL, resp.StatusCode)
 	}
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create target directory %s: %w", targetDir, err)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	fmt.Println("  Extracting tarball...")
+	err = extractTarGz(resp.Body, targetDir)
+	if err != nil {
+		return fmt.Errorf("failed to extract tarball: %w", err)
+	}
 
-	for repoPath, localPath := range filesToDownload {
-		url := baseURL + repoPath
-		destPath := filepath.Join(targetDir, localPath)
-		destDir := filepath.Dir(destPath)
-		fmt.Printf("  Downloading %s to %s...\n", repoPath, destPath)
-		if err := os.MkdirAll(destDir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", destDir, err)
-		}
-		resp, err := client.Get(url)
-		if err != nil {
-			return fmt.Errorf("failed to download %s: %w", url, err)
-		}
-		defer resp.Body.Close()
+	fmt.Println("Stack files downloaded and extracted successfully.")
+	return nil
+}
 
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("failed to download %s: received status code %d", url, resp.StatusCode)
+func extractTarGz(gzipStream io.Reader, targetDir string) error {
+	uncompressedStream, err := gzip.NewReader(gzipStream)
+	if err != nil {
+		return fmt.Errorf("gzip.NewReader failed: %w", err)
+	}
+	defer uncompressedStream.Close()
+
+	tarReader := tar.NewReader(uncompressedStream)
+	var rootDirStripped string = ""
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tarReader.Next failed: %w", err)
 		}
 
-		outFile, err := os.Create(destPath)
-		if err != nil {
-			return fmt.Errorf("failed to create file %s: %w", destPath, err)
+		if rootDirStripped == "" {
+			if header.Typeflag == tar.TypeDir {
+				rootDirStripped = header.Name
+				fmt.Printf("    (Stripping base directory: %s)\n", rootDirStripped)
+				continue
+			} else {
+				return fmt.Errorf("tarball does not start with a single directory")
+			}
 		}
-		defer outFile.Close()
-		_, err = io.Copy(outFile, resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to write file %s: %w", destPath, err)
+		relPath := strings.TrimPrefix(header.Name, rootDirStripped)
+		if relPath == "" {
+			continue
+		}
+		targetPath := filepath.Join(targetDir, relPath)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				return fmt.Errorf("MkdirAll %s failed: %w", targetPath, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return fmt.Errorf("MkdirAll %s failed: %w", filepath.Dir(targetPath), err)
+			}
+
+			outFile, err := os.Create(targetPath)
+			if err != nil {
+				return fmt.Errorf("Create %s failed: %w", targetPath, err)
+			}
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				outFile.Close()
+				return fmt.Errorf("Copy to %s failed: %w", targetPath, err)
+			}
+			outFile.Close()
+			os.Chmod(targetPath, os.FileMode(header.Mode))
+
+		default:
+			fmt.Printf("    (Skipping unsupported type %c for %s)\n", header.Typeflag, header.Name)
 		}
 	}
-	fmt.Println("Stack files downloaded successfully.")
 	return nil
 }
 
@@ -1004,7 +1054,12 @@ func runPodmanCompose(stackDir string, args ...string) error {
 }
 
 func runStart(cmd *cobra.Command, args []string) {
-	stackDir, err := ensureStackDir() // Ensure files are present/downloaded
+	cliVersion := rootCmd.Version
+	if cliVersion == "dev" || cliVersion == "" {
+		log.Println("Warning: CLI version is 'dev' or empty. Trying to download from 'main' branch tarball.")
+		log.Fatalf("Cannot reliably download stack files for 'dev' version. Please use a tagged release.")
+	}
+	stackDir, err := ensureStackDir(cliVersion)
 	if err != nil {
 		log.Fatalf("Failed to prepare stack directory: %v", err)
 	}
