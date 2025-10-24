@@ -728,7 +728,7 @@ func ensureStackDir(cliVersion string) (string, error) {
 }
 
 func downloadAndExtractStackFiles(targetDir string, versionTag string) error {
-	tarballURL := fmt.Sprintf("https://github.com/jinterlante1206/AleutianLocal/archive/refs/tags/%s.tar.gz", versionTag)
+	tarballURL := fmt.Sprintf("https://github.com/jinterlante1206/AleutianLocal/archive/refs/tags/v%s.tar.gz", versionTag)
 
 	fmt.Printf("  Downloading %s...\n", tarballURL)
 
