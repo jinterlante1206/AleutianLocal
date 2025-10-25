@@ -688,6 +688,22 @@ func ensureStackDir(cliVersion string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	modelsDir := filepath.Join(stackDir, "models")
+	modelsCacheDir := filepath.Join(stackDir, "models_cache")
+
+	if _, err := os.Stat(modelsDir); os.IsNotExist(err) {
+		fmt.Printf("Creating directory: %s\n", modelsDir)
+		if err := os.MkdirAll(modelsDir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create models directory %s: %w", modelsDir, err)
+		}
+	}
+	if _, err := os.Stat(modelsCacheDir); os.IsNotExist(err) {
+		fmt.Printf("Creating directory: %s\n", modelsCacheDir)
+		if err := os.MkdirAll(modelsCacheDir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create models_cache directory %s: %w", modelsCacheDir, err)
+		}
+	}
+
 	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
 	configFilePath := filepath.Join(stackDir, "config.yaml")
 	defaultConfigTemplatePath := filepath.Join(stackDir, "config", "community.yaml")
