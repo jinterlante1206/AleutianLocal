@@ -33,33 +33,73 @@ services:
     container_name: aleutian-go-orchestrator
     ports: ["${ORCHESTRATOR_PORT:-12210}:12210"]
     environment:
+      # --- Core Config ---
       PORT: ${ORCHESTRATOR_PORT:-12210}
-      EMBEDDING_SERVICE_URL: http://embedding-server:8000/embed
-      LLM_BACKEND_TYPE: "ollama"
-      OLLAMA_BASE_URL: "http://host.containers.internal:11434"
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://embedding-server:8000/embed}
+      RAG_ENGINE_URL: ${RAG_ENGINE_URL:-http://aleutian-rag-engine:8000}
+      WEAVIATE_SERVICE_URL: ${WEAVIATE_SERVICE_URL:-http://weaviate-db:8080}
+      POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: ${POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH:-/app/internal/policy_engine/enforcement/data_classification_patterns.yaml}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-otel-collector:4317}
+
+      # --- LLM Backend Configuration ---
+      LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
+      # Ollama Specific
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.containers.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
-      OPENAI_URL_BASE: "https://api.openai.com/v1"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
-      RAG_ENGINE_URL: http://aleutian-rag-engine:8000
-      WEAVIATE_SERVICE_URL: http://weaviate-db:8080
-      POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: /app/internal/policy_engine/enforcement/data_classification_patterns.yaml
+      # OpenAI Specific
+      OPENAI_URL_BASE: ${OPENAI_URL_BASE:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini} # Note: Key comes from secret
+      # Local Llama.cpp Specific
+      LLM_SERVICE_URL_BASE: ${LLM_SERVICE_URL_BASE:-} # Base URL for llama.cpp server
+      # HF TGI/vLLM Specific
+      HF_SERVER_URL: ${HF_SERVER_URL:-}
+      # Generic Remote Specific
+      REMOTE_LLM_URL: ${REMOTE_LLM_URL:-}
+      # Add Anthropic/Gemini base URLs if needed later
+
+      # --- FUTURE: Data Parsing Service URLs ---
+      PDF_PARSER_URL: ${PDF_PARSER_URL:-}
+      DOCX_PARSER_URL: ${DOCX_PARSER_URL:-}
+      HTML_CLEANER_URL: ${HTML_CLEANER_URL:-}
+      AUDIO_TRANSCRIBER_URL: ${AUDIO_TRANSCRIBER_URL:-}
+      OCR_SERVICE_URL: ${OCR_SERVICE_URL:-}
+      PII_MASKING_SERVICE_URL: ${PII_MASKING_SERVICE_URL:-}
+
+      # --- FUTURE: Agent Tools & Services ---
+      TOOL_REGISTRY_URL: ${TOOL_REGISTRY_URL:-}
+      AGENT_STATE_DB_CONNECTION_STRING: ${AGENT_STATE_DB_CONNECTION_STRING:-}
+      # Examples of custom tool URLs (already present from template)
       ALEUTIAN_CUSTOM_TOOL_FINANCE: ${ALEUTIAN_CUSTOM_TOOL_FINANCE:-}
       ALEUTIAN_CUSTOM_TOOL_INFLUX: ${ALEUTIAN_CUSTOM_TOOL_INFLUX:-}
+      # Add more generic custom tool slots if desired:
+      CUSTOM_TOOL_1_URL: ${CUSTOM_TOOL_1_URL:-}
+      CUSTOM_TOOL_2_URL: ${CUSTOM_TOOL_2_URL:-}
+
+      # --- FUTURE: Evaluation Framework ---
+      EVALUATION_ENGINE_URL: ${EVALUATION_ENGINE_URL:-}
+
+      # --- FUTURE: General Config ---
+      LOG_LEVEL: ${LOG_LEVEL:-INFO} # Example for controlling orchestrator logs
+      TIMEOUT_SECONDS_RAG_ENGINE: ${TIMEOUT_SECONDS_RAG_ENGINE:-240} # Example timeout
+      TIMEOUT_SECONDS_LLM: ${TIMEOUT_SECONDS_LLM:-300} # Example timeout
     volumes:
       # Mount the policy file so users can customize it locally
       - ./internal/policy_engine/enforcement/data_classification_patterns.yaml:/app/internal/policy_engine/enforcement/data_classification_patterns.yaml:ro
     secrets:
       - source: aleutian_hf_token
+      - source: openai_api_key
     networks:
       - aleutian-network
     restart: unless-stopped
     depends_on:
       aleutian-rag-engine:
-        condition: service_healthy
+        condition: service_started
       embedding-server:
         condition: service_healthy
       weaviate-db:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:12210/health" ]
       interval: 10s
