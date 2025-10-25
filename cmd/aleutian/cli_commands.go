@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -707,7 +708,42 @@ func ensureStackDir(cliVersion string) (string, error) {
 	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
 	configFilePath := filepath.Join(stackDir, "config.yaml")
 	defaultConfigTemplatePath := filepath.Join(stackDir, "config", "community.yaml")
-	if _, err := os.Stat(composeFilePath); errors.Is(err, os.ErrNotExist) {
+	versionFilePath := filepath.Join(stackDir, ".version")
+	var storedVersion string
+	versionBytes, err := os.ReadFile(versionFilePath)
+	if err == nil {
+		storedVersion = strings.TrimSpace(string(versionBytes))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("Could not read existing stack version file", "path", versionFilePath, "error", err)
+		storedVersion = ""
+	}
+	if _, err := os.Stat(composeFilePath); errors.Is(err, os.ErrNotExist) || (storedVersion != cliVersion && cliVersion != "dev") {
+		if storedVersion != cliVersion && storedVersion != "" {
+			slog.Info("Detected stack version mismatch", "stored", storedVersion, "cli", cliVersion)
+			fmt.Printf("Updating stack files in %s to match CLI version %s...\n", stackDir, cliVersion)
+		} else {
+			slog.Info("Stack files not found, downloading.", "path", stackDir)
+			fmt.Printf("Stack files not found in %s. Downloading v%s...\n", stackDir, cliVersion)
+		}
+		backupConfigPath := ""
+		if _, err := os.Stat(configFilePath); err == nil {
+			backupConfigPath = configFilePath + ".bak"
+			slog.Info("Backing up existing config.yaml", "to", backupConfigPath)
+			if err := os.Rename(configFilePath, backupConfigPath); err != nil {
+				slog.Error("Failed to back up config.yaml", "error", err)
+				return "", fmt.Errorf("failed to back up existing config.yaml: %w", err)
+			}
+		}
+		slog.Info("Cleaning stack directory before download", "path", stackDir)
+		dirEntries, _ := os.ReadDir(stackDir)
+		for _, entry := range dirEntries {
+			entryPath := filepath.Join(stackDir, entry.Name())
+			if entryPath != backupConfigPath {
+				if err := os.RemoveAll(entryPath); err != nil {
+					slog.Warn("Failed to remove old stack entry during cleanup", "path", entryPath, "error", err)
+				}
+			}
+		}
 		fmt.Printf("Stack files not found in %s. Downloading...\n", stackDir)
 		if err := downloadAndExtractStackFiles(stackDir, cliVersion); err != nil {
 			_ = os.RemoveAll(stackDir)
@@ -723,11 +759,43 @@ func ensureStackDir(cliVersion string) (string, error) {
 		} else {
 			fmt.Printf("Warning: Default config template not found at %s after download.\n", defaultConfigTemplatePath)
 		}
+		slog.Info("Writing new version file", "version", cliVersion, "path", versionFilePath)
+		if err := os.WriteFile(versionFilePath, []byte(cliVersion+"\n"), 0644); err != nil {
+			slog.Warn("Failed to write .version file", "error", err)
+		}
 
-	} else if err != nil {
+		// --- Restore config.yaml backup if it existed ---
+		if backupConfigPath != "" {
+			slog.Info("Restoring config.yaml backup", "from", backupConfigPath)
+			if err := os.Rename(backupConfigPath, configFilePath); err != nil {
+				slog.Error("Failed to restore config.yaml backup", "error", err)
+				fmt.Printf("Warning: Could not restore your config.yaml backup from %s\n", backupConfigPath)
+				fmt.Println("A new default config.yaml may have been created. Please review.")
+				if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+				}
+			}
+		}
+		if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+			defaultConfigTemplatePath := filepath.Join(stackDir, "config", "community.yaml")
+			if _, err := os.Stat(defaultConfigTemplatePath); err == nil {
+				slog.Info("config.yaml not found, copying default template.", "path", configFilePath)
+				fmt.Println("Copying default config/community.yaml to config.yaml...")
+				if err = copyFile(defaultConfigTemplatePath, configFilePath); err != nil {
+					return "", fmt.Errorf("failed to copy default config: %w", err)
+				}
+			} else {
+				// If template also missing after extract, something's very wrong
+				slog.Error("Default config template missing after extraction", "path", defaultConfigTemplatePath)
+				return "", fmt.Errorf("default config template missing at %s after extraction", defaultConfigTemplatePath)
+			}
+		}
 		return "", fmt.Errorf("failed to check stack directory %s: %w", stackDir, err)
 	} else {
-		fmt.Printf("Using existing stack files in %s\n", stackDir)
+		slog.Info("Using existing stack files", "path", stackDir, "version", storedVersion)
+		fmt.Printf("Using existing stack files in %s (Version: %s)\n", stackDir, storedVersion)
+		// Still ensure essential directories and config exist even if no download occurred
+		_ = ensureEssentialDirs(stackDir)     // Ignore error, just try to ensure they exist
+		_ = ensureDefaultConfigCopy(stackDir) // Ignore error
 	}
 	if _, err := os.Stat(configFilePath); errors.Is(err, os.ErrNotExist) {
 		if _, err := os.Stat(defaultConfigTemplatePath); err == nil {
@@ -740,12 +808,13 @@ func ensureStackDir(cliVersion string) (string, error) {
 			fmt.Println("Warning: config.yaml and default template not found. Please ensure configuration is correct.")
 		}
 	}
+
 	return stackDir, nil
 }
 
 func downloadAndExtractStackFiles(targetDir string, versionTag string) error {
 	tarballURL := fmt.Sprintf("https://github.com/jinterlante1206/AleutianLocal/archive/refs/tags/v%s.tar.gz", versionTag)
-
+	slog.Info("Downloading stack archive", "url", tarballURL)
 	fmt.Printf("  Downloading %s...\n", tarballURL)
 
 	client := &http.Client{Timeout: 5 * time.Minute}
@@ -756,19 +825,64 @@ func downloadAndExtractStackFiles(targetDir string, versionTag string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		slog.Error("Download failed", "url", tarballURL, "status_code", resp.StatusCode, "body", string(bodyBytes))
 		return fmt.Errorf("failed to download %s: received status code %d", tarballURL, resp.StatusCode)
 	}
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create target directory %s: %w", targetDir, err)
 	}
 
+	slog.Info("Extracting tarball", "target", targetDir)
 	fmt.Println("  Extracting tarball...")
-	err = extractTarGz(resp.Body, targetDir)
+	err = extractTarGz(resp.Body, targetDir) // extractTarGz remains the same
 	if err != nil {
 		return fmt.Errorf("failed to extract tarball: %w", err)
 	}
 
+	slog.Info("Stack files downloaded and extracted successfully.")
 	fmt.Println("Stack files downloaded and extracted successfully.")
+	return nil
+}
+
+// Ensures directories needed for volume mounts exist within stackDir
+func ensureEssentialDirs(stackDir string) error {
+	dirsToEnsure := []string{"models", "models_cache"}
+	var firstErr error
+	for _, dirName := range dirsToEnsure {
+		dirPath := filepath.Join(stackDir, dirName)
+		if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+			slog.Info("Creating essential directory", "path", dirPath)
+			fmt.Printf("Creating directory: %s\n", dirPath)
+			if err := os.MkdirAll(dirPath, 0755); err != nil {
+				slog.Error("Failed to create essential directory", "path", dirPath, "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+	}
+	return firstErr
+}
+
+// Ensures config.yaml exists, copying from template if needed.
+func ensureDefaultConfigCopy(stackDir string) error {
+	configFilePath := filepath.Join(stackDir, "config.yaml")
+	defaultConfigTemplatePath := filepath.Join(stackDir, "config", "community.yaml")
+
+	if _, err := os.Stat(configFilePath); errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(defaultConfigTemplatePath); err == nil {
+			slog.Info("config.yaml missing, copying default template.", "path", configFilePath)
+			fmt.Println("Copying default config/community.yaml to config.yaml...")
+			if err = copyFile(defaultConfigTemplatePath, configFilePath); err != nil {
+				slog.Error("Failed to copy default config", "error", err)
+				return fmt.Errorf("failed to copy default config: %w", err)
+			}
+		} else {
+			slog.Warn("config.yaml and default template missing.", "config_path", configFilePath, "template_path", defaultConfigTemplatePath)
+			fmt.Println("Warning: config.yaml and default template not found. Please ensure configuration is correct.")
+		}
+	}
 	return nil
 }
 
@@ -1115,6 +1229,9 @@ func runStart(cmd *cobra.Command, args []string) {
 	stackDir, err := ensureStackDir(cliVersion)
 	if err != nil {
 		log.Fatalf("Failed to prepare stack directory: %v", err)
+	}
+	if err := ensureEssentialDirs(stackDir); err != nil {
+		log.Fatalf("Failed to create essential directories in stack: %v", err)
 	}
 	loadedConfig, err := loadConfigFromStackDir(stackDir)
 	if err != nil {
