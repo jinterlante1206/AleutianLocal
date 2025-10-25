@@ -31,7 +31,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
-from pipelines import standard, reranking, raptor, graph
+from pipelines import standard, reranking
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -197,41 +197,41 @@ async def run_reranking_rag(request: RAGEngineRequest):
         logger.error(f"Error in reranking RAG pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.post("/rag/raptor", response_model=RAGEngineResponse)
-async def run_raptor_rag(request: RAGEngineRequest):
-    rag_request_counter.add(1, {"pipeline": "raptor"})
-    logger.info(f"Running RAPTOR RAG for query: {request.query[:50]}...")
-    if not weaviate_client or not weaviate_client.is_connected():
-         raise HTTPException(status_code=503, detail="Weaviate client not connected")
-    try:
-        pipeline = raptor.RaptorPipeline(weaviate_client, pipeline_config)
-        answer = await pipeline.run(request.query)
-        return RAGEngineResponse(answer=answer)
-    except NotImplementedError:
-         logger.warning("RAPTOR pipeline execution is not implemented.")
-         raise HTTPException(status_code=501, detail="RAPTOR pipeline not implemented yet.")
-    except Exception as e:
-        logger.error(f"Error in RAPTOR RAG pipeline: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/rag/graph", response_model=RAGEngineResponse)
-async def run_graph_rag(request: RAGEngineRequest):
-    rag_request_counter.add(1, {"pipeline": "graph"})
-    logger.info(f"Running Graph RAG for query: {request.query[:50]}...")
-    if not weaviate_client or not weaviate_client.is_connected():
-         raise HTTPException(status_code=503, detail="Weaviate client not connected")
-    try:
-        pipeline = graph.GraphRAGPipeline(weaviate_client, pipeline_config)
-        answer = await pipeline.run(request.query)
-        return RAGEngineResponse(answer=answer)
-    except NotImplementedError:
-         logger.warning("Graph RAG pipeline execution is not implemented.")
-         raise HTTPException(status_code=501, detail="Graph RAG pipeline not implemented yet.")
-    except Exception as e:
-        logger.error(f"Error in Graph RAG pipeline: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+#
+# @app.post("/rag/raptor", response_model=RAGEngineResponse)
+# async def run_raptor_rag(request: RAGEngineRequest):
+#     rag_request_counter.add(1, {"pipeline": "raptor"})
+#     logger.info(f"Running RAPTOR RAG for query: {request.query[:50]}...")
+#     if not weaviate_client or not weaviate_client.is_connected():
+#          raise HTTPException(status_code=503, detail="Weaviate client not connected")
+#     try:
+#         pipeline = raptor.RaptorPipeline(weaviate_client, pipeline_config)
+#         answer = await pipeline.run(request.query)
+#         return RAGEngineResponse(answer=answer)
+#     except NotImplementedError:
+#          logger.warning("RAPTOR pipeline execution is not implemented.")
+#          raise HTTPException(status_code=501, detail="RAPTOR pipeline not implemented yet.")
+#     except Exception as e:
+#         logger.error(f"Error in RAPTOR RAG pipeline: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail=str(e))
+#
+#
+# @app.post("/rag/graph", response_model=RAGEngineResponse)
+# async def run_graph_rag(request: RAGEngineRequest):
+#     rag_request_counter.add(1, {"pipeline": "graph"})
+#     logger.info(f"Running Graph RAG for query: {request.query[:50]}...")
+#     if not weaviate_client or not weaviate_client.is_connected():
+#          raise HTTPException(status_code=503, detail="Weaviate client not connected")
+#     try:
+#         pipeline = graph.GraphRAGPipeline(weaviate_client, pipeline_config)
+#         answer = await pipeline.run(request.query)
+#         return RAGEngineResponse(answer=answer)
+#     except NotImplementedError:
+#          logger.warning("Graph RAG pipeline execution is not implemented.")
+#          raise HTTPException(status_code=501, detail="Graph RAG pipeline not implemented yet.")
+#     except Exception as e:
+#         logger.error(f"Error in Graph RAG pipeline: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail=str(e))
 
 # TODO: add semantic RAG
 
