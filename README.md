@@ -9,6 +9,10 @@ This project is licensed under the GNU Affero General Public License v3.0 - see 
 
 **Aleutian Local** simplifies building, deploying, evaluating, and managing sophisticated LLM-native applications on your **local machine** (macOS M2/M3 recommended, Linux compatible) while being easily extensible to hybrid cloud setups.
 
+AleutianLocal's architecture is not just for local prototyping; it is fundamentally production-ready. By adhering to cloud-native principles—containerized services defined by Dockerfiles, configuration via environment variables, and a decoupled microservice structure—the entire stack is designed for a straightforward migration.
+
+A DevOps engineer can take the `podman-compose.yml` and `podman-compose.override.yml` files (which define the services, dependencies, and configuration) and translate them directly into deployment manifests for production orchestrators like **Kubernetes**, **Docker Swarm**, or other server environments. This "local-first, production-ready" design allows you to prototype with confidence, knowing the path to a scalable deployment is clear.
+
 It acts as an **opinionated but modular MLOps control plane**, providing the essential **infrastructure and workflow automation** around your chosen inference engine:
 
 * **Secure Data Ingestion:** Automate the processing (e.g., PDF parsing via extensible containers) and privacy scanning of local data before storing it in the vector database.
