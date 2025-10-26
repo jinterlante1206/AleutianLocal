@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # --- Models for /v1/chat/direct ---
 class Message(BaseModel):
@@ -48,11 +48,6 @@ class DocumentResponse(BaseModel):
     message: Optional[str] = None
 
 # --- Models for GET /v1/sessions ---
-class SessionInfo(BaseModel):
-    session_id: str
-    summary: str
-    timestamp: int # Assuming timestamp is returned as an int
-
 class WeaviateGraphQLResponse(BaseModel):
     # This matches the nested structure: {"Get": {"Session": [...]}}
     Get: Dict[str, List[SessionInfo]]

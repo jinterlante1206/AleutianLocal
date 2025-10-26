@@ -17,8 +17,23 @@ class AleutianClient:
             host: The hostname of the orchestrator (e.g., http://localhost)
             port: The port the orchestrator is listening on (default 12210)
         """
-        self.base_url = f"{host}:{port}/v1"
+        self.base_url = f"{host}:{port}"
         self._client = httpx.Client(base_url=self.base_url, timeout=300.0)  # 5 min timeout
+
+    def _handle_error(self, response: httpx.Response, endpoint: str):
+        """Helper to parse and raise API errors."""
+        if response.status_code >= 400:
+            try:
+                error_data = response.json()
+                # Check for specific error structures
+                error_detail = error_data.get('error', response.text)
+                if 'details' in error_data:  # As seen in orchestrator 500 responses
+                    error_detail = f"{error_detail}: {error_data.get('details')}"
+            except Exception:
+                error_detail = response.text
+            raise AleutianApiError(
+                f"API call to {endpoint} failed with status {response.status_code}: {error_detail}"
+            )
 
     def health_check(self) -> dict:
         """Checks the health of the orchestrator."""
@@ -32,7 +47,7 @@ class AleutianClient:
     def ask(self, query: str, pipeline: str = "reranking", no_rag: bool = False,
             session_id: str = None) -> RAGResponse:
         """
-        Asks a question to the RAG system (maps to /v1/rag).
+        Asks a question to the RAG system (maps to /rag).
 
         Args:
             query: The user's question.
@@ -47,7 +62,8 @@ class AleutianClient:
                                   session_id=session_id)
 
         try:
-            response = self._client.post("/rag", json=request_data.model_dump())
+            endpoint = "/v1/rag"
+            response = self._client.post(endpoint, json=request_data.model_dump())
 
             if response.status_code != 200:
                 # Try to parse the error detail from the server
@@ -61,11 +77,11 @@ class AleutianClient:
             return RAGResponse(**response.json())
 
         except httpx.RequestError as e:
-            raise AleutianConnectionError(f"Connection to /v1/rag failed: {e}") from e
+            raise AleutianConnectionError(f"Connection to /rag failed: {e}") from e
 
     def chat(self, messages: list[Message]) -> DirectChatResponse:
         """
-        Sends a list of messages to the direct chat endpoint (maps to /v1/chat/direct).
+        Sends a list of messages to the direct chat endpoint (maps to /chat/direct).
 
         Args:
             messages: A list of Message objects (e.g., [Message(role="user", content="Hi")])
@@ -75,7 +91,8 @@ class AleutianClient:
         """
         request_data = DirectChatRequest(messages=messages)
         try:
-            response = self._client.post("/chat/direct", json=request_data.model_dump())
+            endpoint = "/v1/chat/direct"
+            response = self._client.post(endpoint, json=request_data.model_dump())
             if response.status_code != 200:
                 try:
                     error_detail = response.json().get('error', response.text)
@@ -87,12 +104,12 @@ class AleutianClient:
             return DirectChatResponse(**response.json())
 
         except httpx.RequestError as e:
-            raise AleutianConnectionError(f"Connection to /v1/chat/direct failed: {e}") from e
+            raise AleutianConnectionError(f"Connection to /chat/direct failed: {e}") from e
 
     def populate_document(self, content: str, source: str,
                           version: Optional[str] = None) -> DocumentResponse:
         """
-        Populates a single document into Weaviate (maps to POST /v1/documents).
+        Populates a single document into Weaviate (maps to POST /documents).
         Note: This sends raw content. For file-path based ingestion, use the CLI.
 
         Args:
@@ -110,23 +127,25 @@ class AleutianClient:
         try:
             # Note: The 'documents.go' handler expects 'content' and 'source' at the top level
             # Let's match the Go struct 'CreateDocumentRequest'
-            response = self._client.post("/v1/documents",
+            endpoint = "/v1/documents"
+            response = self._client.post(endpoint,
                                          json=request_data.model_dump(exclude_none=True))
-            self._handle_error(response, "/v1/documents")
+            self._handle_error(response, endpoint)
             return DocumentResponse(**response.json())
         except httpx.RequestError as e:
-            raise AleutianConnectionError(f"Connection to /v1/documents failed: {e}") from e
+            raise AleutianConnectionError(f"Connection to /documents failed: {e}") from e
 
     def list_sessions(self) -> List[SessionInfo]:
         """
-        Lists all available conversation sessions (maps to GET /v1/sessions).
+        Lists all available conversation sessions (maps to GET /sessions).
 
         Returns:
             A list of SessionInfo objects.
         """
         try:
-            response = self._client.get("/v1/sessions")
-            self._handle_error(response, "/v1/sessions")
+            endpoint = "/v1/sessions"
+            response = self._client.get(endpoint)
+            self._handle_error(response, endpoint)
 
             # Parse the nested GraphQL-like response
             parsed_response = SessionListResponse(**response.json())
@@ -135,11 +154,11 @@ class AleutianClient:
             return []  # Return empty list if no data or "Session" key
 
         except httpx.RequestError as e:
-            raise AleutianConnectionError(f"Connection to /v1/sessions failed: {e}") from e
+            raise AleutianConnectionError(f"Connection to /sessions failed: {e}") from e
 
     def delete_session(self, session_id: str) -> DeleteSessionResponse:
         """
-        Deletes a specific session and its related conversations (maps to DELETE /v1/sessions/{session_id}).
+        Deletes a specific session and its related conversations (maps to DELETE /sessions/{session_id}).
 
         Args:
             session_id: The ID of the session to delete.
