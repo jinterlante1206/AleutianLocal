@@ -27,7 +27,7 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/textsplitter"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"github.com/weaviate/weaviate/entities/models"
 )
 

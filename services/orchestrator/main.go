@@ -23,7 +23,7 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/routes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"google.golang.org/grpc/credentials/insecure"
 
 	// --- OpenTelemetry imports ---

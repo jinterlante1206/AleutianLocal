@@ -17,7 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
 type BackupRequest struct {

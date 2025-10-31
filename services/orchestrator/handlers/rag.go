@@ -24,7 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"

@@ -15,9 +15,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate/filters"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate/graphql"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate/graphql"
 	"go.opentelemetry.io/otel"
 )
 
