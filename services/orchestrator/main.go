@@ -123,6 +123,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: Could not initialize the Policy Engine %v", err)
 	}
+	modelName := os.Getenv("EMBEDDING_MODEL_NAME")
+	if modelName == "" {
+		slog.Warn("EMBEDDING_MODEL_NAME is not set, defaulting to 'google/embeddinggemma-300m'")
+	}
 
 	log.Println("Configuring the LLM Client")
 	llmBackendType := os.Getenv("LLM_BACKEND_TYPE")
