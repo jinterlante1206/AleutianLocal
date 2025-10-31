@@ -16,6 +16,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/weaviate/weaviate-go-client/v4/weaviate"
 )
 
@@ -95,6 +96,9 @@ func DeleteAll(client *weaviate.Client) gin.HandlerFunc {
 		}
 		slog.Info("All data and schemas have been deleted from your Weaviate instance. " +
 			"It's been wiped clean.")
+		slog.Info("Rebuilding default schemas...")
+		datatypes.EnsureWeaviateSchema(client)
+		slog.Info("Default schemas rebuilt successfully.")
 		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Weaviate was wiped clean"})
 	}
 }

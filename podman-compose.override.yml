@@ -2,13 +2,13 @@
 version: '0.0.1'
 
 services:
-  orchestrator:
-    environment:
-      OPENAI_API_KEY: ""
-      OPENAI_model: ""
-      OLLAMA_BASE_URL: ""
-      OLLAMA_MODEL: ""
-      SYSTEM_ROLE_PROMPT_PERSONA: "You are an expert systems engineer."
+#  orchestrator:
+#    environment:
+#      OPENAI_API_KEY: ""
+#      OPENAI_model: ""
+#      OLLAMA_BASE_URL: ""
+#      OLLAMA_MODEL: ""
+#      SYSTEM_ROLE_PROMPT_PERSONA: "You are an expert systems engineer."
   # Override the LLM command if you've downloaded a different model
   # llm-server:
   #   command: -m /models/my-other-model.gguf -c 8192 --n_gpu_layers -1
@@ -38,14 +38,6 @@ services:
     environment:
       RAG_PROMPT_TEMPLATE: "Context: {context}\n\nBased ONLY on the context, answer: {query}\nAnswer:"
 
-# Uncomment the gguf-converter if you want to use a local model instead of one from HF.
-#  gguf-converter:
-#    volumes:
-#      - /path/to/my/hf-models:/input-models
 
 volumes:
   influxdb_data: {}
-
-networks:
-  aleutian-network:
-    external: true

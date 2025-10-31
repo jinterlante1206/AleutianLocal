@@ -144,9 +144,22 @@ class BaseRAGPipeline:
                 logger.error(f"Invalid embedding response format: {data}")
                 raise ValueError("Invalid embedding response format")
             return data["vector"]
-        except httpx.RequestError as e:
-            logger.error(f"HTTP error calling embedding service at {self.embedding_url}: {e}")
-            raise ConnectionError(f"Failed to connect to embedding service: {e}")
+        except httpx.HTTPStatusError as e:
+            error_detail = "No detail provided"
+            try:
+                error_detail = e.response.json().get("detail", e.response.text)
+            except Exception:
+                error_detail = e.response.text
+
+            logger.error(
+                f"Embedding service at {self.embedding_url} returned status {e.response.status_code}. "
+                f"Detail: {error_detail}",
+                exc_info=True
+            )
+            raise RuntimeError(f"Embedding service failed: {error_detail}")
+        except httpx.RequestError as httpxRequestError:
+            logger.error(f"HTTP error calling embedding service at {self.embedding_url}: {httpxRequestError}")
+            raise ConnectionError(f"Failed to connect to embedding service: {httpxRequestError}")
         except Exception as e:
             logger.error(f"Failed to get embedding: {e}", exc_info=True)
             raise RuntimeError(f"Embedding generation failed: {e}")
