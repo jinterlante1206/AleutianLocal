@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from huggingface_hub import login
 from pydantic import BaseModel
+from torch import Tensor
 from transformers import AutoTokenizer, AutoModel
 from typing import List
 
@@ -46,6 +47,16 @@ tokenizer: AutoTokenizer = None
 model: AutoModel = None
 device: str = "cpu"
 model_ready: bool = False
+
+def last_token_pool(last_hidden_states: Tensor,
+                    attention_mask: Tensor) -> Tensor:
+    left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
+    if left_padding:
+        return last_hidden_states[:, -1]
+    else:
+        sequence_lengths = attention_mask.sum(dim=1) - 1
+        batch_size = last_hidden_states.shape[0]
+        return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -76,7 +87,7 @@ def load_llm_configuration():
                     print("FATAL ERROR: Could not load HuggingFace Token")
         except FileNotFoundError:
             print("Huggingface Secret Token not found")
-        logger.info(f"Loading LLM Model...")
+        logger.info(f"Loading LLM Model: " +  MODEL_NAME)
 
         if torch.backends.mps.is_available():
             device_str = "mps"
@@ -102,6 +113,7 @@ def get_embedding(text: str) -> List[float]:
     if not model_ready or not model or not tokenizer:
         logger.error("LLM Resources are not available. Check startup logs.")
         raise HTTPException(status_code=503, detail="LLM service not ready or model not loaded")
+    logger.info("Starting up to get the embeddings")
     try:
         inputs = tokenizer(
             text,
@@ -110,16 +122,30 @@ def get_embedding(text: str) -> List[float]:
             truncation=True,
             max_length=512
         ).to(device)
+        logger.info("setup the model(**inputs)")
 
         with torch.no_grad():
+            logger.info("sending the inputs to the model")
             outputs = model(**inputs)
+            logger.info("outputs set")
+
+
+        logger.info("determining which embedings to use for:" + MODEL_NAME)
         # Consistent embedding extraction (mean pooling)
-        embeddings = outputs.last_hidden_state.mean(dim=1)
+        if MODEL_NAME == "google/embeddinggemma-300m":
+            logger.info("processing for google/embeddinggemma-300m")
+            embeddings = outputs.last_hidden_state.mean(dim=1)
+        elif MODEL_NAME.split("/")[0].lower() == "qwen":
+            logger.info("processing for Qwen")
+            embeddings = last_token_pool(outputs.last_hidden_state, inputs['attention_mask'])
+        else:
+            logger.error(f"Failed to process for: {MODEL_NAME}. Define the embeddings processor")
+
         # Normalization (L2 norm) is common for embeddings
         normalized_embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
         return normalized_embeddings.cpu().numpy().tolist()[0]
-    except Exception as e:
-        logger.error(f"Error during embedding generation: {e}", exc_info=True)
+    except Exception as getEmbeddingsError:
+        logger.error(f"Error during embedding generation: {getEmbeddingsError}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate embeddings")
 
 @app.post("/embed", response_model=EmbeddingResponse)

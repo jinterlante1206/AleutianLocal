@@ -24,7 +24,6 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/routes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v4/weaviate"
-	"github.com/weaviate/weaviate/entities/models"
 	"google.golang.org/grpc/credentials/insecure"
 
 	// --- OpenTelemetry imports ---
@@ -117,7 +116,7 @@ func main() {
 		log.Fatalf("Failed to create a weaviate client, %v", err)
 	}
 
-	ensureWeaviateSchema(weaviateClient)
+	datatypes.EnsureWeaviateSchema(weaviateClient)
 
 	policyEnginePath := os.Getenv("POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH")
 	policyEngine, err = policy_engine.NewPolicyEngine(policyEnginePath)
@@ -155,35 +154,5 @@ func main() {
 	log.Println("Starting the orchestrator server on port ", port)
 	if err := router.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
-	}
-}
-
-func ensureWeaviateSchema(client *weaviate.Client) {
-	// A list of functions that return our schema definitions.
-	schemaGetters := []func() *models.Class{
-		datatypes.GetDocumentSchema,
-		datatypes.GetConversationSchema,
-		datatypes.GetSessionSchema,
-	}
-
-	for _, getSchema := range schemaGetters {
-		class := getSchema()
-		slog.Info("Checking schema", "class", class.Class)
-
-		// Check if the class already exists.
-		_, err := client.Schema().ClassGetter().WithClassName(class.Class).Do(context.Background())
-		if err != nil {
-			// If it doesn't exist, the client returns an error. We can now create it.
-			slog.Info("Schema not found, creating it...", "class", class.Class)
-			err := client.Schema().ClassCreator().WithClass(class).Do(context.Background())
-			if err != nil {
-				// If we fail to create it, it's a fatal error.
-				log.Fatalf("Failed to create schema for class %s: %v", class.Class, err)
-			}
-			slog.Info("Schema created successfully", "class", class.Class)
-		} else {
-			// If it exists, no error is returned.
-			slog.Info("Schema already exists", "class", class.Class)
-		}
 	}
 }

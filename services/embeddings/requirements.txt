@@ -8,3 +8,5 @@ fastapi
 uvicorn
 pydantic
 bitsandbytes
+torch
+sentence-transformers
