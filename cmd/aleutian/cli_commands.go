@@ -21,6 +21,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -216,6 +217,13 @@ var (
 		Short: "DANGER: Deletes all data and schemas from Weaviate",
 		Run:   runWeaviateWipeout,
 	}
+	weaviateDeleteDocCmd = &cobra.Command{
+		Use:   "delete [source-name]",
+		Short: "Deletes a document and all its chunks by its parent_source name",
+		Long:  `Sends a DELETE request to the orchestrator to remove all chunks associated with a specific parent_source. This is the 'Right to be Forgotten' command.`,
+		Args:  cobra.ExactArgs(1),
+		Run:   runWeaviateDeleteDoc,
+	}
 
 	// GCS data commands
 	uploadCmd = &cobra.Command{
@@ -277,6 +285,7 @@ func init() {
 	weaviateCmd.AddCommand(weaviateSummaryCmd)
 	weaviateCmd.AddCommand(weaviateWipeoutCmd)
 	weaviateWipeoutCmd.Flags().Bool("force", false, "Required to confirm the deletion of all data.")
+	weaviateCmd.AddCommand(weaviateDeleteDocCmd)
 
 	// GCS data commands
 	rootCmd.AddCommand(uploadCmd)
@@ -1537,6 +1546,54 @@ func runLogsCommand(cmd *cobra.Command, args []string) {
 	} else {
 		fmt.Println("\nLog streaming finished")
 	}
+}
+
+func runWeaviateDeleteDoc(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("could not load the config: %v", err)
+	}
+	var host string
+	if loadedConfig.Target == "local" {
+		host = "localhost"
+	} else {
+		host = loadedConfig.ServerHost
+	}
+	sourceName := args[0]
+	fmt.Printf("Submitting request to delete all chunks for: %s\n", sourceName)
+
+	encodedSourceName := url.QueryEscape(sourceName)
+	orchestratorURL := fmt.Sprintf(
+		"http://%s:%d/v1/document?source=%s",
+		host,
+		loadedConfig.Services["orchestrator"].Port,
+		encodedSourceName)
+	req, err := http.NewRequest(http.MethodDelete, orchestratorURL, nil)
+	if err != nil {
+		log.Fatalf("failed to create the delete request: %v", err)
+	}
+	// Send the request to the orchestrator
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("Orchestrator returned an error: (Status %d) %s", resp.StatusCode, string(bodyBytes))
+	}
+	var deleteResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &deleteResp); err != nil {
+		log.Fatalf("Failed to parse success response from orchestrator: %v", err)
+	}
+	fmt.Printf("\nSuccess: %s\n", deleteResp["status"])
+	fmt.Printf("Source Deleted: %s\n", deleteResp["source_deleted"])
+	fmt.Printf("Chunks Removed: %.0f\n", deleteResp["chunks_deleted"])
 }
 
 type SessionInfo struct {
