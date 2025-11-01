@@ -25,8 +25,6 @@ from torch import Tensor
 from transformers import AutoTokenizer, AutoModel
 from typing import List
 
-from weaviate.connect.executor import return_
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -35,6 +33,9 @@ MODEL_NAME = os.getenv("MODEL_NAME", "google/embeddinggemma-300m")
 # create the request data class
 class BatchEmbeddingRequest(BaseModel):
     texts: List[str]
+
+class EmbeddingRequest(BaseModel):
+    text: str
 
 # create the response data class
 class BatchEmbeddingResponse(BaseModel):
@@ -162,14 +163,19 @@ def get_embedding(text: str) -> List[float]:
 @app.post("/embed", response_model=BatchEmbeddingResponse)
 async def create_embeddings(message: BatchEmbeddingRequest):
     try:
-        vector = get_embedding(message.text)
+        if not message.texts or len(message.texts) == 0:
+            logger.error("Embed called with no texts in 'texts' list")
+            raise HTTPException(status_code=400, detail="No text provided in 'texts' list")
+
+        vector = get_embedding(message.texts[0])
+
         idVal = str(uuid.uuid4())
         timestamp = int(1000*datetime.datetime.now(datetime.UTC).timestamp())
         return BatchEmbeddingResponse(
             id=idVal,
             timestamp=timestamp,
-            text=message.text,
-            vector=vector,
+            model=MODEL_NAME,  # Also add model name
+            vectors=[vector],  # Return as a list of one
             dim=len(vector)
         )
     except Exception as e:
@@ -194,6 +200,7 @@ async def tokenize_text(message: TokenizeRequest):
         logger.error(f"Error during the tokenization process {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to count tokens")
 
+
 @app.post("/batch_embed", response_model=BatchEmbeddingResponse)
 async def batch_embed_text(request: BatchEmbeddingRequest):
     global tokenizer, model, model_ready, MODEL_NAME
@@ -205,8 +212,6 @@ async def batch_embed_text(request: BatchEmbeddingRequest):
         return BatchEmbeddingResponse(vectors=[], model=MODEL_NAME, dim=0)
     logger.info(f"Received batch embed request with {len(request.texts)} documents.")
     try:
-        # The tokenizer and model can process a whole batch at once.
-        # This is *massively* faster than a loop.
         inputs = tokenizer(
             request.texts,
             padding=True,
@@ -215,14 +220,11 @@ async def batch_embed_text(request: BatchEmbeddingRequest):
             max_length=512  # Or your model's max sequence length
         )
 
-        # Move inputs to the correct device (e.g., 'cuda', 'mps', 'cpu')
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        # Run batch inference
         with torch.no_grad():
             outputs = model(**inputs)
 
-            # Use your existing embedding extraction logic
             logger.info("determining which embedings to use for:" + MODEL_NAME)
             if MODEL_NAME == "google/embeddinggemma-300m":
                 logger.info("processing for google/embeddinggemma-300m")
@@ -252,6 +254,7 @@ async def batch_embed_text(request: BatchEmbeddingRequest):
     except Exception as e:
         logger.error(f"Error during batch embedding: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to process batch: {e}")
+
 
 @app.get("/health", status_code=200)
 async def health_check():
