@@ -911,7 +911,6 @@ func ensureStackDir(cliVersion string) (string, error) {
 				return "", fmt.Errorf("default config template missing at %s after extraction", defaultConfigTemplatePath)
 			}
 		}
-		return "", fmt.Errorf("failed to check stack directory %s: %w", stackDir, err)
 	} else {
 		slog.Info("Using existing stack files", "path", stackDir, "version", storedVersion)
 		fmt.Printf("Using existing stack files in %s (Version: %s)\n", stackDir, storedVersion)
@@ -930,7 +929,6 @@ func ensureStackDir(cliVersion string) (string, error) {
 			fmt.Println("Warning: config.yaml and default template not found. Please ensure configuration is correct.")
 		}
 	}
-
 	return stackDir, nil
 }
 
