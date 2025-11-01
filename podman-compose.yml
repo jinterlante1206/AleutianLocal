@@ -36,11 +36,11 @@ services:
       # --- Core Config ---
       PORT: ${ORCHESTRATOR_PORT:-12210}
       EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://embedding-server:8000/embed}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_ID:-google/embeddinggemma-300m}
       RAG_ENGINE_URL: ${RAG_ENGINE_URL:-http://aleutian-rag-engine:8000}
       WEAVIATE_SERVICE_URL: ${WEAVIATE_SERVICE_URL:-http://weaviate-db:8080}
       POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH: ${POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH:-/app/internal/policy_engine/enforcement/data_classification_patterns.yaml}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-otel-collector:4317}
-
       # --- LLM Backend Configuration ---
       LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
       # Ollama Specific

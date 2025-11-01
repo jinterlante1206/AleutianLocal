@@ -137,13 +137,13 @@ class BaseRAGPipeline:
              logger.warning("Empty text passed to _get_embedding.")
              return []
         try:
-            response = await self.http_client.post(self.embedding_url, json={"text": text})
+            response = await self.http_client.post(self.embedding_url, json={"texts": [text,]})
             response.raise_for_status()
             data = response.json()
-            if "vector" not in data or not isinstance(data["vector"], list):
+            if "vectors" not in data or not isinstance(data["vectors"], list):
                 logger.error(f"Invalid embedding response format: {data}")
                 raise ValueError("Invalid embedding response format")
-            return data["vector"]
+            return data["vectors"][0]
         except httpx.HTTPStatusError as e:
             error_detail = "No detail provided"
             try:

@@ -23,7 +23,7 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/routes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
-	"github.com/weaviate/weaviate-go-client/v4/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"google.golang.org/grpc/credentials/insecure"
 
 	// --- OpenTelemetry imports ---
@@ -122,6 +122,10 @@ func main() {
 	policyEngine, err = policy_engine.NewPolicyEngine(policyEnginePath)
 	if err != nil {
 		log.Fatalf("FATAL: Could not initialize the Policy Engine %v", err)
+	}
+	modelName := os.Getenv("EMBEDDING_MODEL_NAME")
+	if modelName == "" {
+		slog.Warn("EMBEDDING_MODEL_NAME is not set, defaulting to 'google/embeddinggemma-300m'")
 	}
 
 	log.Println("Configuring the LLM Client")

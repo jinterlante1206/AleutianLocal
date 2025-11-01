@@ -31,16 +31,27 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = os.getenv("MODEL_NAME", "google/embeddinggemma-300m")
 
 # create the request data class
+class BatchEmbeddingRequest(BaseModel):
+    texts: List[str]
+
 class EmbeddingRequest(BaseModel):
     text: str
 
 # create the response data class
-class EmbeddingResponse(BaseModel):
+class BatchEmbeddingResponse(BaseModel):
     id: str
     timestamp: int
-    text: str
-    vector: List[float]
+    model: str
+    vectors: List[List[float]]
     dim: int
+
+class TokenizeRequest(BaseModel):
+    text: str
+
+class TokenizeResponse(BaseModel):
+    model: str
+    token_count: str
+
 
 # instantiate a few global variables
 tokenizer: AutoTokenizer = None
@@ -148,22 +159,102 @@ def get_embedding(text: str) -> List[float]:
         logger.error(f"Error during embedding generation: {getEmbeddingsError}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate embeddings")
 
-@app.post("/embed", response_model=EmbeddingResponse)
-async def create_embeddings(message: EmbeddingRequest):
+
+@app.post("/embed", response_model=BatchEmbeddingResponse)
+async def create_embeddings(message: BatchEmbeddingRequest):
     try:
-        vector = get_embedding(message.text)
+        if not message.texts or len(message.texts) == 0:
+            logger.error("Embed called with no texts in 'texts' list")
+            raise HTTPException(status_code=400, detail="No text provided in 'texts' list")
+
+        vector = get_embedding(message.texts[0])
+
         idVal = str(uuid.uuid4())
         timestamp = int(1000*datetime.datetime.now(datetime.UTC).timestamp())
-        return EmbeddingResponse(
+        return BatchEmbeddingResponse(
             id=idVal,
             timestamp=timestamp,
-            text=message.text,
-            vector=vector,
+            model=MODEL_NAME,  # Also add model name
+            vectors=[vector],  # Return as a list of one
             dim=len(vector)
         )
     except Exception as e:
         print(f"ERROR: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate embeddings")
+
+@app.post("/tokenize", response_model=TokenizeResponse)
+async def tokenize_text(message: TokenizeRequest):
+    global tokenizer, model_ready, MODEL_NAME
+    if not model_ready or not tokenizer:
+        logger.error("Tokenizer is not available. Check the logs")
+        raise HTTPException(status_code=503, detail="Tokenizer service is not ready")
+
+    try:
+        inputs = tokenizer(message.text, return_tensors="pt")
+        token_count = len(inputs['input_ids'][0])
+        return TokenizeResponse(
+            model=MODEL_NAME,
+            token_count=token_count
+        )
+    except Exception as e:
+        logger.error(f"Error during the tokenization process {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to count tokens")
+
+
+@app.post("/batch_embed", response_model=BatchEmbeddingResponse)
+async def batch_embed_text(request: BatchEmbeddingRequest):
+    global tokenizer, model, model_ready, MODEL_NAME
+    if not model_ready:
+        logger.error("Batch embed called but the model isn't ready")
+        raise HTTPException(status_code=503, detail="Model service not ready")
+    if not request.texts:
+        logger.info("Batch embed called with no texts.")
+        return BatchEmbeddingResponse(vectors=[], model=MODEL_NAME, dim=0)
+    logger.info(f"Received batch embed request with {len(request.texts)} documents.")
+    try:
+        inputs = tokenizer(
+            request.texts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            max_length=512  # Or your model's max sequence length
+        )
+
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+            logger.info("determining which embedings to use for:" + MODEL_NAME)
+            if MODEL_NAME == "google/embeddinggemma-300m":
+                logger.info("processing for google/embeddinggemma-300m")
+                embeddings = outputs.last_hidden_state.mean(dim=1)
+            elif MODEL_NAME.split("/")[0].lower() == "qwen":
+                logger.info("processing for Qwen")
+                embeddings = last_token_pool(outputs.last_hidden_state, inputs['attention_mask'])
+            else:
+                logger.error(
+                    f"Failed to process for: {MODEL_NAME}. Define the embeddings processor")
+                raise HTTPException(status_code=500,
+                                    detail=f"Embedding processor not defined for {MODEL_NAME}")
+
+        # Normalize embeddings
+        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        # Move back to CPU and convert to a standard list
+        vectors = embeddings.cpu().tolist()
+        dim = len(vectors[0]) if vectors else 0
+        idVal = str(uuid.uuid4())
+        timestamp = int(1000 * datetime.datetime.now(datetime.UTC).timestamp())
+
+        logger.info(f"Successfully generated {len(vectors)} vectors with dim {dim}.")
+        return BatchEmbeddingResponse(
+            id=idVal, timestamp=timestamp, vectors=vectors, model=MODEL_NAME, dim=dim)
+
+    except Exception as e:
+        logger.error(f"Error during batch embedding: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to process batch: {e}")
+
 
 @app.get("/health", status_code=200)
 async def health_check():

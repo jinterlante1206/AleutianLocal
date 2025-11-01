@@ -26,10 +26,12 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"archive/tar"
 	"compress/gzip"
+
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/gcs"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
@@ -64,6 +66,37 @@ type DirectChatResponse struct {
 }
 
 var (
+	blockedDirs = map[string]bool{
+		".git":          true,
+		".venv":         true,
+		"node_modules":  true,
+		"__pycache__":   true,
+		"build":         true,
+		"dist":          true,
+		".pytest_cache": true,
+		".mypy_cache":   true,
+	}
+	allowedFileExts = map[string]bool{
+		".go":   true,
+		".py":   true,
+		".js":   true,
+		".ts":   true,
+		".md":   true,
+		".txt":  true,
+		".java": true,
+		".c":    true,
+		".cpp":  true,
+		".h":    true,
+		".hpp":  true,
+		".rs":   true,
+		".rb":   true,
+		".php":  true,
+		".html": true,
+		".css":  true,
+		".json": true,
+		".yaml": true,
+		".toml": true,
+	}
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
 		Short: "A CLI to manage the Aleutian Private AI Appliance",
@@ -211,6 +244,7 @@ func init() {
 	askCmd.Flags().BoolVar(&noRag, "no-rag", false, "Skip the RAG pipeline and ask the LLM directly.")
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
+	populateVectorDBCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
 
 	// --- Local Commands ---
 	rootCmd.AddCommand(stackCmd)
@@ -269,6 +303,71 @@ func loadConfigFromStackDir(stackDir string) (Config, error) {
 	return cfg, nil
 }
 
+func fileWorker(
+	id int,
+	wg *sync.WaitGroup,
+	jobs <-chan string,
+	loadedConfig Config,
+) {
+	defer wg.Done()
+
+	// --- SETUP (Unchanged) ---
+	var host string
+	if loadedConfig.Target == "local" {
+		host = "localhost"
+	} else {
+		host = loadedConfig.ServerHost
+	}
+	orchestratorURL := fmt.Sprintf(
+		"http://%s:%d/v1/documents",
+		host,
+		loadedConfig.Services["orchestrator"].Port,
+	)
+	client := &http.Client{Timeout: 5 * time.Minute}
+
+	// --- WORK (Simplified) ---
+	for file := range jobs {
+		fmt.Printf("[Worker %d] Ingesting: %s\n", id, file)
+		content, err := os.ReadFile(file)
+		if err != nil {
+			log.Printf("[Worker %d] Could not read file %s: %v", id, file, err)
+			continue
+		}
+		// Send the *entire file*
+		postBody, err := json.Marshal(map[string]string{
+			"source":  file,
+			"content": string(content),
+		})
+		if err != nil {
+			log.Printf("[Worker %d] could not create request for file %s: %v", id, file, err)
+			continue
+		}
+
+		// Make one call per file
+		resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
+		if err != nil {
+			log.Printf("[Worker %d] Failed to send data for %s to orchestrator: %v", id, file, err)
+			continue
+		}
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			log.Printf("[Worker %d] Orchestrator error for %s, status %d: %s\n", id,
+				file, resp.StatusCode, string(bodyBytes))
+		} else {
+			// Parse the richer response
+			var ingestResp map[string]interface{}
+			if err := json.Unmarshal(bodyBytes, &ingestResp); err == nil {
+				log.Printf("[Worker %d] Ingested %s (chunks: %.0f)\n", id,
+					ingestResp["source"], ingestResp["chunks_processed"])
+			} else {
+				log.Printf("[Worker %d] Ingested %s (response unclear)\n", id, file)
+			}
+		}
+		resp.Body.Close()
+	}
+}
+
 func populateVectorDB(cmd *cobra.Command, args []string) {
 	stackDir, err := getStackDir()
 	if err != nil {
@@ -278,22 +377,28 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Error loading configuration: %v", err)
 	}
-	fmt.Println("Initializing the VectorDB population process")
+
+	// --- COLLECT ALL FILES (Unchanged) ---
+	fmt.Println("Initializing the VectorDB population process... Finding all files...")
 	var allFiles []string
-	var allFindings []policy_engine.ScanFinding
-	// 1. Initialize the Policy Engine
-	policyEngine, err := policy_engine.NewPolicyEngine(
-		"internal/policy_engine/enforcement/data_classification_patterns.yaml")
-	if err != nil {
-		log.Fatalf("FATAL: Could not initialize the policy engine: %v", err)
-	}
-	// 2. Collect all files from the provided paths
 	for _, path := range args {
 		err := filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
+			if info.IsDir() {
+				if blockedDirs[info.Name()] {
+					log.Printf("Skipping blocked directory: %s\n", p)
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if !info.IsDir() {
+				ext := filepath.Ext(p)
+				if !allowedFileExts[ext] {
+					// log.Printf("Skipping file with unhandled extension: %s\n", p) // Can be noisy
+					return nil
+				}
 				allFiles = append(allFiles, p)
 			}
 			return nil
@@ -302,8 +407,24 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 			log.Printf("Error walking path %s: %v", path, err)
 		}
 	}
+	if len(allFiles) == 0 {
+		fmt.Println("No valid files found to process.")
+		return
+	}
+	fmt.Printf("Found %d files. Starting policy scan...\n", len(allFiles))
 
-	// 3. Process each file individually for user review
+	// --- INITIALIZE POLICY ENGINE (Unchanged) ---
+	policyEngine, err := policy_engine.NewPolicyEngine(
+		"internal/policy_engine/enforcement/data_classification_patterns.yaml")
+	if err != nil {
+		log.Fatalf("FATAL: Could not initialize the policy engine: %v", err)
+	}
+
+	// --- NEW: "APPROVAL" LOOP (Serial & Interactive) ---
+	var approvedFiles []string
+	var allFindings []policy_engine.ScanFinding
+	reader := bufio.NewReader(os.Stdin)
+
 	for _, file := range allFiles {
 		fmt.Printf("\n🔍 Scanning file: %s\n", file)
 		content, err := os.ReadFile(file)
@@ -314,17 +435,16 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 
 		findings := policyEngine.ScanFileContent(string(content))
 
-		// Get current user for logging
 		currentUser, err := user.Current()
-		reviewer := "unknown"
+		reviewer := "John Doe"
 		if err == nil {
 			reviewer = currentUser.Username
 		}
-
-		decision := "accepted" // Default decision if no findings
+		decision := "accepted"
 		proceed := true
 
 		if len(findings) > 0 {
+			// This is the interactive prompt, moved from the worker
 			fmt.Printf("Found %d potential issue(s) in '%s':\n", len(findings), file)
 			fmt.Println("-------------------------------------------------")
 			for _, f := range findings {
@@ -333,10 +453,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 				fmt.Printf("    Reason: %s\n", f.PatternDescription)
 				fmt.Printf("    Match:  '%s'\n\n", f.MatchedContent)
 			}
-
-			// 5. Per-file review and defaulting to "stop"
 			fmt.Print("Do you want to proceed with this file? (yes/no): ")
-			reader := bufio.NewReader(os.Stdin)
 			input, _ := reader.ReadString('\n')
 			input = strings.ToLower(strings.TrimSpace(input))
 
@@ -345,14 +462,14 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 				proceed = false
 				fmt.Println("Skipping file based on user decision.")
 			} else {
-				decision = "accepted"
+				decision = "accepted (user override)"
 				fmt.Println("Proceeding with file based on user decision.")
 			}
 		} else {
 			fmt.Println("No issues found.")
 		}
 
-		// 4. Record the human's decision for each finding in the file
+		// Log findings for this file
 		for i := range findings {
 			findings[i].FilePath = file
 			findings[i].ReviewTimestamp = time.Now().UnixMilli()
@@ -362,52 +479,40 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		allFindings = append(allFindings, findings...)
 
 		if proceed {
-			// Prepare the request body for the orchestrator
-			postBody, err := json.Marshal(map[string]string{
-				"source":  file,
-				"content": string(content),
-			})
-			if err != nil {
-				log.Printf("could not create the request for file %s: %v", file, err)
-				continue
-			}
-			var host string
-			if loadedConfig.Target == "local" {
-				host = "localhost"
-			} else {
-				host = loadedConfig.ServerHost
-			}
-			// Send the request to the orchestrator
-			orchestratorURL := fmt.Sprintf(
-				"http://%s:%d/v1/documents",
-				host,
-				loadedConfig.Services["orchestrator"].Port)
-			resp, err := http.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
-			if err != nil {
-				log.Printf("Failed to send data for %s to the orchestrator: %v", file, err)
-				continue
-			}
-			defer func(Body io.ReadCloser) {
-				err := Body.Close()
-				if err != nil {
-					log.Println("Failed to close the orchestrator request")
-				}
-			}(resp.Body)
-			if resp.StatusCode >= 400 {
-				log.Printf("The orchestrator returned an error for %s, status %d\n", file,
-					resp.StatusCode)
-			} else {
-				log.Printf("Successfully sent %s for population to the vectorDB\n", file)
-			}
-
+			approvedFiles = append(approvedFiles, file)
 		}
 	}
 
-	// 6. Log all findings to a file
+	// --- LOG ALL FINDINGS (Moved up) ---
 	if len(allFindings) > 0 {
 		logFindingsToFile(allFindings)
 	}
-	fmt.Println("\n✨ Weaviate population process complete.")
+
+	// --- "INGESTION" POOL (Parallel & Fast) ---
+	if len(approvedFiles) == 0 {
+		fmt.Println("\nNo files were approved for ingestion. Process complete.")
+		return
+	}
+
+	fmt.Printf("\nScan complete. %d files approved. Starting parallel ingestion with 10 workers...\n", len(approvedFiles))
+	numWorkers := 10
+	var wg sync.WaitGroup
+	jobs := make(chan string, len(approvedFiles)) // Use new list size
+
+	for w := 1; w <= numWorkers; w++ {
+		wg.Add(1)
+		// Worker signature is now simpler
+		go fileWorker(w, &wg, jobs, loadedConfig) //
+	}
+
+	// Send *only approved* files to the job channel
+	for _, file := range approvedFiles {
+		jobs <- file
+	}
+	close(jobs)
+
+	wg.Wait()
+	fmt.Println("\nWeaviate population process complete.")
 }
 
 // logFindingsToFile handles writing the final log.
