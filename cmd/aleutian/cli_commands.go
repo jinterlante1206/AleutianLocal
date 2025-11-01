@@ -21,6 +21,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -216,6 +217,13 @@ var (
 		Short: "DANGER: Deletes all data and schemas from Weaviate",
 		Run:   runWeaviateWipeout,
 	}
+	weaviateDeleteDocCmd = &cobra.Command{
+		Use:   "delete [source-name]",
+		Short: "Deletes a document and all its chunks by its parent_source name",
+		Long:  `Sends a DELETE request to the orchestrator to remove all chunks associated with a specific parent_source. This is the 'Right to be Forgotten' command.`,
+		Args:  cobra.ExactArgs(1),
+		Run:   runWeaviateDeleteDoc,
+	}
 
 	// GCS data commands
 	uploadCmd = &cobra.Command{
@@ -245,6 +253,8 @@ func init() {
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
 	populateVectorDBCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
+	populateVectorDBCmd.Flags().String("data-space", "default", "The logical data space to ingest into (e.g., 'work', 'personal')")
+	populateVectorDBCmd.Flags().String("version", "latest", "A version tag for this ingestion (e.g., 'v1.1', '2025-11-01')")
 
 	// --- Local Commands ---
 	rootCmd.AddCommand(stackCmd)
@@ -275,6 +285,7 @@ func init() {
 	weaviateCmd.AddCommand(weaviateSummaryCmd)
 	weaviateCmd.AddCommand(weaviateWipeoutCmd)
 	weaviateWipeoutCmd.Flags().Bool("force", false, "Required to confirm the deletion of all data.")
+	weaviateCmd.AddCommand(weaviateDeleteDocCmd)
 
 	// GCS data commands
 	rootCmd.AddCommand(uploadCmd)
@@ -308,6 +319,8 @@ func fileWorker(
 	wg *sync.WaitGroup,
 	jobs <-chan string,
 	loadedConfig Config,
+	dataSpace string,
+	versionTag string,
 ) {
 	defer wg.Done()
 
@@ -335,8 +348,10 @@ func fileWorker(
 		}
 		// Send the *entire file*
 		postBody, err := json.Marshal(map[string]string{
-			"source":  file,
-			"content": string(content),
+			"source":      file,
+			"content":     string(content),
+			"data_space":  dataSpace,
+			"version_tag": versionTag,
 		})
 		if err != nil {
 			log.Printf("[Worker %d] could not create request for file %s: %v", id, file, err)
@@ -420,13 +435,15 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		log.Fatalf("FATAL: Could not initialize the policy engine: %v", err)
 	}
 
-	// --- NEW: "APPROVAL" LOOP (Serial & Interactive) ---
+	// --- "APPROVAL" LOOP (Serial & Interactive) ---
 	var approvedFiles []string
 	var allFindings []policy_engine.ScanFinding
 	reader := bufio.NewReader(os.Stdin)
+	dataSpace, _ := cmd.Flags().GetString("data-space")
+	versionTag, _ := cmd.Flags().GetString("version")
 
 	for _, file := range allFiles {
-		fmt.Printf("\n🔍 Scanning file: %s\n", file)
+		fmt.Printf("\nScanning file: %s\n", file)
 		content, err := os.ReadFile(file)
 		if err != nil {
 			log.Printf("Could not read file %s: %v", file, err)
@@ -502,7 +519,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
 		// Worker signature is now simpler
-		go fileWorker(w, &wg, jobs, loadedConfig) //
+		go fileWorker(w, &wg, jobs, loadedConfig, dataSpace, versionTag)
 	}
 
 	// Send *only approved* files to the job channel
@@ -894,7 +911,6 @@ func ensureStackDir(cliVersion string) (string, error) {
 				return "", fmt.Errorf("default config template missing at %s after extraction", defaultConfigTemplatePath)
 			}
 		}
-		return "", fmt.Errorf("failed to check stack directory %s: %w", stackDir, err)
 	} else {
 		slog.Info("Using existing stack files", "path", stackDir, "version", storedVersion)
 		fmt.Printf("Using existing stack files in %s (Version: %s)\n", stackDir, storedVersion)
@@ -913,7 +929,6 @@ func ensureStackDir(cliVersion string) (string, error) {
 			fmt.Println("Warning: config.yaml and default template not found. Please ensure configuration is correct.")
 		}
 	}
-
 	return stackDir, nil
 }
 
@@ -1529,6 +1544,54 @@ func runLogsCommand(cmd *cobra.Command, args []string) {
 	} else {
 		fmt.Println("\nLog streaming finished")
 	}
+}
+
+func runWeaviateDeleteDoc(cmd *cobra.Command, args []string) {
+	stackDir, err := getStackDir()
+	if err != nil {
+		log.Fatalf("could not determine the stack directory: %v", err)
+	}
+	loadedConfig, err := loadConfigFromStackDir(stackDir)
+	if err != nil {
+		log.Fatalf("could not load the config: %v", err)
+	}
+	var host string
+	if loadedConfig.Target == "local" {
+		host = "localhost"
+	} else {
+		host = loadedConfig.ServerHost
+	}
+	sourceName := args[0]
+	fmt.Printf("Submitting request to delete all chunks for: %s\n", sourceName)
+
+	encodedSourceName := url.QueryEscape(sourceName)
+	orchestratorURL := fmt.Sprintf(
+		"http://%s:%d/v1/document?source=%s",
+		host,
+		loadedConfig.Services["orchestrator"].Port,
+		encodedSourceName)
+	req, err := http.NewRequest(http.MethodDelete, orchestratorURL, nil)
+	if err != nil {
+		log.Fatalf("failed to create the delete request: %v", err)
+	}
+	// Send the request to the orchestrator
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("Orchestrator returned an error: (Status %d) %s", resp.StatusCode, string(bodyBytes))
+	}
+	var deleteResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &deleteResp); err != nil {
+		log.Fatalf("Failed to parse success response from orchestrator: %v", err)
+	}
+	fmt.Printf("\nSuccess: %s\n", deleteResp["status"])
+	fmt.Printf("Source Deleted: %s\n", deleteResp["source_deleted"])
+	fmt.Printf("Chunks Removed: %.0f\n", deleteResp["chunks_deleted"])
 }
 
 type SessionInfo struct {

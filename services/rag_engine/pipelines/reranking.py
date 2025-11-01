@@ -123,27 +123,55 @@ class RerankingPipeline(BaseRAGPipeline):
             logger.warning("Reranker model is not available, reranking step will be skipped.")
 
     async def _search_weaviate_initial(self, query_vector: list[float]) -> list[dict]:
-        """ Performs the initial wider search for reranking. """
+        """
+        Performs Parent Document Retrieval
+            1. Finds the most relevant child chunks.
+            2. Gets their unique parent_source ID.
+            3. Retrieves all chunks for those parent documents for the full context.
+        """
         if not query_vector: return []
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
+            # 1. Find the most relevant child chunks
             response = documents_collection.query.near_vector(
                 near_vector=query_vector,
-                limit=self.top_k_initial, # Use initial K
+                limit=self.top_k_initial,
                 return_metadata=wvc.query.MetadataQuery(distance=True),
-                return_properties=["content", "source"]
+                return_properties=["content", "source", "parent_source"]
+            )
+            # 2. Get the unique parent_source ID
+            if not response.objects:
+                logger.warning("No documents found")
+                return []
+            parent_sources = list(set(
+                obj.properties["parent_source"]
+                for obj in response.objects
+                if "parent_source" in obj.properties
+            ))
+            if not parent_sources:
+                logger.warning("Found orphaned chunks. just returning the child chunks")
+                return [{"properties": obj.properties, "metadata": obj.metadata} for obj in
+                        response.objects]
+            logger.info(f"Found {len(response.objects)} child chunks pointing to {len(parent_sources)} parent(s).")
+
+            # 3. Retrieve all chunks for those parents (PDR)
+            parent_response = documents_collection.query.fetch_objects(
+                filters=wvc.query.Filter.by_property("parent_source").contains_any(parent_sources),
+                limit=100
             )
             context_docs_with_meta = [
                 {"properties": obj.properties, "metadata": obj.metadata}
-                for obj in response.objects
+                for obj in parent_response.objects
             ]
-            logger.info(f"Retrieved {len(context_docs_with_meta)} initial documents ...")
+            logger.info(
+                f"Retrieved {len(context_docs_with_meta)} total chunks from {len(parent_sources)} parent documents for PDR context.")
             return context_docs_with_meta
+
         except WeaviateQueryException as e:
-            logger.error(f"Weaviate initial query failed: {e}")
-            raise RuntimeError(f"Weaviate initial search failed: {e}")
+            logger.error(f"Weaviate PDR query failed: {e}")
+            raise RuntimeError(f"Weaviate PDR search failed: {e}")
         except Exception as e:
-            logger.error(f"Failed initial Weaviate search: {e}", exc_info=True)
+            logger.error(f"Failed PDR Weaviate search: {e}", exc_info=True)
             raise RuntimeError(f"Weaviate interaction failed: {e}")
 
     async def _rerank_docs(self, query: str, initial_docs_with_meta: list[dict]) -> list[dict]:
