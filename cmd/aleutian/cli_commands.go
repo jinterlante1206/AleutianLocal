@@ -245,6 +245,8 @@ func init() {
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
 	populateVectorDBCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
+	populateVectorDBCmd.Flags().String("data-space", "default", "The logical data space to ingest into (e.g., 'work', 'personal')")
+	populateVectorDBCmd.Flags().String("version", "latest", "A version tag for this ingestion (e.g., 'v1.1', '2025-11-01')")
 
 	// --- Local Commands ---
 	rootCmd.AddCommand(stackCmd)
@@ -308,6 +310,8 @@ func fileWorker(
 	wg *sync.WaitGroup,
 	jobs <-chan string,
 	loadedConfig Config,
+	dataSpace string,
+	versionTag string,
 ) {
 	defer wg.Done()
 
@@ -335,8 +339,10 @@ func fileWorker(
 		}
 		// Send the *entire file*
 		postBody, err := json.Marshal(map[string]string{
-			"source":  file,
-			"content": string(content),
+			"source":      file,
+			"content":     string(content),
+			"data_space":  dataSpace,
+			"version_tag": versionTag,
 		})
 		if err != nil {
 			log.Printf("[Worker %d] could not create request for file %s: %v", id, file, err)
@@ -420,10 +426,12 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		log.Fatalf("FATAL: Could not initialize the policy engine: %v", err)
 	}
 
-	// --- NEW: "APPROVAL" LOOP (Serial & Interactive) ---
+	// --- "APPROVAL" LOOP (Serial & Interactive) ---
 	var approvedFiles []string
 	var allFindings []policy_engine.ScanFinding
 	reader := bufio.NewReader(os.Stdin)
+	dataSpace, _ := cmd.Flags().GetString("data-space")
+	versionTag, _ := cmd.Flags().GetString("version")
 
 	for _, file := range allFiles {
 		fmt.Printf("\n🔍 Scanning file: %s\n", file)
@@ -502,7 +510,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
 		// Worker signature is now simpler
-		go fileWorker(w, &wg, jobs, loadedConfig) //
+		go fileWorker(w, &wg, jobs, loadedConfig, dataSpace, versionTag)
 	}
 
 	// Send *only approved* files to the job channel

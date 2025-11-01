@@ -50,8 +50,10 @@ var (
 )
 
 type IngestDocumentRequest struct {
-	Content string `json:"content"`
-	Source  string `json:"source"`
+	Content    string `json:"content"`
+	Source     string `json:"source"`
+	DataSpace  string `json:"data_space"`
+	VersionTag string `json:"version_tag"`
 }
 
 type BatchEmbeddingRequest struct {
@@ -134,6 +136,9 @@ func CreateDocument(client *weaviate.Client) gin.HandlerFunc {
 					"content":       chunk,
 					"source":        chunkSource,
 					"parent_source": req.Source,
+					"data_space":    req.DataSpace,
+					"version_tag":   req.VersionTag,
+					"ingested_at":   time.Now().UnixMilli(),
 				},
 			}
 		}

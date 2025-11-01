@@ -25,6 +25,26 @@ func GetDocumentSchema() *models.Class {
 				DataType:    []string{"string"},
 				Description: "The original file path or source of the document.",
 			},
+			{
+				Name:        "parent_source",
+				DataType:    []string{"string"},
+				Description: "The original parent file",
+			},
+			{
+				Name:        "version_tag",
+				DataType:    []string{"string"},
+				Description: "A version tag (e.g., git hash, 'v1.0') for this document.",
+			},
+			{
+				Name:        "data_space",
+				DataType:    []string{"string"},
+				Description: "Logical data space for segmentation (e.g., 'work', 'personal').",
+			},
+			{
+				Name:        "ingested_at",
+				DataType:    []string{"int"},
+				Description: "Timestamp (Unix ms) of when the chunk was ingested.",
+			},
 		},
 	}
 }
