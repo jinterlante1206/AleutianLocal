@@ -15,7 +15,7 @@ A DevOps engineer can take the `podman-compose.yml` and `podman-compose.override
 
 It acts as an **opinionated but modular MLOps control plane**, providing the essential **infrastructure and workflow automation** around your chosen inference engine:
 
-* **Secure Data Ingestion:** Automate the processing (e.g., PDF parsing via extensible containers) and privacy scanning of local data before storing it in the vector database.
+* **Secure Data Ingestion:** A two-phase pipeline (aleutian populate) first scans all local files with the Policy Engine, prompts for user approval on any findings, and then ingests only the approved files. The orchestrator automatically performs high-speed, content-aware chunking (e.g., using different rules for .py vs. .md files), batch embedding, and batch storage, ensuring high throughput even on a local machine.
 * **Flexible RAG Engine:** Utilize multiple Retrieval-Augmented Generation strategies (Standard, Reranking available now) out-of-the-box via a simple API.
 * **Unified LLM Access:** Seamlessly switch between local models (Ollama, llama.cpp, HF TGI/vLLM) and external APIs (OpenAI, Anthropic, Gemini - *coming soon*) using a consistent interface.
 * **Efficient Model Management:** Convert and quantize models to GGUF format for optimized local inference.
@@ -195,13 +195,18 @@ Scan and add local files or directories to the Weaviate vector database. Handles
 
 * `aleutian populate vectordb <path/to/file_or_dir> [another/path...]`
 * **Behavior:**
-    1.  Recursively finds files in the given paths.
-    2.  Reads content (for `.txt`) or identifies file type.
-    3.  Scans content using the **Policy Engine** (`~/.aleutian/stack/internal/.../data_classification_patterns.yaml`).
-    4.  Prompts for confirmation (`yes/no`) if potential secrets/PII are found in a file.
-    5.  If approved, sends file path/content to the orchestrator's `/v1/documents` endpoint.
-    6.  The orchestrator *automatically* calls the configured parser service (e.g., `PDF_PARSER_URL`) based on file type, gets embeddings for the (extracted) text, and stores the document in Weaviate.
-    7.  Generates a `scan_log_*.json` file in the directory where the command was run.
+  1.  Phase 1: Scan & Approve (Serial): The CLI recursively finds all files. It then loops through them one by one to perform a fast, in-memory Policy Engine scan.
+  2.  If potential secrets/PII are found, it prompts you for confirmation (yes/no). A scan_log_*.json is generated.
+  3.  Phase 2: Ingest (Parallel): A list of only the approved files is fed to a parallel worker pool.
+  4.  Each worker sends one approved file's content to the orchestrator's /v1/documents endpoint.
+  5.  The orchestrator then performs the high-throughput ingestion:
+       - Content-Aware Chunking: Splits the text using different separators for code (.py) vs. 
+        documents (.md).
+       - Batch Embedding: Makes one call to the embedding server's `/batch_embed` endpoint to get vectors for all chunks at once.
+       - Batch Storage: Makes one call to Weaviate to import all chunks (with their vectors and parent_source metadata) in a single transaction.
+  7.  Generates a `scan_log_*.json` file in the directory where the command was run.
+* **Flags:**
+  * `--force`: Force ingestion and skip the interactive policy prompt. Files with findings will be ingested and logged as "accepted (forced)".
 ---
 
 ### `convert`: Transform Models to GGUF
@@ -253,8 +258,8 @@ AleutianLocal operates as a cohesive stack of containerized microservices manage
 
 The core stack, started by `aleutian stack start`, includes:
 
-* **`orchestrator` (Go):** Central API gateway. Handles CLI requests, manages workflows (including RAG proxying and direct LLM chat), interacts with other services (embedding, Weaviate, parsers), and enforces data policies during ingestion. Reads configuration primarily from environment variables.
-* **`rag-engine` (Python):** Executes Retrieval-Augmented Generation pipelines. Receives requests from the orchestrator, retrieves context from Weaviate using specified strategies (Standard, Reranking), constructs prompts, and calls the configured LLM (via the orchestrator) for generation.
+* **`orchestrator` (Go):** Central API gateway. Handles CLI requests and manages workflows. It runs the Policy Engine during the populate pre-scan, performs high-speed content-aware chunking, and orchestrates batch ingestion. It also proxies requests to the rag-engine and llm backends.
+* **`rag-engine` (Python):** Executes Retrieval-Augmented Generation pipelines. Receives requests from the orchestrator, retrieves context from Weaviate using specified strategies (Standard, Reranking), constructs prompts, and calls the configured LLM for generation. The ingestion pipeline makes all chunks PDR-ready (Parent Document Retriever), allowing this engine to be easily upgraded to retrieve full-document context.
 * **`embedding-server` (Python):** Provides text embedding generation via an API, using Sentence Transformers. Called by the orchestrator during data ingestion (`populate`) and by the RAG engine during querying (`ask`).
 * **`gguf-converter` (Python):** Downloads Hugging Face models and converts them to the GGUF format for use with local inference engines like Ollama. Called via the `aleutian convert` command.
 * **`weaviate-db`:** Weaviate vector database instance. Stores ingested documents, embeddings, and conversation session metadata.
@@ -283,6 +288,16 @@ The Retrieval-Augmented Generation engine offers distinct strategies for sourcin
 * **Other Available Pipelines:**
     * `standard`: Uses only the results from the initial vector search. Select via `aleutian ask --pipeline standard`. Faster execution, potentially less precise context.
 * **Future Pipelines:** Implementations for Raptor, GraphRAG, RIG, and Semantic Search strategies are planned.
+
+#### Ingestion, Chunking, and PDR-Readiness
+All retrieval strategies (Standard, Reranking, etc.) depend on the quality and structure of the data in Weaviate. The aleutian populate vectordb command is built to create a high-quality, high-performance knowledge base.
+
+-  *Content-Aware Chunking:* The orchestrator's ingestion handler (documents.go) uses different 
+   langchaingo text splitters based on file type. It applies rules for Python code (splitting on class and def) that are different from Markdown (splitting on # headers) or plain text (splitting on \n\n).
+- *High-Throughput Batching:* To achieve maximum speed on a local machine, the orchestrator does 
+  not use a slow, "chatty" token-based splitter. Instead, it uses fast character-based splitting which allows it to process all chunks in one batch to the embedding server and one batch to Weaviate. This is an engineering trade-off that massively prioritizes ingestion speed.
+- *Parent Document Retriever (PDR) Ready:* This is a key feature of the ingestion pipeline. 
+  Every chunk saved to Weaviate includes a parent_source property, linking it back to the original file (e.g., test/rag_files/detroit_history.txt). This prepares your system for advanced RAG techniques like PDR, where you can search on small, precise chunks but retrieve the entire parent document for the LLM to use as context, solving the "context-cutoff" problem.
 
 ### External Model Integration
 
