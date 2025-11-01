@@ -176,11 +176,12 @@ func CreateDocument(client *weaviate.Client) gin.HandlerFunc {
 			slog.Warn("Errors encountered during Weaviate batch import", "source", req.Source, "successful_chunks", chunksCreated)
 		}
 
-		slog.Info("Successfully ingested document", "source", req.Source, "chunks_created", chunksCreated)
+		slog.Info("Successfully processed document", "source", req.Source, "chunks_processed",
+			chunksCreated)
 		c.JSON(http.StatusCreated, gin.H{
-			"status":         "success",
-			"source":         req.Source,
-			"chunks_created": chunksCreated,
+			"status":           "success",
+			"source":           req.Source,
+			"chunks_processed": chunksCreated,
 		})
 	}
 }

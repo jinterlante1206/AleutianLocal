@@ -359,7 +359,7 @@ func fileWorker(
 			var ingestResp map[string]interface{}
 			if err := json.Unmarshal(bodyBytes, &ingestResp); err == nil {
 				log.Printf("[Worker %d] Ingested %s (chunks: %.0f)\n", id,
-					ingestResp["source"], ingestResp["chunks_created"])
+					ingestResp["source"], ingestResp["chunks_processed"])
 			} else {
 				log.Printf("[Worker %d] Ingested %s (response unclear)\n", id, file)
 			}
@@ -512,7 +512,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	close(jobs)
 
 	wg.Wait()
-	fmt.Println("\n✨ Weaviate population process complete.")
+	fmt.Println("\nWeaviate population process complete.")
 }
 
 // logFindingsToFile handles writing the final log.
