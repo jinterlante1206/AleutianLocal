@@ -141,7 +141,7 @@ class RerankingPipeline(BaseRAGPipeline):
             )
             # 2. Get the unique parent_source ID
             if not response.objects:
-                logger.Warning("No documents found")
+                logger.warning("No documents found")
                 return []
             parent_sources = list(set(
                 obj.properties["parent_source"]

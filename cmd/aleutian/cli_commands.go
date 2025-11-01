@@ -443,7 +443,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	versionTag, _ := cmd.Flags().GetString("version")
 
 	for _, file := range allFiles {
-		fmt.Printf("\n🔍 Scanning file: %s\n", file)
+		fmt.Printf("\nScanning file: %s\n", file)
 		content, err := os.ReadFile(file)
 		if err != nil {
 			log.Printf("Could not read file %s: %v", file, err)
