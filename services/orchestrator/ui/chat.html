@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aleutian Chat</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <script src="./lucide.min.js"></script>
+    <script src="./markdown-it.min.js"></script>
+
+    <style>
+        :root {
+            /* ... (all CSS variables are unchanged) ... */
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            --gray-50: #f9f9f9; --gray-100: #f2f2f7; --gray-200: #e5e5ea; --gray-300: #d1d1d6; --gray-400: #aeaeb2; --gray-500: #8e8e93; --gray-600: #636366; --gray-800: #1c1c1e; --gray-900: #000000; --white: #FFFFFF;
+            --brand-light: #20B9B4; --brand-default: #1D9DA0; --brand-dark: #16858E;
+            --system-blue: #0A84FF; --system-red: #FF453A; --system-green: #30D158;
+            --border-radius-s: 0.375rem; --border-radius-m: 0.625rem; --transition: all 0.2s ease-in-out;
+            --material-background: rgba(242, 242, 247, 0.85);
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        /* ... (html, body, scrollbar styles unchanged) ... */
+        html, body { font-family: var(--font-sans); color: var(--gray-800); line-height: 1.6; height: 100vh; width: 100vw; overflow: hidden; background-color: var(--gray-100); display: flex; flex-direction: column; }
+        pre, code { font-family: var(--font-mono); }
+        .hidden { display: none; }
+        ::-webkit-scrollbar { width: 14px; height: 14px; background: transparent; }
+        ::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.2); border-radius: 7px; border: 4px solid transparent; background-clip: content-box; }
+        ::-webkit-scrollbar-thumb:hover { background-color: rgba(0,0,0,0.3); }
+        ::-webkit-scrollbar-track { background: transparent; }
+
+        /* Main 3-Column Layout */
+        #app-layout { display: flex; flex-grow: 1; width: 100%; height: 100%; overflow: hidden; }
+
+        /* Column 1: Sidebar */
+        #sidebar {
+            width: 260px;
+            flex-shrink: 0;
+            background-color: var(--material-background);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-right: 1px solid var(--gray-200);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .sidebar-group {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            border-bottom: 1px solid var(--gray-200);
+        }
+        .sidebar-group.sessions { flex-grow: 1; min-height: 150px; } /* Sessions group grows */
+        .sidebar-group.documents { flex-shrink: 0; max-height: 40%; } /* Documents group has max height */
+
+        .sidebar-header {
+            padding: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        .sidebar-header h2 { font-size: 1rem; font-weight: 600; color: var(--gray-900); }
+        #new-chat-btn {
+            background: none; border: none; cursor: pointer; color: var(--system-blue);
+            padding: 4px; border-radius: var(--border-radius-s);
+        }
+        #new-chat-btn:hover { background-color: rgba(0,0,0,0.05); }
+
+        .sidebar-list {
+            list-style: none;
+            padding: 0.75rem;
+            flex-grow: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        .sidebar-item {
+            padding: 0.5rem 0.75rem;
+            font-size: 0.875rem;
+            border-radius: var(--border-radius-s);
+            cursor: pointer;
+            color: var(--gray-600);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .sidebar-item:hover { background-color: rgba(0,0,0,0.05); }
+        .sidebar-item.active {
+            background-color: var(--system-blue);
+            color: var(--white);
+            font-weight: 500;
+        }
+        .sidebar-item.document-item {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            cursor: default;
+        }
+
+
+        /* Column 2: Main Content */
+        /* ... (message log, messages, cards, etc. unchanged) ... */
+        #main-content { flex-grow: 1; display: flex; flex-direction: column; background: var(--white); overflow: hidden; }
+        #message-log { flex-grow: 1; overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+        .message { display: flex; gap: 1rem; max-width: 90%; }
+        .message-icon { flex-shrink: 0; width: 2.5rem; height: 2.5rem; border-radius: 9999px; display: flex; align-items: center; justify-content: center; color: var(--white); }
+        .message.user .message-icon { background-color: var(--gray-500); }
+        .message.assistant .message-icon { background-color: var(--brand-default); }
+        .message-content h1,
+        .message-content h2,
+        .message-content h3 {
+            font-weight: 600;
+            margin-top: 1.25em;
+            margin-bottom: 0.5em;
+            color: var(--gray-900);
+        }
+        .message-content h1 { font-size: 1.5rem; }
+        .message-content h2 { font-size: 1.25rem; }
+        .message-content h3 { font-size: 1.1rem; }
+
+        .message-content strong {
+            font-weight: 600;
+        }
+
+        .message-content ul,
+        .message-content ol {
+            margin-top: 0.5em;
+            margin-bottom: 1em;
+            padding-left: 1.5rem;
+        }
+        .message-content li {
+            margin-top: 0.25em;
+        }
+
+        .message-content blockquote {
+            margin: 1em 0;
+            padding-left: 1em;
+            border-left: 3px solid var(--system-blue);
+            color: var(--gray-600);
+        }
+        .message-content { padding-top: 0.25rem; max-width: 100%; overflow: hidden; }
+        .message-content strong { display: block; font-weight: 600; color: var(--gray-900); }
+        .message-content p { margin-top: 0.25rem; color: var(--gray-800); }
+        .message-content pre { background-color: var(--gray-800); color: var(--gray-50); padding: 1rem; border-radius: var(--border-radius-m); margin: 1rem 0; overflow-x: auto; }
+        .message-content code { font-size: 0.875rem; }
+        .message-content p > code, .message-content li > code { background-color: var(--gray-100); color: var(--brand-darker); padding: 0.15rem 0.3rem; border-radius: 4px; font-size: 0.85em; }
+        .sources-box { background: var(--gray-50); border: 1px solid var(--gray-200); border-radius: var(--border-radius-m); padding: 1rem; margin-top: 1rem; }
+        .sources-box h4 { font-weight: 600; font-size: 0.875rem; color: var(--brand-dark); margin-bottom: 0.5rem; }
+        .sources-list { list-style: none; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+        .source-item { font-family: var(--font-mono); font-size: 0.8rem; color: var(--gray-600); background: var(--white); border: 1px solid var(--gray-300); padding: 0.25rem 0.5rem; border-radius: 4px; }
+        .message.user { align-self: flex-start; }
+        .message.assistant { align-self: flex-start; }
+        .approval-card { background: var(--gray-50); border: 1px solid var(--gray-200); border-radius: var(--border-radius-m); padding: 1rem; }
+        .approval-card h4 { font-weight: 600; color: var(--gray-800); }
+        .approval-card p { font-size: 0.875rem; color: var(--gray-600); }
+        .approval-card pre { background-color: var(--white); border: 1px solid var(--gray-200); padding: 0.75rem; margin: 0.75rem 0; }
+        .approval-buttons { display: flex; gap: 0.5rem; margin-top: 1rem; }
+        .approval-buttons button { font-family: var(--font-sans); font-size: 0.875rem; font-weight: 500; padding: 0.5rem 1rem; border-radius: var(--border-radius-s); border: 1px solid transparent; cursor: pointer; transition: var(--transition); }
+        .approve-btn { background-color: var(--system-green); color: var(--white); }
+        .approve-btn:hover:not(:disabled) { background-color: #28a745; }
+        .deny-btn { background-color: var(--system-red); color: var(--white); }
+        .deny-btn:hover:not(:disabled) { background-color: #dc3545; }
+        .approval-buttons button:disabled { background-color: var(--gray-200); color: var(--gray-400); cursor: not-allowed; }
+
+        /* Form Container (Updated) */
+        #chat-form-container {
+            border-top: 1px solid var(--gray-200);
+            padding: 1rem 1.5rem;
+            background: var(--gray-50);
+            flex-shrink: 0;
+        }
+        /* This div shows the selected file */
+        #file-preview {
+            font-size: 0.8rem;
+            font-family: var(--font-mono);
+            color: var(--gray-600);
+            margin-bottom: 0.75rem;
+            background: var(--gray-100);
+            padding: 0.5rem 0.75rem;
+            border-radius: var(--border-radius-s);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #file-preview-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #clear-file-btn {
+            background: none; border: none; color: var(--gray-500); cursor: pointer;
+            padding: 2px; border-radius: 99px;
+        }
+        #clear-file-btn:hover { background: var(--gray-200); color: var(--gray-800); }
+
+        #chat-form { display: flex; gap: 1rem; }
+        #chat-mode {
+            padding: 0.75rem 1rem; font-family: var(--font-sans); font-size: 0.9rem; border: 1px solid var(--gray-300); border-radius: var(--border-radius-m); background: var(--white);
+            -webkit-appearance: none; appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%234B5563' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2.5rem;
+        }
+        #chat-input {
+            flex-grow: 1; padding: 0.75rem 1rem; font-family: var(--font-sans); font-size: 1rem; border: 1px solid var(--gray-300); border-radius: var(--border-radius-m);
+        }
+        #chat-input:focus { outline: none; border-color: var(--system-blue); box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.2); }
+
+        /* New File Upload Button */
+        #file-upload-label {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.75rem;
+            border: 1px solid var(--gray-300);
+            border-radius: var(--border-radius-m);
+            background: var(--white);
+            cursor: pointer;
+            color: var(--gray-600);
+            transition: var(--transition);
+        }
+        #file-upload-label:hover { border-color: var(--system-blue); color: var(--system-blue); }
+        #file-upload-input { display: none; }
+
+        #send-button {
+            display: inline-flex; align-items: center; justify-content: center; padding: 0 1rem;
+            border: none; font-size: 1rem; font-weight: 500; border-radius: var(--border-radius-m); cursor: pointer; transition: var(--transition);
+            color: var(--white); background-color: var(--system-blue);
+        }
+        #send-button:hover:not(:disabled) { background-color: #0070e0; }
+        #send-button:disabled { background-color: var(--gray-300); cursor: not-allowed; }
+        #thinking-spinner { align-self: flex-start; margin-left: 4.5rem; padding: 0 1.5rem; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .spinner { animation: spin 1s linear infinite; }
+
+        /* Column 3: Inspector */
+        /* ... (styles unchanged) ... */
+        #inspector { width: 280px; flex-shrink: 0; background-color: var(--material-background); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-left: 1px solid var(--gray-200); padding: 1.5rem 1rem; overflow-y: auto; display: flex; flex-direction: column; gap: 1.5rem; }
+        .inspector-group h3 { font-size: 0.75rem; font-weight: 600; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--gray-200); }
+        .inspector-group p { font-size: 0.875rem; color: var(--gray-600); }
+        #session-id-display, #current-mode-display { font-family: var(--font-mono); font-size: 0.8rem; color: var(--gray-800); word-wrap: break-word; background: rgba(0,0,0,0.03); padding: 0.5rem; border-radius: var(--border-radius-s); }
+    </style>
+</head>
+<body>
+    <div id="app-layout">
+        <div id="sidebar">
+            <div class="sidebar-group sessions">
+                <div class="sidebar-header">
+                    <h2>Sessions</h2>
+                    <button id="new-chat-btn" title="New Chat">
+                        <i data-lucide="file-plus-2"></i>
+                    </button>
+                </div>
+                <ul id="session-list" class="sidebar-list">
+                    </ul>
+            </div>
+            <div class="sidebar-group documents">
+                <div class="sidebar-header">
+                    <h2>Documents</h2>
+                </div>
+                <ul id="document-list" class="sidebar-list">
+                    </ul>
+            </div>
+        </div>
+
+        <div id="main-content">
+            <div id="message-log"></div>
+            <div id="thinking-spinner" class="hidden">
+                <i data-lucide="loader-2" class="spinner" style="color: var(--brand-dark);"></i>
+            </div>
+            <div id="chat-form-container">
+                <div id="file-preview" class="hidden">
+                    <span id="file-preview-name"></span>
+                    <button id="clear-file-btn" title="Clear file">
+                        <i data-lucide="x" style="width:16px; height:16px;"></i>
+                    </button>
+                </div>
+
+                <form id="chat-form">
+                    <select id="chat-mode" name="mode">
+                        <option value="chat-rag">Chat (with RAG)</option>
+                        <option value="chat-no-rag">Chat (no RAG)</option>
+                        <option value="single-rag">Single Prompt (with RAG)</option>
+                        <option value="single-no-rag">Single Prompt (no RAG)</option>
+                    </select>
+
+                    <label for="file-upload-input" id="file-upload-label" title="Attach file">
+                        <i data-lucide="paperclip"></i>
+                    </label>
+                    <input type="file" id="file-upload-input">
+
+                    <input type="text" id="chat-input" placeholder="Ask Aleutian anything..." autocomplete="off">
+                    <button type="submit" id="send-button">
+                        <i data-lucide="send-horizontal"></i>
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div id="inspector">
+            <div class="inspector-group">
+                <h3>Session</h3>
+                <p id="session-id-display">(Connecting...)</p>
+            </div>
+            <div class="inspector-group">
+                <h3>Mode</h3>
+                <p id="current-mode-display">chat-rag</p>
+            </div>
+            <div class="inspector-group">
+                <h3>Info</h3>
+                <p>This panel can show RAG sources, token counts, or other metadata about the conversation.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        lucide.createIcons();
+        const md = window.markdownit({ html: false, linkify: true, typographer: true });
+
+        // --- 1. Get DOM Elements ---
+        const messageLog = document.getElementById('message-log');
+        const chatForm = document.getElementById('chat-form');
+        const chatInput = document.getElementById('chat-input');
+        const chatMode = document.getElementById('chat-mode');
+        const sendButton = document.getElementById('send-button');
+        const thinkingSpinner = document.getElementById('thinking-spinner');
+
+        const newChatBtn = document.getElementById('new-chat-btn');
+        const sessionList = document.getElementById('session-list');
+        const documentList = document.getElementById('document-list'); // New
+        const sessionIdDisplay = document.getElementById('session-id-display');
+        const currentModeDisplay = document.getElementById('current-mode-display');
+
+        // File upload elements
+        const fileUploadInput = document.getElementById('file-upload-input');
+        const filePreview = document.getElementById('file-preview');
+        const filePreviewName = document.getElementById('file-preview-name');
+        const clearFileBtn = document.getElementById('clear-file-btn');
+
+        // --- 2. State Management (Frontend) ---
+        let currentMode = chatMode.value;
+        let globalSessionId = null;
+        let ws;
+        let chatHistories = {};
+
+        // This will hold the file object for submission
+        let fileToUpload = null;
+        // This will hold the Base64 data *during* the approval flow
+        let approvalDataCache = {};
+
+        function initWelcomeMessages() { /* ... (unchanged) ... */
+            chatHistories = {
+                'chat-rag': [{ role: 'assistant', content: 'Welcome! This is **Chat (with RAG)** mode.', sources: [] }],
+                'chat-no-rag': [{ role: 'assistant', content: 'Welcome! This is **Chat (no RAG)** mode.', sources: [] }],
+                'single-rag': [{ role: 'assistant', content: 'Welcome! This is **Single Prompt (with RAG)** mode.', sources: [] }],
+                'single-no-rag': [{ role: 'assistant', content: 'Welcome! This is **Single Prompt (no RAG)** mode.', sources: [] }]
+            };
+        }
+        initWelcomeMessages();
+
+        // --- 3. WebSocket Connection ---
+        const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+        const wsURL = `${wsProtocol}${window.location.host}/v1/chat/ws`;
+
+        function connect() {
+            ws = new WebSocket(wsURL);
+
+            ws.onopen = () => {
+                console.log("WebSocket connected");
+                sendButton.disabled = false;
+                chatInput.disabled = false;
+                chatInput.focus();
+                updateMessageLog();
+                fetchSessions();
+                fetchDocuments(); // New
+            };
+
+            ws.onmessage = (event) => {
+                thinkingSpinner.classList.add('hidden');
+                sendButton.disabled = false;
+                chatInput.disabled = false;
+                chatInput.focus();
+                const resp = JSON.parse(event.data);
+                if (resp.action) { handleAction(resp); } else { handleChat(resp); }
+            };
+
+            ws.onclose = () => { /* ... (unchanged) ... */
+                console.log("WebSocket disconnected.");
+                sendButton.disabled = true;
+                chatInput.disabled = true;
+                if (!globalSessionId) {
+                    addMessage("assistant", "**Connection lost. Attempting to reconnect...**");
+                    setTimeout(connect, 3000);
+                }
+            };
+            ws.onerror = (err) => { /* ... (unchanged) ... */
+                console.error("WebSocket error:", err);
+                addMessage("assistant", "**Connection error. Please refresh.**");
+                ws.close();
+            };
+        }
+
+        // --- 4. Event Handlers ---
+
+        newChatBtn.addEventListener('click', () => { /* ... (unchanged) ... */
+            console.log("Starting new chat...");
+            globalSessionId = null;
+            sessionIdDisplay.textContent = "(Connecting...)";
+            initWelcomeMessages();
+            updateMessageLog();
+            ws.close();
+            setTimeout(connect, 100);
+        });
+
+        chatForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const query = chatInput.value.trim();
+
+            // --- THIS IS THE FIX ---
+            // We must read the current mode from the dropdown *inside* this function.
+            const mode = chatMode.value;
+            // --- END OF FIX ---
+
+            // If there's a file, we ignore the text input and do a file scan
+            if (fileToUpload) {
+                handleFileUpload(fileToUpload);
+                return;
+            }
+
+            // If no file, proceed with normal chat
+            if (!query || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            addMessage("user", query);
+            setLoadingState(true);
+
+            // Now, 'mode' is correctly defined and these lines will work
+            if (mode.startsWith('chat-')) {
+                chatHistories[mode].push({ role: 'user', content: query });
+            }
+            let historyForBackend = [];
+
+            // This logic was slightly incorrect before, this is the clean version
+            if (currentMode === 'chat-no-rag') {
+                historyForBackend = chatHistories[currentMode]
+                    .filter(msg => !msg.content.startsWith('Welcome!')) // Don't send welcome msg
+                    .map(msg => ({ role: msg.role, content: msg.content }));
+            } else if (currentMode === 'single-no-rag') {
+                 historyForBackend = [{ role: 'user', content: query }];
+            }
+
+            ws.send(JSON.stringify({
+                mode: mode, // 'mode' is now correctly passed
+                query: query,
+                history: historyForBackend
+            }));
+
+            chatInput.value = '';
+        });
+
+        // --- New File Upload Handlers ---
+        fileUploadInput.addEventListener('change', (e) => {
+            if (e.target.files && e.target.files[0]) {
+                fileToUpload = e.target.files[0];
+                filePreviewName.textContent = fileToUpload.name;
+                filePreview.classList.remove('hidden');
+                chatInput.placeholder = "Click Send to upload and scan file...";
+                chatInput.disabled = true; // Disable text input when file is staged
+                sendButton.disabled = false; // Ensure send is enabled
+            }
+        });
+
+        clearFileBtn.addEventListener('click', () => {
+            fileToUpload = null;
+            fileUploadInput.value = null; // Clear the input
+            filePreview.classList.add('hidden');
+            chatInput.placeholder = "Ask Aleutian anything...";
+            chatInput.disabled = false;
+        });
+
+        function handleFileUpload(file) {
+            setLoadingState(true);
+            addMessage('user', `Uploading file: \`${file.name}\``);
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const base64data = e.target.result.split(',')[1];
+
+                // Store data for the approval step
+                approvalDataCache[file.name] = base64data;
+
+                // Send a request to SCAN the file
+                ws.send(JSON.stringify({
+                    action: 'file_upload_scan',
+                    filename: file.name,
+                    // We send the data now for the scan
+                    base64data: base64data
+                }));
+            };
+            reader.onerror = (err) => {
+                console.error("Failed to read file:", err);
+                addMessage('assistant', `**Error:** Failed to read file \`${file.name}\``);
+                setLoadingState(false);
+            };
+            reader.readAsDataURL(file);
+
+            // Clear the file input
+            clearFileBtn.click();
+        }
+
+        // Handle chat mode change
+        chatMode.addEventListener('change', (e) => { /* ... (unchanged) ... */
+            currentMode = e.target.value;
+            currentModeDisplay.textContent = currentMode;
+            updateMessageLog();
+        });
+
+        // Handle clicks on dynamic buttons (Approve/Deny)
+        messageLog.addEventListener('click', (e) => {
+            const button = e.target.closest('button');
+            if (!button || (!button.classList.contains('approve-btn') && !button.classList.contains('deny-btn'))) {
+                return;
+            }
+
+            const path = button.dataset.path;
+            const decision = button.classList.contains('approve-btn') ? 'approve' : 'deny';
+
+            button.parentElement.querySelectorAll('button').forEach(btn => {
+                btn.disabled = true;
+                btn.style.opacity = '0.7';
+            });
+
+            setLoadingState(true);
+
+            // Get the cached Base64 data
+            const base64data = approvalDataCache[path];
+            if (!base64data) {
+                addMessage('assistant', `**Error:** File data cache lost for \`${path}\`. Please upload again.`);
+                setLoadingState(false);
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                action: 'file_upload_confirm', // New action
+                filename: path,
+                decision: decision,
+                scope: 'global', // All uploads are global for now
+                base64data: base64data
+            }));
+
+            // Clear the cache
+            delete approvalDataCache[path];
+        });
+
+        // --- 5. Logic & UI Functions ---
+
+        function setLoadingState(isLoading) {
+            if (isLoading) {
+                thinkingSpinner.classList.remove('hidden');
+                sendButton.disabled = true;
+                chatInput.disabled = true;
+            } else {
+                thinkingSpinner.classList.add('hidden');
+                sendButton.disabled = false;
+                chatInput.disabled = false;
+                chatInput.focus();
+            }
+            scrollToBottom();
+        }
+
+        function handleAction(resp) {
+            setLoadingState(false);
+            switch (resp.action) {
+                case 'session_created':
+                    globalSessionId = resp.sessionId;
+                    sessionIdDisplay.textContent = globalSessionId;
+                    break;
+                case 'populate_approval_required':
+                    // Cache the data from the server (if it was sent back)
+                    if(resp.base64data) {
+                        approvalDataCache[resp.path] = resp.base64data;
+                    }
+                    addApprovalCard(resp.path, resp.findings);
+                    break;
+                case 'populate_ingest':
+                case 'populate_final':
+                    addMessage('assistant', resp.message);
+                    // If ingestion was successful, refresh the doc list
+                    if (resp.message && resp.message.includes('Success')) {
+                        fetchDocuments();
+                    }
+                    break;
+                default:
+                    console.warn("Received unknown action:", resp);
+            }
+        }
+
+        function handleChat(resp) { /* ... (unchanged) ... */
+            if (resp.error) {
+                addMessage("assistant", `**Error:** ${resp.error}`);
+            } else {
+                addMessage("assistant", resp.answer, resp.sources);
+                if (resp.mode.startsWith('chat-')) {
+                    chatHistories[resp.mode].push({ role: 'assistant', content: resp.answer, sources: resp.sources });
+                }
+            }
+        }
+
+        async function fetchSessions() { /* ... (unchanged) ... */
+            try {
+                const response = await fetch('/v1/sessions');
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const result = await response.json();
+                sessionList.innerHTML = '';
+                if (result.Get && result.Get.Session && result.Get.Session.length > 0) {
+                    result.Get.Session.forEach((session, index) => {
+                        const li = document.createElement('li');
+                        li.className = 'sidebar-item session-item';
+                        if (index === 0) li.classList.add('active');
+                        li.textContent = session.summary;
+                        li.title = session.summary + `\n(ID: ${session.session_id})`;
+                        sessionList.appendChild(li);
+                    });
+                } else {
+                    sessionList.innerHTML = '<li class="sidebar-item" style="color: var(--gray-400); cursor: default;">No past sessions</li>';
+                }
+            } catch (error) {
+                console.error("Failed to fetch sessions:", error);
+                sessionList.innerHTML = '<li class="sidebar-item" style="color: var(--system-red);">Failed to load</li>';
+            }
+        }
+
+        /**
+         * Fetches ingested documents from the backend. (New)
+         */
+        async function fetchDocuments() {
+            try {
+                const response = await fetch('/v1/documents'); // New endpoint
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const result = await response.json();
+
+                documentList.innerHTML = ''; // Clear list
+
+                if (result.documents && result.documents.length > 0) {
+                    result.documents.forEach(doc => {
+                        const li = document.createElement('li');
+                        li.className = 'sidebar-item document-item';
+                        li.textContent = doc;
+                        li.title = doc;
+                        documentList.appendChild(li);
+                    });
+                } else {
+                    documentList.innerHTML = '<li class="sidebar-item" style="color: var(--gray-400); cursor: default;">No documents</li>';
+                }
+            } catch (error) {
+                console.error("Failed to fetch documents:", error);
+                documentList.innerHTML = '<li class="sidebar-item" style="color: var(--system-red);">Failed to load</li>';
+            }
+        }
+
+        function updateMessageLog() { /* ... (unchanged) ... */
+            messageLog.innerHTML = '';
+            const history = chatHistories[currentMode];
+            if (history) {
+                history.forEach(msg => { addMessage(msg.role, msg.content, msg.sources); });
+            }
+            scrollToBottom();
+        }
+
+        function addMessage(role, content, sources = []) { /* ... (unchanged) ... */
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+            const iconName = (role === 'user') ? 'user' : 'brain-circuit';
+            const authorName = (role === 'user') ? 'You' : 'Aleutian AI';
+            let renderedContent = md.render(content);
+            let sourcesHTML = '';
+            if (sources && sources.length > 0) {
+                sourcesHTML = '<div class="sources-box"><h4>Sources</h4><ul class="sources-list">';
+                sources.forEach(source => {
+                    let score = source.score ? `(Score: ${source.score.toFixed(3)})` : (source.distance ? `(Dist: ${source.distance.toFixed(3)})` : '');
+                    sourcesHTML += `<li class="source-item">${source.source} ${score}</li>`;
+                });
+                sourcesHTML += '</ul></div>';
+            }
+            messageDiv.innerHTML = `
+                <div class="message-icon"><i data-lucide="${iconName}"></i></div>
+                <div class="message-content">
+                    <strong>${authorName}</strong>
+                    ${renderedContent}
+                    ${sourcesHTML}
+                </div>`;
+            messageLog.appendChild(messageDiv);
+            lucide.createIcons();
+            scrollToBottom();
+        }
+
+        function addApprovalCard(path, findings) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message assistant';
+
+            let findingsHTML = '<p>No issues found. Ready to ingest.</p>';
+            if (findings && findings.length > 0) {
+                findingsHTML = `<p>${findings.length} issue(s) found:</p><pre><code>`;
+                findings.forEach(f => {
+                    findingsHTML += `[L${f.line}] ${f.name}: ${f.match.substring(0, 50)}...\n`;
+                });
+                findingsHTML += `</code></pre>`;
+            }
+
+            // We pass data-path, which holds the filename
+            messageDiv.innerHTML = `
+                <div class="message-icon"><i data-lucide="shield-alert"></i></div>
+                <div class="message-content">
+                    <div class="approval-card">
+                        <h4>Scan Results for <code>${path}</code></h4>
+                        ${findingsHTML}
+                        <div class="approval-buttons">
+                            <button class="approve-btn" data-path="${path}">
+                                <i data-lucide="check-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Approve
+                            </button>
+                            <button class="deny-btn" data-path="${path}">
+                                <i data-lucide="x-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Deny
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+            messageLog.appendChild(messageDiv);
+            lucide.createIcons();
+            scrollToBottom();
+        }
+
+        function scrollToBottom() { messageLog.scrollTop = messageLog.scrollHeight; }
+
+        // --- 6. Start the application ---
+        sendButton.disabled = true;
+        currentModeDisplay.textContent = currentMode;
+        connect();
+    </script>
+</body>
+</html>

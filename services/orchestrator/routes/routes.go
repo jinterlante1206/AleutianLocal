@@ -11,6 +11,8 @@
 package routes
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
@@ -19,14 +21,22 @@ import (
 
 func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient llm.LLMClient) {
 	router.GET("/health", handlers.HealthCheck)
+	router.StaticFS("/ui", http.Dir("/app/ui"))
+
+	// Add a friendly redirect from /chat to the actual HTML file
+	router.GET("/chat", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, "/ui/chat.html")
+	})
 
 	// API version 1 group
 	v1 := router.Group("/v1")
 	{
 		v1.POST("/documents", handlers.CreateDocument(client))
+		v1.GET("/documents", handlers.ListDocuments(client))
 		v1.DELETE("/document", handlers.DeleteBySource(client))
 		v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient))
 		v1.POST("/chat/direct", handlers.HandleDirectChat(globalLLMClient))
+		v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient))
 		// Session administration routes
 		sessions := v1.Group("/sessions")
 		{
@@ -40,5 +50,6 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 			weaviateAdmin.GET("/summary", handlers.GetSummary(client))
 			weaviateAdmin.DELETE("/data", handlers.DeleteAll(client))
 		}
+
 	}
 }

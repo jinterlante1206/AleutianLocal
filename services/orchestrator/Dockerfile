@@ -33,6 +33,7 @@ COPY --from=builder /app/orchestrator .
 # Ensure the target directory structure exists
 RUN mkdir -p /app/internal/policy_engine/enforcement
 COPY --from=builder /src/internal/policy_engine/enforcement/data_classification_patterns.yaml /app/internal/policy_engine/enforcement/
+COPY --from=builder /src/services/orchestrator/ui /app/ui
 
 # The CMD should start the server
 CMD ["/app/orchestrator"]

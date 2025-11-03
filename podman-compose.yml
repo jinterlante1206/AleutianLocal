@@ -93,7 +93,7 @@ services:
     restart: unless-stopped
     depends_on:
       aleutian-rag-engine:
-        condition: service_started
+        condition: service_healthy
       embedding-server:
         condition: service_healthy
       weaviate-db:
