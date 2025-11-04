@@ -10,7 +10,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
 # --- Models for /v1/chat/direct ---
@@ -72,3 +72,24 @@ class SessionListResponse(BaseModel):
 class DeleteSessionResponse(BaseModel):
     status: str
     deleted_session_id: str
+
+# Timeseries Forecasting Model datatypes
+class TimeseriesForecastRequest(BaseModel):
+    """
+    Payload to match a timeseries forecast
+    """
+    name: str
+    context_period_size: int
+    forecast_period_size: int
+
+class TimeseriesForecastResponse(BaseModel):
+    """
+    Response payload you get back from the timeseries forecast endpoint
+    """
+    name: str
+    context_period_size: int
+    forecast_period_size: int
+    forecast: List[float] = Field(default_factory=list)
+    # this can clearly get more complicated so I'm starting simple
+    error: Optional[str] = None
+

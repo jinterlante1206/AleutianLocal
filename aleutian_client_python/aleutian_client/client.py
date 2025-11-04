@@ -14,7 +14,8 @@ import httpx
 from .models import (
     RAGRequest, RAGResponse,
     DirectChatRequest, DirectChatResponse, Message,
-    DocumentRequest, DocumentResponse, SessionListResponse, SessionInfo, DeleteSessionResponse
+    DocumentRequest, DocumentResponse, SessionListResponse, SessionInfo, DeleteSessionResponse,
+    TimeseriesForecastRequest, TimeseriesForecastResponse
 )
 from .exceptions import AleutianConnectionError, AleutianApiError
 from typing import List, Optional
@@ -199,3 +200,31 @@ class AleutianClient:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    def forecast(self, name: str, context_period_size: int,
+                 forecast_period_size: int) -> TimeseriesForecastResponse:
+        """
+        Calls the orchestrator's timeseries forecast endpoint.
+
+        Args:
+            name: The name of the thing to forecast (e.g., "SPY").
+            context_period_size: The number of past days to use as context.
+            forecast_period_size: The number of future days to forecast.
+
+        Returns:
+            A TimeseriesForecastResponse object with the forecast data.
+        """
+        request_data = TimeseriesForecastRequest(
+            name=name,
+            context_period_size=context_period_size,
+            forecast_period_size=forecast_period_size
+        )
+        try:
+            endpoint = "/v1/timeseries/forecast"
+            response = self._client.post(endpoint, json=request_data.model_dump())
+            self._handle_error(response, endpoint)
+            return TimeseriesForecastResponse(**response.json())
+        except httpx.RequestError as e:
+            raise AleutianConnectionError(f"Connection to {endpoint} failed: {e}") from e
+        except Exception as e:
+            raise AleutianApiError(f"Failed to parse forecast response: {e}") from e
