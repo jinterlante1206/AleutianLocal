@@ -111,6 +111,7 @@ func ListDocuments(client *weaviate.Client) gin.HandlerFunc {
 		}
 
 		var docList []string
+		fmt.Println("Agg Data", agg)
 
 		// Parse the complex response
 		if agg.Data["Aggregate"] != nil {

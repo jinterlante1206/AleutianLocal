@@ -220,7 +220,7 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 			}
 			if resp.Error == "" {
 				// Save conversation turn in background
-				go func() {
+				go func(isFirstTurn bool) {
 					turn := datatypes.Conversation{
 						SessionId: sessionID,
 						Question:  req.Query,
@@ -234,14 +234,14 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 					if isFirstTurn {
 						SummarizeAndSaveSession(llmClient, client, sessionID, req.Query, resp.Answer)
 					}
-				}()
+				}(isFirstTurn)
 			}
 
 			err := sendJSON(ws, resp)
 			if err != nil {
 				return
 			}
-			isFirstTurn = false // Mark first turn as complete
+			isFirstTurn = false
 		}
 	}
 }

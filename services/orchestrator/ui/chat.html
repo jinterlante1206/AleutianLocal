@@ -365,6 +365,11 @@
                 updateMessageLog();
                 fetchSessions();
                 fetchDocuments();
+                // Poll for new sessions every 5 seconds
+                setInterval(fetchSessions, 5000);
+
+                // Poll for new documents every 30 seconds (less frequent)
+                setInterval(fetchDocuments, 30000);
             };
             ws.onmessage = (event) => {
                 setLoadingState(false);
@@ -574,6 +579,15 @@
                         setTimeout(fetchDocuments, 1000);
                     }
                     break;
+                case 'sessions_updated':
+                  console.log("Server pushed session update, refetching...");
+                  fetchSessions();
+                  break;
+
+                case 'documents_updated':
+                  console.log("Server pushed document update, refetching...");
+                  fetchDocuments();
+                  break;
                 default:
                     console.warn("Received unknown action:", resp);
             }
