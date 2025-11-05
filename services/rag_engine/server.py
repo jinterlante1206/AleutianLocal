@@ -177,7 +177,7 @@ async def run_standard_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = standard.StandardRAGPipeline(weaviate_client, pipeline_config)
-        answer, source_docs = await pipeline.run(request.query)
+        answer, source_docs = await pipeline.run(request.query, request.session_id)
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in standard RAG pipeline: {e}", exc_info=True)
@@ -191,7 +191,7 @@ async def run_reranking_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = reranking.RerankingPipeline(weaviate_client, pipeline_config)
-        answer, source_docs = await pipeline.run(request.query)
+        answer, source_docs = await pipeline.run(request.query, request.session_id)
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in reranking RAG pipeline: {e}", exc_info=True)

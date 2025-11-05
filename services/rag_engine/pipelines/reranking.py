@@ -122,20 +122,34 @@ class RerankingPipeline(BaseRAGPipeline):
         if not self.reranker:
             logger.warning("Reranker model is not available, reranking step will be skipped.")
 
-    async def _search_weaviate_initial(self, query_vector: list[float]) -> list[dict]:
+    async def _search_weaviate_initial(self, query_vector: list[float], session_id: str | None = None) -> list[dict]:
         """
-        Performs Parent Document Retrieval
-            1. Finds the most relevant child chunks.
-            2. Gets their unique parent_source ID.
-            3. Retrieves all chunks for those parent documents for the full context.
+        Performs Parent Document Retrieval with session-aware filtering.
+            1. Creates a filter for "default" docs OR "session_id" docs.
+            2. Finds the most relevant child chunks using this filter.
+            3. Gets their unique parent_source ID.
+            4. Retrieves all chunks for those parent documents for the full context.
         """
         if not query_vector: return []
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
+            filter_docs = wvc.query.Filter.by_property("data_space").equal("default")
+
+            combined_filter = None
+            if session_id:
+                # 2. If a session_id is provided, also filter for its memory
+                logger.info(f"Applying session memory filter for: {session_id}")
+                filter_memory = wvc.query.Filter.by_property("data_space").equal(session_id)
+                # 3. Combine them with an OR
+                combined_filter = wvc.query.Filter.any_of([filter_docs, filter_memory])
+            else:
+                # 4. Otherwise, just use the default filter
+                combined_filter = filter_docs
             # 1. Find the most relevant child chunks
             response = documents_collection.query.near_vector(
                 near_vector=query_vector,
                 limit=self.top_k_initial,
+                filters=combined_filter,
                 return_metadata=wvc.query.MetadataQuery(distance=True),
                 return_properties=["content", "source", "parent_source"]
             )
@@ -213,18 +227,21 @@ class RerankingPipeline(BaseRAGPipeline):
                 reranked_docs_with_meta[i]["metadata"].rerank_score = score
         return reranked_docs_with_meta
 
-    async def run(self, query: str) -> tuple[str, list[dict]]:
+    async def run(self, query: str, session_id: str | None = None) -> tuple[str, list[dict]]:
         """Executes the RAG pipeline with reranking."""
         tracer = trace.get_tracer("aleutian.rag.reranking")
         with tracer.start_as_current_span("reranking_pipeline.run") as span:
             span.set_attribute("query.length", len(query))
-            logger.info(f"Reranking RAG run started...")  # Keep logs
+            if session_id:
+                span.set_attribute("session.id", session_id)
+            logger.info(f"Reranking RAG run started...")
 
             with tracer.start_as_current_span("get_embedding"):
                 query_vector = await self._get_embedding(query)
 
             with tracer.start_as_current_span("initial_search"):
-                initial_docs_with_meta = await self._search_weaviate_initial(query_vector)
+                initial_docs_with_meta = await self._search_weaviate_initial(query_vector,
+                                                                             session_id)
                 span.set_attribute("retrieved.initial_count", len(initial_docs_with_meta))
 
             with tracer.start_as_current_span("rerank_docs"):
@@ -246,7 +263,9 @@ class RerankingPipeline(BaseRAGPipeline):
                 {
                     "source": d["properties"].get("source", "Unknown"),
                     "distance": d["metadata"].distance if d.get("metadata") else None,
-                    "score": d["metadata"].rerank_score if d.get("metadata") else None,
+                    "score": d["metadata"].rerank_score if (
+                                d.get("metadata") and hasattr(d["metadata"],
+                                                              "rerank_score")) else None,
                 } for d in context_docs_with_meta
             ]
 

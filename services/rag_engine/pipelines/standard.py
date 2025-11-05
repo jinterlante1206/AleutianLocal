@@ -30,20 +30,40 @@ class StandardRAGPipeline(BaseRAGPipeline):
         self.search_limit = config.get("standard_rag_limit", DEFAULT_SEARCH_LIMIT)
         logger.info("StandardRAGPipeline initialized.")
 
-    async def _search_weaviate_initial(self, query_vector: list[float]) -> list[dict]:
+    async def _search_weaviate_initial(self, query_vector: list[float], session_id: str | None = None) -> list[dict]:
         """
-        Performs Parent Document Retrieval
-            1. Finds the most relevant child chunks.
-            2. Gets their unique parent_source ID.
-            3. Retrieves all chunks for those parent documents for the full context.
+        Performs Parent Document Retrieval with session-aware filtering.
+            1. Creates a filter for "default" docs OR "session_id" docs.
+            2. Finds the most relevant child chunks using this filter.
+            3. Gets their unique parent_source ID.
+            4. Retrieves all chunks for those parent documents for the full context.
         """
+        # --- SIGNATURE MODIFIED to accept session_id ---
         if not query_vector: return []
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
+
+            # --- NEW FILTER LOGIC ---
+            # 1. Always filter for default documents
+            filter_docs = wvc.query.Filter.by_property("data_space").equal("default")
+
+            combined_filter = None
+            if session_id:
+                # 2. If a session_id is provided, also filter for its memory
+                logger.info(f"Applying session memory filter for: {session_id}")
+                filter_memory = wvc.query.Filter.by_property("data_space").equal(session_id)
+                # 3. Combine them with an OR
+                combined_filter = wvc.query.Filter.any_of([filter_docs, filter_memory])
+            else:
+                # 4. Otherwise, just use the default filter
+                combined_filter = filter_docs
+            # --- END NEW FILTER LOGIC ---
+
             # 1. Find the most relevant child chunks
             response = documents_collection.query.near_vector(
                 near_vector=query_vector,
                 limit=self.search_limit, # differs from reranking which uses top k (e.g.20) this uses top 3
+                filters=combined_filter, # <-- ADDED FILTER
                 return_metadata=wvc.query.MetadataQuery(distance=True),
                 return_properties=["content", "source", "parent_source"]
             )
@@ -84,8 +104,10 @@ class StandardRAGPipeline(BaseRAGPipeline):
             raise RuntimeError(f"Weaviate interaction failed: {e}")
 
 
-    async def run(self, query: str) -> tuple[str, list[dict]]:
+    async def run(self, query: str, session_id: str | None = None) -> tuple[str, list[dict]]:
         """Executes the standard RAG pipeline."""
+        # --- SIGNATURE MODIFIED to accept session_id ---
+
         logger.info(f"Standard RAG run started for query: {query[:50]}...")
 
         # 1. Get query embedding (uses inherited _get_embedding)
@@ -93,10 +115,12 @@ class StandardRAGPipeline(BaseRAGPipeline):
         query_vector = await self._get_embedding(query)
         logger.debug("Query embedding received.")
 
-        context_docs_with_meta = await self._search_weaviate(query_vector)
-
-        # 2. Search for relevant documents (uses *this* class's _search_weaviate)
+        # 2. Search for relevant documents
         logger.debug("Searching Weaviate...")
+        # --- MODIFIED LINE: Pass session_id and call correct function ---
+        context_docs_with_meta = await self._search_weaviate_initial(query_vector, session_id)
+        # --- END MODIFICATION ---
+
         context_docs_props = [d["properties"] for d in context_docs_with_meta]
         logger.debug(f"Found {len(context_docs_props)} context documents.")
 
@@ -112,7 +136,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
         sources = [
             {
                 "source": d["properties"].get("source", "Unknown"),
-                "distance": d["metadata"].distance if d.get("metadata") else None,
+                "distance": d["metadata"].distance if (d.get("metadata") and hasattr(d["metadata"], "distance")) else None,
             } for d in context_docs_with_meta
         ]
 
