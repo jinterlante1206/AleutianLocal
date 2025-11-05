@@ -81,15 +81,22 @@ class TimeseriesForecastRequest(BaseModel):
     name: str
     context_period_size: int
     forecast_period_size: int
+    data_version: Optional[str] = "v1.0"
 
 class TimeseriesForecastResponse(BaseModel):
     """
     Response payload you get back from the timeseries forecast endpoint
     """
     name: str
-    context_period_size: int
-    forecast_period_size: int
     forecast: List[float] = Field(default_factory=list)
-    # this can clearly get more complicated so I'm starting simple
-    error: Optional[str] = None
+    message: str
 
+class DataFetchRequest(BaseModel):
+    tickers: List[str]
+    start_date: str  # "YYYY-MM-DD"
+    interval: str = "1d" # "1m", "1h", "1d"
+
+class DataFetchResponse(BaseModel):
+    status: str
+    message: str
+    details: Dict[str, str]

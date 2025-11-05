@@ -84,3 +84,49 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 		}
 	}
 }
+
+func HandleDataFetch() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 1. Get the URL from the environment
+		serviceURL := os.Getenv("ALEUTIAN_DATA_FETCHER_URL")
+		if serviceURL == "" {
+			slog.Error("ALEUTIAN_DATA_FETCHER_URL env var not set")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Data fetching service not configured"})
+			return
+		}
+		targetURL := fmt.Sprintf("%s/v1/data/fetch", serviceURL) // Points to the Gin handler in main.go
+
+		// 2. Read the raw request body
+		reqBodyBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			slog.Error("Failed to read request body", "error", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+			return
+		}
+
+		// 3. Create and send the proxy request
+		slog.Info("Proxying data fetch request", "target_url", targetURL)
+		httpReq, err := http.NewRequestWithContext(c.Request.Context(), "POST", targetURL, bytes.NewBuffer(reqBodyBytes))
+		if err != nil {
+			slog.Error("Failed to create request for data fetch service", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create data fetch service request"})
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(httpReq)
+		if err != nil {
+			slog.Error("Failed to call data fetch service", "url", targetURL, "error", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Failed to connect to the data fetch service"})
+			return
+		}
+		defer resp.Body.Close()
+
+		// 4. Stream the response
+		c.Status(resp.StatusCode)
+		for k, v := range resp.Header {
+			c.Header(k, strings.Join(v, ","))
+		}
+		_, _ = io.Copy(c.Writer, resp.Body)
+	}
+}

@@ -8,6 +8,8 @@
 //
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
+
+git clean -xdf && rm -rf build dist .eggs aleutian_client.egg-info && pip install -e .
 """
 
 import httpx
@@ -15,7 +17,7 @@ from .models import (
     RAGRequest, RAGResponse,
     DirectChatRequest, DirectChatResponse, Message,
     DocumentRequest, DocumentResponse, SessionListResponse, SessionInfo, DeleteSessionResponse,
-    TimeseriesForecastRequest, TimeseriesForecastResponse
+    TimeseriesForecastRequest, TimeseriesForecastResponse, DataFetchResponse, DataFetchRequest
 )
 from .exceptions import AleutianConnectionError, AleutianApiError
 from typing import List, Optional
@@ -228,3 +230,33 @@ class AleutianClient:
             raise AleutianConnectionError(f"Connection to {endpoint} failed: {e}") from e
         except Exception as e:
             raise AleutianApiError(f"Failed to parse forecast response: {e}") from e
+
+    def ensure_data(self, tickers: List[str], start_date: str,
+                    interval: str = "1d") -> DataFetchResponse:
+        """
+        Calls the orchestrator's on-demand data fetch endpoint.
+        This will trigger the finance-data-service to pull data
+        from Yahoo and store it in InfluxDB.
+
+        Args:
+            tickers: A list of tickers (e.g., ["SPY", "MSFT"]).
+            start_date: The earliest date to fetch (e.g., "2020-01-01").
+            interval: The data frequency (e.g., "1d", "1h", "1m").
+
+        Returns:
+            A DataFetchResponse object with the status.
+        """
+        request_data = DataFetchRequest(
+            tickers=tickers,
+            start_date=start_date,
+            interval=interval
+        )
+        try:
+            endpoint = "/v1/data/fetch"
+            response = self._client.post(endpoint, json=request_data.model_dump())
+            self._handle_error(response, endpoint)
+            return DataFetchResponse(**response.json())
+        except httpx.RequestError as e:
+            raise AleutianConnectionError(f"Connection to {endpoint} failed: {e}") from e
+        except Exception as e:
+            raise AleutianApiError(f"Failed to parse data fetch response: {e}") from e
