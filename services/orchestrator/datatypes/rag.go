@@ -108,6 +108,9 @@ var httpClient = &http.Client{
 
 func (e *EmbeddingResponse) Get(text string) error {
 	embeddingServiceURL := os.Getenv("EMBEDDING_SERVICE_URL")
+	if embeddingServiceURL == "" {
+		return fmt.Errorf("EMBEDDING_SERVICE_URL not set")
+	}
 
 	// Use the correct request struct: {"texts": ["..."]}
 	embReq := embeddingServiceRequest{Texts: []string{text}}

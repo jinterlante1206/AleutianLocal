@@ -152,7 +152,7 @@ func main() {
 	router := gin.Default()
 	router.Use(otelgin.Middleware("orchestrator-service"))
 
-	routes.SetupRoutes(router, weaviateClient, globalLLMClient)
+	routes.SetupRoutes(router, weaviateClient, globalLLMClient, policyEngine)
 	log.Println("started up the container")
 
 	log.Println("Starting the orchestrator server on port ", port)

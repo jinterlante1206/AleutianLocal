@@ -268,6 +268,6 @@ class BaseRAGPipeline:
             logger.error(f"An unexpected error occurred during prompt formatting: {e}", exc_info=True)
             return f"Context:\n{context_str}\n\nQuestion: {query}\nAnswer:" # Fallback
 
-    async def run(self, query: str) -> tuple[str, list[dict]]:
+    async def run(self, query: str, session_id: str | None = None) -> tuple[str, list[dict]]:
         """Placeholder run method - subclasses must implement."""
         raise NotImplementedError("Subclasses must implement the 'run' method.")

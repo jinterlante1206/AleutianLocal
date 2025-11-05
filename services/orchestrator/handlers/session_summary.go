@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
@@ -31,8 +32,15 @@ func SummarizeAndSaveSession(llmClient llm.LLMClient, client *weaviate.Client, s
 	}
 
 	summaryString, err := llmClient.Generate(context.Background(), summaryPrompt, summaryParams)
-	if err != nil {
-		slog.Error("Failed to generate session summary via LLMClient", "sessionId", sessionId, "error", err)
+	summaryString = strings.TrimSpace(summaryString)
+	if err != nil || summaryString == "" {
+		if err != nil {
+			slog.Error("Failed to generate session summary via LLMClient", "sessionId", sessionId, "error", err)
+		} else {
+			// This log will now tell you what's happening
+			slog.Warn("LLM generated an empty summary, using fallback.", "sessionId", sessionId)
+		}
+
 		// Fallback summary
 		summaryString = fmt.Sprintf("Chat: %s", question)
 		if len(summaryString) > 100 {

@@ -22,11 +22,6 @@ func (c *Conversation) Save(client *weaviate.Client) error {
 	}
 	slog.Info("Saving the conversation to Weaviate", "sessionId", c.SessionId)
 
-	var questionEmbResp EmbeddingResponse
-	if err := questionEmbResp.Get(c.Question); err != nil {
-		slog.Error("failed to get embeddings for question", "error", err)
-		return fmt.Errorf("failed to get embeddings for question: %w", err)
-	}
 	properties := map[string]interface{}{
 		"session_id": c.SessionId,
 		"question":   c.Question,
@@ -37,7 +32,6 @@ func (c *Conversation) Save(client *weaviate.Client) error {
 	_, err := client.Data().Creator().
 		WithClassName("Conversation").
 		WithProperties(properties).
-		WithVector(questionEmbResp.Vector).
 		Do(context.Background())
 
 	if err != nil {

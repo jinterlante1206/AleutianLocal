@@ -147,7 +147,8 @@
         .message-content { padding-top: 0.25rem; max-width: 100%; overflow: hidden; }
         .message-content strong { display: block; font-weight: 600; color: var(--gray-900); }
         .message-content p { margin-top: 0.25rem; color: var(--gray-800); }
-        .message-content pre { background-color: var(--gray-800); color: var(--gray-50); padding: 1rem; border-radius: var(--border-radius-m); margin: 1rem 0; overflow-x: auto; }
+        .message-content pre { background-color: var(--gray-800); padding: 1rem; border-radius:
+            var(--border-radius-m); margin: 1rem 0; overflow-x: auto; }
         .message-content code { font-size: 0.875rem; }
         .message-content p > code, .message-content li > code { background-color: var(--gray-100); color: var(--brand-darker); padding: 0.15rem 0.3rem; border-radius: 4px; font-size: 0.85em; }
         .sources-box { background: var(--gray-50); border: 1px solid var(--gray-200); border-radius: var(--border-radius-m); padding: 1rem; margin-top: 1rem; }
@@ -276,7 +277,6 @@
                         <i data-lucide="x" style="width:16px; height:16px;"></i>
                     </button>
                 </div>
-
                 <form id="chat-form">
                     <select id="chat-mode" name="mode">
                         <option value="chat-rag">Chat (with RAG)</option>
@@ -284,12 +284,10 @@
                         <option value="single-rag">Single Prompt (with RAG)</option>
                         <option value="single-no-rag">Single Prompt (no RAG)</option>
                     </select>
-
                     <label for="file-upload-input" id="file-upload-label" title="Attach file">
                         <i data-lucide="paperclip"></i>
                     </label>
                     <input type="file" id="file-upload-input">
-
                     <input type="text" id="chat-input" placeholder="Ask Aleutian anything..." autocomplete="off">
                     <button type="submit" id="send-button">
                         <i data-lucide="send-horizontal"></i>
@@ -325,14 +323,11 @@
         const chatMode = document.getElementById('chat-mode');
         const sendButton = document.getElementById('send-button');
         const thinkingSpinner = document.getElementById('thinking-spinner');
-
         const newChatBtn = document.getElementById('new-chat-btn');
         const sessionList = document.getElementById('session-list');
-        const documentList = document.getElementById('document-list'); // New
+        const documentList = document.getElementById('document-list');
         const sessionIdDisplay = document.getElementById('session-id-display');
         const currentModeDisplay = document.getElementById('current-mode-display');
-
-        // File upload elements
         const fileUploadInput = document.getElementById('file-upload-input');
         const filePreview = document.getElementById('file-preview');
         const filePreviewName = document.getElementById('file-preview-name');
@@ -343,10 +338,7 @@
         let globalSessionId = null;
         let ws;
         let chatHistories = {};
-
-        // This will hold the file object for submission
         let fileToUpload = null;
-        // This will hold the Base64 data *during* the approval flow
         let approvalDataCache = {};
 
         function initWelcomeMessages() { /* ... (unchanged) ... */
@@ -363,9 +355,8 @@
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
         const wsURL = `${wsProtocol}${window.location.host}/v1/chat/ws`;
 
-        function connect() {
+        function connect() { /* ... (unchanged, still fetches docs/sessions onopen) ... */
             ws = new WebSocket(wsURL);
-
             ws.onopen = () => {
                 console.log("WebSocket connected");
                 sendButton.disabled = false;
@@ -373,19 +364,19 @@
                 chatInput.focus();
                 updateMessageLog();
                 fetchSessions();
-                fetchDocuments(); // New
-            };
+                fetchDocuments();
+                // Poll for new sessions every 5 seconds
+                setInterval(fetchSessions, 5000);
 
+                // Poll for new documents every 30 seconds (less frequent)
+                setInterval(fetchDocuments, 30000);
+            };
             ws.onmessage = (event) => {
-                thinkingSpinner.classList.add('hidden');
-                sendButton.disabled = false;
-                chatInput.disabled = false;
-                chatInput.focus();
+                setLoadingState(false);
                 const resp = JSON.parse(event.data);
                 if (resp.action) { handleAction(resp); } else { handleChat(resp); }
             };
-
-            ws.onclose = () => { /* ... (unchanged) ... */
+            ws.onclose = () => {
                 console.log("WebSocket disconnected.");
                 sendButton.disabled = true;
                 chatInput.disabled = true;
@@ -394,7 +385,7 @@
                     setTimeout(connect, 3000);
                 }
             };
-            ws.onerror = (err) => { /* ... (unchanged) ... */
+            ws.onerror = (err) => {
                 console.error("WebSocket error:", err);
                 addMessage("assistant", "**Connection error. Please refresh.**");
                 ws.close();
@@ -417,40 +408,41 @@
             e.preventDefault();
             const query = chatInput.value.trim();
 
-            // --- THIS IS THE FIX ---
+            // --- FIX 1: "Hanging Chat" ---
             // We must read the current mode from the dropdown *inside* this function.
             const mode = chatMode.value;
             // --- END OF FIX ---
 
-            // If there's a file, we ignore the text input and do a file scan
             if (fileToUpload) {
                 handleFileUpload(fileToUpload);
                 return;
             }
 
-            // If no file, proceed with normal chat
             if (!query || !ws || ws.readyState !== WebSocket.OPEN) return;
 
             addMessage("user", query);
             setLoadingState(true);
 
-            // Now, 'mode' is correctly defined and these lines will work
+            // Now, 'mode' is correctly defined
             if (mode.startsWith('chat-')) {
                 chatHistories[mode].push({ role: 'user', content: query });
             }
-            let historyForBackend = [];
 
-            // This logic was slightly incorrect before, this is the clean version
-            if (currentMode === 'chat-no-rag') {
-                historyForBackend = chatHistories[currentMode]
-                    .filter(msg => !msg.content.startsWith('Welcome!')) // Don't send welcome msg
+            let historyForBackend = [];
+            // Use 'mode' (the current selection) not 'currentMode' (which might be stale)
+            if (mode === 'chat-no-rag') {
+                historyForBackend = chatHistories[mode]
+                    .filter(msg => !msg.content.startsWith('Welcome!'))
                     .map(msg => ({ role: msg.role, content: msg.content }));
-            } else if (currentMode === 'single-no-rag') {
-                 historyForBackend = [{ role: 'user', content: query }];
+            } else if (mode === 'single-no-rag') {
+                 // For single-no-rag, just send the query, not the welcome
+                 // The backend will add this to an empty list
+                 historyForBackend = [];
             }
+            // For RAG modes, history is always empty (backend handles it)
 
             ws.send(JSON.stringify({
-                mode: mode, // 'mode' is now correctly passed
+                mode: mode,
                 query: query,
                 history: historyForBackend
             }));
@@ -465,18 +457,23 @@
                 filePreviewName.textContent = fileToUpload.name;
                 filePreview.classList.remove('hidden');
                 chatInput.placeholder = "Click Send to upload and scan file...";
-                chatInput.disabled = true; // Disable text input when file is staged
-                sendButton.disabled = false; // Ensure send is enabled
+                chatInput.disabled = true;
+                sendButton.disabled = false;
             }
         });
 
-        clearFileBtn.addEventListener('click', () => {
+        // --- FIX 3: "Sticky Bar" ---
+        // Create a dedicated function to clear the file selection UI
+        function clearFileSelection() {
             fileToUpload = null;
             fileUploadInput.value = null; // Clear the input
             filePreview.classList.add('hidden');
             chatInput.placeholder = "Ask Aleutian anything...";
             chatInput.disabled = false;
-        });
+        }
+
+        // Add click listener to the clear button
+        clearFileBtn.addEventListener('click', clearFileSelection);
 
         function handleFileUpload(file) {
             setLoadingState(true);
@@ -485,17 +482,17 @@
             const reader = new FileReader();
             reader.onload = (e) => {
                 const base64data = e.target.result.split(',')[1];
-
-                // Store data for the approval step
                 approvalDataCache[file.name] = base64data;
 
-                // Send a request to SCAN the file
                 ws.send(JSON.stringify({
                     action: 'file_upload_scan',
                     filename: file.name,
-                    // We send the data now for the scan
                     base64data: base64data
                 }));
+
+                // --- FIX 3: "Sticky Bar" ---
+                // Call the clear function *after* sending the file
+                clearFileSelection();
             };
             reader.onerror = (err) => {
                 console.error("Failed to read file:", err);
@@ -503,67 +500,60 @@
                 setLoadingState(false);
             };
             reader.readAsDataURL(file);
-
-            // Clear the file input
-            clearFileBtn.click();
         }
+        // --- End of File Upload Handlers ---
 
-        // Handle chat mode change
-        chatMode.addEventListener('change', (e) => { /* ... (unchanged) ... */
+        chatMode.addEventListener('change', (e) => {
             currentMode = e.target.value;
             currentModeDisplay.textContent = currentMode;
             updateMessageLog();
         });
 
-        // Handle clicks on dynamic buttons (Approve/Deny)
-        messageLog.addEventListener('click', (e) => {
+        messageLog.addEventListener('click', (e) => { /* ... (unchanged) ... */
             const button = e.target.closest('button');
             if (!button || (!button.classList.contains('approve-btn') && !button.classList.contains('deny-btn'))) {
                 return;
             }
-
             const path = button.dataset.path;
             const decision = button.classList.contains('approve-btn') ? 'approve' : 'deny';
-
             button.parentElement.querySelectorAll('button').forEach(btn => {
                 btn.disabled = true;
                 btn.style.opacity = '0.7';
             });
-
             setLoadingState(true);
-
-            // Get the cached Base64 data
             const base64data = approvalDataCache[path];
             if (!base64data) {
                 addMessage('assistant', `**Error:** File data cache lost for \`${path}\`. Please upload again.`);
                 setLoadingState(false);
                 return;
             }
-
             ws.send(JSON.stringify({
-                action: 'file_upload_confirm', // New action
+                action: 'file_upload_confirm',
                 filename: path,
                 decision: decision,
-                scope: 'global', // All uploads are global for now
+                scope: 'global',
                 base64data: base64data
             }));
-
-            // Clear the cache
             delete approvalDataCache[path];
         });
 
         // --- 5. Logic & UI Functions ---
 
-        function setLoadingState(isLoading) {
+        function setLoadingState(isLoading) { /* ... (unchanged) ... */
             if (isLoading) {
                 thinkingSpinner.classList.remove('hidden');
                 sendButton.disabled = true;
-                chatInput.disabled = true;
+                if(fileToUpload) {
+                    chatInput.disabled = true;
+                }
             } else {
                 thinkingSpinner.classList.add('hidden');
                 sendButton.disabled = false;
-                chatInput.disabled = false;
-                chatInput.focus();
+                // Only re-enable chatInput if a file is NOT selected
+                if (!fileToUpload) {
+                    chatInput.disabled = false;
+                    chatInput.focus();
+                }
             }
             scrollToBottom();
         }
@@ -576,7 +566,6 @@
                     sessionIdDisplay.textContent = globalSessionId;
                     break;
                 case 'populate_approval_required':
-                    // Cache the data from the server (if it was sent back)
                     if(resp.base64data) {
                         approvalDataCache[resp.path] = resp.base64data;
                     }
@@ -585,23 +574,39 @@
                 case 'populate_ingest':
                 case 'populate_final':
                     addMessage('assistant', resp.message);
-                    // If ingestion was successful, refresh the doc list
+
                     if (resp.message && resp.message.includes('Success')) {
-                        fetchDocuments();
+                        setTimeout(fetchDocuments, 1000);
                     }
                     break;
+                case 'sessions_updated':
+                  console.log("Server pushed session update, refetching...");
+                  fetchSessions();
+                  break;
+
+                case 'documents_updated':
+                  console.log("Server pushed document update, refetching...");
+                  fetchDocuments();
+                  break;
                 default:
                     console.warn("Received unknown action:", resp);
             }
         }
 
         function handleChat(resp) { /* ... (unchanged) ... */
+            setLoadingState(false); // This was already here in your file
             if (resp.error) {
                 addMessage("assistant", `**Error:** ${resp.error}`);
             } else {
                 addMessage("assistant", resp.answer, resp.sources);
                 if (resp.mode.startsWith('chat-')) {
                     chatHistories[resp.mode].push({ role: 'assistant', content: resp.answer, sources: resp.sources });
+                }
+                const history = chatHistories[resp.mode] || [];
+                const userMessages = history.filter(m => m.role === 'user').length;
+                if (userMessages === 1) {
+                    console.log("First turn complete, refreshing session list.");
+                    setTimeout(fetchSessions, 500);
                 }
             }
         }
@@ -630,17 +635,12 @@
             }
         }
 
-        /**
-         * Fetches ingested documents from the backend. (New)
-         */
-        async function fetchDocuments() {
+        async function fetchDocuments() { /* ... (unchanged) ... */
             try {
-                const response = await fetch('/v1/documents'); // New endpoint
+                const response = await fetch('/v1/documents');
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const result = await response.json();
-
-                documentList.innerHTML = ''; // Clear list
-
+                documentList.innerHTML = '';
                 if (result.documents && result.documents.length > 0) {
                     result.documents.forEach(doc => {
                         const li = document.createElement('li');
@@ -694,20 +694,17 @@
             scrollToBottom();
         }
 
-        function addApprovalCard(path, findings) {
+        function addApprovalCard(path, findings) { /* ... (unchanged) ... */
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message assistant';
-
             let findingsHTML = '<p>No issues found. Ready to ingest.</p>';
             if (findings && findings.length > 0) {
                 findingsHTML = `<p>${findings.length} issue(s) found:</p><pre><code>`;
                 findings.forEach(f => {
-                    findingsHTML += `[L${f.line}] ${f.name}: ${f.match.substring(0, 50)}...\n`;
-                });
+                    // Use Go struct keys: f.LineNumber, f.ClassificationName, f.MatchedContent
+                findingsHTML += `[L${f.line_number}] ${f.classification_name}: ${f.matched_content.substring(0, 50)}...\n`;                });
                 findingsHTML += `</code></pre>`;
             }
-
-            // We pass data-path, which holds the filename
             messageDiv.innerHTML = `
                 <div class="message-icon"><i data-lucide="shield-alert"></i></div>
                 <div class="message-content">

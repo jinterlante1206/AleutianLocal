@@ -16,10 +16,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
+	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
-func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient llm.LLMClient) {
+func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient llm.LLMClient,
+	policyEngine *policy_engine.PolicyEngine) {
+
 	router.GET("/health", handlers.HealthCheck)
 	router.StaticFS("/ui", http.Dir("/app/ui"))
 
@@ -36,7 +39,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		v1.DELETE("/document", handlers.DeleteBySource(client))
 		v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient))
 		v1.POST("/chat/direct", handlers.HandleDirectChat(globalLLMClient))
-		v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient))
+		v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient, policyEngine))
 		v1.POST("/timeseries/forecast", handlers.HandleTimeSeriesForecast())
 		v1.POST("/data/fetch", handlers.HandleDataFetch())
 		// Session administration routes

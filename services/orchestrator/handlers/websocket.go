@@ -3,16 +3,19 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings" // Import strings
+	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
@@ -44,6 +47,10 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+	// 10MB Read Buffer
+	ReadBufferSize: 10 * 1024 * 1024,
+	// 10MB Write Buffer
+	WriteBufferSize: 10 * 1024 * 1024,
 }
 
 // MockFinding is a placeholder for your real policy_engine.ScanFinding
@@ -61,7 +68,9 @@ func sendJSON(ws *websocket.Conn, v interface{}) error {
 	return err
 }
 
-func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient) gin.HandlerFunc {
+func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
+	policyEngine *policy_engine.PolicyEngine) gin.HandlerFunc {
+
 	return func(c *gin.Context) {
 		ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
@@ -98,8 +107,6 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient) gin.H
 				slog.Info("Received action request", "action", req.Action, "path", req.Filename)
 				switch req.Action {
 				case "file_upload_scan":
-					// Here you would plug in your *real* policy engine scanner
-					// We decode the content to scan it
 					contentBytes, err := base64.StdEncoding.DecodeString(req.Base64Data)
 					if err != nil {
 						slog.Error("Failed to decode Base64 data for scanning", "filename", req.Filename, "error", err)
@@ -107,17 +114,17 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient) gin.H
 						continue
 					}
 
-					// Mock Scan Logic (using file content length and name)
+					// --- REAL SCAN LOGIC ---
 					slog.Info("Scanning file content", "filename", req.Filename, "size", len(contentBytes))
-					if strings.Contains(req.Filename, "secret") || strings.Contains(req.Filename, "key") || strings.Contains(string(contentBytes), "pass:") {
-						findings := []MockFinding{
-							{Line: 1, Name: "Mock Secret", Match: "File contains sensitive keywords..."},
-						}
-						// Send back approval card
+					// Use the real policy engine
+					findings := policyEngine.ScanFileContent(string(contentBytes))
+
+					if len(findings) > 0 {
+						// Send back approval card with real findings
 						if err = sendJSON(ws, map[string]interface{}{
 							"action":   "populate_approval_required",
-							"path":     req.Filename, // "path" is what the JS approval card expects
-							"findings": findings,
+							"path":     req.Filename,
+							"findings": findings, // Pass the real findings array
 						}); err != nil {
 							return
 						}
@@ -129,40 +136,45 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient) gin.H
 						}); err != nil {
 							return
 						}
-						// Call ingestion goroutine
 						ingestReq := IngestDocumentRequest{
 							Content:    string(contentBytes),
 							Source:     req.Filename,
 							DataSpace:  "default",
 							VersionTag: "latest",
-							// SessionID: "", // This is a global upload
 						}
 						go runWebSocketIngestion(ws, client, ingestReq)
 					}
 
 				case "file_upload_confirm":
+					// --- REAL AUDIT LOGIC ---
+					contentBytes, err := base64.StdEncoding.DecodeString(req.Base64Data)
+					if err != nil {
+						slog.Error("Failed to decode Base64 data for ingestion", "filename", req.Filename, "error", err)
+						sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "Error: Invalid file data."})
+						continue
+					}
+
+					// Re-run scan to get findings to log
+					findings := policyEngine.ScanFileContent(string(contentBytes))
+
+					// Populate findings with decision metadata
+					// TODO: update the .Reviewer with the username
+					for i := range findings {
+						findings[i].FilePath = req.Filename
+						findings[i].UserDecision = req.Decision
+						findings[i].Reviewer = "WebAppUser"
+						findings[i].ReviewTimestamp = time.Now().UnixMilli()
+					}
+
+					go logFindingsToFile(findings)
 					if req.Decision == "approve" {
 						slog.Info("User approved ingestion", "filename", req.Filename, "scope", req.Scope)
-
-						// Decode the data *again* (stateless design)
-						contentBytes, err := base64.StdEncoding.DecodeString(req.Base64Data)
-						if err != nil {
-							slog.Error("Failed to decode Base64 data for ingestion", "filename", req.Filename, "error", err)
-							sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "Error: Invalid file data."})
-							continue
-						}
-
 						ingestReq := IngestDocumentRequest{
 							Content:    string(contentBytes),
 							Source:     req.Filename,
 							DataSpace:  "default",
 							VersionTag: "latest",
 						}
-						// This is where you would add session scoping if the RAG engine supported it
-						// if req.Scope == "session" {
-						// 	ingestReq.SessionID = sessionID
-						// }
-
 						go runWebSocketIngestion(ws, client, ingestReq)
 						sendJSON(ws, map[string]interface{}{"action": "populate_ingest", "message": "✅ Approved. Ingesting `" + req.Filename + "`..."})
 
@@ -204,28 +216,32 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient) gin.H
 					resp.Error = llmErr.Error()
 				} else {
 					resp.Answer = answer
-					// Save conversation turn in background
-					go func() {
-						turn := datatypes.Conversation{
-							SessionId: sessionID,
-							Question:  req.Query,
-							Answer:    resp.Answer,
-						}
-						if err := turn.Save(client); err != nil {
-							slog.Warn("Failed to save non-RAG conversation turn", "error", err, "sessionID", sessionID)
-						}
-						if isFirstTurn {
-							SummarizeAndSaveSession(llmClient, client, sessionID, req.Query, resp.Answer)
-						}
-					}()
 				}
+			}
+			if resp.Error == "" {
+				// Save conversation turn in background
+				go func(isFirstTurn bool) {
+					turn := datatypes.Conversation{
+						SessionId: sessionID,
+						Question:  req.Query,
+						Answer:    resp.Answer,
+					}
+					if err := turn.Save(client); err != nil {
+						slog.Warn("Failed to save non-RAG conversation turn", "error", err, "sessionID", sessionID)
+					} else {
+						go SaveMemoryChunk(client, sessionID, req.Query, resp.Answer)
+					}
+					if isFirstTurn {
+						SummarizeAndSaveSession(llmClient, client, sessionID, req.Query, resp.Answer)
+					}
+				}(isFirstTurn)
 			}
 
 			err := sendJSON(ws, resp)
 			if err != nil {
 				return
 			}
-			isFirstTurn = false // Mark first turn as complete
+			isFirstTurn = false
 		}
 	}
 }
@@ -253,4 +269,32 @@ func runWebSocketIngestion(ws *websocket.Conn, client *weaviate.Client, ingestRe
 	}); err != nil {
 		return
 	}
+}
+
+// logFindingsToFile appends scan findings to a JSON Lines log file.
+// It runs in a goroutine so it doesn't block the API response.
+func logFindingsToFile(findings []policy_engine.ScanFinding) {
+	if len(findings) == 0 {
+		return // Nothing to log
+	}
+
+	// Log to /tmp/ inside the container. This can be mounted out with a volume if needed.
+	logFilePath := "/tmp/scan_audit_log.jsonl"
+
+	// Open the file in append mode, creating it if it doesn't exist.
+	file, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		slog.Error("Failed to open audit log file", "path", logFilePath, "error", err)
+		return
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	for _, finding := range findings {
+		// Marshal each finding as a new line
+		if err := encoder.Encode(finding); err != nil {
+			slog.Warn("Failed to write finding to audit log", "error", err)
+		}
+	}
+	slog.Info("Successfully wrote findings to audit log", "count", len(findings), "path", logFilePath)
 }
