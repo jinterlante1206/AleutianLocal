@@ -88,3 +88,49 @@ func DeleteSessions(client *weaviate.Client) gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{"status": "success", "deleted_session_id": session})
 	}
 }
+
+// GetSessionHistory retrieves all chat turns for a specific session
+func GetSessionHistory(client *weaviate.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "GetSessionHistory.handler")
+		defer span.End()
+		sessionId := c.Param("sessionId")
+		if sessionId == "" {
+			c.JSON(http.StatusBadRequest,
+				gin.H{"error": "a sessionId is required to resume a session"})
+			return
+		}
+		slog.Info("Received a request for session history", "sessionId", sessionId)
+		// Define the fields to retrieve from the VectorDB Conversation class
+		fields := []graphql.Field{
+			{Name: "question"},
+			{Name: "answer"},
+			{Name: "timestamp"},
+		}
+		// Create a filter to find objects by session_id (defined in the weaviate schema)
+		whereFilter := filters.Where().
+			WithPath([]string{"session_id"}).
+			WithOperator(filters.Equal).
+			WithValueString(sessionId)
+		// Create a sorter to get them in chronological order
+		sortBy := graphql.Sort{
+			Path:  []string{"timestamp"},
+			Order: graphql.Asc,
+		}
+		// Execute the query
+		result, err := client.GraphQL().Get().
+			WithClassName("Conversation").
+			WithWhere(whereFilter).
+			WithSort(sortBy).
+			WithFields(fields...).
+			Do(ctx)
+		if err != nil {
+			slog.Error("failed to query Weaviate for session history", "error", err)
+			span.RecordError(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query history"})
+			return
+		}
+		// Return the raw data (result.Data["Get"]["Conversation"]
+		c.JSON(http.StatusOK, result.Data)
+	}
+}

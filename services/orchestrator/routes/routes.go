@@ -46,6 +46,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		sessions := v1.Group("/sessions")
 		{
 			sessions.GET("", handlers.ListSessions(client))
+			sessions.GET("/:sessionId/history", handlers.GetSessionHistory(client))
 			sessions.DELETE("/:sessionId", handlers.DeleteSessions(client))
 		}
 		// Weaviate administration routes

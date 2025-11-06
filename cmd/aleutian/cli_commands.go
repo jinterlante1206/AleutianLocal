@@ -742,13 +742,43 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 	}
 	orchestratorURL := fmt.Sprintf("http://%s:%d/v1/chat/direct", host,
 		loadedConfig.Services["orchestrator"].Port)
-	messages := []datatypes.Message{
-		{
+	resumeID, _ := cmd.Flags().GetString("resume")
+	messages := []datatypes.Message{}
+	if resumeID != "" {
+		fmt.Printf("Resuming chat session: %s\n", resumeID)
+		historyURL := fmt.Sprintf("http://%s:%d/v1/sessions/%s/history", host,
+			loadedConfig.Services["orchestrator"].Port, resumeID)
+		resp, err := http.Get(historyURL)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			log.Fatalf("Failed to get history for session %s: %v", resumeID, err)
+		}
+		type HistoryTurn struct {
+			Question string `json:"question"`
+			Answer   string `json:"answer"`
+		}
+		var historyResp map[string]map[string][]HistoryTurn
+		if err := json.NewDecoder(resp.Body).Decode(&historyResp); err != nil {
+			resp.Body.Close()
+			log.Fatalf("Failed to parse session history: %v", err)
+		}
+		resp.Body.Close()
+		history, ok := historyResp["Get"]["Conversation"]
+		if !ok {
+			log.Fatalf("No 'Conversation' data found in history response.")
+		}
+		for _, turn := range history {
+			messages = append(messages, datatypes.Message{Role: "user", Content: turn.Question})
+			messages = append(messages, datatypes.Message{Role: "assistant", Content: turn.Answer})
+		}
+		fmt.Printf("Loaded %d previous turns. You can start chatting.\n", len(history))
+
+	} else {
+		fmt.Println("Starting a new chat session (no RAG). Type 'exit' or 'quit' to end.")
+		messages = append(messages, datatypes.Message{
 			Role:    "system",
 			Content: "You are a helpful, technically gifted assistant",
-		},
+		})
 	}
-	// TODO: Add in session, --resume, and state here
 	fmt.Println("starting a new chat session (no RAG). Type 'exit' or 'quit' to end")
 	reader := bufio.NewReader(os.Stdin)
 	for {

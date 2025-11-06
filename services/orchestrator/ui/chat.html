@@ -404,6 +404,74 @@
             setTimeout(connect, 100);
         });
 
+        async function loadSessionHistory(sessionId) {
+            if (!sessionId) return;
+
+            console.log(`Loading history for session: ${sessionId}`);
+            setLoadingState(true);
+
+            // 1. Update global state
+            globalSessionId = sessionId;
+            sessionIdDisplay.textContent = sessionId;
+
+            // 2. Clear the current chat log
+            messageLog.innerHTML = '';
+
+            // 3. Fetch the history from our new endpoint
+            try {
+                const response = await fetch(`/v1/sessions/${sessionId}/history`);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch history: ${response.statusText}`);
+                }
+                const result = await response.json();
+
+                // 4. Re-populate the message log
+                const history = result?.Get?.Conversation || [];
+                if (history.length === 0) {
+                    // If a session has no history (e.g., summary failed), just show the welcome
+                    initWelcomeMessages();
+                    updateMessageLog();
+                } else {
+                    // Clear the chat-specific history cache
+                    chatHistories[currentMode] = [];
+
+                    history.forEach(turn => {
+                        // Add the question and answer from the "Conversation" object
+                        addMessage('user', turn.question);
+                        addMessage('assistant', turn.answer); // 'turn.sources' will be undefined, which is fine
+
+                        // Also rebuild the internal JS history
+                        chatHistories[currentMode].push({ role: 'user', content: turn.question });
+                        chatHistories[currentMode].push({ role: 'assistant', content: turn.answer, sources: [] });
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to load session history:", error);
+                addMessage('assistant', `**Error:** Could not load history for session ${sessionId}.`);
+            } finally {
+                setLoadingState(false);
+                scrollToBottom();
+            }
+        }
+
+        sessionList.addEventListener('click', (e) => {
+            const clickedItem = e.target.closest('.session-item');
+            if (clickedItem && clickedItem.dataset.sessionId) {
+                const sessionIdToLoad = clickedItem.dataset.sessionId;
+
+                // Remove 'active' from all other items
+                sessionList.querySelectorAll('.session-item').forEach(item => {
+                    item.classList.remove('active');
+                });
+
+                // Add 'active' to the clicked item
+                clickedItem.classList.add('active');
+
+                // Load the session
+                loadSessionHistory(sessionIdToLoad);
+            }
+        });
+
         chatForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const query = chatInput.value.trim();
@@ -624,6 +692,7 @@
                         if (index === 0) li.classList.add('active');
                         li.textContent = session.summary;
                         li.title = session.summary + `\n(ID: ${session.session_id})`;
+                        li.dataset.sessionId = session.session_id;
                         sessionList.appendChild(li);
                     });
                 } else {
