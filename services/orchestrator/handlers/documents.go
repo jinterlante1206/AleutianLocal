@@ -29,7 +29,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/textsplitter"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate/graphql"
 	"github.com/weaviate/weaviate/entities/models"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 var (
@@ -57,6 +60,14 @@ type IngestDocumentRequest struct {
 	VersionTag string `json:"version_tag"`
 }
 
+type IngestedDocument struct {
+	ParentSource string `json:"parent_source"`
+	ChunkCount   int    `json:"chunk_count"`
+	DataSpace    string `json:"data_space"`
+	VersionTag   string `json:"version_tag"`
+	IngestedAt   int64  `json:"ingested_at"`
+}
+
 type BatchEmbeddingRequest struct {
 	Texts []string `json:"texts"`
 }
@@ -66,6 +77,32 @@ type BatchEmbeddingResponse struct {
 	Vectors   [][]float32 `json:"vectors"`
 	Model     string      `json:"model"`
 	Dim       int         `json:"dim"`
+}
+
+type gqlAggregateResponse struct {
+	Aggregate struct {
+		Document []struct {
+			GroupedBy struct {
+				Value string `json:"value"`
+			} `json:"groupedBy"`
+			Meta struct {
+				Count float64 `json:"count"`
+			} `json:"meta"`
+			DataSpace struct {
+				TopOccurrences []struct {
+					Value string `json:"value"`
+				} `json:"topOccurrences"`
+			} `json:"data_space"`
+			VersionTag struct {
+				TopOccurrences []struct {
+					Value string `json:"value"`
+				} `json:"topOccurrences"`
+			} `json:"version_tag"`
+			IngestedAt struct {
+				Maximum float64 `json:"maximum"`
+			} `json:"ingested_at"`
+		} `json:"Document"`
+	} `json:"Aggregate"`
 }
 
 // CreateDocument receives data from the CLI and adds it to Weaviate
@@ -96,44 +133,100 @@ func CreateDocument(client *weaviate.Client) gin.HandlerFunc {
 
 // ListDocuments gets a unique list of all ingested 'parent_source' files
 func ListDocuments(client *weaviate.Client) gin.HandlerFunc {
+	tracer := otel.Tracer("aleutian.orchestrator.handlers")
 	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "ListDocuments.handler")
+		defer span.End()
 		slog.Info("Received request to list ingested documents")
 
-		agg, err := client.GraphQL().Aggregate().
+		resp, err := client.GraphQL().Aggregate().
 			WithClassName("Document").
 			WithGroupBy("parent_source").
-			Do(context.Background())
-
+			WithFields(
+				graphql.Field{
+					Name: "meta",
+					Fields: []graphql.Field{
+						{Name: "count"},
+					},
+				},
+				graphql.Field{
+					Name: "data_space",
+					Fields: []graphql.Field{
+						{
+							Name:   "topOccurrences(limit: 1)", // <-- Correct v5 syntax
+							Fields: []graphql.Field{{Name: "value"}},
+						},
+					},
+				},
+				graphql.Field{
+					Name: "version_tag",
+					Fields: []graphql.Field{
+						{
+							Name:   "topOccurrences(limit: 1)", // <-- Correct v5 syntax
+							Fields: []graphql.Field{{Name: "value"}},
+						},
+					},
+				},
+				graphql.Field{
+					Name: "ingested_at",
+					Fields: []graphql.Field{
+						{
+							Name: "maximum",
+						},
+					},
+				},
+			).
+			Do(ctx)
 		if err != nil {
 			slog.Error("Failed to aggregate documents from Weaviate", "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query documents"})
 			return
 		}
 
-		var docList []string
-		fmt.Println("Agg Data", agg)
-
-		// Parse the complex response
-		if agg.Data["Aggregate"] != nil {
-			aggMap, ok := agg.Data["Aggregate"].(map[string]interface{})
-			if ok && aggMap["Document"] != nil {
-				docGroups, ok := aggMap["Document"].([]interface{})
-				if ok {
-					for _, groupItem := range docGroups {
-						groupMap, ok := groupItem.(map[string]interface{})
-						if ok && groupMap["groupedBy"] != nil {
-							groupedByMap, ok := groupMap["groupedBy"].(map[string]interface{})
-							if ok && groupedByMap["value"] != nil {
-								if sourceName, ok := groupedByMap["value"].(string); ok {
-									docList = append(docList, sourceName)
-								}
-							}
-						}
-					}
-				}
-			}
+		// Marshal the raw response data back to JSON
+		rawRespData, err := json.Marshal(resp.Data)
+		if err != nil {
+			slog.Error("Failed to re-marshal weaviate response", "error", err)
+			span.RecordError(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response data"})
+			return
 		}
 
+		// Unmarshal the JSON bytes into our strongly-typed struct
+		var parsedResp gqlAggregateResponse
+		if err := json.Unmarshal(rawRespData, &parsedResp); err != nil {
+			slog.Error("Failed to unmarshal weaviate response into struct", "error", err, "raw_data", string(rawRespData))
+			span.RecordError(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to unmarshal response"})
+			return
+		}
+
+		// Build the final docList from the struct
+		docList := make([]IngestedDocument, 0)
+		getStringValue := func(occurrences []struct {
+			Value string `json:"value"`
+		}) string {
+			if len(occurrences) > 0 {
+				return occurrences[0].Value
+			}
+			return ""
+		}
+		for _, group := range parsedResp.Aggregate.Document {
+			// Filter out the RAG memory chunks from the UI list
+			versionTag := getStringValue(group.VersionTag.TopOccurrences)
+			if versionTag != "chat_memory" {
+				docList = append(docList, IngestedDocument{
+					ParentSource: group.GroupedBy.Value,
+					ChunkCount:   int(group.Meta.Count),
+					DataSpace:    getStringValue(group.DataSpace.TopOccurrences),
+					VersionTag:   versionTag,
+					IngestedAt:   int64(group.IngestedAt.Maximum),
+				})
+			}
+		}
+		slog.Info("Successfully fetched document list", "count", len(docList))
 		c.JSON(http.StatusOK, gin.H{"documents": docList})
 	}
 }

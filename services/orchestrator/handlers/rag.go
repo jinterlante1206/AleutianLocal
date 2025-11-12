@@ -70,10 +70,8 @@ func runRAGLogic(ctx context.Context, client *weaviate.Client, llmClient llm.LLM
 	defer span.End()
 
 	sessionID := req.SessionId
-	isNewSession := false
 	if sessionID == "" {
 		sessionID = uuid.New().String()
-		isNewSession = true
 		slog.Info("New session started", "sessionId", sessionID)
 	}
 
@@ -151,25 +149,6 @@ func runRAGLogic(ctx context.Context, client *weaviate.Client, llmClient llm.LLM
 		answer = ragEngineResp.Answer
 		sources = ragEngineResp.Sources
 	}
-
-	// --- Session & Conversation Saving Logic (applies to both paths) ---
-	// Run this in a goroutine so it doesn't block the user's response
-	go func() {
-		// Save the Conversation turn
-		turn := datatypes.Conversation{
-			SessionId: sessionID,
-			Question:  req.Query,
-			Answer:    answer,
-		}
-		if err := turn.Save(client); err != nil {
-			slog.Warn("Failed to save conversation turn to Weaviate", "error", err, "sessionId", sessionID)
-		}
-
-		// Summarize and save the Session if it's new
-		if isNewSession {
-			SummarizeAndSaveSession(llmClient, client, sessionID, req.Query, answer)
-		}
-	}()
 
 	// Return the final response
 	return datatypes.RAGResponse{
