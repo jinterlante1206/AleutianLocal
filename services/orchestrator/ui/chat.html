@@ -259,9 +259,13 @@
             <div class="sidebar-group documents">
                 <div class="sidebar-header">
                     <h2>Documents</h2>
-                </div>
-                <ul id="document-list" class="sidebar-list">
-                    </ul>
+                <button id="refresh-docs-btn" class="sidebar-header-button" title="Refresh Documents">
+                    <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i>
+                </button>
+            </div>
+            <ul id="doc-list" class="sidebar-list">
+                <li class="sidebar-no-item">No documents</li>
+            </ul>
             </div>
         </div>
 
@@ -311,496 +315,518 @@
             </div>
         </div>
     </div>
-
     <script>
-        lucide.createIcons();
-        const md = window.markdownit({ html: false, linkify: true, typographer: true });
+      document.addEventListener('DOMContentLoaded', () => {
 
-        // --- 1. Get DOM Elements ---
-        const messageLog = document.getElementById('message-log');
-        const chatForm = document.getElementById('chat-form');
-        const chatInput = document.getElementById('chat-input');
-        const chatMode = document.getElementById('chat-mode');
-        const sendButton = document.getElementById('send-button');
-        const thinkingSpinner = document.getElementById('thinking-spinner');
-        const newChatBtn = document.getElementById('new-chat-btn');
-        const sessionList = document.getElementById('session-list');
-        const documentList = document.getElementById('document-list');
-        const sessionIdDisplay = document.getElementById('session-id-display');
-        const currentModeDisplay = document.getElementById('current-mode-display');
-        const fileUploadInput = document.getElementById('file-upload-input');
-        const filePreview = document.getElementById('file-preview');
-        const filePreviewName = document.getElementById('file-preview-name');
-        const clearFileBtn = document.getElementById('clear-file-btn');
+          lucide.createIcons();
+          const md = window.markdownit({ html: false, linkify: true, typographer: true });
 
-        // --- 2. State Management (Frontend) ---
-        let currentMode = chatMode.value;
-        let globalSessionId = null;
-        let ws;
-        let chatHistories = {};
-        let fileToUpload = null;
-        let approvalDataCache = {};
+          // Get DOM Elements
+          const messageLog = document.getElementById('message-log');
+          const chatForm = document.getElementById('chat-form');
+          const chatInput = document.getElementById('chat-input');
+          const chatMode = document.getElementById('chat-mode');
+          const sendButton = document.getElementById('send-button');
+          const thinkingSpinner = document.getElementById('thinking-spinner');
+          const newChatBtn = document.getElementById('new-chat-btn');
+          const sessionList = document.getElementById('session-list');
 
-        function initWelcomeMessages() { /* ... (unchanged) ... */
-            chatHistories = {
-                'chat-rag': [{ role: 'assistant', content: 'Welcome! This is **Chat (with RAG)** mode.', sources: [] }],
-                'chat-no-rag': [{ role: 'assistant', content: 'Welcome! This is **Chat (no RAG)** mode.', sources: [] }],
-                'single-rag': [{ role: 'assistant', content: 'Welcome! This is **Single Prompt (with RAG)** mode.', sources: [] }],
-                'single-no-rag': [{ role: 'assistant', content: 'Welcome! This is **Single Prompt (no RAG)** mode.', sources: [] }]
-            };
-        }
-        initWelcomeMessages();
+          // Corrected the ID to match your HTML ('doc-list')
+          const documentList = document.getElementById('doc-list');
 
-        // --- 3. WebSocket Connection ---
-        const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-        const wsURL = `${wsProtocol}${window.location.host}/v1/chat/ws`;
+          const sessionIdDisplay = document.getElementById('session-id-display');
+          const currentModeDisplay = document.getElementById('current-mode-display');
+          const fileUploadInput = document.getElementById('file-upload-input');
+          const filePreview = document.getElementById('file-preview');
+          const filePreviewName = document.getElementById('file-preview-name');
+          const clearFileBtn = document.getElementById('clear-file-btn');
 
-        function connect() { /* ... (unchanged, still fetches docs/sessions onopen) ... */
-            ws = new WebSocket(wsURL);
-            ws.onopen = () => {
-                console.log("WebSocket connected");
-                sendButton.disabled = false;
-                chatInput.disabled = false;
-                chatInput.focus();
-                updateMessageLog();
-                fetchSessions();
-                fetchDocuments();
-                // Poll for new sessions every 5 seconds
-                setInterval(fetchSessions, 5000);
+          const refreshDocsBtn = document.getElementById('refresh-docs-btn');
 
-                // Poll for new documents every 30 seconds (less frequent)
-                setInterval(fetchDocuments, 30000);
-            };
-            ws.onmessage = (event) => {
-                setLoadingState(false);
-                const resp = JSON.parse(event.data);
-                if (resp.action) { handleAction(resp); } else { handleChat(resp); }
-            };
-            ws.onclose = () => {
-                console.log("WebSocket disconnected.");
-                sendButton.disabled = true;
-                chatInput.disabled = true;
-                if (!globalSessionId) {
-                    addMessage("assistant", "**Connection lost. Attempting to reconnect...**");
-                    setTimeout(connect, 3000);
-                }
-            };
-            ws.onerror = (err) => {
-                console.error("WebSocket error:", err);
-                addMessage("assistant", "**Connection error. Please refresh.**");
-                ws.close();
-            };
-        }
+          // --- State Management (Frontend) ---
+          let currentMode = chatMode.value;
+          let globalSessionId = null;
+          let ws;
+          let chatHistories = {};
+          let fileToUpload = null;
+          let approvalDataCache = {};
 
-        // --- 4. Event Handlers ---
+          function initWelcomeMessages() {
+              chatHistories = {
+                  'chat-rag': [{ role: 'assistant', content: 'Welcome! This is **Chat (with RAG)** mode.', sources: [] }],
+                  'chat-no-rag': [{ role: 'assistant', content: 'Welcome! This is **Chat (no RAG)** mode.', sources: [] }],
+                  'single-rag': [{ role: 'assistant', content: 'Welcome! This is **Single Prompt (with RAG)** mode.', sources: [] }],
+                  'single-no-rag': [{ role: 'assistant', content: 'Welcome! This is **Single Prompt (no RAG)** mode.', sources: [] }]
+              };
+          }
+          initWelcomeMessages();
 
-        newChatBtn.addEventListener('click', () => { /* ... (unchanged) ... */
-            console.log("Starting new chat...");
-            globalSessionId = null;
-            sessionIdDisplay.textContent = "(Connecting...)";
-            initWelcomeMessages();
-            updateMessageLog();
-            ws.close();
-            setTimeout(connect, 100);
-        });
+          // --- WebSocket Connection ---
+          const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+          const wsURL = `${wsProtocol}${window.location.host}/v1/chat/ws`;
 
-        async function loadSessionHistory(sessionId) {
-            if (!sessionId) return;
-
-            console.log(`Loading history for session: ${sessionId}`);
-            setLoadingState(true);
-
-            // 1. Update global state
-            globalSessionId = sessionId;
-            sessionIdDisplay.textContent = sessionId;
-
-            // 2. Clear the current chat log
-            messageLog.innerHTML = '';
-
-            // 3. Fetch the history from our new endpoint
-            try {
-                const response = await fetch(`/v1/sessions/${sessionId}/history`);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch history: ${response.statusText}`);
-                }
-                const result = await response.json();
-
-                // 4. Re-populate the message log
-                const history = result?.Get?.Conversation || [];
-                if (history.length === 0) {
-                    // If a session has no history (e.g., summary failed), just show the welcome
-                    initWelcomeMessages();
-                    updateMessageLog();
-                } else {
-                    // Clear the chat-specific history cache
-                    chatHistories[currentMode] = [];
-
-                    history.forEach(turn => {
-                        // Add the question and answer from the "Conversation" object
-                        addMessage('user', turn.question);
-                        addMessage('assistant', turn.answer); // 'turn.sources' will be undefined, which is fine
-
-                        // Also rebuild the internal JS history
-                        chatHistories[currentMode].push({ role: 'user', content: turn.question });
-                        chatHistories[currentMode].push({ role: 'assistant', content: turn.answer, sources: [] });
-                    });
-                }
-            } catch (error) {
-                console.error("Failed to load session history:", error);
-                addMessage('assistant', `**Error:** Could not load history for session ${sessionId}.`);
-            } finally {
-                setLoadingState(false);
-                scrollToBottom();
-            }
-        }
-
-        sessionList.addEventListener('click', (e) => {
-            const clickedItem = e.target.closest('.session-item');
-            if (clickedItem && clickedItem.dataset.sessionId) {
-                const sessionIdToLoad = clickedItem.dataset.sessionId;
-
-                // Remove 'active' from all other items
-                sessionList.querySelectorAll('.session-item').forEach(item => {
-                    item.classList.remove('active');
-                });
-
-                // Add 'active' to the clicked item
-                clickedItem.classList.add('active');
-
-                // Load the session
-                loadSessionHistory(sessionIdToLoad);
-            }
-        });
-
-        chatForm.addEventListener('submit', (e) => {
-            e.preventDefault();
-            const query = chatInput.value.trim();
-
-            // --- FIX 1: "Hanging Chat" ---
-            // We must read the current mode from the dropdown *inside* this function.
-            const mode = chatMode.value;
-            // --- END OF FIX ---
-
-            if (fileToUpload) {
-                handleFileUpload(fileToUpload);
-                return;
-            }
-
-            if (!query || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-            addMessage("user", query);
-            setLoadingState(true);
-
-            // Now, 'mode' is correctly defined
-            if (mode.startsWith('chat-')) {
-                chatHistories[mode].push({ role: 'user', content: query });
-            }
-
-            let historyForBackend = [];
-            // Use 'mode' (the current selection) not 'currentMode' (which might be stale)
-            if (mode === 'chat-no-rag') {
-                historyForBackend = chatHistories[mode]
-                    .filter(msg => !msg.content.startsWith('Welcome!'))
-                    .map(msg => ({ role: msg.role, content: msg.content }));
-            } else if (mode === 'single-no-rag') {
-                 // For single-no-rag, just send the query, not the welcome
-                 // The backend will add this to an empty list
-                 historyForBackend = [];
-            }
-            // For RAG modes, history is always empty (backend handles it)
-
-            ws.send(JSON.stringify({
-                mode: mode,
-                query: query,
-                history: historyForBackend
-            }));
-
-            chatInput.value = '';
-        });
-
-        // --- New File Upload Handlers ---
-        fileUploadInput.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files[0]) {
-                fileToUpload = e.target.files[0];
-                filePreviewName.textContent = fileToUpload.name;
-                filePreview.classList.remove('hidden');
-                chatInput.placeholder = "Click Send to upload and scan file...";
-                chatInput.disabled = true;
-                sendButton.disabled = false;
-            }
-        });
-
-        // --- FIX 3: "Sticky Bar" ---
-        // Create a dedicated function to clear the file selection UI
-        function clearFileSelection() {
-            fileToUpload = null;
-            fileUploadInput.value = null; // Clear the input
-            filePreview.classList.add('hidden');
-            chatInput.placeholder = "Ask Aleutian anything...";
-            chatInput.disabled = false;
-        }
-
-        // Add click listener to the clear button
-        clearFileBtn.addEventListener('click', clearFileSelection);
-
-        function handleFileUpload(file) {
-            setLoadingState(true);
-            addMessage('user', `Uploading file: \`${file.name}\``);
-
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const base64data = e.target.result.split(',')[1];
-                approvalDataCache[file.name] = base64data;
-
-                ws.send(JSON.stringify({
-                    action: 'file_upload_scan',
-                    filename: file.name,
-                    base64data: base64data
-                }));
-
-                // --- FIX 3: "Sticky Bar" ---
-                // Call the clear function *after* sending the file
-                clearFileSelection();
-            };
-            reader.onerror = (err) => {
-                console.error("Failed to read file:", err);
-                addMessage('assistant', `**Error:** Failed to read file \`${file.name}\``);
-                setLoadingState(false);
-            };
-            reader.readAsDataURL(file);
-        }
-        // --- End of File Upload Handlers ---
-
-        chatMode.addEventListener('change', (e) => {
-            currentMode = e.target.value;
-            currentModeDisplay.textContent = currentMode;
-            updateMessageLog();
-        });
-
-        messageLog.addEventListener('click', (e) => { /* ... (unchanged) ... */
-            const button = e.target.closest('button');
-            if (!button || (!button.classList.contains('approve-btn') && !button.classList.contains('deny-btn'))) {
-                return;
-            }
-            const path = button.dataset.path;
-            const decision = button.classList.contains('approve-btn') ? 'approve' : 'deny';
-            button.parentElement.querySelectorAll('button').forEach(btn => {
-                btn.disabled = true;
-                btn.style.opacity = '0.7';
-            });
-            setLoadingState(true);
-            const base64data = approvalDataCache[path];
-            if (!base64data) {
-                addMessage('assistant', `**Error:** File data cache lost for \`${path}\`. Please upload again.`);
-                setLoadingState(false);
-                return;
-            }
-            ws.send(JSON.stringify({
-                action: 'file_upload_confirm',
-                filename: path,
-                decision: decision,
-                scope: 'global',
-                base64data: base64data
-            }));
-            delete approvalDataCache[path];
-        });
-
-        // --- 5. Logic & UI Functions ---
-
-        function setLoadingState(isLoading) { /* ... (unchanged) ... */
-            if (isLoading) {
-                thinkingSpinner.classList.remove('hidden');
-                sendButton.disabled = true;
-                if(fileToUpload) {
-                    chatInput.disabled = true;
-                }
-            } else {
-                thinkingSpinner.classList.add('hidden');
-                sendButton.disabled = false;
-                // Only re-enable chatInput if a file is NOT selected
-                if (!fileToUpload) {
-                    chatInput.disabled = false;
-                    chatInput.focus();
-                }
-            }
-            scrollToBottom();
-        }
-
-        function handleAction(resp) {
-            setLoadingState(false);
-            switch (resp.action) {
-                case 'session_created':
-                    globalSessionId = resp.sessionId;
-                    sessionIdDisplay.textContent = globalSessionId;
-                    break;
-                case 'populate_approval_required':
-                    if(resp.base64data) {
-                        approvalDataCache[resp.path] = resp.base64data;
-                    }
-                    addApprovalCard(resp.path, resp.findings);
-                    break;
-                case 'populate_ingest':
-                case 'populate_final':
-                    addMessage('assistant', resp.message);
-
-                    if (resp.message && resp.message.includes('Success')) {
-                        setTimeout(fetchDocuments, 1000);
-                    }
-                    break;
-                case 'sessions_updated':
-                  console.log("Server pushed session update, refetching...");
+          function connect() {
+              ws = new WebSocket(wsURL);
+              ws.onopen = () => {
+                  console.log("WebSocket connected");
+                  sendButton.disabled = false;
+                  chatInput.disabled = false;
+                  chatInput.focus();
+                  updateMessageLog();
                   fetchSessions();
-                  break;
-
-                case 'documents_updated':
-                  console.log("Server pushed document update, refetching...");
                   fetchDocuments();
-                  break;
-                default:
-                    console.warn("Received unknown action:", resp);
-            }
-        }
+                  // Poll for new sessions every 5 seconds
+                  setInterval(fetchSessions, 5000);
 
-        function handleChat(resp) { /* ... (unchanged) ... */
-            setLoadingState(false); // This was already here in your file
-            if (resp.error) {
-                addMessage("assistant", `**Error:** ${resp.error}`);
-            } else {
-                addMessage("assistant", resp.answer, resp.sources);
-                if (resp.mode.startsWith('chat-')) {
-                    chatHistories[resp.mode].push({ role: 'assistant', content: resp.answer, sources: resp.sources });
-                }
-                const history = chatHistories[resp.mode] || [];
-                const userMessages = history.filter(m => m.role === 'user').length;
-                if (userMessages === 1) {
-                    console.log("First turn complete, refreshing session list.");
-                    setTimeout(fetchSessions, 500);
-                }
-            }
-        }
+                  // Poll for new documents every 30 seconds (less frequent)
+                  setInterval(fetchDocuments, 30000);
+              };
+              ws.onmessage = (event) => {
+                  setLoadingState(false);
+                  const resp = JSON.parse(event.data);
+                  if (resp.action) { handleAction(resp); } else { handleChat(resp); }
+              };
+              ws.onclose = () => {
+                  console.log("WebSocket disconnected.");
+                  sendButton.disabled = true;
+                  chatInput.disabled = true;
+                  if (!globalSessionId) {
+                      addMessage("assistant", "**Connection lost. Attempting to reconnect...**");
+                      setTimeout(connect, 3000);
+                  }
+              };
+              ws.onerror = (err) => {
+                  console.error("WebSocket error:", err);
+                  addMessage("assistant", "**Connection error. Please refresh.**");
+                  ws.close();
+              };
+          }
 
-        async function fetchSessions() { /* ... (unchanged) ... */
-            try {
-                const response = await fetch('/v1/sessions');
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                const result = await response.json();
-                sessionList.innerHTML = '';
-                if (result.Get && result.Get.Session && result.Get.Session.length > 0) {
-                    result.Get.Session.forEach((session, index) => {
-                        const li = document.createElement('li');
-                        li.className = 'sidebar-item session-item';
-                        if (index === 0) li.classList.add('active');
-                        li.textContent = session.summary;
-                        li.title = session.summary + `\n(ID: ${session.session_id})`;
-                        li.dataset.sessionId = session.session_id;
-                        sessionList.appendChild(li);
-                    });
-                } else {
-                    sessionList.innerHTML = '<li class="sidebar-item" style="color: var(--gray-400); cursor: default;">No past sessions</li>';
-                }
-            } catch (error) {
-                console.error("Failed to fetch sessions:", error);
-                sessionList.innerHTML = '<li class="sidebar-item" style="color: var(--system-red);">Failed to load</li>';
-            }
-        }
+          // --- Event Handlers ---
+          newChatBtn.addEventListener('click', () => {
+              console.log("Starting new chat...");
+              globalSessionId = null;
+              sessionIdDisplay.textContent = "(Connecting...)";
+              initWelcomeMessages();
+              updateMessageLog();
+              if (ws) {
+                 ws.close();
+              }
+              setTimeout(connect, 100);
+          });
 
-        async function fetchDocuments() { /* ... (unchanged) ... */
-            try {
-                const response = await fetch('/v1/documents');
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                const result = await response.json();
-                documentList.innerHTML = '';
-                if (result.documents && result.documents.length > 0) {
-                    result.documents.forEach(doc => {
-                        const li = document.createElement('li');
-                        li.className = 'sidebar-item document-item';
-                        li.textContent = doc;
-                        li.title = doc;
-                        documentList.appendChild(li);
-                    });
-                } else {
-                    documentList.innerHTML = '<li class="sidebar-item" style="color: var(--gray-400); cursor: default;">No documents</li>';
-                }
-            } catch (error) {
-                console.error("Failed to fetch documents:", error);
-                documentList.innerHTML = '<li class="sidebar-item" style="color: var(--system-red);">Failed to load</li>';
-            }
-        }
+          async function loadSessionHistory(sessionId) {
+              if (!sessionId) return;
 
-        function updateMessageLog() { /* ... (unchanged) ... */
-            messageLog.innerHTML = '';
-            const history = chatHistories[currentMode];
-            if (history) {
-                history.forEach(msg => { addMessage(msg.role, msg.content, msg.sources); });
-            }
-            scrollToBottom();
-        }
+              console.log(`Loading history for session: ${sessionId}`);
+              setLoadingState(true);
 
-        function addMessage(role, content, sources = []) { /* ... (unchanged) ... */
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${role}`;
-            const iconName = (role === 'user') ? 'user' : 'brain-circuit';
-            const authorName = (role === 'user') ? 'You' : 'Aleutian AI';
-            let renderedContent = md.render(content);
-            let sourcesHTML = '';
-            if (sources && sources.length > 0) {
-                sourcesHTML = '<div class="sources-box"><h4>Sources</h4><ul class="sources-list">';
-                sources.forEach(source => {
-                    let score = source.score ? `(Score: ${source.score.toFixed(3)})` : (source.distance ? `(Dist: ${source.distance.toFixed(3)})` : '');
-                    sourcesHTML += `<li class="source-item">${source.source} ${score}</li>`;
-                });
-                sourcesHTML += '</ul></div>';
-            }
-            messageDiv.innerHTML = `
-                <div class="message-icon"><i data-lucide="${iconName}"></i></div>
-                <div class="message-content">
-                    <strong>${authorName}</strong>
-                    ${renderedContent}
-                    ${sourcesHTML}
-                </div>`;
-            messageLog.appendChild(messageDiv);
-            lucide.createIcons();
-            scrollToBottom();
-        }
+              // 1. Update global state
+              globalSessionId = sessionId;
+              sessionIdDisplay.textContent = sessionId;
 
-        function addApprovalCard(path, findings) { /* ... (unchanged) ... */
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message assistant';
-            let findingsHTML = '<p>No issues found. Ready to ingest.</p>';
-            if (findings && findings.length > 0) {
-                findingsHTML = `<p>${findings.length} issue(s) found:</p><pre><code>`;
-                findings.forEach(f => {
-                    // Use Go struct keys: f.LineNumber, f.ClassificationName, f.MatchedContent
-                findingsHTML += `[L${f.line_number}] ${f.classification_name}: ${f.matched_content.substring(0, 50)}...\n`;                });
-                findingsHTML += `</code></pre>`;
-            }
-            messageDiv.innerHTML = `
-                <div class="message-icon"><i data-lucide="shield-alert"></i></div>
-                <div class="message-content">
-                    <div class="approval-card">
-                        <h4>Scan Results for <code>${path}</code></h4>
-                        ${findingsHTML}
-                        <div class="approval-buttons">
-                            <button class="approve-btn" data-path="${path}">
-                                <i data-lucide="check-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Approve
-                            </button>
-                            <button class="deny-btn" data-path="${path}">
-                                <i data-lucide="x-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Deny
-                            </button>
-                        </div>
-                    </div>
-                </div>`;
-            messageLog.appendChild(messageDiv);
-            lucide.createIcons();
-            scrollToBottom();
-        }
+              // 2. Clear the current chat log
+              messageLog.innerHTML = '';
 
-        function scrollToBottom() { messageLog.scrollTop = messageLog.scrollHeight; }
+              // 3. Fetch the history from our new endpoint
+              try {
+                  const response = await fetch(`/v1/sessions/${sessionId}/history`);
+                  if (!response.ok) {
+                      throw new Error(`Failed to fetch history: ${response.statusText}`);
+                  }
+                  const result = await response.json();
 
-        // --- 6. Start the application ---
-        sendButton.disabled = true;
-        currentModeDisplay.textContent = currentMode;
-        connect();
-    </script>
+                  // 4. Re-populate the message log
+                  const history = result?.Get?.Conversation || [];
+                  if (history.length === 0) {
+                      // If a session has no history (e.g., summary failed), just show the welcome
+                      initWelcomeMessages();
+                      updateMessageLog();
+                  } else {
+                      // Clear the chat-specific history cache
+                      chatHistories[currentMode] = [];
+
+                      history.forEach(turn => {
+                          // Add the question and answer from the "Conversation" object
+                          addMessage('user', turn.question);
+                          addMessage('assistant', turn.answer); // 'turn.sources' will be undefined, which is fine
+
+                          // Also rebuild the internal JS history
+                          chatHistories[currentMode].push({ role: 'user', content: turn.question });
+                          chatHistories[currentMode].push({ role: 'assistant', content: turn.answer, sources: [] });
+                      });
+                  }
+              } catch (error) {
+                  console.error("Failed to load session history:", error);
+                  addMessage('assistant', `**Error:** Could not load history for session ${sessionId}.`);
+              } finally {
+                  setLoadingState(false);
+                  scrollToBottom();
+              }
+          }
+
+          sessionList.addEventListener('click', (e) => {
+              const clickedItem = e.target.closest('.session-item');
+              if (clickedItem && clickedItem.dataset.sessionId) {
+                  const sessionIdToLoad = clickedItem.dataset.sessionId;
+
+                  // Remove 'active' from all other items
+                  sessionList.querySelectorAll('.session-item').forEach(item => {
+                      item.classList.remove('active');
+                  });
+
+                  // Add 'active' to the clicked item
+                  clickedItem.classList.add('active');
+
+                  // Load the session
+                  loadSessionHistory(sessionIdToLoad);
+              }
+          });
+
+          // --- FIX 3: Add event listener for the new refresh button ---
+          if (refreshDocsBtn) {
+              refreshDocsBtn.addEventListener('click', (e) => {
+                  e.preventDefault(); // Stop any form submission
+                  console.log("Manual refresh of documents triggered...");
+                  fetchDocuments(); // Just call the function we already have
+              });
+          }
+
+          chatForm.addEventListener('submit', (e) => {
+              e.preventDefault();
+              const query = chatInput.value.trim();
+              const mode = chatMode.value;
+
+              if (fileToUpload) {
+                  handleFileUpload(fileToUpload);
+                  return;
+              }
+
+              if (!query || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+              addMessage("user", query);
+              setLoadingState(true);
+
+              if (mode.startsWith('chat-')) {
+                  chatHistories[mode].push({ role: 'user', content: query });
+              }
+
+              let historyForBackend = [];
+              if (mode === 'chat-no-rag') {
+                  historyForBackend = chatHistories[mode]
+                      .filter(msg => !msg.content.startsWith('Welcome!'))
+                      .map(msg => ({ role: msg.role, content: msg.content }));
+              } else if (mode === 'single-no-rag') {
+                   historyForBackend = [];
+              }
+
+              ws.send(JSON.stringify({
+                  mode: mode,
+                  query: query,
+                  history: historyForBackend
+              }));
+
+              chatInput.value = '';
+          });
+
+          fileUploadInput.addEventListener('change', (e) => {
+              if (e.target.files && e.target.files[0]) {
+                  fileToUpload = e.target.files[0];
+                  filePreviewName.textContent = fileToUpload.name;
+                  filePreview.classList.remove('hidden');
+                  chatInput.placeholder = "Click Send to upload and scan file...";
+                  chatInput.disabled = true;
+                  sendButton.disabled = false;
+              }
+          });
+
+          function clearFileSelection() {
+              fileToUpload = null;
+              fileUploadInput.value = null;
+              filePreview.classList.add('hidden');
+              chatInput.placeholder = "Ask Aleutian anything...";
+              chatInput.disabled = false;
+          }
+
+          clearFileBtn.addEventListener('click', clearFileSelection);
+
+          function handleFileUpload(file) {
+              setLoadingState(true);
+              addMessage('user', `Uploading file: \`${file.name}\``);
+
+              const reader = new FileReader();
+              reader.onload = (e) => {
+                  const base64data = e.target.result.split(',')[1];
+                  approvalDataCache[file.name] = base64data;
+
+                  ws.send(JSON.stringify({
+                      action: 'file_upload_scan',
+                      filename: file.name,
+                      base64data: base64data
+                  }));
+
+                  clearFileSelection();
+              };
+              reader.onerror = (err) => {
+                  console.error("Failed to read file:", err);
+                  addMessage('assistant', `**Error:** Failed to read file \`${file.name}\``);
+                  setLoadingState(false);
+              };
+              reader.readAsDataURL(file);
+          }
+
+          chatMode.addEventListener('change', (e) => {
+              currentMode = e.target.value;
+              currentModeDisplay.textContent = currentMode;
+              updateMessageLog();
+          });
+
+          messageLog.addEventListener('click', (e) => {
+              const button = e.target.closest('button');
+              if (!button || (!button.classList.contains('approve-btn') && !button.classList.contains('deny-btn'))) {
+                  return;
+              }
+              const path = button.dataset.path;
+              const decision = button.classList.contains('approve-btn') ? 'approve' : 'deny';
+              button.parentElement.querySelectorAll('button').forEach(btn => {
+                  btn.disabled = true;
+                  btn.style.opacity = '0.7';
+              });
+              setLoadingState(true);
+              const base64data = approvalDataCache[path];
+              if (!base64data) {
+                  addMessage('assistant', `**Error:** File data cache lost for \`${path}\`. Please upload again.`);
+                  setLoadingState(false);
+                  return;
+              }
+              ws.send(JSON.stringify({
+                  action: 'file_upload_confirm',
+                  filename: path,
+                  decision: decision,
+                  scope: 'global',
+                  base64data: base64data
+              }));
+              delete approvalDataCache[path];
+          });
+
+          // --- 6. Logic & UI Functions ---
+
+          function setLoadingState(isLoading) {
+              if (isLoading) {
+                  thinkingSpinner.classList.remove('hidden');
+                  sendButton.disabled = true;
+                  if(fileToUpload) {
+                      chatInput.disabled = true;
+                  }
+              } else {
+                  thinkingSpinner.classList.add('hidden');
+                  sendButton.disabled = false;
+                  if (!fileToUpload) {
+                      chatInput.disabled = false;
+                      chatInput.focus();
+                  }
+              }
+              scrollToBottom();
+          }
+
+          function handleAction(resp) {
+              setLoadingState(false);
+              switch (resp.action) {
+                  case 'session_created':
+                      globalSessionId = resp.sessionId;
+                      sessionIdDisplay.textContent = globalSessionId;
+                      break;
+                  case 'populate_approval_required':
+                      if(resp.base64data) {
+                          approvalDataCache[resp.path] = resp.base64data;
+                      }
+                      addApprovalCard(resp.path, resp.findings);
+                      break;
+                  case 'populate_ingest':
+                  case 'populate_final':
+                      addMessage('assistant', resp.message);
+
+                      if (resp.message && resp.message.includes('Success')) {
+                          setTimeout(fetchDocuments, 1000);
+                      }
+                      break;
+                  case 'sessions_updated':
+                    console.log("Server pushed session update, refetching...");
+                    fetchSessions();
+                    break;
+
+                  case 'documents_updated':
+                    console.log("Server pushed document update, refetching...");
+                    fetchDocuments();
+                    break;
+                  default:
+                      console.warn("Received unknown action:", resp);
+              }
+          }
+
+          function handleChat(resp) {
+              setLoadingState(false);
+              if (resp.error) {
+                  addMessage("assistant", `**Error:** ${resp.error}`);
+              } else {
+                  addMessage("assistant", resp.answer, resp.sources);
+                  if (resp.mode.startsWith('chat-')) {
+                      chatHistories[resp.mode].push({ role: 'assistant', content: resp.answer, sources: resp.sources });
+                  }
+                  const history = chatHistories[resp.mode] || [];
+                  const userMessages = history.filter(m => m.role === 'user').length;
+                  if (userMessages === 1) {
+                      console.log("First turn complete, refreshing session list.");
+                      setTimeout(fetchSessions, 500);
+                  }
+              }
+          }
+
+          async function fetchSessions() {
+              try {
+                  const response = await fetch('/v1/sessions');
+                  if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                  const result = await response.json();
+                  sessionList.innerHTML = '';
+                  if (result.Get && result.Get.Session && result.Get.Session.length > 0) {
+                      result.Get.Session.forEach((session, index) => {
+                          const li = document.createElement('li');
+                          li.className = 'sidebar-item session-item';
+
+                          // Set 'active' on the one that matches our globalSessionId
+                          if (session.session_id === globalSessionId) {
+                               li.classList.add('active');
+                          }
+
+                          li.textContent = session.summary;
+                          li.title = session.summary + `\n(ID: ${session.session_id})`;
+                          li.dataset.sessionId = session.session_id;
+                          sessionList.appendChild(li);
+                      });
+
+                      // If no session is active (e.g., new chat), make the first one active
+                      if (globalSessionId === null && sessionList.firstChild) {
+                          sessionList.firstChild.classList.add('active');
+                          // And update the global state to match
+                          globalSessionId = sessionList.firstChild.dataset.sessionId;
+                          sessionIdDisplay.textContent = globalSessionId;
+                      }
+
+                  } else {
+                      sessionList.innerHTML = '<li class="sidebar-item" style="color: var(--gray-400); cursor: default;">No past sessions</li>';
+                  }
+              } catch (error) {
+                  console.error("Failed to fetch sessions:", error);
+                  sessionList.innerHTML = '<li class="sidebar-item" style="color: var(--system-red);">Failed to load</li>';
+              }
+          }
+
+          // --- FIX 4: Corrected fetchDocuments to parse the object ---
+          async function fetchDocuments() {
+              if (!documentList) {
+                   console.error("fetchDocuments: documentList element not found. Aborting.");
+                   return; // Stop execution if the element doesn't exist
+              }
+              try {
+                  const response = await fetch('/v1/documents');
+                  if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                  const result = await response.json();
+                  documentList.innerHTML = ''; // Clear the list
+
+                  if (result.documents && result.documents.length > 0) {
+                      result.documents.forEach(doc => { // 'doc' is now an object
+                          const li = document.createElement('li');
+                          li.className = 'sidebar-item document-item';
+                          // Use the object properties
+                          li.textContent = `[${doc.chunk_count}] ${doc.parent_source}`;
+                          li.title = `Source: ${doc.parent_source}\nChunks: ${doc.chunk_count}\nSpace: ${doc.data_space}`;
+                          documentList.appendChild(li);
+                      });
+                  } else {
+                      documentList.innerHTML = '<li class="sidebar-no-item">No documents</li>';
+                  }
+              } catch (error) {
+                  console.error("Failed to fetch documents:", error);
+                  documentList.innerHTML = '<li class="sidebar-item" style="color: var(--system-red);">Failed to load</li>';
+              }
+          }
+
+          function updateMessageLog() {
+              messageLog.innerHTML = '';
+              const history = chatHistories[currentMode];
+              if (history) {
+                  history.forEach(msg => { addMessage(msg.role, msg.content, msg.sources); });
+              }
+              scrollToBottom();
+          }
+
+          function addMessage(role, content, sources = []) {
+              const messageDiv = document.createElement('div');
+              messageDiv.className = `message ${role}`;
+              const iconName = (role === 'user') ? 'user' : 'brain-circuit';
+              const authorName = (role === 'user') ? 'You' : 'Aleutian AI';
+              let renderedContent = md.render(content);
+              let sourcesHTML = '';
+              if (sources && sources.length > 0) {
+                  sourcesHTML = '<div class="sources-box"><h4>Sources</h4><ul class="sources-list">';
+                  sources.forEach(source => {
+                      let score = source.score ? `(Score: ${source.score.toFixed(3)})` : (source.distance ? `(Dist: ${source.distance.toFixed(3)})` : '');
+                      sourcesHTML += `<li class="source-item">${source.source} ${score}</li>`;
+                  });
+                  sourcesHTML += '</ul></div>';
+              }
+              messageDiv.innerHTML = `
+                  <div class="message-icon"><i data-lucide="${iconName}"></i></div>
+                  <div class="message-content">
+                      <strong>${authorName}</strong>
+                      ${renderedContent}
+                      ${sourcesHTML}
+                  </div>`;
+              messageLog.appendChild(messageDiv);
+              lucide.createIcons();
+              scrollToBottom();
+          }
+
+          function addApprovalCard(path, findings) {
+              const messageDiv = document.createElement('div');
+              messageDiv.className = 'message assistant';
+              let findingsHTML = '<p>No issues found. Ready to ingest.</p>';
+              if (findings && findings.length > 0) {
+                  findingsHTML = `<p>${findings.length} issue(s) found:</p><pre><code>`;
+                  findings.forEach(f => {
+                  findingsHTML += `[L${f.line_number}] ${f.classification_name}: ${f.matched_content.substring(0, 50)}...\n`;
+                  });
+                  findingsHTML += `</code></pre>`;
+              }
+              messageDiv.innerHTML = `
+                  <div class="message-icon"><i data-lucide="shield-alert"></i></div>
+                  <div class="message-content">
+                      <div class="approval-card">
+                          <h4>Scan Results for <code>${path}</code></h4>
+                          ${findingsHTML}
+                          <div class="approval-buttons">
+                              <button class="approve-btn" data-path="${path}">
+                                  <i data-lucide="check-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Approve
+                              </button>
+                              <button class="deny-btn" data-path="${path}">
+                                  <i data-lucide="x-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Deny
+                              </button>
+                          </div>
+                      </div>
+                  </div>`;
+              messageLog.appendChild(messageDiv);
+              lucide.createIcons();
+              scrollToBottom();
+          }
+
+          function scrollToBottom() { messageLog.scrollTop = messageLog.scrollHeight; }
+
+          // --- 7. Start the application ---
+          sendButton.disabled = true;
+          currentModeDisplay.textContent = currentMode;
+          connect();
+
+      }); // <-- FIX 1: Close the DOMContentLoaded wrapper
+      </script>
 </body>
 </html>
