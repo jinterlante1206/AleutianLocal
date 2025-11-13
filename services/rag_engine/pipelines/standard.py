@@ -33,37 +33,23 @@ class StandardRAGPipeline(BaseRAGPipeline):
     async def _search_weaviate_initial(self, query_vector: list[float], session_id: str | None = None) -> list[dict]:
         """
         Performs Parent Document Retrieval with session-aware filtering.
-            1. Creates a filter for "default" docs OR "session_id" docs.
+            1. Creates a filter for "Global" docs OR "Session" docs.
             2. Finds the most relevant child chunks using this filter.
             3. Gets their unique parent_source ID.
             4. Retrieves all chunks for those parent documents for the full context.
         """
-        # --- SIGNATURE MODIFIED to accept session_id ---
         if not query_vector: return []
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
 
-            # --- NEW FILTER LOGIC ---
-            # 1. Always filter for default documents
-            filter_docs = wvc.query.Filter.by_property("data_space").equal("default")
-
-            combined_filter = None
-            if session_id:
-                # 2. If a session_id is provided, also filter for its memory
-                logger.info(f"Applying session memory filter for: {session_id}")
-                filter_memory = wvc.query.Filter.by_property("data_space").equal(session_id)
-                # 3. Combine them with an OR
-                combined_filter = wvc.query.Filter.any_of([filter_docs, filter_memory])
-            else:
-                # 4. Otherwise, just use the default filter
-                combined_filter = filter_docs
-            # --- END NEW FILTER LOGIC ---
+            # Get the session-aware filter from the base class
+            combined_filter = self._get_session_aware_filter(session_id)
 
             # 1. Find the most relevant child chunks
             response = documents_collection.query.near_vector(
                 near_vector=query_vector,
                 limit=self.search_limit, # differs from reranking which uses top k (e.g.20) this uses top 3
-                filters=combined_filter, # <-- ADDED FILTER
+                filters=combined_filter,
                 return_metadata=wvc.query.MetadataQuery(distance=True),
                 return_properties=["content", "source", "parent_source"]
             )

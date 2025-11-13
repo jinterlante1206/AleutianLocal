@@ -110,7 +110,10 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 					contentBytes, err := base64.StdEncoding.DecodeString(req.Base64Data)
 					if err != nil {
 						slog.Error("Failed to decode Base64 data for scanning", "filename", req.Filename, "error", err)
-						sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "Error: Invalid file data."})
+						err := sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "Error: Invalid file data."})
+						if err != nil {
+							return
+						}
 						continue
 					}
 
@@ -142,7 +145,7 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 							DataSpace:  "default",
 							VersionTag: "latest",
 						}
-						go runWebSocketIngestion(ws, client, ingestReq)
+						go runWebSocketIngestion(ws, client, ingestReq, sessionID, req.Scope)
 					}
 
 				case "file_upload_confirm":
@@ -150,7 +153,10 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 					contentBytes, err := base64.StdEncoding.DecodeString(req.Base64Data)
 					if err != nil {
 						slog.Error("Failed to decode Base64 data for ingestion", "filename", req.Filename, "error", err)
-						sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "Error: Invalid file data."})
+						err := sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "Error: Invalid file data."})
+						if err != nil {
+							return
+						}
 						continue
 					}
 
@@ -175,12 +181,18 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 							DataSpace:  "default",
 							VersionTag: "latest",
 						}
-						go runWebSocketIngestion(ws, client, ingestReq)
-						sendJSON(ws, map[string]interface{}{"action": "populate_ingest", "message": "✅ Approved. Ingesting `" + req.Filename + "`..."})
+						go runWebSocketIngestion(ws, client, ingestReq, sessionID, req.Scope)
+						err := sendJSON(ws, map[string]interface{}{"action": "populate_ingest", "message": "✅ Approved. Ingesting `" + req.Filename + "`..."})
+						if err != nil {
+							return
+						}
 
 					} else {
 						slog.Info("User denied ingestion", "filename", req.Filename)
-						sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "❌ Cancelled by user. Ingestion of `" + req.Filename + "` aborted."})
+						err := sendJSON(ws, map[string]interface{}{"action": "populate_final", "message": "❌ Cancelled by user. Ingestion of `" + req.Filename + "` aborted."})
+						if err != nil {
+							return
+						}
 					}
 				}
 				continue
@@ -248,7 +260,18 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 
 // runWebSocketIngestion is a helper to run the ingestion in a goroutine
 // and report success or failure back to the WebSocket client.
-func runWebSocketIngestion(ws *websocket.Conn, client *weaviate.Client, ingestReq IngestDocumentRequest) {
+func runWebSocketIngestion(ws *websocket.Conn, client *weaviate.Client,
+	ingestReq IngestDocumentRequest, sessionID string, scope string) {
+
+	if scope == "session" && sessionID != "" {
+		// This is a session-scoped document. Get the Weaviate UUID for the link.
+		sessionUUID, err := datatypes.FindOrCreateSessionUUID(context.Background(), client, sessionID)
+		if err != nil {
+			slog.Error("Failed to find or create parent session for document ingestion", "error", err, "sessionID", sessionID)
+		} else {
+			ingestReq.SessionUUID = sessionUUID
+		}
+	}
 
 	chunks, err := RunIngestion(context.Background(), client, ingestReq)
 	if err != nil {
@@ -264,8 +287,9 @@ func runWebSocketIngestion(ws *websocket.Conn, client *weaviate.Client, ingestRe
 
 	slog.Info("WebSocket ingestion successful", "path", ingestReq.Source, "chunks", chunks)
 	if err = sendJSON(ws, map[string]interface{}{
-		"action":  "populate_final",
-		"message": fmt.Sprintf("🎉 **Success!** Ingested `%s` (%d chunks).", ingestReq.Source, chunks),
+		"action": "populate_final",
+		"message": fmt.Sprintf("🎉 **Success!** Ingested `%s` (%d chunks).",
+			ingestReq.Source, chunks),
 	}); err != nil {
 		return
 	}
@@ -296,5 +320,6 @@ func logFindingsToFile(findings []policy_engine.ScanFinding) {
 			slog.Warn("Failed to write finding to audit log", "error", err)
 		}
 	}
-	slog.Info("Successfully wrote findings to audit log", "count", len(findings), "path", logFilePath)
+	slog.Info("Successfully wrote findings to audit log", "count", len(findings), "path",
+		logFilePath)
 }

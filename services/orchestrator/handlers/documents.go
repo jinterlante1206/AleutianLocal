@@ -54,10 +54,11 @@ var (
 )
 
 type IngestDocumentRequest struct {
-	Content    string `json:"content"`
-	Source     string `json:"source"`
-	DataSpace  string `json:"data_space"`
-	VersionTag string `json:"version_tag"`
+	Content     string `json:"content"`
+	Source      string `json:"source"`
+	DataSpace   string `json:"data_space"`
+	VersionTag  string `json:"version_tag"`
+	SessionUUID string `json:"session_id"`
 }
 
 type IngestedDocument struct {
@@ -277,20 +278,28 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 		hash := sha256.Sum256([]byte(chunk))
 		docUUID, _ := uuid.FromBytes(hash[:16])
 		docId := docUUID.String()
+		properties := map[string]interface{}{
+			"content":       chunk,
+			"source":        chunkSource,
+			"parent_source": req.Source,
+			"data_space":    req.DataSpace,
+			"version_tag":   req.VersionTag,
+			"ingested_at":   time.Now().UnixMilli(),
+		}
+		if req.SessionUUID != "" {
+			beacon := map[string]interface{}{
+				"beacon": fmt.Sprintf("weaviate://localhost/Session/%s", req.SessionUUID),
+			}
+			properties["inSession"] = []map[string]interface{}{beacon}
+		}
 
 		objects[i] = &models.Object{
-			Class:  "Document",
-			ID:     strfmt.UUID(docId),
-			Vector: vectors[i],
-			Properties: map[string]interface{}{
-				"content":       chunk,
-				"source":        chunkSource,
-				"parent_source": req.Source,
-				"data_space":    req.DataSpace,
-				"version_tag":   req.VersionTag,
-				"ingested_at":   time.Now().UnixMilli(),
-			},
+			Class:      "Document",
+			ID:         strfmt.UUID(docId),
+			Vector:     vectors[i],
+			Properties: properties,
 		}
+
 	}
 
 	batcher.WithObjects(objects...)

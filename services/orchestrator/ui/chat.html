@@ -582,12 +582,12 @@
           });
 
           messageLog.addEventListener('click', (e) => {
-              const button = e.target.closest('button');
-              if (!button || (!button.classList.contains('approve-btn') && !button.classList.contains('deny-btn'))) {
-                  return;
-              }
+              const button = e.target.closest('button[data-decision]');
+              if (!button) return; 
+
               const path = button.dataset.path;
-              const decision = button.classList.contains('approve-btn') ? 'approve' : 'deny';
+              const decision = button.dataset.decision;
+
               button.parentElement.querySelectorAll('button').forEach(btn => {
                   btn.disabled = true;
                   btn.style.opacity = '0.7';
@@ -599,11 +599,21 @@
                   setLoadingState(false);
                   return;
               }
+              let finalDecision = "deny";
+              let scope = "global";
+
+              if (decision === "approve-session") {
+                  finalDecision = "approve";
+                  scope = "session";
+              } else if (decision === "approve-global") {
+                  finalDecision = "approve";
+                  scope = "global";
+              }
               ws.send(JSON.stringify({
                   action: 'file_upload_confirm',
                   filename: path,
-                  decision: decision,
-                  scope: 'global',
+                  decision: finalDecision,
+                  scope: scope,
                   base64data: base64data
               }));
               delete approvalDataCache[path];
@@ -805,11 +815,14 @@
                           <h4>Scan Results for <code>${path}</code></h4>
                           ${findingsHTML}
                           <div class="approval-buttons">
-                              <button class="approve-btn" data-path="${path}">
-                                  <i data-lucide="check-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Approve
+                              <button class="approve-btn" data-decision="approve-session" data-path="${path}">
+                                  <i data-lucide="check" style="width:14px; height:14px;"></i> Approve (This Session)
                               </button>
-                              <button class="deny-btn" data-path="${path}">
-                                  <i data-lucide="x-circle" style="width:14px; height:14px; vertical-align: text-bottom;"></i> Deny
+                              <button class="approve-btn" style="background-color: var(--brand-default);" data-decision="approve-global" data-path="${path}">
+                                  <i data-lucide="globe" style="width:14px; height:14px;"></i> Approve (Global)
+                              </button>
+                              <button class="deny-btn" data-decision="deny" data-path="${path}">
+                                  <i data-lucide="x-circle" style="width:14px; height:14px;"></i> Deny
                               </button>
                           </div>
                       </div>

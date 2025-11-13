@@ -27,12 +27,12 @@ type sessionQueryResponse struct {
 	} `json:"Get"`
 }
 
-// findOrCreateSessionUUID finds a session by its session_id and returns its Weaviate UUID
+// FindOrCreateSessionUUID finds a session by its session_id and returns its Weaviate UUID
 // If it doesn't exist, it creates one and returns the new UUID
-func findOrCreateSessionUUID(ctx context.Context, client *weaviate.Client,
+func FindOrCreateSessionUUID(ctx context.Context, client *weaviate.Client,
 	sessionID string) (string, error) {
 
-	ctx, span := convTracer.Start(ctx, "findOrCreateSessionUUID")
+	ctx, span := convTracer.Start(ctx, "FindOrCreateSessionUUID")
 	defer span.End()
 
 	// 1. Try to find the existing session
@@ -108,7 +108,7 @@ func (c *Conversation) Save(client *weaviate.Client) error {
 	slog.Info("Saving the conversation to Weaviate", "sessionId", c.SessionId)
 
 	parentCtx := context.Background()
-	sessionUUID, err := findOrCreateSessionUUID(parentCtx, client, c.SessionId)
+	sessionUUID, err := FindOrCreateSessionUUID(parentCtx, client, c.SessionId)
 	if err != nil {
 		slog.Error(
 			"Failed to find or create parent session, saving conversation without graph link",
