@@ -17,6 +17,15 @@ func GetDocumentSchema() *models.Class {
 		Class:       "Document",
 		Description: "A document containing text content and its source.",
 		Vectorizer:  "none",
+		InvertedIndexConfig: &models.InvertedIndexConfig{
+			Bm25:                   nil,
+			CleanupIntervalSeconds: 0,
+			IndexNullState:         true,
+			IndexPropertyLength:    false,
+			IndexTimestamps:        true,
+			Stopwords:              nil,
+			UsingBlockMaxWAND:      false,
+		},
 		Properties: []*models.Property{
 			{
 				Name:         "content",
@@ -54,8 +63,15 @@ func GetDocumentSchema() *models.Class {
 			},
 			{
 				Name:            "ingested_at",
-				DataType:        []string{"number"}, // <-- CHANGED from "int" to "number" for int64
+				DataType:        []string{"number"},
 				Description:     "Timestamp (Unix ms) of when the chunk was ingested.",
+				IndexFilterable: indexFilterable,
+			},
+			{
+				Name:     "inSession",
+				DataType: []string{"Session"},
+				Description: "A direct graph link to the parent Session object (" +
+					"if this is a session-scoped document)",
 				IndexFilterable: indexFilterable,
 			},
 		},
@@ -70,6 +86,15 @@ func GetConversationSchema() *models.Class {
 		Class:       "Conversation",
 		Description: "A record of a user question and the AI's answer.",
 		Vectorizer:  "none",
+		InvertedIndexConfig: &models.InvertedIndexConfig{
+			Bm25:                   nil,
+			CleanupIntervalSeconds: 0,
+			IndexNullState:         true,
+			IndexPropertyLength:    false,
+			IndexTimestamps:        true,
+			Stopwords:              nil,
+			UsingBlockMaxWAND:      false,
+		},
 		Properties: []*models.Property{
 			{
 				Name:            "session_id",
@@ -91,13 +116,13 @@ func GetConversationSchema() *models.Class {
 			},
 			{
 				Name:            "timestamp",
-				DataType:        []string{"number"}, // <-- CHANGED from "int" to "number"
+				DataType:        []string{"number"},
 				Description:     "The timestamp of the conversation action.",
 				IndexFilterable: indexFilterable,
 			},
 			{
 				Name:            "inSession",
-				DataType:        []string{"Session"}, // This is the cross-reference
+				DataType:        []string{"Session"},
 				Description:     "A direct graph link to the parent Session object.",
 				IndexFilterable: indexFilterable,
 			},
@@ -110,9 +135,10 @@ func GetSessionSchema() *models.Class {
 	*indexFilterable = true
 
 	return &models.Class{
-		Class:       "Session",
-		Description: "Metadata for a single conversation session, including a summary",
-		Vectorizer:  "none",
+		Class:               "Session",
+		Description:         "Metadata for a single conversation session, including a summary",
+		Vectorizer:          "none",
+		InvertedIndexConfig: &models.InvertedIndexConfig{IndexTimestamps: true},
 		Properties: []*models.Property{
 			{
 				Name:            "session_id",
@@ -140,8 +166,8 @@ func GetSessionSchema() *models.Class {
 func EnsureWeaviateSchema(client *weaviate.Client) {
 	// A list of functions that return our schema definitions.
 	schemaGetters := []func() *models.Class{
-		GetDocumentSchema,
 		GetSessionSchema,
+		GetDocumentSchema,
 		GetConversationSchema,
 	}
 
