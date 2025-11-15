@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/textsplitter"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/graphql"
 	"github.com/weaviate/weaviate/entities/models"
 	"go.opentelemetry.io/otel"
@@ -139,9 +140,14 @@ func ListDocuments(client *weaviate.Client) gin.HandlerFunc {
 		ctx, span := tracer.Start(c.Request.Context(), "ListDocuments.handler")
 		defer span.End()
 		slog.Info("Received request to list ingested documents")
+		globalDocsFilter := filters.Where().
+			WithPath([]string{"inSession"}).
+			WithOperator(filters.IsNull).
+			WithValueBoolean(true)
 
 		resp, err := client.GraphQL().Aggregate().
 			WithClassName("Document").
+			WithWhere(globalDocsFilter).
 			WithGroupBy("parent_source").
 			WithFields(
 				graphql.Field{

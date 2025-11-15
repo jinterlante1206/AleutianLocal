@@ -15,6 +15,11 @@ import (
 func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string) {
 	slog.Info("Saving chat turn to Document class for RAG memory", "sessionId", sessionId)
 
+	sessionUUID, err := datatypes.FindOrCreateSessionUUID(context.Background(), client, sessionId)
+	if err != nil {
+		slog.Error("Failed to find parent session for memory chunk, aborting save.", "sessionId", sessionId, "error", err)
+		return
+	}
 	// 1. Format the content just like your RAG pipeline would expect.
 	content := fmt.Sprintf("User: %s\nAI: %s", question, answer)
 
@@ -31,6 +36,9 @@ func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string
 	// We use the existing Document schema fields
 	parentSource := fmt.Sprintf("session_memory_%s", sessionId)
 	source := fmt.Sprintf("%s_ts_%d", parentSource, time.Now().UnixMilli())
+	beacon := map[string]interface{}{
+		"beacon": fmt.Sprintf("weaviate://localhost/Session/%s", sessionUUID),
+	}
 
 	properties := map[string]interface{}{
 		"content":       content,
@@ -39,10 +47,11 @@ func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string
 		"data_space":    sessionId,
 		"version_tag":   "chat_memory",
 		"ingested_at":   time.Now().UnixMilli(),
+		"inSession":     beacon,
 	}
 
 	// 4. Save to Weaviate *with* the vector.
-	_, err := client.Data().Creator().
+	_, err = client.Data().Creator().
 		WithClassName("Document").
 		WithProperties(properties).
 		WithVector(embResp.Vector).
