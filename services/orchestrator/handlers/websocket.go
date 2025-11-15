@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -247,6 +248,9 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 						SummarizeAndSaveSession(llmClient, client, sessionID, req.Query, resp.Answer)
 					}
 				}(isFirstTurn)
+			}
+			if resp.Error == "" && strings.TrimSpace(resp.Answer) == "" {
+				resp.Answer = "(The model returned an empty response. This may be because 'no RAG' mode is active and the model has no context.)"
 			}
 
 			err := sendJSON(ws, resp)
