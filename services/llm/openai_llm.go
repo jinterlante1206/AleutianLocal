@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/sashabaranov/go-openai"
@@ -18,17 +17,10 @@ type OpenAIClient struct {
 
 func NewOpenAIClient() (*OpenAIClient, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
-	model := os.Getenv("OPENAI_MODEL") // e.g., "gpt-4o"
+	model := os.Getenv("OPENAI_MODEL")
 	if apiKey == "" {
-		secretPath := "/run/secrets/openai_api_key"
-		apiKeyBytes, err := os.ReadFile(secretPath)
-		if err == nil {
-			apiKey = strings.TrimSpace(string(apiKeyBytes))
-			slog.Info("Read the OpenAI API Key from Podman Secrets")
-		} else {
-			slog.Error("OPENAI_API_KEY environment variable not set and secret not found", "path", secretPath)
-			return nil, fmt.Errorf("OPENAI_API_KEY environment variable not set")
-		}
+		slog.Warn("OpenAI API Key is empty. OpenAI Client will not function.")
+		return nil, fmt.Errorf("OpenAI API key is missing")
 	}
 	if model == "" {
 		model = "gpt-4o-mini"

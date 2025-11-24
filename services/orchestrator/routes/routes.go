@@ -42,6 +42,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient, policyEngine))
 		v1.POST("/timeseries/forecast", handlers.HandleTimeSeriesForecast())
 		v1.POST("/data/fetch", handlers.HandleDataFetch())
+		v1.POST("/models/pull", handlers.HandleModelPull())
 		// Session administration routes
 		sessions := v1.Group("/sessions")
 		{

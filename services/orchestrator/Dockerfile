@@ -23,7 +23,12 @@ WORKDIR /app
 RUN apk update && \
     apk add --no-cache \
         git \
-        curl
+        curl \
+        python3 \
+        py3-pip
+
+RUN pip3 install --no-cache-dir --break-system-packages "huggingface_hub[cli]>=0.26.0"
+RUN hf version
 
 # Copy only the compiled binary from the builder stage
 COPY --from=builder /app/orchestrator .

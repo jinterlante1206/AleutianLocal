@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +65,35 @@ type DirectChatRequest struct {
 }
 type DirectChatResponse struct {
 	Answer string `json:"answer"`
+}
+
+type SecretDefinition struct {
+	Name        string
+	DisplayName string
+	Description string
+}
+
+var requiredSecrets = []SecretDefinition{
+	{
+		Name:        "aleutian_hf_token",
+		DisplayName: "Hugging Face Token",
+		Description: "Required for downloading gated models (Llama-3, Pyannote, etc).",
+	},
+	{
+		Name:        "openai_api_key",
+		DisplayName: "OpenAI API Key",
+		Description: "Required if you select 'openai' as your LLM backend.",
+	},
+	{
+		Name:        "anthropic_api_key",
+		DisplayName: "Anthropic API Key",
+		Description: "Required if you select 'claude' as your LLM backend.",
+	},
+	{
+		Name:        "google_api_key",
+		DisplayName: "Google Gemini API Key",
+		Description: "Required if you select 'gemini' as your LLM backend.",
+	},
 }
 
 var (
@@ -242,6 +272,46 @@ var (
 		Args:  cobra.ExactArgs(1),
 		Run:   runUploadBackups,
 	}
+
+	timeseriesCmd = &cobra.Command{
+		Use:   "timeseries",
+		Short: "timeseries data and forecasting commands",
+	}
+
+	fetchDataCmd = &cobra.Command{
+		Use:     "fetch [tickers]",
+		Short:   "Fetch historical data for tickers (comma separated). Uses the Yahoo Finance API",
+		Example: "aleutian timeseries fetch SPY,QQQ --days 365",
+		Args:    cobra.ExactArgs(1),
+		Run:     runFetchData,
+	}
+
+	forecastCmd = &cobra.Command{
+		Use:     "forecast [ticker]",
+		Short:   "Run a time-series forecast on a ticker",
+		Example: "aleutian timeseries forecast SPY --model timesfm-2.0 --horizon 20",
+		Args:    cobra.ExactArgs(1),
+		Run:     runForecast,
+	}
+	fetchDays       int
+	forecastModel   string
+	forecastHorizon int
+	forecastContext int
+
+	// --- Model caching utility ---
+	pullModelCmd = &cobra.Command{
+		Use:   "pull [model_id]",
+		Short: "Instructs the Orchestrator to download a specific model",
+		Args:  cobra.ExactArgs(1),
+		Run:   runPullModel,
+	}
+
+	cacheAllCmd = &cobra.Command{
+		Use:   "cache-all [json_file]",
+		Short: "Iterates through a JSON list and requests the Orchestrator to cache them all",
+		Args:  cobra.ExactArgs(1),
+		Run:   runCacheAll,
+	}
 )
 
 // init() runs when the Go program starts
@@ -291,6 +361,19 @@ func init() {
 	rootCmd.AddCommand(uploadCmd)
 	uploadCmd.AddCommand(uploadLogsCmd)
 	uploadCmd.AddCommand(uploadBackupsCmd)
+
+	rootCmd.AddCommand(timeseriesCmd)
+
+	timeseriesCmd.AddCommand(fetchDataCmd)
+	fetchDataCmd.Flags().IntVar(&fetchDays, "days", 365, "Number of days of history to fetch")
+
+	timeseriesCmd.AddCommand(forecastCmd)
+	forecastCmd.Flags().StringVar(&forecastModel, "model", "google/timesfm-2.0-500m-pytorch", "Model ID to use")
+	forecastCmd.Flags().IntVar(&forecastHorizon, "horizon", 20, "Forecast horizon (days)")
+	forecastCmd.Flags().IntVar(&forecastContext, "context", 300, "Context window size (days)")
+
+	rootCmd.AddCommand(pullModelCmd)
+	rootCmd.AddCommand(cacheAllCmd)
 }
 
 func loadConfigFromStackDir(stackDir string) (Config, error) {
@@ -1372,10 +1455,10 @@ func runPodmanCompose(stackDir string, args ...string) error {
 
 func runStart(cmd *cobra.Command, args []string) {
 	cliVersion := rootCmd.Version
-	if cliVersion == "dev" || cliVersion == "" {
-		log.Println("Warning: CLI version is 'dev' or empty. Trying to download from 'main' branch tarball.")
-		log.Fatalf("Cannot reliably download stack files for 'dev' version. Please use a tagged release.")
-	}
+	//if cliVersion == "dev" || cliVersion == "" {
+	//	log.Println("Warning: CLI version is 'dev' or empty. Trying to download from 'main' branch tarball.")
+	//	log.Fatalf("Cannot reliably download stack files for 'dev' version. Please use a tagged release.")
+	//}
 	stackDir, err := ensureStackDir(cliVersion)
 	if err != nil {
 		log.Fatalf("Failed to prepare stack directory: %v", err)
@@ -1387,6 +1470,14 @@ func runStart(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to load configuration after setup: %v", err)
 	}
+	// Ensure secrets exist before asking Podman to build
+	fmt.Println("--- Checking Secrets ---")
+	for _, secret := range requiredSecrets {
+		if !ensureSecretExists(secret) {
+			log.Fatalf("Failed to verify secret: %s. Cannot proceed.", secret.Name)
+		}
+	}
+	fmt.Println("------------------------")
 	// Pass stackDir to runPodmanCompose
 	err = runPodmanCompose(stackDir, "up", "-d", "--build")
 	if err != nil {
@@ -1624,8 +1715,194 @@ func runWeaviateDeleteDoc(cmd *cobra.Command, args []string) {
 	fmt.Printf("Chunks Removed: %.0f\n", deleteResp["chunks_deleted"])
 }
 
+func runFetchData(cmd *cobra.Command, args []string) {
+	stackDir, _ := getStackDir()
+	cfg, _ := loadConfigFromStackDir(stackDir)
+	host := "localhost"
+	if cfg.Target != "local" {
+		host = cfg.ServerHost
+	}
+
+	tickers := strings.Split(args[0], ",")
+	// Calculate start date based on days
+	startDate := time.Now().AddDate(0, 0, -fetchDays).Format("2006-01-02")
+
+	fmt.Printf("Fetching data for %v (starting %s)...\n", tickers, startDate)
+
+	payload := map[string]interface{}{
+		"names":      tickers,
+		"start_date": startDate,
+		"interval":   "1d",
+	}
+
+	url := fmt.Sprintf("http://%s:%d/v1/data/fetch", host, cfg.Services["orchestrator"].Port)
+	resp := sendPostRequest(url, payload)
+	fmt.Println(resp)
+}
+
+func runForecast(cmd *cobra.Command, args []string) {
+	stackDir, _ := getStackDir()
+	cfg, _ := loadConfigFromStackDir(stackDir)
+	host := "localhost"
+	if cfg.Target != "local" {
+		host = cfg.ServerHost
+	}
+
+	ticker := args[0]
+	fmt.Printf("Forecasting %s using %s...\n", ticker, forecastModel)
+
+	payload := map[string]interface{}{
+		"name":                 ticker,
+		"context_period_size":  forecastContext,
+		"forecast_period_size": forecastHorizon,
+		"model":                forecastModel, // Uses the new routing logic!
+	}
+
+	url := fmt.Sprintf("http://%s:%d/v1/timeseries/forecast", host, cfg.Services["orchestrator"].Port)
+	resp := sendPostRequest(url, payload)
+
+	// Pretty print the forecast
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(resp), &result); err == nil {
+		if forecast, ok := result["forecast"].([]interface{}); ok {
+			fmt.Printf("\nForecast for %s:\n", ticker)
+			fmt.Printf("%v\n", forecast)
+		} else {
+			fmt.Println("Response:", resp)
+		}
+	} else {
+		fmt.Println("Response:", resp)
+	}
+}
+
+// Helper for cleaner code
+func sendPostRequest(url string, payload interface{}) string {
+	jsonBody, _ := json.Marshal(payload)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
+}
+
 type SessionInfo struct {
 	SessionId string `json:"session_id"`
 	Summary   string `json:"summary"`
 	Timestamp int64  `json:"timestamp"`
+}
+
+// Define the structures matching your JSON file
+type ModelListJSON struct {
+	ModelList []struct {
+		Name            string `json:"name"`
+		HuggingFaceLink string `json:"huggingface_link"`
+	} `json:"model_list"`
+}
+
+func runPullModel(cmd *cobra.Command, args []string) {
+	modelID := args[0]
+	triggerDownload(modelID)
+}
+
+func runCacheAll(cmd *cobra.Command, args []string) {
+	jsonPath := args[0]
+	byteValue, err := os.ReadFile(jsonPath)
+	if err != nil {
+		log.Fatalf("Failed to read JSON file: %v", err)
+	}
+
+	var list ModelListJSON
+	if err := json.Unmarshal(byteValue, &list); err != nil {
+		log.Fatalf("Failed to parse JSON: %v", err)
+	}
+
+	// Regex to extract URL from Markdown links [link](url)
+	re := regexp.MustCompile(`\((https://huggingface\.co/[^)]+)\)`)
+
+	for _, item := range list.ModelList {
+		matches := re.FindStringSubmatch(item.HuggingFaceLink)
+		if len(matches) < 2 {
+			continue
+		}
+		fullURL := matches[1]
+		if strings.Contains(fullURL, "/papers/") {
+			continue // Skip papers
+		}
+
+		// Clean ID: https://huggingface.co/org/repo -> org/repo
+		repoID := strings.TrimPrefix(fullURL, "https://huggingface.co/")
+		repoID = strings.Split(repoID, "?")[0]
+		repoID = strings.TrimSuffix(repoID, "/")
+
+		fmt.Printf("Processing %s (%s)...\n", item.Name, repoID)
+		triggerDownload(repoID)
+	}
+}
+
+func triggerDownload(modelID string) {
+	// Load config to find Orchestrator URL
+	stackDir, _ := getStackDir()
+	cfg, _ := loadConfigFromStackDir(stackDir)
+	host := "localhost"
+	if cfg.Target != "local" {
+		host = cfg.ServerHost
+	}
+
+	url := fmt.Sprintf("http://%s:%d/v1/models/pull", host, cfg.Services["orchestrator"].Port)
+
+	payload := map[string]string{"model_id": modelID}
+	jsonBody, _ := json.Marshal(payload)
+
+	fmt.Printf("Requesting download for %s... ", modelID)
+	client := &http.Client{Timeout: 30 * time.Minute} // Long timeout for downloads
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonBody))
+
+	if err != nil {
+		fmt.Printf("Connection Failed: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		fmt.Println("Success")
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("Failed (Status %d): %s\n", resp.StatusCode, string(body))
+	}
+}
+
+func ensureSecretExists(def SecretDefinition) bool {
+	// 1. Check if secret exists in Podman
+	cmd := exec.Command("podman", "secret", "exists", def.Name)
+	if err := cmd.Run(); err == nil {
+		return true // Secret exists, do nothing
+	}
+
+	// 2. Secret is missing. Prompt the user.
+	fmt.Printf("\nMissing secret: %s (%s)\n", def.DisplayName, def.Name)
+	fmt.Printf("   %s\n", def.Description)
+	fmt.Print("   Paste key (or press Enter to skip/leave empty): ")
+
+	reader := bufio.NewReader(os.Stdin)
+	token, _ := reader.ReadString('\n')
+	token = strings.TrimSpace(token)
+
+	// 3. Create the secret
+	// IMPORTANT: We MUST create the secret object even if the value is empty.
+	// Podman Compose will fail to start if 'external: true' is set but the secret ID doesn't exist.
+	createCmd := exec.Command("sh", "-c", fmt.Sprintf("printf '%s' | podman secret create %s -", token, def.Name))
+
+	if out, err := createCmd.CombinedOutput(); err != nil {
+		log.Printf("Failed to create secret %s: %v\nOutput: %s", def.Name, err, string(out))
+		return false
+	}
+
+	if token == "" {
+		fmt.Printf("   Created empty placeholder for %s.\n", def.Name)
+	} else {
+		fmt.Printf("   %s stored successfully.\n", def.DisplayName)
+	}
+	return true
 }

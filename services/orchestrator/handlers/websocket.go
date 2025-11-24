@@ -223,7 +223,9 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 				messages := req.History
 				messages = append(messages, datatypes.Message{Role: "user", Content: req.Query})
 
-				params := llm.GenerationParams{}
+				params := llm.GenerationParams{
+					Stop: []string{"\nUser:", "\nQuestion:", "\nAleutian AI:", "[USER}"},
+				}
 				answer, llmErr := llmClient.Chat(ctx, messages, params)
 				if llmErr != nil {
 					resp.Error = llmErr.Error()

@@ -140,7 +140,16 @@ func (o *OllamaClient) Generate(ctx context.Context, prompt string,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-
+		if resp.StatusCode == http.StatusNotFound {
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(respBodyBytes, &errResp); err == nil && strings.Contains(errResp.Error, "model") && strings.Contains(errResp.Error, "not found") {
+				slog.Warn("Ollama model not found", "model", o.model)
+				// Return a specific, user-friendly error
+				return "", fmt.Errorf("model '%s' not found. Please run: 'ollama pull %s'", o.model, o.model)
+			}
+		}
 		slog.Error("Ollama returned an error", "status_code", resp.StatusCode, "response", string(respBodyBytes))
 		return "", fmt.Errorf("Ollama failed with status %d: %s", resp.StatusCode, string(respBodyBytes))
 	}

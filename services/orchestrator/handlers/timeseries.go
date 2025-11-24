@@ -12,11 +12,13 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -26,24 +28,180 @@ import (
 // Create a new tracer
 var timeseriesTracer = otel.Tracer("aleutian.orchestrator.handlers")
 
+// Request structure to inspect just the routing key
+type TimeSeriesRoutingRequest struct {
+	Model string `json:"model"`
+}
+
+// normalizeModelName converts a display name or huggingface ID to a standard "slug"
+// e.g.: "Chronos T5 (Tiny)" -> "chronos-t5-tiny"
+func normalizeModelName(input string) string {
+	// Lowercase everything
+	s := strings.ToLower(input)
+	// Remove the prefix
+	if idx := strings.LastIndex(s, "/"); idx != -1 {
+		s = s[idx+1:]
+	}
+	// Remove non-alphanumeric characters except hyphens
+	reg := regexp.MustCompile("[^a-z0-9]+")
+	s = reg.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	return s
+}
+
+// Helper to resolve the target URL based on the model name
+func getSerivceURL(modelName string) (string, error) {
+	// Default URL (the primary container)
+	defaultURL := os.Getenv("ALEUTIAN_TIMESERIES_TOOL")
+	if defaultURL == "" {
+		defaultURL = "http://forecast-primary:8000"
+	}
+	if modelName == "" {
+		slog.Error("Model Name was not set")
+		return defaultURL, nil
+	}
+	// normalize the model name
+	slug := normalizeModelName(modelName)
+
+	// Check for a specific Env Variable Override for the IP for a specific model
+	envVarKey := fmt.Sprintf("TIMESERIES_SERVICE_%S", strings.ReplaceAll(strings.ToUpper(slug),
+		"-", "_"))
+	if override := os.Getenv(envVarKey); override != "" {
+		slog.Info("Using environment override for model", "model", modelName, "url", override)
+		return override, nil
+	}
+
+	// Dynamic Routing Logic
+	// You can map specific model names to specific container service names here in Podman,
+	// the host is the container name.
+	switch slug {
+	// --- AMAZON CHRONOS ---
+	case "chronos-t5-tiny":
+		return "http://forecast-chronos-t5-tiny:8000", nil
+	case "chronos-t5-mini":
+		return "http://forecast-chronos-t5-mini:8000", nil
+	case "chronos-t5-small":
+		return "http://forecast-chronos-t5-small:8000", nil
+	case "chronos-t5-base":
+		return "http://forecast-chronos-t5-base:8000", nil
+	case "chronos-t5-large":
+		return "http://forecast-chronos-t5-large:8000", nil
+	case "chronos-bolt-mini":
+		return "http://forecast-chronos-bolt-mini:8000", nil
+	case "chronos-bolt-small":
+		return "http://forecast-chronos-bolt-small:8000", nil
+	case "chronos-bolt-base":
+		return "http://forecast-chronos-bolt-base:8000", nil
+
+	// --- GOOGLE TIMESFM ---
+	case "timesfm-1-0":
+		return "http://forecast-timesfm-1-0:8000", nil
+	case "timesfm-2-0":
+		return "http://forecast-timesfm-2-0:8000", nil
+	case "timesfm-2-5":
+		return "http://forecast-timesfm-2-5:8000", nil
+
+	// --- SALESFORCE MOIRAI ---
+	case "moirai-1-1-small":
+		return "http://forecast-moirai-1-1-small:8000", nil
+	case "moirai-1-1-base":
+		return "http://forecast-moirai-1-1-base:8000", nil
+	case "moirai-1-1-large":
+		return "http://forecast-moirai-1-1-large:8000", nil
+	case "moirai-2-0-small":
+		return "http://forecast-moirai-2-0-small:8000", nil
+	// (Added compatibility for older 1.0 slugs if needed)
+	case "moirai-1-0-small":
+		return "http://forecast-moirai-1-0-small:8000", nil
+
+	// --- IBM GRANITE ---
+	case "granite-ttm-r1":
+		return "http://forecast-granite-ttm-r1:8000", nil
+	case "granite-ttm-r2":
+		return "http://forecast-granite-ttm-r2:8000", nil
+	case "granite-flowstate":
+		return "http://forecast-granite-flowstate:8000", nil
+	case "granite-patchtsmixer":
+		return "http://forecast-granite-patchtsmixer:8000", nil
+	case "granite-patchtst":
+		return "http://forecast-granite-patchtst:8000", nil
+
+	// --- AUTONLAB MOMENT ---
+	case "moment-small":
+		return "http://forecast-moment-small:8000", nil
+	case "moment-base":
+		return "http://forecast-moment-base:8000", nil
+	case "moment-large":
+		return "http://forecast-moment-large:8000", nil
+
+	// --- ALIBABA YINGLONG ---
+	case "yinglong-6m":
+		return "http://forecast-yinglong-6m:8000", nil
+	case "yinglong-50m":
+		return "http://forecast-yinglong-50m:8000", nil
+	case "yinglong-110m":
+		return "http://forecast-yinglong-110m:8000", nil
+	case "yinglong-300m":
+		return "http://forecast-yinglong-300m:8000", nil
+
+	// --- MISC / SINGLE MODELS ---
+	case "lag-llama":
+		return "http://forecast-lag-llama:8000", nil
+	case "kairos-10m":
+		return "http://forecast-kairos-10m:8000", nil
+	case "kairos-50m":
+		return "http://forecast-kairos-50m:8000", nil
+	case "timemoe-200m":
+		return "http://forecast-timemoe-200m:8000", nil
+	case "timer":
+		return "http://forecast-timer:8000", nil
+	case "sundial":
+		return "http://forecast-sundial:8000", nil
+	case "toto":
+		return "http://forecast-toto:8000", nil
+	case "falcon-tst":
+		return "http://forecast-falcon-tst:8000", nil
+	case "tempopfn":
+		return "http://forecast-tempopfn:8000", nil
+	case "forecastpfn":
+		return "http://forecast-forecastpfn:8000", nil
+	case "chattime":
+		return "http://forecast-chattime:8000", nil
+	case "opencity":
+		return "http://forecast-opencity:8000", nil
+	case "units":
+		return "http://forecast-units:8000", nil
+
+	// --- EARTH / WEATHER ---
+	case "prithvi-2-0-eo":
+		return "http://forecast-prithvi-2-0-eo:8000", nil
+	case "atmorep":
+		return "http://forecast-atmorep:8000", nil
+	case "earthpt":
+		return "http://forecast-earthpt:8000", nil
+	case "graphcast":
+		return "http://forecast-graphcast:8000", nil
+	case "fourcastnet":
+		return "http://forecast-fourcastnet:8000", nil
+	case "pangu-weather":
+		return "http://forecast-pangu-weather:8000", nil
+	case "climax":
+		return "http://forecast-climax:8000", nil
+
+	default:
+		slog.Warn("Unknown model requested, falling back to default", "model", modelName,
+			"slug", slug)
+		return defaultURL, nil
+	}
+}
+
 // HandleTimeSeriesForecast proxies requests to the Python timeseries-analysis-service
 func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 	return func(c *gin.Context) {
 		ctx, span := timeseriesTracer.Start(c.Request.Context(), "HandleTimeSeriesForecast")
 		defer span.End()
 
-		// 1. Get the URL from the environment
-		// --- READ THE NEW ENV VAR ---
-		serviceURL := os.Getenv("ALEUTIAN_TIMESERIES_TOOL")
-		if serviceURL == "" {
-			slog.Error("ALEUTIAN_TIMESERIES_TOOL env var not set")
-			span.RecordError(fmt.Errorf("ALEUTIAN_TIMESERIES_TOOL not set"))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Time Series service not configured"})
-			return
-		}
-		targetURL := fmt.Sprintf("%s/v1/timeseries/forecast", serviceURL)
-
-		// 2. Read the raw request body
+		// Read the raw request body
 		reqBodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			slog.Error("Failed to read request body", "error", err)
@@ -52,10 +210,21 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 			return
 		}
 
+		// Peek at the "model" field
+		var routingReq TimeSeriesRoutingRequest
+		_ = json.Unmarshal(reqBodyBytes, &routingReq)
+		baseURL, err := getSerivceURL(routingReq.Model)
+		if err != nil {
+			slog.Error("Routing error", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Service configuration error"})
+			return
+		}
+		targetURL := fmt.Sprintf("%s/v1/timeseries/forecast", baseURL)
+		slog.Info("Proxying time series forecast request", "target_url", targetURL)
+
 		// 3. Create and send the proxy request
 		slog.Info("Proxying time series forecast request", "target_url", targetURL)
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(reqBodyBytes))
-		// ... (rest of the function is identical) ...
 		if err != nil {
 			slog.Error("Failed to create request for time series service", "error", err)
 			span.RecordError(err)

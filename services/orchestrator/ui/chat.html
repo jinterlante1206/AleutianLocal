@@ -568,6 +568,9 @@
               currentModeDisplay.textContent = currentMode;
               // Call our new visibility function
               updateSidebarDocVisibility(currentMode);
+              if (currentMode.includes('no-rag') && fileToUpload) {
+                clearFileSelection();
+              }
           });
 
           // Handle clicking on a session in the list
