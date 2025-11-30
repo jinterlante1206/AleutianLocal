@@ -17,7 +17,7 @@ type OpenAIClient struct {
 
 func NewOpenAIClient() (*OpenAIClient, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
-	model := os.Getenv("OPENAI_MODEL")
+	model := os.Getenv("OPENAI_MODEL") // e.g., "gpt-4o"
 	if apiKey == "" {
 		slog.Warn("OpenAI API Key is empty. OpenAI Client will not function.")
 		return nil, fmt.Errorf("OpenAI API key is missing")

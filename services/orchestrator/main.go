@@ -141,7 +141,10 @@ func main() {
 	case "ollama":
 		globalLLMClient, err = llm.NewOllamaClient()
 		slog.Info("Using Ollama LLM backend")
-	// TODO: add cases for "gemini", "huggingface", "anthropic", etc.
+	case "claude", "anthropic":
+		globalLLMClient, err = llm.NewAnthropicClient()
+		slog.Info("Using Anthropic (Claude) LLM backend")
+	// TODO: add cases for "gemini", "huggingface", etc.
 	default:
 		slog.Warn("LLM_BACKEND_TYPE not set or invalid, defaulting to local")
 		globalLLMClient, err = llm.NewLocalLlamaCppClient()

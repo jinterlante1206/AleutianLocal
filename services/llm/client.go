@@ -7,11 +7,14 @@ import (
 )
 
 type GenerationParams struct {
-	Temperature *float32 `json:"temperature"`
-	TopK        *int     `json:"top_k"`
-	TopP        *float32 `json:"top_p"`
-	MaxTokens   *int     `json:"max_tokens"`
-	Stop        []string `json:"stop"`
+	Temperature     *float32      `json:"temperature"`
+	TopK            *int          `json:"top_k"`
+	TopP            *float32      `json:"top_p"`
+	MaxTokens       *int          `json:"max_tokens"`
+	Stop            []string      `json:"stop"`
+	ToolDefinitions []interface{} `json:"tools,omitempty"`
+	EnableThinking  bool          `json:"thinking,omitempty"`
+	BudgetTokens    int           `json:"budget_tokens,omitempty"`
 }
 
 // LLMClient defines the standard interface for any LLM backend

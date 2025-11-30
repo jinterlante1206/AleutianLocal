@@ -14,7 +14,10 @@ import (
 var chatTracer = otel.Tracer("aleutian.orchestrator.handlers")
 
 type DirectChatRequest struct {
-	Messages []datatypes.Message `json:"messages"`
+	Messages       []datatypes.Message `json:"messages"`
+	EnableThinking bool                `json:"enable_thinking"` // New
+	BudgetTokens   int                 `json:"budget_tokens"`   // New
+	Tools          []interface{}       `json:"tools"`           // New
 }
 
 func HandleDirectChat(llmClient llm.LLMClient) gin.HandlerFunc {
@@ -35,15 +38,11 @@ func HandleDirectChat(llmClient llm.LLMClient) gin.HandlerFunc {
 			return
 		}
 
-		// TODO: Pass params from the request if needed
-		//params := llm.GenerationParams{
-		//	Temperature: nil,
-		//	TopK:        nil,
-		//	TopP:        nil,
-		//	MaxTokens:   nil,
-		//	Stop:        nil,
-		//}
-		params := llm.GenerationParams{}
+		params := llm.GenerationParams{
+			EnableThinking:  req.EnableThinking,
+			BudgetTokens:    req.BudgetTokens,
+			ToolDefinitions: req.Tools,
+		}
 		answer, err := llmClient.Chat(ctx, req.Messages, params)
 		if err != nil {
 			span.RecordError(err)

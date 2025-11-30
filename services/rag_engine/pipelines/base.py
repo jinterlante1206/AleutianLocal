@@ -215,7 +215,7 @@ class BaseRAGPipeline:
 
         # Read secrets needed for different backends
         self.openai_api_key = self._read_secret("openai_api_key")
-        # self.anthropic_api_key = self._read_secret("anthropic_api_key")
+        self.anthropic_api_key = self._read_secret("anthropic_api_key")
 
         # --- Validation ---
         if not self.embedding_url:
@@ -376,7 +376,34 @@ class BaseRAGPipeline:
         logger.debug(f"Calling LLM backend: {self.llm_backend}")
 
         # --- Backend Specific Logic with Params ---
-        if self.llm_backend == "ollama":
+        if self.llm_backend in ["claude", "anthropic"]:
+            if not self.anthropic_api_key:
+                raise ValueError("Anthropic API key secret not configured")
+
+            api_url = "https://api.anthropic.com/v1/messages"
+            headers = {
+                "x-api-key": self.anthropic_api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
+
+            # Note: For RAG, we treat the whole prompt as the user message for now.
+            # To use "Prompt Caching" effectively, you would need to split
+            # the 'context' out into a 'system' block here.
+            payload = {
+                "model": os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20240620"),
+                "max_tokens": self.default_llm_params["max_tokens"],
+                "messages": [{"role": "user", "content": prompt}]
+            }
+
+            # Example: Basic "Thinking" support for RAG
+            if os.getenv("ENABLE_THINKING") == "true":
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": int(os.getenv("THINKING_BUDGET", 2048))
+                }
+                payload["temperature"] = None  # Required for thinking
+        elif self.llm_backend == "ollama":
             api_url = f"{self.llm_url}/api/generate"
             payload = {
                 "model": self.ollama_model,
