@@ -61,8 +61,12 @@ type ConvertResponse struct {
 }
 
 type DirectChatRequest struct {
-	Messages []datatypes.Message `json:"messages"`
+	Messages       []datatypes.Message `json:"messages"`
+	EnableThinking bool                `json:"enable_thinking"`
+	BudgetTokens   int                 `json:"budget_tokens"`
+	Tools          []interface{}       `json:"tools"`
 }
+
 type DirectChatResponse struct {
 	Answer string `json:"answer"`
 }
@@ -219,6 +223,8 @@ var (
 		Long:  `Initiates a persistent, interactive chat session. A session ID is created and used for all subsequent messages to maintain conversation context.`,
 		Run:   runChatCommand,
 	}
+	enableThinking bool
+	budgetTokens   int
 
 	// Weaviate Administration commands
 	weaviateCmd = &cobra.Command{
@@ -312,6 +318,13 @@ var (
 		Args:  cobra.ExactArgs(1),
 		Run:   runCacheAll,
 	}
+
+	traceCmd = &cobra.Command{
+		Use:   "trace [query]",
+		Short: "Analyze codebase using autonomous agent",
+		Args:  cobra.MinimumNArgs(1),
+		Run:   runTraceCommand,
+	}
 )
 
 // init() runs when the Go program starts
@@ -347,6 +360,8 @@ func init() {
 	// chat command
 	rootCmd.AddCommand(chatCmd)
 	chatCmd.Flags().String("resume", "", "Resume a conversation using a specific session ID.")
+	chatCmd.Flags().BoolVar(&enableThinking, "thinking", false, "Enable Extended Thinking (Claude only)")
+	chatCmd.Flags().IntVar(&budgetTokens, "budget", 2048, "Token budget for thinking (default 2048)")
 
 	// weaviate administration commands
 	rootCmd.AddCommand(weaviateCmd)
@@ -374,6 +389,7 @@ func init() {
 
 	rootCmd.AddCommand(pullModelCmd)
 	rootCmd.AddCommand(cacheAllCmd)
+	rootCmd.AddCommand(traceCmd)
 }
 
 func loadConfigFromStackDir(stackDir string) (Config, error) {
@@ -877,7 +893,11 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 		}
 		// ---- add the user's message to the history ----
 		messages = append(messages, datatypes.Message{Role: "user", Content: input})
-		reqBody := DirectChatRequest{Messages: messages}
+		reqBody := DirectChatRequest{
+			Messages:       messages,
+			EnableThinking: enableThinking, // Pass the flag value
+			BudgetTokens:   budgetTokens,   // Pass the flag value
+		}
 		postBody, err := json.Marshal(reqBody)
 		if err != nil {
 			fmt.Printf("Error: failed to create the chat request: %v", err)
@@ -888,22 +908,37 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 		resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
 		if err != nil {
 			fmt.Printf("failed to send the request to the orchestrator: %v", err)
+			// FIX: Remove the last user message so we don't have a hanging user message without an assistant reply
+			if len(messages) > 0 {
+				messages = messages[:len(messages)-1]
+			}
 			continue
 		}
 		defer resp.Body.Close()
 		bodyBytes, _ := io.ReadAll(resp.Body)
 
 		if resp.StatusCode != http.StatusOK {
-			fmt.Printf("error: Orchestrator returned status %d: %s\n", http.StatusOK,
+			fmt.Printf("error: Orchestrator returned status %d: %s\n", resp.StatusCode,
 				string(bodyBytes))
-			messages = messages[:len(messages)-1] // remove the last failed message from the context
+			if len(messages) > 0 {
+				messages = messages[:len(messages)-1]
+			}
 			continue
 		}
 		// ---- parse the response and add it to the chat history ----
 		var chatResp DirectChatResponse
 		if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
 			fmt.Printf("Failed to parse the chat response: %v", err)
-			messages = messages[:len(messages)-1]
+			if len(messages) > 0 {
+				messages = messages[:len(messages)-1]
+			}
+			continue
+		}
+		if chatResp.Answer == "" {
+			fmt.Println("Error: Received empty response from Orchestrator.")
+			if len(messages) > 0 {
+				messages = messages[:len(messages)-1]
+			}
 			continue
 		}
 		messages = append(messages, datatypes.Message{Role: "assistant", Content: chatResp.Answer})
@@ -1439,7 +1474,13 @@ func runPodmanCompose(stackDir string, args ...string) error {
 	fmt.Printf("Executing: podman-compose %s (in %s)\n", strings.Join(args, " "), stackDir)
 
 	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
-	cmdArgs := append([]string{"-f", composeFilePath}, args...)
+	overrideFilePath := filepath.Join(stackDir, "podman-compose.override.yml")
+	fileArgs := []string{"-f", composeFilePath}
+	if _, err := os.Stat(overrideFilePath); err == nil {
+		fileArgs = append(fileArgs, "-f", overrideFilePath)
+		fmt.Println("    (Including podman-compose.override.yml)")
+	}
+	cmdArgs := append(fileArgs, args...)
 
 	cmd := exec.Command("podman-compose", cmdArgs...)
 	cmd.Dir = stackDir
@@ -1905,4 +1946,39 @@ func ensureSecretExists(def SecretDefinition) bool {
 		fmt.Printf("   %s stored successfully.\n", def.DisplayName)
 	}
 	return true
+}
+
+func runTraceCommand(cmd *cobra.Command, args []string) {
+	query := strings.Join(args, " ")
+	fmt.Printf("🕵️  Agent analyzing codebase for: %s\n", query)
+	fmt.Println("(This may take a moment while the agent reads files...)")
+
+	stackDir, _ := getStackDir()
+	config, _ := loadConfigFromStackDir(stackDir)
+
+	host := "localhost" // Simplification
+	url := fmt.Sprintf("http://%s:%d/v1/agent/trace", host, config.Services["orchestrator"].Port)
+
+	payload, _ := json.Marshal(map[string]string{"query": query})
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
+
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	// Parse result (Answer + Steps)
+	var result map[string]interface{}
+	json.Unmarshal(body, &result)
+
+	fmt.Printf("\n📝 Answer:\n%s\n", result["answer"])
+
+	fmt.Println("\nSteps Taken:")
+	steps := result["steps"].([]interface{})
+	for _, s := range steps {
+		step := s.(map[string]interface{})
+		fmt.Printf("- Called %s(%s)\n", step["tool"], step["args"])
+	}
 }

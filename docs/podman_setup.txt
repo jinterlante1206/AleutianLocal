@@ -1,0 +1,12 @@
+# 1. Stop the broken machine
+podman machine stop
+
+# 2. Remove it
+podman machine rm
+# (Press 'y' to confirm)
+
+# We map /Users to /Users AND /Volumes to /Volumes
+podman machine init --cpus 6 --memory 20480 --disk-size 100 -v /Users:/Users -v /Volumes:/Volumes
+
+# 4. Start it
+podman machine start

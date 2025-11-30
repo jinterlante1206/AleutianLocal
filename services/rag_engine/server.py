@@ -31,7 +31,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
-from pipelines import standard, reranking
+from pipelines import standard, reranking, agent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -237,6 +237,25 @@ async def run_reranking_rag(request: RAGEngineRequest):
 
 # TODO: add RIG
 
+
+class AgentRequest(BaseModel):
+    query: str
+
+
+@app.post("/agent/trace")
+async def run_agent_trace(request: AgentRequest):
+    logger.info(f"Received Agent Trace request: {request.query}")
+    if not weaviate_client or not weaviate_client.is_connected():
+        raise HTTPException(status_code=503, detail="Weaviate client not connected")
+
+    try:
+        # Instantiate the Agent Pipeline
+        pipeline = agent.AgentPipeline(weaviate_client, pipeline_config)
+        answer, steps = await pipeline.run_trace(request.query)
+        return {"answer": answer, "steps": steps}
+    except Exception as e:
+        logger.error(f"Agent error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 def health_check():
