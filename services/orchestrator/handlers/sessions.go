@@ -11,6 +11,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -86,5 +87,120 @@ func DeleteSessions(client *weaviate.Client) gin.HandlerFunc {
 		slog.Info("successfully deleted objects from the Weaviate DB", "response", &response.Output)
 		slog.Info("Successfully deleted all data for session", "sessionId", session)
 		c.JSON(http.StatusOK, gin.H{"status": "success", "deleted_session_id": session})
+	}
+}
+
+// GetSessionHistory retrieves all chat turns for a specific session
+func GetSessionHistory(client *weaviate.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "GetSessionHistory.handler")
+		defer span.End()
+		sessionId := c.Param("sessionId")
+		if sessionId == "" {
+			c.JSON(http.StatusBadRequest,
+				gin.H{"error": "a sessionId is required to resume a session"})
+			return
+		}
+		slog.Info("Received a request for session history", "sessionId", sessionId)
+		// Define the fields to retrieve from the VectorDB Conversation class
+		fields := []graphql.Field{
+			{Name: "question"},
+			{Name: "answer"},
+			{Name: "timestamp"},
+		}
+		// Create a filter to find objects by session_id (defined in the weaviate schema)
+		whereFilter := filters.Where().
+			WithPath([]string{"session_id"}).
+			WithOperator(filters.Equal).
+			WithValueString(sessionId)
+		// Create a sorter to get them in chronological order
+		sortBy := graphql.Sort{
+			Path:  []string{"timestamp"},
+			Order: graphql.Asc,
+		}
+		// Execute the query
+		result, err := client.GraphQL().Get().
+			WithClassName("Conversation").
+			WithWhere(whereFilter).
+			WithSort(sortBy).
+			WithFields(fields...).
+			Do(ctx)
+		if err != nil {
+			slog.Error("failed to query Weaviate for session history", "error", err)
+			span.RecordError(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query history"})
+			return
+		}
+		// Return the raw data (result.Data["Get"]["Conversation"]
+		c.JSON(http.StatusOK, result.Data)
+	}
+}
+
+// GetSessionDocuments pulls the non-global/session scoped documents
+func GetSessionDocuments(client *weaviate.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "GetSessionDocuments.handler")
+		defer span.End()
+		sessionId := c.Param("sessionId")
+		if sessionId == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "sessionId is required"})
+			return
+		}
+		slog.Info("Received a request for session documents", "sessionId", sessionId)
+
+		whereFilter := filters.Where().
+			WithPath([]string{"inSession", "Session", "session_id"}).
+			WithOperator(filters.Equal).
+			WithValueString(sessionId)
+
+		resp, err := client.GraphQL().Aggregate().
+			WithClassName("Document").
+			WithWhere(whereFilter).
+			WithGroupBy("parent_source").
+			WithFields(
+				graphql.Field{Name: "meta", Fields: []graphql.Field{
+					{Name: "count"},
+				}}).
+			Do(ctx)
+		if err != nil {
+			slog.Error("Failed to aggregate session documents", "error", err)
+			span.RecordError(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query session documents"})
+			return
+		}
+
+		// --- Minimal parser for this specific aggregation ---
+		var parsedResp struct {
+			Aggregate struct {
+				Document []struct {
+					GroupedBy struct {
+						Value string `json:"value"`
+					} `json:"groupedBy"`
+					Meta struct {
+						Count float64 `json:"count"`
+					} `json:"meta"`
+				} `json:"Document"`
+			} `json:"Aggregate"`
+		}
+
+		rawRespData, _ := json.Marshal(resp.Data)
+		if err := json.Unmarshal(rawRespData, &parsedResp); err != nil {
+			slog.Error("Failed to unmarshal session documents response", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response"})
+			return
+		}
+
+		// Build the final list
+		docList := make([]map[string]interface{}, 0)
+		for _, group := range parsedResp.Aggregate.Document {
+			docList = append(docList, map[string]interface{}{
+				"parent_source": group.GroupedBy.Value,
+				"chunk_count":   int(group.Meta.Count),
+			})
+		}
+
+		slog.Info("Successfully fetched session document list", "count", len(docList))
+		c.JSON(http.StatusOK, gin.H{"documents": docList})
+
 	}
 }

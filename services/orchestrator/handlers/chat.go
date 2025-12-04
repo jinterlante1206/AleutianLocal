@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -14,10 +15,13 @@ import (
 var chatTracer = otel.Tracer("aleutian.orchestrator.handlers")
 
 type DirectChatRequest struct {
-	Messages []datatypes.Message `json:"messages"`
+	Messages       []datatypes.Message `json:"messages"`
+	EnableThinking bool                `json:"enable_thinking"` // New
+	BudgetTokens   int                 `json:"budget_tokens"`   // New
+	Tools          []interface{}       `json:"tools"`           // New
 }
 
-func HandleDirectChat(llmClient llm.LLMClient) gin.HandlerFunc {
+func HandleDirectChat(llmClient llm.LLMClient, pe *policy_engine.PolicyEngine) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx, span := chatTracer.Start(c.Request.Context(), "HandleDirectChat")
 		defer span.End()
@@ -35,15 +39,26 @@ func HandleDirectChat(llmClient llm.LLMClient) gin.HandlerFunc {
 			return
 		}
 
-		// TODO: Pass params from the request if needed
-		//params := llm.GenerationParams{
-		//	Temperature: nil,
-		//	TopK:        nil,
-		//	TopP:        nil,
-		//	MaxTokens:   nil,
-		//	Stop:        nil,
-		//}
-		params := llm.GenerationParams{}
+		// Scan the last message (the user's new input)
+		// Optionally loop through all if you want to be extra safe
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role == "user" {
+			findings := pe.ScanFileContent(lastMsg.Content)
+			if len(findings) > 0 {
+				slog.Warn("Blocked chat request due to policy violation", "findings", len(findings))
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":    "Policy Violation: Message contains sensitive data.",
+					"findings": findings,
+				})
+				return
+			}
+		}
+
+		params := llm.GenerationParams{
+			EnableThinking:  req.EnableThinking,
+			BudgetTokens:    req.BudgetTokens,
+			ToolDefinitions: req.Tools,
+		}
 		answer, err := llmClient.Chat(ctx, req.Messages, params)
 		if err != nil {
 			span.RecordError(err)

@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+type embeddingServiceRequest struct {
+	Texts []string `json:"texts"`
+}
+
+type embeddingServiceResponse struct {
+	Vectors   [][]float32 `json:"vectors"`
+	Model     string      `json:"model"`
+	Dim       int         `json:"dim"`
+	Timestamp int64       `json:"timestamp"`
+	Id        string      `json:"id"`
+}
+
 type EmbeddingRequest struct {
 	Text string `json:"text"`
 }
@@ -96,14 +108,18 @@ var httpClient = &http.Client{
 
 func (e *EmbeddingResponse) Get(text string) error {
 	embeddingServiceURL := os.Getenv("EMBEDDING_SERVICE_URL")
-	embReq := EmbeddingRequest{Text: text}
+	if embeddingServiceURL == "" {
+		return fmt.Errorf("EMBEDDING_SERVICE_URL not set")
+	}
+
+	// Use the correct request struct: {"texts": ["..."]}
+	embReq := embeddingServiceRequest{Texts: []string{text}}
 	reqBody, err := json.Marshal(embReq)
 	if err != nil {
-		return fmt.Errorf("failed to marshal the input text and send it to the /embed"+
-			" endpoint: %w", err)
+		return fmt.Errorf("failed to marshal embedding request: %w", err)
 	}
-	log.Println(reqBody)
 
+	// This part is unchanged
 	req, err := http.NewRequest(http.MethodPost, embeddingServiceURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return fmt.Errorf("failed to setup a new request: %w", err)
@@ -124,13 +140,30 @@ func (e *EmbeddingResponse) Get(text string) error {
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("the response was not a 200 OK from the embedding service: %s, "+
-			"%d", string(bodyBytes), resp.StatusCode)
+		return fmt.Errorf("embedding service returned non-200 status: %s, %d", string(bodyBytes), resp.StatusCode)
 	}
 
-	if err := json.Unmarshal(bodyBytes, &e); err != nil {
-		return fmt.Errorf("failed to parse the response from the embedding service %w", err)
+	// Use the correct response struct to parse: {"vectors": [[...]]}
+	var serviceResp embeddingServiceResponse
+	if err := json.Unmarshal(bodyBytes, &serviceResp); err != nil {
+		slog.Warn("Failed to parse embedding service response as batch, trying single", "error", err)
+		if err := json.Unmarshal(bodyBytes, &e); err != nil {
+			return fmt.Errorf("failed to parse response from embedding service in any format: %w", err)
+		}
+		return nil
 	}
+
+	// Check that we got at least one vector back
+	if len(serviceResp.Vectors) == 0 || len(serviceResp.Vectors[0]) == 0 {
+		return fmt.Errorf("embedding service returned no vectors")
+	}
+
+	e.Vector = serviceResp.Vectors[0]
+	e.Dim = len(e.Vector)
+	e.Text = text
+	e.Timestamp = int(time.Now().Unix()) // Use current time
+	e.Id = serviceResp.Id
+
 	return nil
 }
 

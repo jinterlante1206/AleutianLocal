@@ -86,13 +86,7 @@ func main() {
 		port = "12210"
 	}
 
-	logFile, err := os.OpenFile("/tmp/orchestrator.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("Failed to open the log file: %v", err)
-	}
-	defer logFile.Close()
-
-	logger := slog.New(slog.NewJSONHandler(logFile, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
 	// --- Init the tracer ---
@@ -118,8 +112,7 @@ func main() {
 
 	datatypes.EnsureWeaviateSchema(weaviateClient)
 
-	policyEnginePath := os.Getenv("POLICY_ENGINE_DATA_CLASSIFICATION_PATTERNS_PATH")
-	policyEngine, err = policy_engine.NewPolicyEngine(policyEnginePath)
+	policyEngine, err = policy_engine.NewPolicyEngine()
 	if err != nil {
 		log.Fatalf("FATAL: Could not initialize the Policy Engine %v", err)
 	}
@@ -141,7 +134,10 @@ func main() {
 	case "ollama":
 		globalLLMClient, err = llm.NewOllamaClient()
 		slog.Info("Using Ollama LLM backend")
-	// TODO: add cases for "gemini", "huggingface", "anthropic", etc.
+	case "claude", "anthropic":
+		globalLLMClient, err = llm.NewAnthropicClient()
+		slog.Info("Using Anthropic (Claude) LLM backend")
+	// TODO: add cases for "gemini", "huggingface", etc.
 	default:
 		slog.Warn("LLM_BACKEND_TYPE not set or invalid, defaulting to local")
 		globalLLMClient, err = llm.NewLocalLlamaCppClient()
@@ -152,7 +148,7 @@ func main() {
 	router := gin.Default()
 	router.Use(otelgin.Middleware("orchestrator-service"))
 
-	routes.SetupRoutes(router, weaviateClient, globalLLMClient)
+	routes.SetupRoutes(router, weaviateClient, globalLLMClient, policyEngine)
 	log.Println("started up the container")
 
 	log.Println("Starting the orchestrator server on port ", port)

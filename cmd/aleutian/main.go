@@ -12,14 +12,19 @@ package main
 
 import (
 	"log"
-)
 
-var config Config
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+)
 
 var version = "dev"
 
 func main() {
 	log.Println("Starting up Aleutian Deployment")
+	// Initialize the Aleutian config
+	if err := config.Load(); err != nil {
+		log.Fatalf("Failed to set the initial Aleutian state from the aleutian.yaml: %v", err)
+	}
+	log.Println("Starting the Aleutian Controller")
 	// Execute the root command. Cobra handles parsing the arguments.
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatalf("Error executing command: %v", err)

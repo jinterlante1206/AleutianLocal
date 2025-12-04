@@ -1,3 +1,5 @@
+// Package policy_engine provides the logic for scanning, classifying, and enforcing
+// data governance rules on content passing through the Aleutian system.
 // Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -7,6 +9,7 @@
 //
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
+
 package policy_engine
 
 import (
@@ -17,6 +20,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ConfidenceLevel represents the degree of certainty that a matched pattern
+// indicates a specific data classification.
+//
+// Allowed values are "low", "medium", and "high".
 type ConfidenceLevel string
 
 const (
@@ -25,10 +32,16 @@ const (
 	High   ConfidenceLevel = "high"
 )
 
+// PolicyEngineClassificationFile represents the root structure of the YAML policy configuration.
+// It maps directly to the top-level "classifications" key in the data_classification_patterns.yaml file.
 type PolicyEngineClassificationFile struct {
 	ClassificationPatterns []Classification `yaml:"classifications"`
 }
 
+// Classification represents a high-level category of data sensitivity (e.g., "Secret", "PII").
+//
+// It contains metadata about the category and a collection of specific regex patterns
+// used to identify data belonging to this category.
 type Classification struct {
 	Name             string           `yaml:"name"`
 	Description      string           `yaml:"description"`
@@ -37,6 +50,7 @@ type Classification struct {
 	CompiledPatterns []*regexp.Regexp `yaml:"-"`
 }
 
+// Pattern defines a specific rule for identifying sensitive data within a Classification.
 type Pattern struct {
 	Id              string          `yaml:"id"`
 	Description     string          `yaml:"description"`
@@ -45,6 +59,10 @@ type Pattern struct {
 	compiledPattern *regexp.Regexp  `yaml:"-"`
 }
 
+// UnmarshalYAML implements the yaml.Unmarshaler interface for ConfidenceLevel.
+//
+// It validates that the confidence level string provided in the YAML config matches
+// one of the allowed constants (low, medium, high), returning an error if invalid.
 func (c *ConfidenceLevel) UnmarshalYAML(value *yaml.Node) error {
 	var s string
 	if err := value.Decode(&s); err != nil {
@@ -60,6 +78,11 @@ func (c *ConfidenceLevel) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
+// CompileRegexes iterates through every pattern in the configuration and pre-compiles
+// the regex strings into optimized *regexp.Regexp objects.
+//
+// This method must be called before any scanning occurs to ensure performance and
+// to validate that all regex strings in the YAML are syntactically correct.
 func (p *PolicyEngineClassificationFile) CompileRegexes() error {
 	for i := range p.ClassificationPatterns {
 		for j := range p.ClassificationPatterns[i].Patterns {
@@ -76,12 +99,18 @@ func (p *PolicyEngineClassificationFile) CompileRegexes() error {
 	return nil
 }
 
+// SortByPriority reorders the internal ClassificationPatterns slice based on the
+// Priority field, in descending order (highest priority first).
+//
+// This ensures that when multiple rules might match the same data, the most sensitive
+// classification is applied.
 func (p *PolicyEngineClassificationFile) SortByPriority() {
 	sort.Slice(p.ClassificationPatterns, func(i, j int) bool {
 		return p.ClassificationPatterns[i].Priority > p.ClassificationPatterns[j].Priority
 	})
 }
 
+// ScanFinding represents a specific instance of a policy violation or data match found within a file.
 type ScanFinding struct {
 	FilePath           string          `json:"file_path"`
 	LineNumber         int             `json:"line_number"`

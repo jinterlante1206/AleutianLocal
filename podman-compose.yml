@@ -3,6 +3,10 @@ secrets:
     external: true
   openai_api_key:
     external: true
+  anthropic_api_key:
+    external: true
+  google_api_key:
+    external: true
 
 services:
   # The Embedding server (Built from source in this repo)
@@ -16,7 +20,7 @@ services:
     secrets:
       - source: aleutian_hf_token
     volumes:
-      - ./models_cache:/root/.cache/huggingface/
+      - /Volumes/ai_models/aleutian_data/models_cache:/root/.cache/huggingface/
     networks:
       - aleutian-network
     healthcheck:
@@ -45,7 +49,8 @@ services:
       LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
       # Ollama Specific
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.containers.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
+#      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
+      OLLAMA_MODEL: "gemma3:12b"
       # OpenAI Specific
       OPENAI_URL_BASE: ${OPENAI_URL_BASE:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini} # Note: Key comes from secret
@@ -84,16 +89,19 @@ services:
       TIMEOUT_SECONDS_LLM: ${TIMEOUT_SECONDS_LLM:-300} # Example timeout
     volumes:
       # Mount the policy file so users can customize it locally
+      - /Volumes/ai_models/aleutian_data/models_cache:/root/.cache/huggingface/
       - ./internal/policy_engine/enforcement/data_classification_patterns.yaml:/app/internal/policy_engine/enforcement/data_classification_patterns.yaml:ro
     secrets:
       - source: aleutian_hf_token
       - source: openai_api_key
+      - source: google_api_key
+      - source: anthropic_api_key
     networks:
       - aleutian-network
     restart: unless-stopped
     depends_on:
       aleutian-rag-engine:
-        condition: service_started
+        condition: service_healthy
       embedding-server:
         condition: service_healthy
       weaviate-db:
@@ -136,7 +144,7 @@ services:
       - "12140:8000"
     volumes:
       - ./models:/models
-      - ./models_cache:/root/.cache/huggingface/
+      - /Volumes/ai_models/aleutian_data/models_cache:/root/.cache/huggingface/
     secrets:
       - source: aleutian_hf_token
     restart: unless-stopped

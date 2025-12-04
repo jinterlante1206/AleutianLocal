@@ -21,7 +21,7 @@ It acts as an **opinionated but modular MLOps control plane**, providing the ess
 * **Efficient Model Management:** Convert and quantize models to GGUF format for optimized local inference.
 * **Integrated Observability:** Gain immediate insights into application performance and behavior with a pre-configured stack (OpenTelemetry, Jaeger, Prometheus, Grafana).
 * **Easy Extensibility:** Add custom containers (data processors, tools, models) or modify configurations using standard `podman-compose.override.yml` practices without altering core code.
-* **Developer-Centric Tooling:** Manage the stack via a simple CLI (`aleutian`) or programmatically via a Python SDK (*coming soon*).
+* **Developer-Centric Tooling:** Manage the stack via a simple CLI (aleutian) or interact with it programmatically via the official aleutian-client Python SDK.
 
 **Key Differentiator:** Aleutian empowers developers to **own their AI stack locally**. It prioritizes **data privacy, control, and observability**, offering a robust, pre-configured foundation that integrates easily with diverse data sources and LLM backends (local or cloud). Focus on your application's unique value, not infrastructure headaches.
 
@@ -249,6 +249,97 @@ Example commands for uploading data (requires GCP configuration in `config.yaml`
 * `aleutian upload logs <local_directory>`: Uploads local log files to the configured GCS bucket/path.
 * `aleutian upload backups <local_directory>`: Uploads local backup files to the configured GCS bucket/path.
 * *(Note: Requires service account key available at the expected path - see `gcs/client.go` - and relevant config in `~/.aleutian/stack/config.yaml`)*.
+
+## Programmatic Access (Python SDK)
+
+In addition to the `aleutian` CLI, you can control and interact with your AleutianLocal stack programmatically using the official `aleutian-client` Python SDK.
+
+This is ideal for:
+* Integrating Aleutian into automated workflows (e.g., Airflow, CI/CD).
+* Building custom applications on top of the Aleutian API.
+* Prototyping and data analysis in Jupyter notebooks.
+* Programmatically managing sessions, populating data, and running queries.
+
+### Installation
+
+The client is available on PyPI:
+
+```bash
+pip install aleutian-client
+```
+Quickstart Example
+
+Ensure your Aleutian stack is running (aleutian stack start). The client will automatically connect to the orchestrator on http://localhost:12210 by default.
+
+```Python
+from aleutian_client import AleutianClient, Message
+from aleutian_client.exceptions import AleutianConnectionError, AleutianApiError
+import sys
+
+def main():
+    try:
+        # 1. Connect to the running Aleutian stack
+        # Use a context manager to automatically handle connections
+        with AleutianClient() as client:
+
+            # 2. Run a health check to verify connection
+            health = client.health_check()
+            print(f"Successfully connected to Aleutian: {health.get('status')}")
+
+            # -------------------------------------------------
+            # Example 1: Direct Ask (No RAG)
+            # This is the same as `aleutian ask --no-rag`
+            # -------------------------------------------------
+            print("\n--- 1. Direct LLM Ask (no RAG) ---")
+            response_ask = client.ask(
+                query="What is the capital of France?", 
+                no_rag=True
+            )
+            print(f"LLM Answer: {response_ask.answer}")
+
+
+            # -------------------------------------------------
+            # Example 2: RAG-Powered Ask
+            # This is the same as `aleutian ask "..."`
+            # -------------------------------------------------
+            print("\n--- 2. RAG-Powered Query ---")
+            response_rag = client.ask(
+                query="What is AleutianLocal?",
+                pipeline="reranking" # or "standard"
+            )
+            print(f"RAG Answer: {response_rag.answer}")
+            
+            if response_rag.sources:
+                sources = [s.source for s in response_rag.sources]
+                print(f"Sources: {sources}")
+            else:
+                print("No sources found. (Have you run `aleutian populate`?)")
+            
+
+            # -------------------------------------------------
+            # Example 3: Direct Chat Session
+            # This is the same as `aleutian chat`
+            # -------------------------------------------------
+            print("\n--- 3. Direct Chat Session ---")
+            messages = [
+                Message(role="user", content="Hello! Please introduce yourself briefly.")
+            ]
+            response_chat = client.chat(messages=messages)
+            print(f"Chat Answer: {response_chat.answer}")
+
+    except AleutianConnectionError:
+        print("\nError: Could not connect to AleutianLocal stack.", file=sys.stderr)
+        print("Please ensure the stack is running with 'aleutian stack start'.", file=sys.stderr)
+        sys.exit(1)
+    except AleutianApiError as e:
+        print(f"An API error occurred: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}", file=sys.stderr)
+
+if __name__ == "__main__":
+    main()
+```
+For the complete API documentation, including timeseries forecasting and session management, please see the aleutian-client repository.
 
 ## Architecture & Core Components
 
@@ -759,7 +850,7 @@ This example shows how a custom service can be added and configured via `podman-
     2.  **Option B (Host Access):** If the external service exposes a port on your host machine (e.g., `localhost:5432`), Aleutian services *might* reach it via `host.containers.internal:<port>` (Podman Desktop on Mac/Win) or the host's bridge IP. Set the relevant URL environment variable in `override.yml` for the Aleutian service that needs to connect. This method depends heavily on the specific Podman network setup.
 
 ### **Scenario 6: Integrating Aleutian into Existing Infrastructure (e.g., Airflow, CI/CD)**
-    1.  **Use API/SDK:** The primary method is via Aleutian's orchestrator API or the Python SDK (*coming soon*). External systems make HTTP requests to the orchestrator's exposed port (default `http://localhost:12210`) to trigger actions like `POST /v1/documents` (ingestion), `POST /v1/rag` (querying), etc.
+    1.  **Use API/SDK:** The primary method is via the official **`aleutian-client` Python SDK** (see the section above for details). Alternatively, you can make direct HTTP requests to the orchestrator's exposed port (default `http://localhost:12210`) to trigger actions like `POST /v1/rag` (querying) or `POST /v1/documents` (ingestion).
     2.  **Data Flow:** Configure external pipelines to push data into Aleutian via the API/SDK.
     3.  **Observability:** Configure Aleutian's `otel-collector` (via its config file in `~/.aleutian/stack/observability/`) to export telemetry to your existing central observability backend if desired.
 
@@ -791,7 +882,6 @@ The stack includes an integrated suite for monitoring and debugging application 
 
 Future development focuses on enhancing usability, integration, and core MLOps capabilities:
 
-* **Python Client SDK:** Enable programmatic interaction with Aleutian services from Python environments (Jupyter, Airflow, etc.).
 * **Aleutian Control Panel UI:** A web interface for viewing stack status, configuration, key metrics, and accessing observability tools.
 * **Integrated Data Parsing:** Automatic handling of common file types (starting with PDF) within the `populate` command workflow.
 * **Expanded LLM Support:** Client implementations for Anthropic Claude and Google Gemini APIs.

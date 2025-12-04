@@ -7,6 +7,7 @@ llama-index
 weaviate-client
 sentence-transformers
 requests
+ollama
 python-dotenv
 opentelemetry-api
 opentelemetry-sdk
