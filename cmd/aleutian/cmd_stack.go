@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -49,8 +50,9 @@ func calculateOptimizedEnv(totalRAM_MB int) map[string]string {
 		env["RERANKER_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 	} else if totalRAM_MB >= MID_RAM && totalRAM_MB < HIGH_RAM {
 		fmt.Println("   -> Profile: Performance (32GB+)")
-		env["OLLAMA_MODEL"] = "gemma3:27b"     // Powerful model
+		//env["OLLAMA_MODEL"] = "gemma3:27b"     // Powerful model
 		env["LLM_DEFAULT_MAX_TOKENS"] = "8192" // Larger context
+		env["OLLAMA_MODEL"] = "gpt-oss:20b"
 		env["RERANKER_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 		env["RERANK_FINAL_K"] = "10" // Re-rank more results
 	} else if totalRAM_MB >= HIGH_RAM {
@@ -110,7 +112,7 @@ func checkAndFixPodmanMachine(cfg config.MachineConfig) error {
 		fmt.Println("Infrastructure provisioned.")
 	}
 
-	// 3. Sleep Crash Detection (The "Hang" Check)
+	// 3. Connectivity & Health Check
 	inspectCmd := exec.Command("podman", "machine", "inspect", machineName)
 	output, _ := inspectCmd.Output()
 
@@ -138,16 +140,32 @@ func checkAndFixPodmanMachine(cfg config.MachineConfig) error {
 
 			if err := testCmd.Run(); err != nil {
 				fmt.Println("FAILED.")
-				if ctx.Err() == context.DeadlineExceeded {
-					fmt.Println("   Reason: Drive access timed out (The 'Sleep Crash').")
-				} else {
-					fmt.Printf("   Reason: Drive disconnected or unreadable.\n")
-				}
-				fmt.Println("️  Self-Healing: Restarting infrastructure to reconnect drives...")
 
-				exec.Command("podman", "machine", "stop", machineName).Run()
-				needsStart = true
-				isRestart = true
+				if ctx.Err() == context.DeadlineExceeded {
+					// Case A: Timeout (Sleep Crash) -> Soft Reboot
+					fmt.Println("   Reason: Drive access timed out (The 'Sleep Crash').")
+					fmt.Println("️  Self-Healing: Restarting infrastructure to reconnect drives...")
+					exec.Command("podman", "machine", "stop", machineName).Run()
+					needsStart = true
+					isRestart = true
+				} else {
+					// Case B: Immediate Error (Missing Mount) -> Factory Reset
+					fmt.Printf("   Reason: Drive disconnected or unreadable.\n")
+					fmt.Println("   Diagnosis: The Podman machine configuration is missing required mounts.")
+					fmt.Println("🛠️  Self-Healing: Performing Factory Reset on Podman machine to fix configuration...")
+
+					// 1. Destroy the broken machine
+					rmCmd := exec.Command("podman", "machine", "rm", "-f", machineName)
+					rmCmd.Stdout = os.Stdout
+					rmCmd.Stderr = os.Stderr
+					if err := rmCmd.Run(); err != nil {
+						return fmt.Errorf("failed to remove broken machine during self-healing: %w", err)
+					}
+
+					// 2. Recurse to provision it correctly (Block A will now run)
+					fmt.Println("   Machine removed. Re-provisioning with correct mounts...")
+					return checkAndFixPodmanMachine(cfg)
+				}
 			} else {
 				fmt.Println("OK.")
 			}
@@ -282,11 +300,7 @@ func runPodmanCompose(stackDir string, extraEnv map[string]string, args ...strin
 		}
 	}
 
-	err := cmd.Run()
-	if err != nil {
-		return fmt.Errorf("podman-compose command failed: %w", err)
-	}
-	return nil
+	return cmd.Run()
 }
 
 func runStart(cmd *cobra.Command, args []string) {
@@ -327,40 +341,64 @@ func runStart(cmd *cobra.Command, args []string) {
 	fmt.Println("------------------------")
 
 	var dynamicEnv map[string]string
-	if cfg.ModelBackend.Type == "ollama" {
-		ram, err := getSystemTotalMemory()
-		if err != nil {
-			slog.Warn("Failed to detect system RAM/VRAM, defaulting to safe mode")
-			ram = 8192
+	switch profile {
+	case "manual":
+		fmt.Println("🛠️ Manual Profile selected: Skipping auto-optimization. Using podman-compose.override.yml values.")
+		dynamicEnv = make(map[string]string) // Empty map, lets overrides take precedence
+
+	case "low", "standard", "performance", "ultra":
+		// Force a specific profile regardless of actual RAM
+		// You might need to refactor calculateOptimizedEnv to accept a string,
+		// or just simulate the RAM value here to trick it.
+		var fakeRam int
+		switch profile {
+		case "low":
+			fakeRam = 8192
+		case "standard":
+			fakeRam = 24000
+		case "performance":
+			fakeRam = 48000
+		case "ultra":
+			fakeRam = 90000
 		}
-		dynamicEnv = calculateOptimizedEnv(ram)
-	} else {
-		dynamicEnv = make(map[string]string)
-		dynamicEnv["LLM_BACKEND_TYPE"] = cfg.ModelBackend.Type
-		if cfg.ModelBackend.Type == "openai" && !ensureSecretExists(
-			SecretDefinition{Name: "openai_api_key"}) {
-			log.Fatalf("OpenAI selected, but no API key found")
-		} else if cfg.ModelBackend.Type == "anthropic" && !ensureSecretExists(
-			SecretDefinition{Name: "anthropic_api_key"}) {
-			log.Fatalf("Anthropic selected, but no API key found")
-		} else if cfg.ModelBackend.Type == "gemini" && !ensureSecretExists(
-			SecretDefinition{Name: "gemini_api_key"}) {
-			log.Fatalf("Gemini selected, but no API key found")
+		dynamicEnv = calculateOptimizedEnv(fakeRam)
+
+	default:
+		if cfg.ModelBackend.Type == "ollama" {
+			ram, err := getSystemTotalMemory()
+			if err != nil {
+				slog.Warn("Failed to detect system RAM/VRAM, defaulting to safe mode")
+				ram = 8192
+			}
+			dynamicEnv = calculateOptimizedEnv(ram)
+		} else {
+			dynamicEnv = make(map[string]string)
+			dynamicEnv["LLM_BACKEND_TYPE"] = cfg.ModelBackend.Type
+			if cfg.ModelBackend.Type == "openai" && !ensureSecretExists(
+				SecretDefinition{Name: "openai_api_key"}) {
+				log.Fatalf("OpenAI selected, but no API key found")
+			} else if cfg.ModelBackend.Type == "anthropic" && !ensureSecretExists(
+				SecretDefinition{Name: "anthropic_api_key"}) {
+				log.Fatalf("Anthropic selected, but no API key found")
+			} else if cfg.ModelBackend.Type == "gemini" && !ensureSecretExists(
+				SecretDefinition{Name: "gemini_api_key"}) {
+				log.Fatalf("Gemini selected, but no API key found")
+			}
 		}
 	}
 
-	// Build the Compose Command with Extensions
-	//    Base: core podman-compose.yml
+	// --- NEW: Print the Truth ---
+	printStartupSummary(stackDir, dynamicEnv)
+	// ----------------------------
+
 	composeArgs := []string{"-f", filepath.Join(stackDir, "podman-compose.yml")}
 
-	//    Override: podman-compose.override.yml (if exists)
 	overridePath := filepath.Join(stackDir, "podman-compose.override.yml")
 	if _, err := os.Stat(overridePath); err == nil {
 		fmt.Println("🔌 Loading local override configuration")
 		composeArgs = append(composeArgs, "-f", overridePath)
 	}
 
-	//    Extensions: Custom files defined in aleutian.yaml
 	extensions := config.Global.Extensions
 	if len(extensions) > 0 {
 		fmt.Printf("Loading %d custom extensions:\n", len(extensions))
@@ -374,11 +412,12 @@ func runStart(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	//    Action: Up
-	composeArgs = append(composeArgs, "up", "-d", "--build")
+	composeArgs = append(composeArgs, "up", "-d")
+	if forceBuild {
+		fmt.Println("Force build enabled: Recompiling containers")
+		composeArgs = append(composeArgs, "--build")
+	}
 
-	// 6. Execute
-	// We pass the RAW args to runPodmanCompose, bypassing its default logic
 	err = runPodmanCompose(stackDir, dynamicEnv, composeArgs...)
 	if err != nil {
 		log.Fatalf("Failed to start services: %v", err)
@@ -409,20 +448,80 @@ func ensureOllamaRunning() {
 }
 
 func runStop(cmd *cobra.Command, args []string) {
+	// Pre-flight check: Is Podman responding?
+	checkCmd := exec.Command("podman", "info")
+	checkCmd.Stdout = io.Discard
+	checkCmd.Stderr = io.Discard
+	if err := checkCmd.Run(); err != nil {
+		fmt.Println("⚠️  Podman is unreachable (Machine is likely stopped).")
+		fmt.Println("   Skipping teardown as services are already offline.")
+		return
+	}
+
 	fmt.Println("Stopping local Aleutian services...")
 	stackDir, err := getStackDir()
 	if err != nil {
 		log.Printf("Warning: Could not determine stack directory (%v), attempting run from current dir.", err)
 		stackDir = "."
 	}
-	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
-	if _, err := os.Stat(composeFilePath); os.IsNotExist(err) {
-		log.Println("Stack files not found. Nothing to stop.")
-		return
-	}
+
 	err = runPodmanCompose(stackDir, nil, "down")
 	if err != nil {
-		log.Fatalf("Failed to stop services: %v", err)
+		log.Printf("Warning: Failed to stop services: %v", err)
+	} else {
+		fmt.Println("\nLocal Aleutian services stopped.")
 	}
-	fmt.Println("\nLocal Aleutian services stopped.")
+}
+
+// printStartupSummary inspects the final configuration to tell the user what is running
+func printStartupSummary(stackDir string, dynamicEnv map[string]string) {
+	fmt.Println("\n--- Aleutian Startup Configuration ---")
+
+	// 1. Determine Backend
+	backend := os.Getenv("LLM_BACKEND_TYPE")
+	if val, ok := dynamicEnv["LLM_BACKEND_TYPE"]; ok {
+		backend = val
+	}
+	if backend == "" {
+		backend = "ollama (default)"
+	}
+	fmt.Printf("   Backend:   %s\n", backend)
+
+	// 2. Determine Model (The Tricky Part)
+	// Precedence: Dynamic Env (Profile) > Override File > Config Default
+	model := ""
+	source := "Unknown"
+
+	// Check Dynamic Env (Auto profiles)
+	if val, ok := dynamicEnv["OLLAMA_MODEL"]; ok {
+		model = val
+		source = "Auto-Profile"
+	}
+
+	// Check Override File (Manual profile)
+	if model == "" {
+		overridePath := filepath.Join(stackDir, "podman-compose.override.yml")
+		if content, err := os.ReadFile(overridePath); err == nil {
+			lines := strings.Split(string(content), "\n")
+			for _, line := range lines {
+				trim := strings.TrimSpace(line)
+				if strings.Contains(trim, "OLLAMA_MODEL:") {
+					parts := strings.SplitN(trim, ":", 2)
+					if len(parts) == 2 {
+						model = strings.TrimSpace(strings.ReplaceAll(parts[1], "\"", ""))
+						source = "Override File"
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if model == "" {
+		model = "gpt-oss:latest (default)"
+		source = "Default"
+	}
+
+	fmt.Printf("   Model:     \x1b[32m%s\x1b[0m  [%s]\n", model, source)
+	fmt.Println("-----------------------------------------")
 }

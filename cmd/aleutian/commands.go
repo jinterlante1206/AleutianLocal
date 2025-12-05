@@ -16,6 +16,20 @@ import (
 
 // --- Global Command Variables ---
 var (
+	backendType     string
+	profile         string
+	forceBuild      bool
+	pipelineType    string
+	noRag           bool
+	enableThinking  bool
+	budgetTokens    int
+	quantizeType    string
+	isLocalPath     bool
+	fetchDays       int
+	forecastModel   string
+	forecastHorizon int
+	forecastContext int
+
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
 		Short: "A cli to manage the Aleutian FOSS private AI appliance",
@@ -28,8 +42,6 @@ var (
 		Short: "Asks a question to the RAG system using the documents in the VectorDB",
 		Run:   runAskCommand, // Defined in cmd_chat.go
 	}
-	pipelineType string
-	noRag        bool
 
 	// --- Data / Populate ---
 	populateCmd = &cobra.Command{
@@ -52,8 +64,8 @@ var (
 		Short: "Start all local Aleutian services",
 		Run:   runStart, // Defined in cmd_stack.go
 	}
-	backendType string
-	stopCmd     = &cobra.Command{
+
+	stopCmd = &cobra.Command{
 		Use:   "stop",
 		Short: "Stop all local Aleutian services",
 		Run:   runStop, // Defined in cmd_stack.go
@@ -75,8 +87,6 @@ var (
 		Short: "Converts a huggingface model to GGUF format",
 		Run:   runConvertCommand, // Defined in cmd_utils.go
 	}
-	quantizeType string
-	isLocalPath  bool
 
 	pullModelCmd = &cobra.Command{
 		Use:   "pull [model_id]",
@@ -112,8 +122,6 @@ var (
 		Short: "Starts an interactive chat session",
 		Run:   runChatCommand, // Defined in cmd_chat.go
 	}
-	enableThinking bool
-	budgetTokens   int
 
 	traceCmd = &cobra.Command{
 		Use:   "trace [query]",
@@ -183,10 +191,6 @@ var (
 		Short: "Run a time-series forecast on a ticker",
 		Run:   runForecast, // Defined in cmd_timeseries.go
 	}
-	fetchDays       int
-	forecastModel   string
-	forecastHorizon int
-	forecastContext int
 
 	// Policies
 	policyCmd = &cobra.Command{
@@ -241,8 +245,11 @@ func init() {
 	stackCmd.AddCommand(stopCmd)
 	stackCmd.AddCommand(destroyCmd)
 	stackCmd.AddCommand(logsCmd)
+
 	deployCmd.Flags().StringVar(&backendType, "backend", "", "Set LLM backend (ollama, "+
 		"openai, anthropic). Skips local model checks if not 'ollama'.")
+	deployCmd.Flags().StringVar(&profile, "profile", "auto", "Optimization profile: 'auto', 'low', 'standard', 'performance', 'ultra', or 'manual'")
+	deployCmd.Flags().BoolVar(&forceBuild, "build", false, "Force rebuild of container images")
 
 	// --- Utility Commands ---
 	rootCmd.AddCommand(convertCmd)

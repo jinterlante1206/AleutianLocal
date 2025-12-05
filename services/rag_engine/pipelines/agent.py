@@ -43,7 +43,7 @@ TOOLS = [
 class AgentPipeline(BaseRAGPipeline):
     def __init__(self, weaviate_client, config):
         super().__init__(weaviate_client, config)
-        self.agent_model = os.getenv("AGENT_MODEL", "gemma3:27b")
+        self.agent_model = os.getenv("OLLAMA_MODEL", "gemma3:27b")
         self.agent_backend = os.getenv("AGENT_BACKEND", "ollama").lower()
         self.project_root = "/app/codebase"
 

@@ -19,6 +19,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +50,12 @@ type SourceInfo struct {
 	Source   string  `json:"source"`
 	Distance float64 `json:"distance,omitempty"`
 	Score    float64 `json:"score,omitempty"`
+}
+
+type PodmanStats struct {
+	Name     string `json:"Name"`
+	CPUPerc  string `json:"CPUPerc"`
+	MemUsage string `json:"MemUsage"`
 }
 
 func runAskCommand(cmd *cobra.Command, args []string) {
@@ -150,7 +158,13 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 		}
 
 		client := &http.Client{Timeout: 3 * time.Minute}
+		// Use the simple spinner for normal chat, reserve the heavy monitor for Trace
+		done := make(chan bool)
+		statsChan := make(chan string)
+		go showSpinner("Thinking", done, statsChan)
+
 		resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
+		done <- true
 		if err != nil {
 			fmt.Printf("failed to send the request to the orchestrator: %v", err)
 			if len(messages) > 0 {
@@ -191,35 +205,57 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 
 func runTraceCommand(cmd *cobra.Command, args []string) {
 	query := strings.Join(args, " ")
-	fmt.Printf("🕵️  Agent analyzing codebase for: %s\n", query)
+	fmt.Printf("Agent analyzing codebase for: %s\n", query)
 	fmt.Println("(This may take a moment while the agent reads files...)")
 
 	baseURL := getOrchestratorBaseURL()
 	url := fmt.Sprintf("%s/v1/agent/trace", baseURL)
-
 	payload, _ := json.Marshal(map[string]string{"query": query})
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
+	stopMonitor := make(chan bool)
+	statsChan := make(chan string)
+	stopSpinner := make(chan bool)
+	go monitorResources(stopMonitor, statsChan)
+	go showSpinner("Agent is working", stopSpinner, statsChan)
+	client := &http.Client{Timeout: 10 * time.Minute} // Long timeout for agents
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(payload))
+
+	// Cleanup UI
+	stopMonitor <- true
+	stopSpinner <- true
+	fmt.Print("\r                                                                            \r") // Clean line
 
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("\nConnection Failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 
-	var result map[string]interface{}
-	err = json.Unmarshal(body, &result)
-	if err != nil {
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("\nError (Status %d):\n%s\n", resp.StatusCode, string(body))
 		return
 	}
 
-	fmt.Printf("\n📝 Answer:\n%s\n", result["answer"])
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Fatalf("\nFailed to parse JSON response: %s", string(body))
+	}
 
-	fmt.Println("\nSteps Taken:")
-	steps := result["steps"].([]interface{})
-	for _, s := range steps {
-		step := s.(map[string]interface{})
-		fmt.Printf("- Called %s(%s)\n", step["tool"], step["args"])
+	if ans, ok := result["answer"].(string); ok {
+		fmt.Printf("\nAnswer:\n%s\n", ans)
+		if strings.Contains(ans, "sk_live_") {
+			fmt.Println("\nPrivacy alert: The agent tried to display a secret key.")
+			fmt.Println("   [Content Redacted by Aleutian Policy Engine]")
+			return
+		}
+	}
+
+	if steps, ok := result["steps"].([]interface{}); ok {
+		fmt.Println("\nSteps Taken:")
+		for _, s := range steps {
+			step := s.(map[string]interface{})
+			fmt.Printf("- Called %s(%s)\n", step["tool"], step["args"])
+		}
 	}
 }
 
@@ -256,4 +292,98 @@ func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResp
 		return ragResp, fmt.Errorf("failed to parse response from orchestrator: %w", err)
 	}
 	return ragResp, nil
+}
+
+// monitorResources polls Podman for container stats every second
+func monitorResources(stopChan chan bool, statsChan chan string) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stopChan:
+			return
+		case <-ticker.C:
+			// Run podman stats
+			cmd := exec.Command("podman", "stats", "--no-stream", "--format", "json")
+			out, err := cmd.Output()
+			if err != nil {
+				statsChan <- "(Stats unavailable)"
+				continue
+			}
+
+			var stats []PodmanStats
+			if err := json.Unmarshal(out, &stats); err != nil {
+				continue
+			}
+
+			var totalCPU float64
+			var totalMem float64 // In MB
+
+			for _, s := range stats {
+				// Parse CPU: "5.30%" -> 5.30
+				cpuStr := strings.TrimSuffix(s.CPUPerc, "%")
+				if val, err := strconv.ParseFloat(cpuStr, 64); err == nil {
+					totalCPU += val
+				}
+
+				// Parse Mem: "123MB / 16GB" -> 123
+				parts := strings.Split(s.MemUsage, " / ")
+				if len(parts) > 0 {
+					memStr := parts[0]
+					var mult float64 = 1
+					if strings.Contains(memStr, "GB") {
+						mult = 1024
+						memStr = strings.TrimSuffix(memStr, "GB")
+					} else if strings.Contains(memStr, "MB") {
+						memStr = strings.TrimSuffix(memStr, "MB")
+					} else if strings.Contains(memStr, "kB") {
+						mult = 0.001
+						memStr = strings.TrimSuffix(memStr, "kB")
+					}
+					if val, err := strconv.ParseFloat(strings.TrimSpace(memStr), 64); err == nil {
+						totalMem += val * mult
+					}
+				}
+			}
+
+			// Format the string
+			msg := fmt.Sprintf("CPU: %.1f%% | RAM: %.1f GB", totalCPU, totalMem/1024)
+
+			// Try non-blocking send, skip if spinner isn't ready
+			select {
+			case statsChan <- msg:
+			default:
+			}
+		}
+	}
+}
+
+// showSpinner displays the animation + latest stats
+func showSpinner(msg string, done chan bool, statsChan chan string) {
+	//chars := []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+	//chars := []string{"⚀", "⚁", "⚂", "⚃", "⚄", "⚅"}
+	chars := []string{"▖", "▘", "▝", "▗"}
+	i := 0
+	currentStats := "Initializing metrics..."
+
+	// Clear the cursor initially
+	fmt.Print("\033[?25l")
+	defer fmt.Print("\033[?25h") // Restore cursor on exit
+
+	for {
+		select {
+		case <-done:
+			return
+		case s := <-statsChan:
+			currentStats = s
+		default:
+			// Overwrite the line
+			// \r = return to start of line
+			// \033[K = clear to end of line
+			fmt.Printf("\r%s  %s... [%s] \033[K", chars[i%len(chars)], msg, currentStats)
+			i++
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 }

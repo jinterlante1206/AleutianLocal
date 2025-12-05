@@ -206,6 +206,18 @@ func getOrchestratorBaseURL() string {
 }
 
 func getStackDir() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get the current working directory %w", err)
+	}
+	localCompose := filepath.Join(cwd, "podman-compose.yml")
+	if _, err = os.Stat(localCompose); err == nil {
+		body, err := os.ReadFile(localCompose)
+		if err == nil && strings.Contains(string(body), "aleutian-go-orchestrator") {
+			return cwd, nil
+		}
+	}
+
 	usr, err := user.Current()
 	if err != nil {
 		return "", fmt.Errorf("failed to get the current user: %w", err)
@@ -218,6 +230,17 @@ func ensureStackDir(cliVersion string) (string, error) {
 	stackDir, err := getStackDir()
 	if err != nil {
 		return "", err
+	}
+
+	// if we are not in the hidden .aleutian directory, do not attempt version check, delete,
+	//or download files aka we're in dev mode.
+	if !strings.Contains(stackDir, ".aleutian/stack") {
+		fmt.Println("Dev Mode detected: using local stack files.")
+		fmt.Printf("    Context: %s\n", stackDir)
+		if err := ensureEssentialDirs(stackDir); err != nil {
+			return "", err
+		}
+		return stackDir, nil
 	}
 
 	if err := ensureEssentialDirs(stackDir); err != nil {
