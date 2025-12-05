@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -20,7 +21,7 @@ type DirectChatRequest struct {
 	Tools          []interface{}       `json:"tools"`           // New
 }
 
-func HandleDirectChat(llmClient llm.LLMClient) gin.HandlerFunc {
+func HandleDirectChat(llmClient llm.LLMClient, pe *policy_engine.PolicyEngine) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx, span := chatTracer.Start(c.Request.Context(), "HandleDirectChat")
 		defer span.End()
@@ -36,6 +37,21 @@ func HandleDirectChat(llmClient llm.LLMClient) gin.HandlerFunc {
 		if len(req.Messages) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "no messages provided"})
 			return
+		}
+
+		// Scan the last message (the user's new input)
+		// Optionally loop through all if you want to be extra safe
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role == "user" {
+			findings := pe.ScanFileContent(lastMsg.Content)
+			if len(findings) > 0 {
+				slog.Warn("Blocked chat request due to policy violation", "findings", len(findings))
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":    "Policy Violation: Message contains sensitive data.",
+					"findings": findings,
+				})
+				return
+			}
 		}
 
 		params := llm.GenerationParams{

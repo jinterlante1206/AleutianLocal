@@ -11,13 +11,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 )
 
-func HandleAgentTrace() gin.HandlerFunc {
+func HandleAgentTrace(pe *policy_engine.PolicyEngine) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req datatypes.AgentTraceRequest
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+			return
+		}
+
+		slog.Info("Scanning agent query for sensitive data...")
+		findings := pe.ScanFileContent(req.Query)
+		if len(findings) > 0 {
+			slog.Warn("Blocked agent trace due to policy violation", "findings", len(findings))
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":    "Policy Violation: Query contains sensitive data.",
+				"findings": findings,
+			})
 			return
 		}
 

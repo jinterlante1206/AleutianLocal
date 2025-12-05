@@ -49,8 +49,8 @@ services:
       LLM_BACKEND_TYPE: ${LLM_BACKEND_TYPE:-ollama}
       # Ollama Specific
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.containers.internal:11434}
-#      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
-      OLLAMA_MODEL: "gemma3:12b"
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:latest}
+#      OLLAMA_MODEL: "gemma3:12b"
       # OpenAI Specific
       OPENAI_URL_BASE: ${OPENAI_URL_BASE:-https://api.openai.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini} # Note: Key comes from secret
@@ -162,6 +162,9 @@ services:
       dockerfile: Dockerfile
     container_name: aleutian-rag-engine
     restart: unless-stopped
+    volumes:
+      - ./:/app/codebase
+      - /Users:/Users
     ports:
       - "${RAG_ENGINE_PORT:-12125}:8000" # Expose internal port 8000 on host
     environment:

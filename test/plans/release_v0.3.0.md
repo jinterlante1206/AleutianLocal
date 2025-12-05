@@ -10,18 +10,20 @@
 *If the stack doesn't stand up, nothing else matters.*
 
 ### 1.1 Clean Install
-- [ ] **Prune Environment:** Run `podman system prune -a` (optional, but recommended for a "fresh machine" simulation).
-- [ ] **Build Stack:** Run `./aleutian stack start --build`.
-- [ ] **Container Status:** Verify all containers are `Up` / `Running`:
-    - [ ] `aleutian-orchestrator` (Go)
-    - [ ] `aleutian-engine` (Python)
-    - [ ] `weaviate`
-    - [ ] `jaeger`
+- [x] **Prune Environment:** Run `podman system prune -a` (optional, but recommended for a 
+  "fresh machine" simulation).
+- [x] **Build Stack:** Run `./aleutian stack start`.
+- [x] **Container Status:** Verify all containers are `Up` / `Running`:
+    - [x] `aleutian-orchestrator` (Go)
+    - [x] `aleutian-engine` (Python)
+    - [x] `weaviate`
+    - [x] `jaeger`
 
 ### 1.2 Configuration & Secrets
-- [ ] **Secret Safety:** Check Orchestrator logs (`podman logs aleutian-orchestrator`). Ensure API keys (Anthropic/OpenAI) are loaded but **masked/hidden**.
-- [ ] **Volume Mounts:** Verify the Python engine can see the host filesystem.
-    - *Command:* `podman exec -it aleutian-engine ls /mnt/host_files` (or your configured mount path).
+- [x] **Secret Safety:** Check Orchestrator logs (`podman logs aleutian-orchestrator`). Ensure 
+  API keys (Anthropic/OpenAI) are loaded but **masked/hidden**.
+- [x] **Volume Mounts:** Verify the Python engine can see the host filesystem.
+    - *Command:* ` podman exec -it aleutian-rag-engine ls /root/.cache/huggingface` (or your configured mount path).
     - *Pass Criteria:* Must list your actual local project files.
 
 ---

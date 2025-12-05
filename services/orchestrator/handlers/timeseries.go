@@ -64,7 +64,7 @@ func getSerivceURL(modelName string) (string, error) {
 	slug := normalizeModelName(modelName)
 
 	// Check for a specific Env Variable Override for the IP for a specific model
-	envVarKey := fmt.Sprintf("TIMESERIES_SERVICE_%S", strings.ReplaceAll(strings.ToUpper(slug),
+	envVarKey := fmt.Sprintf("TIMESERIES_SERVICE_%s", strings.ReplaceAll(strings.ToUpper(slug),
 		"-", "_"))
 	if override := os.Getenv(envVarKey); override != "" {
 		slog.Info("Using environment override for model", "model", modelName, "url", override)

@@ -12,7 +12,6 @@ RUN go mod download
 
 # Copy the rest of the source code for the entire project
 COPY services/ ./services/
-COPY internal/ ./internal/
 
 # Build the orchestrator binary, pointing to its package path from the root
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /app/orchestrator ./services/orchestrator
@@ -35,13 +34,7 @@ COPY --from=builder /app/orchestrator .
 
 # ADD THIS LINE to copy the needed policy file
 # Ensure the target directory structure exists
-RUN mkdir -p /app/internal/policy_engine/enforcement
-COPY --from=builder /src/internal/policy_engine/enforcement/data_classification_patterns.yaml /app/internal/policy_engine/enforcement/
 COPY --from=builder /src/services/orchestrator/ui /app/ui
-
-# The CMD should start the server
-CMD ["/app/orchestrator"]
-
 
 # The CMD should start the server
 CMD ["/app/orchestrator"]
