@@ -1,5 +1,4 @@
-# Aleutian Local: Your MLOps Control Plane for LLM Apps
-
+# Aleutian Local: Secure Memory Gateway & Autonomous Agent Platform
 
 ## License
 
@@ -9,18 +8,12 @@ This project is licensed under the GNU Affero General Public License v3.0 - see 
 
 **Aleutian Local** is a secure, offline-first intelligence layer that bridges your proprietary data with modern AI capabilities. It acts as a **Privacy Firewall** and **Institutional Memory** for your organization, allowing you to leverage powerful LLMs (like Microsoft Copilot, Claude, or local models) without exposing sensitive IP or PII to the public cloud.
 
-While many tools exist for local chat, Aleutian is architected as a **Secure Memory Gateway & Autonomous Agent Platform**. It is not just for local prototyping; it is fundamentally production-ready. By adhering to cloud-native principles—containerized services defined by Dockerfiles, configuration via environment variables, and a decoupled microservice structure—the entire stack is designed for a straightforward migration from your laptop to an air-gapped server or private cloud.
-
-A DevOps engineer can take the `podman-compose.yml` and `podman-compose.override.yml` files (which define the services, dependencies, and configuration) and translate them directly into deployment manifests for production orchestrators like **Kubernetes**, **Docker Swarm**, or other server environments. This "local-first, production-ready" design allows you to prototype with confidence, knowing the path to a scalable deployment is clear.
-
-It serves as an **opinionated but modular Secure Enterprise Intelligence platform**, providing the essential infrastructure and workflow automation around your chosen inference engine:
+It is designed as an **opinionated, production-ready Secure Enterprise Intelligence platform**:
 
 * **Privacy Firewall (DLP Integrated):** A built-in Data Loss Prevention engine intercepts every prompt and file ingestion. Unlike other tools that rely on external config files, Aleutian compiles security policies directly into the binary. It scans for regex patterns (API keys, PII, Secrets) in real-time and blocks them *before* they leave your infrastructure.
 * **Institutional Memory:** Ingests your internal documents (PDFs, Code, Markdown) into a local Vector Database (Weaviate), enabling "Chat with your Data" that references *your* specific project history, not just generic internet knowledge.
 * **Autonomous Agent:** The new `aleutian trace` command deploys a local coding agent that can explore your codebase, read files, and answer complex architectural questions. It runs entirely within your infrastructure—no code leaves your hardware unless you explicitly allow it.
-* **Unified LLM Access:** Seamlessly switch between local models (Ollama, llama.cpp, HF TGI/vLLM) and external APIs (OpenAI, Anthropic, Gemini) using a consistent interface. The stack is backend-agnostic; you can hot-swap between an offline Qwen2.5-Coder model and Claude 3.7 Sonnet without changing your application code.
-* **Secure Data Ingestion:** A two-phase pipeline (`aleutian populate`) first scans all local files with the Policy Engine, prompts for user approval on any findings, and then ingests only the approved files using high-speed, content-aware chunking.
-* **Integrated Observability:** Gain immediate insights into agent performance and behavior with a pre-configured stack (OpenTelemetry, Jaeger, Prometheus, Grafana).
+
 
 **Key Differentiator:** Aleutian empowers developers to **own their AI stack locally**. It prioritizes **data privacy, control, and observability**, offering a robust, pre-configured foundation that integrates easily with diverse data sources and LLM backends.
 
@@ -128,7 +121,12 @@ Creates a directory ~/.aleutian/stack/.
 
 Downloads and extracts the source code and configuration files matching your specific CLI version.
 
-Prompts for any missing secrets (e.g., anthropic_api_key) if you have configured a cloud backend.
+#### Interactive Secrets Setup
+You do not need to manually create secrets using the command line. When you run `aleutian stack 
+start`, the CLI automatically detects if your configured backend (e.g., Anthropic, OpenAI) 
+requires an API key. If the key is missing, the CLI will securely prompt you to paste it and 
+automatically store it as an encrypted Podman secret. Alternatively, just type in "none" to get 
+through the prompts if you don't want to add any keys except huggingface.
 
 Runs podman-compose up -d --build, building necessary images and starting all core services (Orchestrator, RAG Engine, Weaviate).
 
@@ -168,7 +166,7 @@ Control the lifecycle of the Aleutian containers. These commands automatically m
     * **Auto-Optimization:** Automatically detects RAM/VRAM to select a profile (`standard`, `performance`, `ultra`).
     * **Self-Healing:** Detects and repairs broken Podman machine mounts or networking issues.
     * **Flags:**
-        * `--profile <mode>`: Manually force a profile (`manual`, `low`, `standard`, `performance`, `ultra`). Use `manual` to respect settings in your `override.yml`.
+        * `--profile <mode>`: **Crucial for customizers.** Use `--profile manual` to disable the auto-optimization engine. This is required if you have defined custom model parameters (like `OLLAMA_MODEL`) in your `podman-compose.override.yml` and don't want the CLI to overwrite them.
         * `--backend <type>`: Switch LLM backend (`ollama`, `openai`, `anthropic`).
         * `--build`: Force a rebuild of container images (useful for developers).
 * `aleutian stack stop`: Gracefully stops all running services (`podman-compose down`).
@@ -280,7 +278,7 @@ Perform administrative maintenance on the Weaviate instance.
 
 ---
 
-### `upload`: Cloud Backup (Experimental)
+### `upload`: Cloud Backup (Disabled for now)
 
 Commands for uploading data to cloud storage (requires GCP configuration).
 
@@ -2006,7 +2004,9 @@ Future development focuses on enhancing usability, integration, and core MLOps c
 
 * **Aleutian Control Panel UI:** A lightweight web interface for viewing stack status, managing configuration, and browsing ingested documents without using the CLI.
 * **Native Data Parsing:** Integrated support for PDF, DOCX, and Excel parsing within the `populate` command workflow (removing the need for external parsing containers).
+* **Client-Side Agent Tools (v0.4.0):** Moving agent tool execution (`read_file`, `list_files`) from the container to the CLI. This ensures true air-gapping, as the LLM container will have zero direct file system access and must "ask" the CLI to perform actions.
 * **Expanded Cloud Clients:** Native Go client implementations for the Anthropic (Claude) and Google (Gemini) APIs directly within the Orchestrator.
+* **Semantic Search:** Advanced search pipelines beyond vector similarity (Raptor, GraphRAG).
 * **Binary Distribution:** Simplified installation via Homebrew Taps and downloadable binaries via GitHub Releases (moving away from `go build`).
 * **Model Evaluation Framework:** Built-in tools for benchmarking RAG accuracy (integrating tools like `ragas`) to quantitatively measure if your answers are improving.
 * **Advanced RAG Pipelines:** Implementation of **Raptor** (Recursive Summarization), **GraphRAG** (Knowledge Graph extraction), and **Semantic Search** strategies.
