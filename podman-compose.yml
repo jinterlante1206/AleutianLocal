@@ -163,7 +163,6 @@ services:
     container_name: aleutian-rag-engine
     restart: unless-stopped
     volumes:
-      - ./:/app/codebase
       - /Users:/Users
     ports:
       - "${RAG_ENGINE_PORT:-12125}:8000" # Expose internal port 8000 on host

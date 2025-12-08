@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -206,57 +208,180 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 func runTraceCommand(cmd *cobra.Command, args []string) {
 	query := strings.Join(args, " ")
 	fmt.Printf("Agent analyzing codebase for: %s\n", query)
-	fmt.Println("(This may take a moment while the agent reads files...)")
 
 	baseURL := getOrchestratorBaseURL()
-	url := fmt.Sprintf("%s/v1/agent/trace", baseURL)
-	payload, _ := json.Marshal(map[string]string{"query": query})
-	stopMonitor := make(chan bool)
-	statsChan := make(chan string)
-	stopSpinner := make(chan bool)
-	go monitorResources(stopMonitor, statsChan)
-	go showSpinner("Agent is working", stopSpinner, statsChan)
-	client := &http.Client{Timeout: 10 * time.Minute} // Long timeout for agents
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(payload))
+	url := fmt.Sprintf("%s/v1/agent/step", baseURL)
 
-	// Cleanup UI
-	stopMonitor <- true
-	stopSpinner <- true
-	fmt.Print("\r                                                                            \r") // Clean line
+	// Initialize History
+	history := []datatypes.AgentMessage{}
 
-	if err != nil {
-		log.Fatalf("\nConnection Failed: %v", err)
-	}
-	defer resp.Body.Close()
+	// Max steps to prevent infinite loops
+	maxSteps := 15
 
-	body, _ := io.ReadAll(resp.Body)
+	for i := 0; i < maxSteps; i++ {
+		// 1. Send State to Brain
+		reqPayload := datatypes.AgentStepRequest{
+			Query:   query,
+			History: history,
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("\nError (Status %d):\n%s\n", resp.StatusCode, string(body))
-		return
-	}
+		jsonPayload, _ := json.Marshal(reqPayload)
+		client := &http.Client{Timeout: 5 * time.Minute}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Fatalf("\nFailed to parse JSON response: %s", string(body))
-	}
+		// Simple Spinner while thinking
+		done := make(chan bool)
+		statsChan := make(chan string) // dummy channel for spinner signature
+		go showSpinner(fmt.Sprintf("Thinking (Step %d/%d)", i+1, maxSteps), done, statsChan)
 
-	if ans, ok := result["answer"].(string); ok {
-		fmt.Printf("\nAnswer:\n%s\n", ans)
-		if strings.Contains(ans, "sk_live_") {
-			fmt.Println("\nPrivacy alert: The agent tried to display a secret key.")
-			fmt.Println("   [Content Redacted by Aleutian Policy Engine]")
+		resp, err := client.Post(url, "application/json", bytes.NewBuffer(jsonPayload))
+		done <- true                                                      // Stop spinner
+		fmt.Print("\r                                                \r") // Clear line
+
+		if err != nil {
+			log.Fatalf("Communication failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			log.Fatalf("Orchestrator Error: %s", string(body))
+		}
+
+		var decision datatypes.AgentStepResponse
+		if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil {
+			log.Fatalf("Failed to decode decision: %v", err)
+		}
+
+		// 2. Act on Decision
+		if decision.Type == "answer" {
+			fmt.Printf("\nAnswer:\n%s\n", decision.Content)
 			return
+		} else if decision.Type == "tool_call" {
+
+			// 3. Execute Tool (Client Side)
+			toolName := decision.ToolName
+			toolArgs := decision.ToolArgs
+			fmt.Printf("Agent requests: %s %v\n", toolName, toolArgs)
+
+			var output string
+
+			// --- Client-Side Tool Logic ---
+			switch toolName {
+			case "list_files":
+				path, _ := toolArgs["path"].(string)
+				if path == "" {
+					path = "."
+				}
+				output = listFilesSafe(path)
+			case "read_file":
+				path, _ := toolArgs["path"].(string)
+				output = readFileSafe(path)
+			default:
+				output = fmt.Sprintf("Error: Tool '%s' not found on client.", toolName)
+			}
+			preview := output
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			fmt.Printf("   -> Tool Output: %s\n", preview)
+
+			// 4. Update History
+			// Add the Assistant's "Call"
+			history = append(history, datatypes.AgentMessage{
+				Role: "assistant",
+				ToolCalls: []datatypes.ToolCall{
+					{
+						Id: decision.ToolID,
+						Function: datatypes.ToolFunction{
+							Name: toolName,
+							// Convert map back to JSON string for history consistency
+							Arguments: mapToString(toolArgs),
+						},
+					},
+				},
+			})
+
+			// Add the Tool's "Result"
+			history = append(history, datatypes.AgentMessage{
+				Role:       "tool",
+				ToolCallId: decision.ToolID,
+				Content:    output,
+			})
 		}
+	}
+	fmt.Println("Max steps reached. Stopping.")
+}
+
+func isPathAllowed(reqPath string) (bool, string) {
+	// 1. Clean the path to resolve ".." and remove redundant slashes
+	cleanPath := filepath.Clean(reqPath)
+
+	// 2. Allow specific absolute paths (The Exception)
+	// We allow /tmp but enforce that the cleaned path actually starts with /tmp
+	if strings.HasPrefix(cleanPath, "/tmp") {
+		return true, cleanPath
 	}
 
-	if steps, ok := result["steps"].([]interface{}); ok {
-		fmt.Println("\nSteps Taken:")
-		for _, s := range steps {
-			step := s.(map[string]interface{})
-			fmt.Printf("- Called %s(%s)\n", step["tool"], step["args"])
-		}
+	if runtime.GOOS == "darwin" && strings.HasPrefix(cleanPath, "/var/folders") {
+		return true, cleanPath
 	}
+
+	// 3. Block all other absolute paths
+	if filepath.IsAbs(cleanPath) || strings.HasPrefix(cleanPath, "/") {
+		return false, ""
+	}
+
+	// 4. Block traversal (..) attempts for relative paths
+	if strings.Contains(cleanPath, "..") {
+		return false, ""
+	}
+
+	return true, cleanPath
+}
+
+func listFilesSafe(dirPath string) string {
+	allowed, cleanPath := isPathAllowed(dirPath)
+	if !allowed {
+		return "Error: Access Denied. Only local paths or /tmp are allowed."
+	}
+
+	entries, err := os.ReadDir(cleanPath)
+	if err != nil {
+		return fmt.Sprintf("Error reading dir: %v", err)
+	}
+
+	var files []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		files = append(files, e.Name())
+	}
+
+	result := strings.Join(files, "\n")
+	if len(result) > 2000 {
+		return result[:2000] + "\n...(truncated)"
+	}
+	return result
+}
+
+func readFileSafe(filePath string) string {
+	allowed, cleanPath := isPathAllowed(filePath)
+	if !allowed {
+		return "Error: Access Denied. Only local paths or /tmp are allowed."
+	}
+
+	content, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return fmt.Sprintf("Error reading file: %v", err)
+	}
+
+	return string(content)
+}
+
+func mapToString(m map[string]interface{}) string {
+	b, _ := json.Marshal(m)
+	return string(b)
 }
 
 func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResponse, error) {

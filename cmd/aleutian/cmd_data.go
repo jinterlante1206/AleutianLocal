@@ -156,6 +156,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	reader := bufio.NewReader(os.Stdin)
 	dataSpace, _ := cmd.Flags().GetString("data-space")
 	versionTag, _ := cmd.Flags().GetString("version")
+	force, _ := cmd.Flags().GetBool("force")
 
 	for _, file := range allFiles {
 		fmt.Printf("\nScanning file: %s\n", file)
@@ -184,17 +185,22 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 				fmt.Printf("    Reason: %s\n", f.PatternDescription)
 				fmt.Printf("    Match:  '%s'\n\n", f.MatchedContent)
 			}
-			fmt.Print("Do you want to proceed with this file? (yes/no): ")
-			input, _ := reader.ReadString('\n')
-			input = strings.ToLower(strings.TrimSpace(input))
-
-			if input != "yes" && input != "y" {
-				decision = "rejected"
-				proceed = false
-				fmt.Println("Skipping file based on user decision.")
+			if force {
+				fmt.Println("Force flag detected. Proceeding despite policy violation.")
+				decision = "accepted (forced)"
 			} else {
-				decision = "accepted (user override)"
-				fmt.Println("Proceeding with file based on user decision.")
+				fmt.Print("Do you want to proceed with this file? (yes/no): ")
+				input, _ := reader.ReadString('\n')
+				input = strings.ToLower(strings.TrimSpace(input))
+
+				if input != "yes" && input != "y" {
+					decision = "rejected"
+					proceed = false
+					fmt.Println("Skipping file based on user decision.")
+				} else {
+					decision = "accepted (user override)"
+					fmt.Println("Proceeding with file based on user decision.")
+				}
 			}
 		} else {
 			fmt.Println("No issues found.")
