@@ -32,6 +32,7 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
 from pipelines import standard, reranking, agent
+from datatypes.agent import AgentStepResponse, AgentStepRequest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

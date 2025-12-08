@@ -23,8 +23,20 @@ func HandleAgentStep(pe *policy_engine.PolicyEngine) gin.HandlerFunc {
 		}
 
 		// 1. Security: Policy Check
-		// We scan the 'Query' or the latest user message content
+		// We scan the 'Query' (User Input)
 		findings := pe.ScanFileContent(req.Query)
+
+		// CRITICAL SECURITY FIX: Scan the latest History entry (Tool Output)
+		// If the CLI just read a file, the content is here. We must block it if it's sensitive.
+		if len(req.History) > 0 {
+			lastMsg := req.History[len(req.History)-1]
+			// Only scan "tool" outputs or "user" follow-ups
+			if lastMsg.Role == "tool" || lastMsg.Role == "user" {
+				newFindings := pe.ScanFileContent(lastMsg.Content)
+				findings = append(findings, newFindings...)
+			}
+		}
+
 		if len(findings) > 0 {
 			slog.Warn("Blocked agent step due to policy violation", "findings", len(findings))
 			c.JSON(http.StatusForbidden, gin.H{
@@ -66,7 +78,6 @@ func HandleAgentStep(pe *policy_engine.PolicyEngine) gin.HandlerFunc {
 		}
 
 		// Return decision to CLI
-		// We pass the raw JSON back because it matches the AgentStepResponse struct
 		c.Data(http.StatusOK, "application/json", bodyBytes)
 	}
 }

@@ -71,7 +71,7 @@ func checkAndFixPodmanMachine(cfg config.MachineConfig) error {
 	}
 
 	machineName := cfg.Id
-	// Defaults if config is missing (unlikely given DefaultConfig)
+	// Defaults if config is missing
 	if machineName == "" {
 		machineName = "podman-machine-default"
 	}
@@ -129,42 +129,58 @@ func checkAndFixPodmanMachine(cfg config.MachineConfig) error {
 			targetMount := cfg.Drives[0]
 			fmt.Printf("🔍 Verifying connectivity to %s... ", targetMount)
 
-			// We use a context with timeout to detect if the mount is hung
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Increased timeout to prevent false positives on slow systems
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+
+			// CRITICAL FIX: Ensure the test image exists before running.
+			// This prevents "image not found" errors from triggering a machine destroy.
+			exec.Command("podman", "pull", "alpine:latest").Run()
 
 			// Run 'ls' inside the VM using a tiny command.
 			testCmd := exec.CommandContext(ctx, "podman", "run", "--rm",
 				"-v", fmt.Sprintf("%s:%s", targetMount, targetMount),
 				"alpine", "ls", targetMount)
 
-			if err := testCmd.Run(); err != nil {
+			out, err := testCmd.CombinedOutput()
+
+			if err != nil {
 				fmt.Println("FAILED.")
 
 				if ctx.Err() == context.DeadlineExceeded {
 					// Case A: Timeout (Sleep Crash) -> Soft Reboot
 					fmt.Println("   Reason: Drive access timed out (The 'Sleep Crash').")
-					fmt.Println("️  Self-Healing: Restarting infrastructure to reconnect drives...")
+					fmt.Println("🛠️  Self-Healing: Restarting infrastructure to reconnect drives...")
 					exec.Command("podman", "machine", "stop", machineName).Run()
 					needsStart = true
 					isRestart = true
 				} else {
-					// Case B: Immediate Error (Missing Mount) -> Factory Reset
-					fmt.Printf("   Reason: Drive disconnected or unreadable.\n")
-					fmt.Println("   Diagnosis: The Podman machine configuration is missing required mounts.")
-					fmt.Println("🛠️  Self-Healing: Performing Factory Reset on Podman machine to fix configuration...")
+					// Case B: Immediate Error
+					// We only destroy if the error explicitly says the file/directory is missing.
+					// This prevents destroying the VM for random network/image errors.
+					errStr := string(out)
+					if strings.Contains(errStr, "no such file") || strings.Contains(errStr, "not found") {
+						fmt.Printf("   Reason: Mount point missing inside VM.\n")
+						fmt.Println("   Diagnosis: The Podman machine configuration is missing required mounts.")
+						fmt.Println("🛠️  Self-Healing: Performing Factory Reset on Podman machine...")
 
-					// 1. Destroy the broken machine
-					rmCmd := exec.Command("podman", "machine", "rm", "-f", machineName)
-					rmCmd.Stdout = os.Stdout
-					rmCmd.Stderr = os.Stderr
-					if err := rmCmd.Run(); err != nil {
-						return fmt.Errorf("failed to remove broken machine during self-healing: %w", err)
+						// 1. Destroy the broken machine
+						rmCmd := exec.Command("podman", "machine", "rm", "-f", machineName)
+						rmCmd.Stdout = os.Stdout
+						rmCmd.Stderr = os.Stderr
+						if err := rmCmd.Run(); err != nil {
+							return fmt.Errorf("failed to remove broken machine during self-healing: %w", err)
+						}
+
+						// 2. Recurse to provision it correctly
+						fmt.Println("   Machine removed. Re-provisioning with correct mounts...")
+						return checkAndFixPodmanMachine(cfg)
+					} else {
+						// Case C: Unknown Error (e.g., Image pull failed, runtime error)
+						// Log it but DO NOT destroy data.
+						fmt.Printf("   ⚠️  Warning: Mount check failed with unexpected error:\n      %s\n", errStr)
+						fmt.Println("   Skipping self-healing to preserve data. Proceeding with startup...")
 					}
-
-					// 2. Recurse to provision it correctly (Block A will now run)
-					fmt.Println("   Machine removed. Re-provisioning with correct mounts...")
-					return checkAndFixPodmanMachine(cfg)
 				}
 			} else {
 				fmt.Println("OK.")

@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir \
 
 COPY server.py .
 COPY ./pipelines /app/pipelines
+COPY ./datatypes /app/datatypes
 
 EXPOSE 8000
 

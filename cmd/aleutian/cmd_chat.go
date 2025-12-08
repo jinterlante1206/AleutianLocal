@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -278,6 +279,11 @@ func runTraceCommand(cmd *cobra.Command, args []string) {
 			default:
 				output = fmt.Sprintf("Error: Tool '%s' not found on client.", toolName)
 			}
+			preview := output
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			fmt.Printf("   -> Tool Output: %s\n", preview)
 
 			// 4. Update History
 			// Add the Assistant's "Call"
@@ -313,6 +319,10 @@ func isPathAllowed(reqPath string) (bool, string) {
 	// 2. Allow specific absolute paths (The Exception)
 	// We allow /tmp but enforce that the cleaned path actually starts with /tmp
 	if strings.HasPrefix(cleanPath, "/tmp") {
+		return true, cleanPath
+	}
+
+	if runtime.GOOS == "darwin" && strings.HasPrefix(cleanPath, "/var/folders") {
 		return true, cleanPath
 	}
 

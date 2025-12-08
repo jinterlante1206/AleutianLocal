@@ -3,7 +3,7 @@ import logging
 import json
 import ollama
 from .base import BaseRAGPipeline
-from ..datatypes.agent import AgentStepResponse, AgentStepRequest, AgentMessage
+from datatypes.agent import AgentStepResponse, AgentStepRequest, AgentMessage
 
 logger = logging.getLogger(__name__)
 
