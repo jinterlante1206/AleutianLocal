@@ -3,6 +3,7 @@ import logging
 import json
 import ollama
 from .base import BaseRAGPipeline
+from datatypes.agent import AgentStepResponse, AgentStepRequest, AgentMessage
 
 logger = logging.getLogger(__name__)
 
@@ -57,49 +58,90 @@ class AgentPipeline(BaseRAGPipeline):
         logger.info(
             f"Agent initialized with backend: {self.agent_backend} model: {self.agent_model}")
 
-    async def run_trace(self, query: str) -> tuple[str, list[dict]]:
-        """Main Agent Loop"""
-        messages = [{"role": "user", "content": f"Trace the codebase to answer: {query}"}]
-        steps_log = []
+    async def run_step(self, request: AgentStepRequest) -> AgentStepResponse:
+        """
+        Executes ONE step of the agent loop.
+        Stateless: Takes history -> Calls LLM -> Returns Instruction.
+        """
+        # 1. Convert incoming Pydantic history to LLM-specific dicts
+        messages = self._convert_history_to_llm_format(request.history)
 
-        logger.info(f"🕵️ Agent Trace Started: {query}")
+        # If history is empty, add the system prompt/initial query context
+        if not request.history:
+            messages.append(
+                {"role": "user", "content": f"Trace the codebase to answer: {request.query}"})
 
-        for step in range(15):
-            # --- 1. ABSTRACT CALL ---
-            try:
-                response_data = await self._call_model_agnostic(messages)
-            except Exception as e:
-                return f"Critical Agent Error: {e}", steps_log
+        # 2. Call the LLM
+        try:
+            response_data = await self._call_model_agnostic(messages)
+        except Exception as e:
+            logger.error(f"Agent LLM error: {e}", exc_info=True)
+            return AgentStepResponse(type="answer", content=f"Critical Agent Error: {e}")
 
-            # Handle simple text response (no tools)
-            if not response_data.get('tool_calls'):
-                logger.info("Agent finished thinking.")
-                return response_data['content'], steps_log
+        # 3. Decision Logic
+        if response_data.get('tool_calls'):
+            tool = response_data['tool_calls'][0]  # Handle first tool
 
-            # --- 2. EXECUTE TOOLS ---
-            # (Add the Assistant's "Thought/Tool Call" to history first)
-            self._append_assistant_message(messages, response_data)
+            # Parse args safely
+            args = tool['args']
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    pass  # Keep as string if not JSON
 
-            for tool in response_data['tool_calls']:
-                fn_name = tool['name']
-                args = tool['args']
+            return AgentStepResponse(
+                type="tool_call",
+                tool=tool['name'],
+                args=args,
+                tool_id=tool['id']
+            )
+        else:
+            return AgentStepResponse(type="answer", content=response_data['content'])
 
-                logger.info(f"🛠️ Executing: {fn_name} {args}")
-                result = self._execute_tool(fn_name, args)
+    def _convert_history_to_llm_format(self, history: list[AgentMessage]) -> list[dict]:
+        """Translates the generic history back into the backend-specific format."""
+        llm_messages = []
 
-                # --- 3. FEED BACK RESULTS ---
-                self._append_tool_result(messages, tool['id'], fn_name, str(result))
+        for msg in history:
+            if self.agent_backend == "ollama":
+                # Ollama format is simpler
+                m = {"role": msg.role, "content": msg.content}
+                if msg.tool_calls:
+                    # Reconstruct Ollama tool calls structure if needed
+                    # Note: Ollama might handle history differently, but basic role/content works for context
+                    pass
+                llm_messages.append(m)
 
-                steps_log.append({
-                    "step": step + 1,
-                    "tool": fn_name,
-                    "args": args,
-                    "snippet": str(result)[:200] + "..."
-                })
+            elif self.agent_backend == "anthropic":
+                if msg.role == "user":
+                    if msg.content:
+                        llm_messages.append({"role": "user", "content": msg.content})
+                    # Handle tool results (which come as role='tool' in our generic format but 'user' in Anthropic)
+                    if msg.role == "tool":
+                        llm_messages.append({
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id,
+                                "content": msg.content
+                            }]
+                        })
+                elif msg.role == "assistant":
+                    content_block = []
+                    if msg.content:
+                        content_block.append({"type": "text", "text": msg.content})
+                    if msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            content_block.append({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "input": json.loads(tc.function.arguments)
+                            })
+                    llm_messages.append({"role": "assistant", "content": content_block})
 
-        return "Agent reached max steps limit.", steps_log
-
-    # --- ADAPTER LAYER: Standardizes different APIs ---
+        return llm_messages
 
     async def _call_model_agnostic(self, messages):
         """Routes to the correct provider and normalizes the output"""

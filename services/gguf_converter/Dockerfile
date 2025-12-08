@@ -1,10 +1,11 @@
-# services/converter/Dockerfile
 ARG VERSION=latest
 ARG BUILD_TIMESTAMP=""
-# --- Stage 1: Build llama.cpp ---
+
+# --- Stage 1: Build llama.cpp (Heavy C++ Compilation) ---
+# This stage typically caches well unless you change the git repo URL or apt packages.
 FROM ubuntu:24.04 as builder
 
-# Install build dependencies
+# 1. Install build tools
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git \
@@ -16,7 +17,9 @@ RUN apt-get update && \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone and compile llama.cpp
+# 2. Clone and Compile
+# Tip: To make this even faster/safer, you could pin a specific commit hash here
+# using 'git checkout <hash>' to prevent daily updates from breaking cache.
 WORKDIR /app
 RUN git clone https://github.com/ggerganov/llama.cpp.git
 WORKDIR /app/llama.cpp
@@ -27,23 +30,14 @@ RUN cmake ..
 RUN cmake --build . --config Release
 
 
-
-# --- Stage 2: Create the final server image ---
+# --- Stage 2: Create the final server image (Python) ---
 FROM python:3.11-slim
 ARG VERSION
 ARG BUILD_TIMESTAMP
 
 WORKDIR /app
 
-# Add in the version number for the build.
-COPY VERSION.txt /tmp/VERSION.txt
-RUN export APP_VERSION=$(cat /tmp/VERSION.txt | tr -d '[:space:]') && \
-    echo "Using Version: $APP_VERSION" && \
-    echo "Build Timestamp: $BUILD_TIMESTAMP"
-LABEL maintainer="jinterlante@aleutian.ai"
-LABEL app.version=$VERSION
-LABEL build.timestamp=$BUILD_TIMESTAMP
-
+# 3. System Dependencies (Cached until apt packages change)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -51,9 +45,9 @@ RUN apt-get update && \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install FastAPI server dependencies
+# 4. Python Dependencies (Cached until requirements.txt changes)
+# We do this EARLY so it doesn't run when you just change server code or version.
 COPY ./services/gguf_converter/requirements.txt .
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
     -r requirements.txt \
     numpy \
@@ -64,15 +58,25 @@ RUN pip install --no-cache-dir \
     torch \
     regex
 
-# Copy the compiled llama.cpp and its dependencies from the builder stage
+# 5. Copy Compiled Binaries (Cached until Stage 1 changes)
 COPY --from=builder /app/llama.cpp /app/llama.cpp
 
-# Copy our server code
+# 6. Copy App Code (Cached until server.py changes)
 COPY ./services/gguf_converter/server.py .
 
-# Define the /models volume. This is CRITICAL.
+# 7. Metadata & Versioning (Volatile - Keep at bottom!)
+# Moving this to the end ensures changing the version doesn't trigger a pip reinstall.
+COPY VERSION.txt /tmp/VERSION.txt
+RUN export APP_VERSION=$(cat /tmp/VERSION.txt | tr -d '[:space:]') && \
+    echo "Using Version: $APP_VERSION" && \
+    echo "Build Timestamp: $BUILD_TIMESTAMP"
+
+LABEL maintainer="jinterlante@aleutian.ai"
+LABEL app.version=$VERSION
+LABEL build.timestamp=$BUILD_TIMESTAMP
+
+# 8. Runtime Config
 VOLUME /models
 EXPOSE 8000
 
-# Run the server
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

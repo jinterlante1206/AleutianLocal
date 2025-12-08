@@ -32,6 +32,7 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
 from pipelines import standard, reranking, agent
+from datatypes.agent import AgentStepResponse, AgentStepRequest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -241,20 +242,18 @@ async def run_reranking_rag(request: RAGEngineRequest):
 class AgentRequest(BaseModel):
     query: str
 
-
-@app.post("/agent/trace")
-async def run_agent_trace(request: AgentRequest):
-    logger.info(f"Received Agent Trace request: {request.query}")
+@app.post("/agent/step", response_model=AgentStepResponse)
+async def run_agent_step(request: AgentStepRequest):
+    # No logging of full history to keep logs clean
+    logger.info(f"Agent Step Request for query: {request.query}")
     if not weaviate_client or not weaviate_client.is_connected():
         raise HTTPException(status_code=503, detail="Weaviate client not connected")
 
     try:
-        # Instantiate the Agent Pipeline
         pipeline = agent.AgentPipeline(weaviate_client, pipeline_config)
-        answer, steps = await pipeline.run_trace(request.query)
-        return {"answer": answer, "steps": steps}
+        return await pipeline.run_step(request)
     except Exception as e:
-        logger.error(f"Agent error: {e}", exc_info=True)
+        logger.error(f"Agent Step error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")

@@ -5,25 +5,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
+// TestSendRAGRequest preserves your existing RAG logic test
 func TestSendRAGRequest(t *testing.T) {
-	// 1. Setup a "Fake" Orchestrator
 	mockOrchestrator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify the URL path
 		if r.URL.Path != "/v1/rag" {
 			t.Errorf("Expected path /v1/rag, got %s", r.URL.Path)
 		}
-
-		// Verify the Request Body
 		var reqBody map[string]interface{}
 		json.NewDecoder(r.Body).Decode(&reqBody)
 		if reqBody["query"] != "Test Question" {
 			t.Errorf("Expected query 'Test Question', got %v", reqBody["query"])
 		}
-
-		// Return a Fake Response
 		resp := map[string]interface{}{
 			"answer":     "This is a mock answer",
 			"session_id": "mock-session-123",
@@ -35,20 +31,11 @@ func TestSendRAGRequest(t *testing.T) {
 	}))
 	defer mockOrchestrator.Close()
 
-	// 2. Trick the CLI into using the Mock URL
-	// We assume getOrchestratorBaseURL() looks at an env var, or we override it if logic permits.
-	// Since getOrchestratorBaseURL isn't exported or easily injectable in the current code,
-	// we set the Env Var that function likely checks.
 	os.Setenv("ALEUTIAN_ORCHESTRATOR_URL", mockOrchestrator.URL)
 	defer os.Unsetenv("ALEUTIAN_ORCHESTRATOR_URL")
 
-	// 3. Run the Function
-	// We need to verify sendRAGRequest actually uses the environment variable logic
-	// If getOrchestratorBaseURL is hardcoded to localhost in your code, this test requires
-	// refactoring getOrchestratorBaseURL to prioritize the Env Var.
 	response, err := sendRAGRequest("Test Question", "session-1", "standard")
 
-	// 4. Assertions
 	if err != nil {
 		t.Fatalf("sendRAGRequest returned error: %v", err)
 	}
@@ -58,4 +45,54 @@ func TestSendRAGRequest(t *testing.T) {
 	if len(response.Sources) != 1 {
 		t.Errorf("Expected 1 source, got %d", len(response.Sources))
 	}
+}
+
+// TestClientSideToolsSecurity verifies our new Path rules
+func TestClientSideToolsSecurity(t *testing.T) {
+	// Create a dummy file in the current temp dir for valid read tests
+	tmpDir := t.TempDir()
+	secretFile := filepath.Join(tmpDir, "secret.txt")
+	os.WriteFile(secretFile, []byte("super secret"), 0644)
+
+	tests := []struct {
+		name      string
+		tool      string
+		input     string
+		wantError bool
+	}{
+		{"Read Local File", "read_file", "go.mod", false},                   // Valid relative path
+		{"Read /tmp File", "read_file", "/tmp/somefile.log", false},         // Valid absolute exception
+		{"Read /tmp Traversal", "read_file", "/tmp/../../etc/passwd", true}, // Malicious /tmp
+		{"Read Absolute Path", "read_file", "/etc/passwd", true},            // Blocked absolute
+		{"Read Parent Dir", "read_file", "../secret.txt", true},             // Blocked relative traversal
+		{"List Valid Dir", "list_files", ".", false},
+		{"List Root Dir", "list_files", "/", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var result string
+			// NOTE: We test the security logic wrapper, not the OS call success
+			// So if it returns "Error: Access Denied", that's what we check.
+			if tt.tool == "read_file" {
+				result = readFileSafe(tt.input)
+			} else {
+				result = listFilesSafe(tt.input)
+			}
+
+			if tt.wantError {
+				if !contains(result, "Access Denied") {
+					t.Errorf("Expected 'Access Denied' for input '%s', got: '%s'", tt.input, result)
+				}
+			} else {
+				if contains(result, "Access Denied") {
+					t.Errorf("Expected allowed access for input '%s', got Blocked: '%s'", tt.input, result)
+				}
+			}
+		})
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && s[0:len(substr)] == substr // simplistic check
 }
