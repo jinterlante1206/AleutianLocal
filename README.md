@@ -890,65 +890,65 @@ Create directory `/Users/me/dev/research-agent/` with the following files:
     ```
 
 * **File:** `/Users/me/dev/research-agent/agent.py`
-    ```python
-    from fastapi import FastAPI, HTTPException
-    from pydantic import BaseModel
-    from aleutian_client import AleutianClient
-    import os
+```python
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from aleutian_client import AleutianClient
+import os
 
-    app = FastAPI(title="Custom Research Agent")
+app = FastAPI(title="Custom Research Agent")
 
-    # We expect the Orchestrator URL to be passed via env var
-    # Inside the cluster, this is usually 'http://orchestrator:12210'
-    ORCHESTRATOR_URL = os.getenv("ALEUTIAN_ORCHESTRATOR_URL", "http://orchestrator:12210")
+# We expect the Orchestrator URL to be passed via env var
+# Inside the cluster, this is usually 'http://orchestrator:12210'
+ORCHESTRATOR_URL = os.getenv("ALEUTIAN_ORCHESTRATOR_URL", "http://orchestrator:12210")
 
-    class ResearchRequest(BaseModel):
-        topic: str
+class ResearchRequest(BaseModel):
+    topic: str
 
-    @app.post("/research")
-    def conduct_research(req: ResearchRequest):
-        print(f"🕵️ Researching topic: {req.topic}")
-        
-        # Connect to the core Aleutian stack from inside this container
-        # We parse the URL to get host/port
-        host = ":".join(ORCHESTRATOR_URL.split(":")[:-1])
-        port = int(ORCHESTRATOR_URL.split(":")[-1])
+@app.post("/research")
+def conduct_research(req: ResearchRequest):
+    print(f"🕵️ Researching topic: {req.topic}")
+    
+    # Connect to the core Aleutian stack from inside this container
+    # We parse the URL to get host/port
+    host = ":".join(ORCHESTRATOR_URL.split(":")[:-1])
+    port = int(ORCHESTRATOR_URL.split(":")[-1])
 
-        try:
-            with AleutianClient(host=host, port=port) as client:
-                # 1. Use Aleutian's Memory (RAG) to get facts
-                print("   - Querying Institutional Memory...")
-                rag_response = client.ask(
-                    query=f"Detailed technical information about {req.topic}",
-                    pipeline="reranking"
-                )
+    try:
+        with AleutianClient(host=host, port=port) as client:
+            # 1. Use Aleutian's Memory (RAG) to get facts
+            print("   - Querying Institutional Memory...")
+            rag_response = client.ask(
+                query=f"Detailed technical information about {req.topic}",
+                pipeline="reranking"
+            )
 
-                # 2. Synthesize a Report (Using Direct Chat)
-                # We feed the RAG findings back into the LLM with a specific persona
-                print("   - Synthesizing Report...")
-                from aleutian_client import Message
-                prompt = f"""
-                You are a Senior Technical Researcher. 
-                Based on the following facts retrieved from our internal knowledge base:
-                
-                {rag_response.answer}
-                
-                Write a concise, executive summary about {req.topic}.
-                """
-                
-                chat_response = client.chat(messages=[
-                    Message(role="user", content=prompt)
-                ])
+            # 2. Synthesize a Report (Using Direct Chat)
+            # We feed the RAG findings back into the LLM with a specific persona
+            print("   - Synthesizing Report...")
+            from aleutian_client import Message
+            prompt = f"""
+            You are a Senior Technical Researcher. 
+            Based on the following facts retrieved from our internal knowledge base:
+            
+            {rag_response.answer}
+            
+            Write a concise, executive summary about {req.topic}.
+            """
+            
+            chat_response = client.chat(messages=[
+                Message(role="user", content=prompt)
+            ])
 
-                return {
-                    "topic": req.topic,
-                    "summary": chat_response.answer,
-                    "sources": [s.source for s in rag_response.sources]
-                }
+            return {
+                "topic": req.topic,
+                "summary": chat_response.answer,
+                "sources": [s.source for s in rag_response.sources]
+            }
 
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-    ```
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
 
 * **File:** `/Users/me/dev/research-agent/Dockerfile`
     ```dockerfile

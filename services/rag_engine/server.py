@@ -31,7 +31,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
-from pipelines import standard, reranking, agent
+from pipelines import standard, reranking, agent, verified
 from datatypes.agent import AgentStepResponse, AgentStepRequest
 
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +49,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_URL_BASE = os.getenv("OPENAI_URL_BASE", "https://api.openai.com/v1")
 HF_SERVER_URL = os.getenv("HF_SERVER_URL")
 OTEL_URL = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "aleutian-otel-collector:4317")
+SKEPTIC_MODEL = os.getenv("SKEPTIC_MODEL", OLLAMA_MODEL)
 
 # Add env vars for other backends (Claude, Gemini etc.)
 # CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-haiku-20240307")
@@ -166,6 +167,7 @@ pipeline_config = {
     "llm_service_url": llm_service_url, # Pass the determined URL
     "ollama_model": OLLAMA_MODEL,
     "openai_model": OPENAI_MODEL,
+    "skeptic_model": SKEPTIC_MODEL,
     # Add other LLM model names (Claude, Gemini, HF) here if needed
     # "claude_model": CLAUDE_MODEL,
 }
@@ -237,6 +239,25 @@ async def run_reranking_rag(request: RAGEngineRequest):
 # TODO: add semantic RAG
 
 # TODO: add RIG
+
+
+@app.post("/rag/verified", response_model=RAGEngineResponse)
+async def run_verified_rag(request: RAGEngineRequest):
+    rag_request_counter.add(1, {"pipeline": "verified"})
+    logger.info(f"Running Verified RAG (Skeptic Mode) for query: {request.query[:50]}...")
+    if not weaviate_client or not weaviate_client.is_connected():
+        raise HTTPException(status_code=503, detail="Weaviate client not connected")
+    try:
+        # Initialize the Verified pipeline
+        pipeline = verified.VerifiedRAGPipeline(weaviate_client, pipeline_config)
+
+        # Run it
+        answer, source_docs = await pipeline.run(request.query, request.session_id)
+
+        return RAGEngineResponse(answer=answer, sources=source_docs)
+    except Exception as e:
+        logger.error(f"Error in Verified RAG pipeline: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class AgentRequest(BaseModel):
