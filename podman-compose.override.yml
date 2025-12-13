@@ -12,10 +12,10 @@ services:
   # Override the LLM command if you've downloaded a different model
   # llm-server:
   #   command: -m /models/my-other-model.gguf -c 8192 --n_gpu_layers -1
-  orchestrator:
-    environment:
-      ALEUTIAN_TIMESERIES_TOOL: http://finance-analysis-service:8000
-      ALEUTIAN_DATA_FETCHER_URL: http://finance-data-service:8000
+#  orchestrator:
+#    environment:
+#      ALEUTIAN_TIMESERIES_TOOL: http://finance-analysis-service:8000
+#      ALEUTIAN_DATA_FETCHER_URL: http://finance-data-service:8000
 #    depends_on:
 #      finance-analysis-service:
 #        condition: service_healthy
@@ -23,78 +23,78 @@ services:
 #        condition: service_healthy
 
 #  # Add the InfluxDB instance
-  influxdb:
-    image: influxdb:latest
-    container_name: user-influxdb
-    ports:
-      - "12130:8086"
-    volumes:
-      - influxdb_data:/var/lib/influxdb2
-    networks:
-      - aleutian-network
-    environment:
-      - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      - DOCKER_INFLUXDB_INIT_PASSWORD=adminadmin
-      - DOCKER_INFLUXDB_INIT_ORG=aleutian-finance
-      - DOCKER_INFLUXDB_INIT_BUCKET=financial-data
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=your_super_secret_admin_token
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8086/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-  finance-data-service:
-    build:
-      context: /Users/jin/GolandProjects/SapheneiaAleutianMLOps/services/finance-data
-      dockerfile: Dockerfile
-    container_name: sapheneia-finance-data
-    ports:
-      - "12131:8000"
-    networks:
-      - aleutian-network
-    environment:
-      INFLUXDB_URL: http://influxdb:8086
-      INFLUXDB_TOKEN: your_super_secret_admin_token
-      INFLUXDB_ORG: aleutian-finance
-      INFLUXDB_BUCKET: financial-data
-    depends_on:
-      influxdb:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-
-  finance-analysis-service:
-    build:
-      context: /Users/jin/GolandProjects/SapheneiaAleutianMLOps/services/finance-analysis
-      dockerfile: Dockerfile
-    container_name: sapheneia-timeseries-analysis
-    ports:
-      - "12129:8000"
-    networks:
-      - aleutian-network
-    environment:
-      - INFLUXDB_URL=http://influxdb:8086
-      - INFLUXDB_TOKEN=your_super_secret_admin_token
-      - INFLUXDB_ORG=aleutian-finance
-      - INFLUXDB_BUCKET=financial-data
-    volumes:
-      - models_cache:/root/.cache/huggingface/
-    secrets:
-      - source: aleutian_hf_token
-    depends_on:
-      influxdb:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 20
+#  influxdb:
+#    image: influxdb:latest
+#    container_name: user-influxdb
+#    ports:
+#      - "12130:8086"
+#    volumes:
+#      - influxdb_data:/var/lib/influxdb2
+#    networks:
+#      - aleutian-network
+#    environment:
+#      - DOCKER_INFLUXDB_INIT_MODE=setup
+#      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+#      - DOCKER_INFLUXDB_INIT_PASSWORD=adminadmin
+#      - DOCKER_INFLUXDB_INIT_ORG=aleutian-finance
+#      - DOCKER_INFLUXDB_INIT_BUCKET=financial-data
+#      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=your_super_secret_admin_token
+#    healthcheck:
+#      test: [ "CMD", "curl", "-f", "http://localhost:8086/health" ]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 20
+#
+#  finance-data-service:
+#    build:
+#      context: /Users/jin/GolandProjects/SapheneiaAleutianMLOps/services/finance-data
+#      dockerfile: Dockerfile
+#    container_name: sapheneia-finance-data
+#    ports:
+#      - "12131:8000"
+#    networks:
+#      - aleutian-network
+#    environment:
+#      INFLUXDB_URL: http://influxdb:8086
+#      INFLUXDB_TOKEN: your_super_secret_admin_token
+#      INFLUXDB_ORG: aleutian-finance
+#      INFLUXDB_BUCKET: financial-data
+#    depends_on:
+#      influxdb:
+#        condition: service_healthy
+#    healthcheck:
+#      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 20
+#
+#
+#  finance-analysis-service:
+#    build:
+#      context: /Users/jin/GolandProjects/SapheneiaAleutianMLOps/services/finance-analysis
+#      dockerfile: Dockerfile
+#    container_name: sapheneia-timeseries-analysis
+#    ports:
+#      - "12129:8000"
+#    networks:
+#      - aleutian-network
+#    environment:
+#      - INFLUXDB_URL=http://influxdb:8086
+#      - INFLUXDB_TOKEN=your_super_secret_admin_token
+#      - INFLUXDB_ORG=aleutian-finance
+#      - INFLUXDB_BUCKET=financial-data
+#    volumes:
+#      - models_cache:/root/.cache/huggingface/
+#    secrets:
+#      - source: aleutian_hf_token
+#    depends_on:
+#      influxdb:
+#        condition: service_healthy
+#    healthcheck:
+#      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 20
 
   aleutian-rag-engine:
     environment:

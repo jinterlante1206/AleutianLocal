@@ -217,12 +217,17 @@ var (
 	}
 
 	testPolicyCmd = &cobra.Command{
-		Use: "test",
-		Short: "Allows you to enter a test string to see if that individual string gets caught by" +
-			" the policies you have in place",
+		Use:   "test",
+		Short: "Allows you to enter a test string see if the policies catch it",
 		Long: `policy test allows you to enter a test string to see if that individual string
 				gets caught by the policies you have in place'`,
 		Run: testPolicyString,
+	}
+
+	statusCmd = &cobra.Command{
+		Use:   "status",
+		Short: "Show resource usage and health of running services.",
+		Run:   runStatus,
 	}
 )
 
@@ -245,12 +250,13 @@ func init() {
 	stackCmd.AddCommand(stopCmd)
 	stackCmd.AddCommand(destroyCmd)
 	stackCmd.AddCommand(logsCmd)
-
+	stackCmd.AddCommand(statusCmd)
 	deployCmd.Flags().StringVar(&backendType, "backend", "", "Set LLM backend (ollama, "+
 		"openai, anthropic). Skips local model checks if not 'ollama'.")
 	deployCmd.Flags().StringVar(&profile, "profile", "auto", "Optimization profile: 'auto', 'low', 'standard', 'performance', 'ultra', or 'manual'")
 	deployCmd.Flags().BoolVar(&forceBuild, "build", false, "Force rebuild of container images")
-
+	deployCmd.Flags().Bool("force-recreate", false,
+		"automatically recreates the podman machine if a drift is detected.")
 	// --- Utility Commands ---
 	rootCmd.AddCommand(convertCmd)
 	convertCmd.Flags().StringVar(&quantizeType, "quantize", "q8_0", "Quantization type (f32, q8_0, bf16, f16)")

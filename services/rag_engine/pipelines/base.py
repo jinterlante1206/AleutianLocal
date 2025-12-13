@@ -328,7 +328,7 @@ class BaseRAGPipeline:
             raise RuntimeError(f"Embedding generation failed: {e}")
 
     # --- Moved from standard.py ---
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, model_override: str=None, **kwargs) -> str:
         """
         Calls the configured LLM backend with the final prompt.
 
@@ -372,6 +372,8 @@ class BaseRAGPipeline:
         headers = {"Content-Type": "application/json"}
         payload = {}
         api_url = ""
+        generation_params = self.default_llm_params.copy()
+        generation_params.update(kwargs)
 
         logger.debug(f"Calling LLM backend: {self.llm_backend}")
 
@@ -410,11 +412,11 @@ class BaseRAGPipeline:
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": self.default_llm_params["temperature"],
-                    "num_predict": self.default_llm_params["max_tokens"],
-                    "top_k": self.default_llm_params["top_k"],
-                    "top_p": self.default_llm_params["top_p"],
-                    "stop": self.default_llm_params["stop"]
+                    "temperature": generation_params["temperature"],
+                    "num_predict": generation_params["max_tokens"],
+                    "top_k": generation_params["top_k"],
+                    "top_p": generation_params["top_p"],
+                    "stop": generation_params["stop"]
                 }
             }
         elif self.llm_backend == "openai":

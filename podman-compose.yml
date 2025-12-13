@@ -20,7 +20,7 @@ services:
     secrets:
       - source: aleutian_hf_token
     volumes:
-      - /Volumes/ai_models/aleutian_data/models_cache:/root/.cache/huggingface/
+      - ${ALEUTIAN_MODELS_CACHE:-./models_cache}:/root/.cache/huggingface/
     networks:
       - aleutian-network
     healthcheck:
@@ -89,7 +89,7 @@ services:
       TIMEOUT_SECONDS_LLM: ${TIMEOUT_SECONDS_LLM:-300} # Example timeout
     volumes:
       # Mount the policy file so users can customize it locally
-      - /Volumes/ai_models/aleutian_data/models_cache:/root/.cache/huggingface/
+      - ${ALEUTIAN_MODELS_CACHE:-./models_cache}:/root/.cache/huggingface/
       - ./internal/policy_engine/enforcement/data_classification_patterns.yaml:/app/internal/policy_engine/enforcement/data_classification_patterns.yaml:ro
     secrets:
       - source: aleutian_hf_token
@@ -144,7 +144,7 @@ services:
       - "12140:8000"
     volumes:
       - ./models:/models
-      - /Volumes/ai_models/aleutian_data/models_cache:/root/.cache/huggingface/
+      - ${ALEUTIAN_MODELS_CACHE:-./models_cache}:/root/.cache/huggingface/
     secrets:
       - source: aleutian_hf_token
     restart: unless-stopped

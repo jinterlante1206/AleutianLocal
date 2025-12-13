@@ -1516,6 +1516,20 @@ Aleutian includes mechanisms to track interactions, primarily for auditing and c
     * Sends the complete turn history to the orchestrator's stateless `/v1/chat/direct` endpoint on each interaction. Does not currently save turns to Weaviate.
 * **Vector DB Storage:** Storing `Conversation` objects enables potential future semantic search capabilities across past interactions.
 
+### Verified RAG Pipeline (The "Skeptic" Architecture)
+
+Aleutian implements a **Self-Correcting "Agentic" Workflow** to mitigate hallucinations in high-stakes environments.
+
+* **Pipeline Name:** `verified`
+* **Usage:** `aleutian ask "Query" --pipeline verified`
+* **Architecture:**
+    1.  **The Optimist (Draft):** Generates an initial answer using standard RAG.
+    2.  **The Skeptic (Audit):** A separate LLM pass (or separate model) reviews the draft against the retrieved evidence. It enforces a strict "Citation Requirement"—if a claim is not explicitly supported by the text, it is flagged as a hallucination.
+    3.  **The Refiner (Correction):** If the Skeptic finds errors, the answer is rewritten to remove unsupported claims. This loop repeats up to 2 times.
+* **Configuration:**
+    * By default, Aleutian uses the main model (e.g., `gpt-oss`) for both roles, using **Persona Switching** (System Prompts) to change behaviors.
+    * **Advanced:** You can configure a separate "Skeptic Model" (e.g., `phi-4` or `granite-guardian`) in `podman-compose.override.yml` via the `SKEPTIC_MODEL` environment variable to optimize for speed vs. rigor.
+
 ---
 
 ## Modularity & Extensibility

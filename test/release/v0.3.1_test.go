@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,17 +13,25 @@ import (
 // TestAgentTraceE2E builds the CLI and runs a real trace command.
 // Requires the Aleutian Stack to be running (`aleutian stack start`).
 func TestAgentTraceE2E(t *testing.T) {
-	// 1. Build the latest CLI binary
-	// We build it to a temp location to avoid messing with the user's install
-	tmpBin := "./aleutian_test_bin"
-	buildCmd := exec.Command("go", "build", "-o", tmpBin, "../../cmd/aleutian")
+	// 1. Build the latest CLI binary (Use absolute path to be safe)
+	cwd, _ := os.Getwd()
+	projectRoot := filepath.Join(cwd, "../../") // Adjust based on where you run 'go test'
+	tmpBin := filepath.Join(projectRoot, "aleutian_test_bin")
+
+	// Build it from the root
+	buildCmd := exec.Command("go", "build", "-o", tmpBin, "./cmd/aleutian")
+	buildCmd.Dir = projectRoot // Execute build from root
 	if output, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to build CLI: %v\nOutput: %s", err, string(output))
 	}
-	defer os.Remove(tmpBin) // Cleanup binary
+	defer os.Remove(tmpBin)
+
+	// 2. Setup a CLEAN ROOM (Temp Directory)
+	// This prevents the agent from seeing other source files and getting distracted.
+	cleanDir := t.TempDir()
 
 	// 2. Create a dummy target file
-	targetFile := "test_trace_target.txt"
+	targetFile := filepath.Join(cleanDir, "test_trace_target.txt")
 	secretCode := "BLUE_HORIZON"
 	content := fmt.Sprintf("The secret code is %s.", secretCode)
 	if err := os.WriteFile(targetFile, []byte(content), 0644); err != nil {
@@ -33,6 +42,7 @@ func TestAgentTraceE2E(t *testing.T) {
 	// 3. Run the Trace Command
 	prompt := fmt.Sprintf("Read the file %s and tell me the secret code.", targetFile)
 	cmd := exec.Command(tmpBin, "trace", prompt)
+	cmd.Dir = cleanDir
 
 	// Set a timeout to prevent hanging if the loop breaks
 	// (We can't easily use CommandContext with a timeout that kills the *process group* robustly in tests without complexity,

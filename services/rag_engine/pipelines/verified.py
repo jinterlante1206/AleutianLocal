@@ -20,6 +20,7 @@ from datatypes.verified import (
     RefinerRequest,
     VerificationState
 )
+import time
 from .reranking import RerankingPipeline
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ class VerifiedRAGPipeline(RerankingPipeline):
 
     def __init__(self, weaviate_client: weaviate.WeaviateClient, config: dict):
         super().__init__(weaviate_client, config)
-        logger.info("VerifiedRAGPipeline initialized.")
+        self.skeptic_model = config.get("skeptic_model")
+        logger.info(f"VerifiedRAGPipeline initialized. Skeptic Model {self.skeptic_model}")
 
     # --- 1. Helper: Prompt Builders (Single Responsibility: Formatting) ---
 
@@ -49,41 +51,72 @@ class VerifiedRAGPipeline(RerankingPipeline):
 
     def _build_skeptic_prompt(self, req: SkepticAuditRequest) -> str:
         return f"""
-        You are a Strict AI Auditor. Detect hallucinations.
+        You are a SKEPTICAL FACT-CHECKER auditing someone else's answer for hallucinations.
+
+        CRITICAL RULES:
+        1. ASSUME THE ANSWER IS WRONG until proven right by evidence.
+        2. Each claim needs DIRECT, EXPLICIT support - no assumptions or inferences.
+        3. If a claim requires connecting multiple sources or "reading between the lines", mark it as unsupported.
+        4. Vague or partial matches = HALLUCINATION.
 
         USER QUERY: {req.query}
-        PROPOSED ANSWER: {req.proposed_answer}
 
-        VERIFIED EVIDENCE:
+        ANSWER TO AUDIT (treat this as potentially flawed):
+        {req.proposed_answer}
+
+        VERIFIED EVIDENCE (the ONLY truth source):
         {req.evidence_text}
 
-        INSTRUCTIONS:
-        1. Verify if every claim in the answer is supported by the evidence.
-        2. Output valid JSON only.
+        AUDIT PROCESS:
+        Step 1: Break the answer into individual factual claims.
+        Step 2: For EACH claim, find its EXACT match in evidence (quote source number).
+        Step 3: If no exact match exists, add to hallucinations list.
+        Step 4: List what evidence is missing to fully answer the query.
 
-        JSON STRUCTURE:
+        Output ONLY valid JSON:
         {{
-            "is_verified": boolean,
-            "reasoning": "string",
-            "hallucinations": ["string", "string"],
-            "missing_evidence": ["string"]
+            "is_verified": boolean,  // true ONLY if ALL claims are supported
+            "reasoning": "string",   // explain your verdict with source references
+            "hallucinations": ["claim 1 that lacks support", "claim 2..."],
+            "missing_evidence": ["what info would be needed to verify hallucinations"]
         }}
+
+        REMEMBER: Being strict protects users from misinformation. When in doubt, mark as hallucination.
         """
 
     def _build_refiner_prompt(self, req: RefinerRequest) -> str:
         return f"""
-        You are a Fact-Checking Editor. Fix the draft based on the critique.
+        You are a SKEPTICAL FACT-CHECKER auditing someone else's answer for hallucinations.
 
-        QUERY: {req.query}
-        DRAFT: {req.draft_answer}
+        CRITICAL RULES:
+        1. ASSUME THE ANSWER IS WRONG until proven right by evidence.
+        2. Each claim needs DIRECT, EXPLICIT support - no assumptions or inferences.
+        3. If a claim requires connecting multiple sources or "reading between the lines", mark it as unsupported.
+        4. Vague or partial matches = HALLUCINATION.
 
-        CRITIQUE:
-        {req.audit_result.reasoning}
-        Unsupported Claims: {req.audit_result.hallucinations}
+        USER QUERY: {req.query}
 
-        TASK:
-        Rewrite the draft. Remove unsupported claims. Do not add new info.
-        Output only the new answer.
+        ANSWER TO AUDIT (treat this as potentially flawed):
+        {req.proposed_answer}
+
+        VERIFIED EVIDENCE (the ONLY truth source):
+        {req.evidence_text}
+
+        AUDIT PROCESS:
+        Step 1: Break the answer into individual factual claims.
+        Step 2: For EACH claim, find its EXACT match in evidence (quote source number).
+        Step 3: If no exact match exists, add to hallucinations list.
+        Step 4: List what evidence is missing to fully answer the query.
+
+        Output ONLY valid JSON:
+        {{
+            "is_verified": boolean,  // true ONLY if ALL claims are supported
+            "reasoning": "string",   // explain your verdict with source references
+            "hallucinations": ["claim 1 that lacks support", "claim 2..."],
+            "missing_evidence": ["what info would be needed to verify hallucinations"]
+        }}
+
+        REMEMBER: Being strict protects users from misinformation. When in doubt, mark as hallucination.
         """
 
     # --- 2. Core Actions (Single Responsibility: Execution) ---
@@ -91,7 +124,12 @@ class VerifiedRAGPipeline(RerankingPipeline):
     async def _execute_skeptic_scan(self, req: SkepticAuditRequest) -> SkepticAuditResult:
         """Calls LLM to audit the answer and returns a typed result."""
         prompt = self._build_skeptic_prompt(req)
-        response_str = await self._call_llm(prompt)
+        # Even if it matches the default model now, this line enables the "Split Brain" later.
+        response_str = await self._call_llm(
+            prompt,
+            model_override=self.skeptic_model,
+            temperature=0.1
+        )
 
         try:
             # Clean generic LLM markdown
