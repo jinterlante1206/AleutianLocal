@@ -431,6 +431,8 @@ func runStart(cmd *cobra.Command, args []string) {
 		log.Fatalf("Failed to create essential directories: %v", err)
 	}
 
+	// Note: We don't strictly need to mkdir here anymore because the smart logic below handles it,
+	// but keeping it doesn't hurt as a fallback.
 	modelsCachePath := filepath.Join(stackDir, "models_cache")
 	if _, err := os.Stat(modelsCachePath); os.IsNotExist(err) {
 		os.MkdirAll(modelsCachePath, 0755)
@@ -480,16 +482,52 @@ func runStart(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Inject Dynamic Volume Path
+	// --- SMART CACHE PATH SELECTION ---
+	// 1. Default to local stack directory (Safe fallback for Linux/Windows)
+	finalCachePath := filepath.Join(stackDir, "models_cache")
+
+	// 2. Check for manual override via Environment Variable
+	if envPath := os.Getenv("ALEUTIAN_MODELS_CACHE"); envPath != "" {
+		finalCachePath = envPath
+	} else {
+		// 3. Auto-Discovery: Check configured drives for an existing cache
+		// This prioritizes your external drive (/Volumes/ai_models) if it exists
+		for _, drive := range cfg.Machine.Drives {
+			// Skip the user's home dir and root /Volumes (too generic)
+			home, _ := os.UserHomeDir()
+			if strings.HasPrefix(drive, home) || drive == "/Volumes" {
+				continue
+			}
+
+			// Check for the standard Aleutian data structure on this drive
+			// Structure: /Volumes/ai_models/aleutian_data/models_cache
+			candidate := filepath.Join(drive, "aleutian_data", "models_cache")
+			if _, err := os.Stat(candidate); err == nil {
+				fmt.Printf("📦 Auto-detected external model cache: %s\n", candidate)
+				finalCachePath = candidate
+				break
+			}
+		}
+	}
+
+	// 4. Ensure the directory exists (Prevent statfs errors)
+	if _, err := os.Stat(finalCachePath); os.IsNotExist(err) {
+		// If it's an external drive that doesn't have the folder yet, we create it.
+		// If it's the local fallback, we create it.
+		if err := os.MkdirAll(finalCachePath, 0755); err != nil {
+			log.Printf("⚠️ Warning: Failed to create model cache at %s: %v", finalCachePath, err)
+			// Fallback to local if external creation fails
+			finalCachePath = filepath.Join(stackDir, "models_cache")
+			os.MkdirAll(finalCachePath, 0755)
+		}
+	}
+
+	// 5. Inject into the map that gets passed to Podman Compose
 	if dynamicEnv == nil {
 		dynamicEnv = make(map[string]string)
 	}
-	userCachePath := os.Getenv("ALEUTIAN_MODELS_CACHE")
-	if userCachePath != "" {
-		dynamicEnv["ALEUTIAN_MODELS_CACHE"] = userCachePath
-	} else {
-		dynamicEnv["ALEUTIAN_MODELS_CACHE"] = modelsCachePath
-	}
+	dynamicEnv["ALEUTIAN_MODELS_CACHE"] = finalCachePath
+	// ----------------------------------
 
 	printStartupSummary(stackDir, dynamicEnv)
 
@@ -637,7 +675,7 @@ func runStatus(cmd *cobra.Command, args []string) {
 	psCmd.Run()
 
 	fmt.Println("\nResource Usage:")
-	statsCmd := exec.Command("podman", "stats", "--no-stream", "--filter", "label=io.podman.compose.project=aleutian",
+	statsCmd := exec.Command("podman", "stats", "--no-stream",
 		"--format", "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}")
 	statsCmd.Stdout = os.Stdout
 	statsCmd.Stderr = os.Stderr
