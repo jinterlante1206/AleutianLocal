@@ -11,9 +11,9 @@ func TestCalculateOptimizedEnv(t *testing.T) {
 		expected string // Expected OLLAMA_MODEL value
 	}{
 		{"LowSpec", 8192, "gemma3:4b"},
-		{"Standard", 24576, "gemma3:12b"},    // 24GB
-		{"Performance", 49152, "gemma3:27b"}, // 48GB
-		{"Ultra", 98304, "llama3:70b"},       // 96GB
+		{"Standard", 24576, "gemma3:12b"},     // 24GB
+		{"Performance", 49152, "gpt-oss:20b"}, // 48GB
+		{"Ultra", 98304, "llama3:70b"},        // 96GB
 	}
 
 	for _, tt := range tests {

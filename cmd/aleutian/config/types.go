@@ -10,6 +10,14 @@
 
 package config
 
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
 type AleutianConfig struct {
 	// Infrastructure (Podman Machine)
 	Machine MachineConfig `yaml:"machine"`
@@ -49,13 +57,65 @@ type BackendConfig struct {
 	BaseURL string `yaml:"base_url,omitempty"`
 }
 
+// findExternalDrives automatically discovers mounted external drives on macOS.
+func findExternalDrives() []string {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	var externalDrives []string
+	volumesDir := "/Volumes"
+	entries, err := os.ReadDir(volumesDir)
+	if err != nil {
+		return nil
+	}
+	cmd := exec.Command("mount")
+	output, err := cmd.Output()
+	mountOutput := string(output)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "Macintosh HD" || strings.HasPrefix(name, ".") || name == "Recovery" {
+			continue
+		}
+
+		fullPath := filepath.Join(volumesDir, name)
+		if err == nil && strings.Contains(mountOutput, fullPath) {
+			externalDrives = append(externalDrives, fullPath)
+		}
+	}
+	return externalDrives
+}
+
 func DefaultConfig() AleutianConfig {
+	// Determine safe default mounts based on the Host OS
+	var defaultDrives []string
+	// Always mount the user's home directory
+	home, err := os.UserHomeDir()
+	if err == nil {
+		defaultDrives = append(defaultDrives, home)
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := os.Stat("/Volumes"); err == nil {
+			defaultDrives = append(defaultDrives, "/Volumes")
+		}
+		extDrives := findExternalDrives()
+		defaultDrives = append(defaultDrives, extDrives...)
+	} else if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/mnt"); err == nil {
+			defaultDrives = append(defaultDrives, "/mnt")
+		}
+		if _, err := os.Stat("/media"); err == nil {
+			defaultDrives = append(defaultDrives, "/media")
+		}
+	}
 	return AleutianConfig{
 		Machine: MachineConfig{
 			Id:           "podman-machine-default",
 			CPUCount:     6,
 			MemoryAmount: 20480,
-			Drives:       []string{"/Volumes", "/Users"},
+			Drives:       defaultDrives,
 		},
 		Extensions: []string{},
 		Secrets:    SecretsConfig{UseEnv: false},

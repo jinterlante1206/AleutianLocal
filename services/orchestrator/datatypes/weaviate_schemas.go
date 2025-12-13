@@ -169,6 +169,7 @@ func EnsureWeaviateSchema(client *weaviate.Client) {
 		GetSessionSchema,
 		GetDocumentSchema,
 		GetConversationSchema,
+		GetVerificationLogSchema,
 	}
 
 	for _, getSchema := range schemaGetters {
@@ -190,5 +191,58 @@ func EnsureWeaviateSchema(client *weaviate.Client) {
 			slog.Info("Schema already exists", "class", class.Class)
 			// TODO: Add logic to check and update properties if they differ?
 		}
+	}
+}
+
+func GetVerificationLogSchema() *models.Class {
+	indexFilterable := new(bool)
+	*indexFilterable = true
+
+	return &models.Class{
+		Class:       "VerificationLog",
+		Description: "Logs the debate between Optimist and Skeptic for offline evaluation.",
+		Vectorizer:  "none",
+		Properties: []*models.Property{
+			{
+				Name:        "query",
+				DataType:    []string{"text"},
+				Description: "The original user query",
+			},
+			{
+				Name:        "draft_answer",
+				DataType:    []string{"text"},
+				Description: "The initial, potentially hallucinated answer from the Optimist",
+			},
+			{
+				Name:        "skeptic_critique",
+				DataType:    []string{"text"},
+				Description: "The reasoning provided by the Skeptic",
+			},
+			{
+				Name:        "hallucinations_found",
+				DataType:    []string{"text[]"}, // Array of strings
+				Description: "Specific claims flagged as hallucinations",
+			},
+			{
+				Name:        "final_answer",
+				DataType:    []string{"text"},
+				Description: "The refined answer after correction",
+			},
+			{
+				Name:        "was_refined",
+				DataType:    []string{"boolean"},
+				Description: "True if the answer had to be corrected",
+			},
+			{
+				Name:            "session_id",
+				DataType:        []string{"text"},
+				Description:     "Link to the chat session",
+				IndexFilterable: indexFilterable,
+			},
+			{
+				Name:     "timestamp",
+				DataType: []string{"number"},
+			},
+		},
 	}
 }

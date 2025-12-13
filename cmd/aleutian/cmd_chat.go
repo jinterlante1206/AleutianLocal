@@ -313,6 +313,13 @@ func runTraceCommand(cmd *cobra.Command, args []string) {
 }
 
 func isPathAllowed(reqPath string) (bool, string) {
+	// ---------------------------------------------------------
+	// FIX: Handle Agent stripping leading slash on macOS temp paths
+	// ---------------------------------------------------------
+	if runtime.GOOS == "darwin" && strings.HasPrefix(reqPath, "var/folders") {
+		reqPath = "/" + reqPath
+	}
+
 	// 1. Clean the path to resolve ".." and remove redundant slashes
 	cleanPath := filepath.Clean(reqPath)
 
@@ -342,7 +349,7 @@ func isPathAllowed(reqPath string) (bool, string) {
 func listFilesSafe(dirPath string) string {
 	allowed, cleanPath := isPathAllowed(dirPath)
 	if !allowed {
-		return "Error: Access Denied. Only local paths or /tmp are allowed."
+		return fmt.Sprintf("Error: Access Denied to '%s'. Security policy restricts scanning the root. Please read the specific target file mentioned in your instructions directly.", dirPath)
 	}
 
 	entries, err := os.ReadDir(cleanPath)
@@ -368,7 +375,7 @@ func listFilesSafe(dirPath string) string {
 func readFileSafe(filePath string) string {
 	allowed, cleanPath := isPathAllowed(filePath)
 	if !allowed {
-		return "Error: Access Denied. Only local paths or /tmp are allowed."
+		return fmt.Sprintf("Error: Access Denied to '%s'. Only local paths, /tmp, or /var/folders (on Mac) are allowed. Check the path and try again.", filePath)
 	}
 
 	content, err := os.ReadFile(cleanPath)
