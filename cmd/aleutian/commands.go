@@ -191,6 +191,16 @@ var (
 		Short: "Run a time-series forecast on a ticker",
 		Run:   runForecast, // Defined in cmd_timeseries.go
 	}
+	evaluationCmd = &cobra.Command{
+		Use:   "evaluate",
+		Short: "Run forecast evaluation across models and tickers",
+	}
+
+	runEvaluationCmd = &cobra.Command{
+		Use:   "run",
+		Short: "Run evaluation for specified date, tickers, and models",
+		Run:   runEvaluation, // Defined in cmd_evaluation.go
+	}
 
 	// Policies
 	policyCmd = &cobra.Command{
@@ -301,6 +311,12 @@ func init() {
 	forecastCmd.Flags().StringVar(&forecastModel, "model", "google/timesfm-2.0-500m-pytorch", "Model ID to use")
 	forecastCmd.Flags().IntVar(&forecastHorizon, "horizon", 20, "Forecast horizon (days)")
 	forecastCmd.Flags().IntVar(&forecastContext, "context", 300, "Context window size (days)")
+
+	rootCmd.AddCommand(evaluationCmd)
+	evaluationCmd.AddCommand(runEvaluationCmd)
+	runEvaluationCmd.Flags().String("date", "", "Evaluation date (YYYYMMDD, default: today)")
+	runEvaluationCmd.Flags().String("ticker", "", "Single ticker to evaluate (default: all)")
+	runEvaluationCmd.Flags().String("model", "", "Single model to evaluate (default: all)")
 
 	// Policies
 	rootCmd.AddCommand(policyCmd)
