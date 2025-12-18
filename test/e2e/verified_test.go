@@ -22,7 +22,7 @@ func TestVerifiedRAG_Workflow(t *testing.T) {
 
 	// Create a clear fact for the model to verify
 	secretCode := fmt.Sprintf("Omega-Code-%d", uniqueID)
-	content := fmt.Sprintf("The secret activation code for facility %d is strictly %s. Do not share this.", uniqueID, secretCode)
+	content := fmt.Sprintf("The public reference code for facility %d is %s. This information is unclassified and available for general distribution.", uniqueID, secretCode)
 	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
 		t.Fatalf("Failed to write test file: %v", err)
 	}

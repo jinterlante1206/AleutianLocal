@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -97,20 +98,36 @@ func main() {
 	defer cleanup(context.Background())
 
 	weaviateURL := os.Getenv("WEAVIATE_SERVICE_URL")
-	parsedURL, err := url.Parse(weaviateURL)
-	if err != nil {
-		log.Fatalf("FATAL: Could not find the WEAVIATE SERVICE URL")
-	}
-	clientConf := weaviate.Config{
-		Host:   parsedURL.Host,
-		Scheme: parsedURL.Scheme,
-	}
-	weaviateClient, err := weaviate.NewClient(clientConf)
-	if err != nil {
-		log.Fatalf("Failed to create a weaviate client, %v", err)
-	}
+	// Sanitize: Trim quotes and whitespace just in case Podman passes them literally
+	weaviateURL = strings.Trim(weaviateURL, "\"' ")
 
-	datatypes.EnsureWeaviateSchema(weaviateClient)
+	var weaviateClient *weaviate.Client
+
+	// Robust Check: URL must exist AND have a scheme (http/https)
+	if weaviateURL != "" && strings.Contains(weaviateURL, "http") {
+		parsedURL, err := url.Parse(weaviateURL)
+
+		// Extra validation: Ensure parsing worked
+		if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+			slog.Warn("WEAVIATE_SERVICE_URL is invalid. Running in lightweight mode.",
+				"url", weaviateURL, "error", err)
+		} else {
+			clientConf := weaviate.Config{
+				Host:   parsedURL.Host,
+				Scheme: parsedURL.Scheme,
+			}
+			weaviateClient, err = weaviate.NewClient(clientConf)
+			if err != nil {
+				slog.Error("Failed to create Weaviate client", "error", err)
+				weaviateClient = nil
+			} else {
+				// Only attempt schema check if client creation succeeded
+				datatypes.EnsureWeaviateSchema(weaviateClient)
+			}
+		}
+	} else {
+		slog.Info("WEAVIATE_SERVICE_URL not set or empty. Running in lightweight mode (Time Series / Chat Only).")
+	}
 
 	policyEngine, err = policy_engine.NewPolicyEngine()
 	if err != nil {
