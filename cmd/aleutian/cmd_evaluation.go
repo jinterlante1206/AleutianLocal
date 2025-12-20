@@ -4,62 +4,54 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 func runEvaluation(cmd *cobra.Command, args []string) {
-	// Parse flags
-	date, _ := cmd.Flags().GetString("date")
-	ticker, _ := cmd.Flags().GetString("ticker")
-	model, _ := cmd.Flags().GetString("model")
-
-	// Set defaults
-	if date == "" {
-		date = time.Now().Format("20060102")
+	// 1. Get the config file path from flags
+	configPath, _ := cmd.Flags().GetString("config")
+	if configPath == "" {
+		slog.Error("Please provide a configuration file using --config (e.g., --config strategies/spy_threshold_v1.yaml)")
+		return
 	}
 
-	runID := fmt.Sprintf("%s_%s", date, uuid.New().String()[:8])
-
-	// Select tickers
-	tickers := datatypes.DefaultTickers
-	if ticker != "" {
-		tickers = []datatypes.TickerInfo{{Ticker: ticker, Description: ""}}
+	// 2. Read and Parse the Scenario File
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		slog.Error("Failed to read config file", "path", configPath, "error", err)
+		return
 	}
 
-	// Select models
-	models := datatypes.DefaultModels
-	if model != "" {
-		models = []string{model}
+	var scenario datatypes.BacktestScenario
+	if err := yaml.Unmarshal(data, &scenario); err != nil {
+		slog.Error("Failed to parse YAML config", "error", err)
+		return
 	}
 
-	// Build config
-	config := &datatypes.EvaluationConfig{
-		Tickers:        tickers,
-		Models:         models,
-		EvaluationDate: date,
-		RunID:          runID,
-		StrategyType:   "threshold",
-		StrategyParams: map[string]interface{}{
-			"threshold_type":  "absolute",
-			"threshold_value": 2.0,
-			"execution_size":  10.0,
-		},
-		ContextSize:     252,
-		HorizonSize:     20,
-		InitialCapital:  100000.0,
-		InitialPosition: 0.0,
-		InitialCash:     100000.0,
+	// 3. Generate a Unique Run ID
+	// Format: {ScenarioID}_v{Version}_{Timestamp}
+	timestamp := time.Now().Format("20060102_150405")
+	runID := fmt.Sprintf("%s_v%s_%s", scenario.Metadata.ID, scenario.Metadata.Version, timestamp)
+
+	fmt.Printf("\n🚀 Starting Evaluation Run: %s\n", runID)
+	fmt.Printf("   Strategy: %s (v%s)\n", scenario.Metadata.ID, scenario.Metadata.Version)
+	fmt.Printf("   Ticker:   %s\n", scenario.Evaluation.Ticker)
+	fmt.Printf("   Range:    %s to %s\n", scenario.Evaluation.StartDate, scenario.Evaluation.EndDate)
+	fmt.Println("---------------------------------------------------")
+
+	// 4. Ensure API Key is set
+	if os.Getenv("SAPHENEIA_TRADING_API_KEY") == "" {
+		_ = os.Setenv("SAPHENEIA_TRADING_API_KEY", "default_trading_api_key_please_change")
+		slog.Warn("SAPHENEIA_TRADING_API_KEY not set, using default")
 	}
 
-	fmt.Printf("Starting Evaluation Run: %s\n", runID)
-	fmt.Printf("Tickers: %d | Models: %d\n", len(tickers), len(models))
-
-	// Create evaluator (Logic lives in handlers package)
+	// 5. Initialize Evaluator
 	evaluator, err := handlers.NewEvaluator()
 	if err != nil {
 		slog.Error("Failed to create evaluator", "error", err)
@@ -67,12 +59,13 @@ func runEvaluation(cmd *cobra.Command, args []string) {
 	}
 	defer evaluator.Close()
 
-	// Run evaluation
+	// 6. Execute the Run using RunScenario
 	ctx := context.Background()
-	if err := evaluator.RunEvaluation(ctx, config); err != nil {
+	if err := evaluator.RunScenario(ctx, &scenario, runID); err != nil {
 		slog.Error("Evaluation failed", "error", err)
 		return
 	}
 
-	fmt.Printf("✅ Evaluation completed successfully.\n")
+	fmt.Printf("\n✅ Evaluation completed successfully.\n")
+	fmt.Printf("   Run ID: %s\n", runID)
 }

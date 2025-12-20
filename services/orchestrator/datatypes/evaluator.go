@@ -10,7 +10,9 @@
 
 package datatypes
 
-import "time"
+import (
+	"time"
+)
 
 // TickerInfo represents a ticker to evaluate
 type TickerInfo struct {
@@ -46,15 +48,18 @@ type ForecastResult struct {
 	Message  string    `json:"message"`
 }
 
-// TradingSignalResponse matches the JSON response from Sapheneia /trading/execute
+// TradingSignalResponse is the response from the trading service
 type TradingSignalResponse struct {
-	Action        string  `json:"action"`
-	Size          float64 `json:"size"`
-	Value         float64 `json:"value"`
-	Reason        string  `json:"reason"`
-	AvailableCash float64 `json:"available_cash"`
-	PositionAfter float64 `json:"position_after"`
-	Stopped       bool    `json:"stopped"`
+	Action        string  `json:"action"`         // "buy", "sell", or "hold"
+	Size          float64 `json:"size"`           // Position size to execute
+	Value         float64 `json:"value"`          // Dollar value of trade
+	Reason        string  `json:"reason"`         // Explanation
+	AvailableCash float64 `json:"available_cash"` // Cash after trade
+	PositionAfter float64 `json:"position_after"` // Position after trade
+	Stopped       bool    `json:"stopped"`        // Strategy stopped flag
+	CurrentPrice  float64 `json:"current_price"`  // Current price used
+	ForecastPrice float64 `json:"forecast_price"` // Forecast price used
+	Ticker        string  `json:"ticker"`         // Ticker symbol
 }
 
 // EvaluationResult is the final data point stored in InfluxDB
@@ -79,6 +84,41 @@ type EvaluationResult struct {
 	ExecutionSize  float64
 
 	Timestamp time.Time
+}
+
+// ScenarioMetadata tracks the identity of the strategy being tested
+type ScenarioMetadata struct {
+	ID          string `yaml:"id" json:"id"`
+	Version     string `yaml:"version" json:"version"`
+	Description string `yaml:"description" json:"description"`
+	Author      string `yaml:"author" json:"author"`
+	Created     string `yaml:"created" json:"created"`
+}
+
+// BacktestScenario represents the full configuration file
+type BacktestScenario struct {
+	Metadata ScenarioMetadata `yaml:"metadata" json:"metadata"`
+
+	Evaluation struct {
+		Ticker         string `yaml:"ticker" json:"ticker"`
+		FetchStartDate string `yaml:"fetch_start_date" json:"fetch_start_date"`
+		StartDate      string `yaml:"start_date" json:"start_date"` //YYYYMMDD
+		EndDate        string `yaml:"end_date" json:"end_date"`     //YYYYMMDD
+	} `yaml:"evaluation" json:"evaluation"`
+
+	Forecast struct {
+		Model       string `yaml:"model" json:"model"`
+		ContextSize int    `yaml:"context_size" json:"context_size"`
+		HorizonSize int    `yaml:"horizon_size" json:"horizon_size"`
+	} `yaml:"forecast" json:"forecast"`
+
+	Trading struct {
+		InitialCapital  float64                `yaml:"initial_capital" json:"initial_capital"`
+		InitialPosition float64                `yaml:"initial_position" json:"initial_position"`
+		InitialCash     float64                `yaml:"initial_cash" json:"initial_cash"`
+		StrategyType    string                 `yaml:"strategy_type" json:"strategy_type"`
+		Params          map[string]interface{} `yaml:"params" json:"params"`
+	} `yaml:"trading" json:"trading"`
 }
 
 // --- Defaults ---

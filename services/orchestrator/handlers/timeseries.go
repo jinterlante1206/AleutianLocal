@@ -233,6 +233,13 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 
+		// Inject the API key so Sapheneia accepts the request
+		apiKey := os.Getenv("SAPHENEIA_TRADING_API_KEY")
+		if apiKey != "" {
+			httpReq.Header.Set("X-API-Key", apiKey)
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
 		resp, err := http.DefaultClient.Do(httpReq)
 		if err != nil {
 			slog.Error("Failed to call time series service", "url", targetURL, "error", err)

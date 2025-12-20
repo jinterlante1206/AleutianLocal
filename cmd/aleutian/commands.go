@@ -314,6 +314,7 @@ func init() {
 
 	rootCmd.AddCommand(evaluationCmd)
 	evaluationCmd.AddCommand(runEvaluationCmd)
+	runEvaluationCmd.Flags().String("config", "", "Path to scenario configuration file (YAML)")
 	runEvaluationCmd.Flags().String("date", "", "Evaluation date (YYYYMMDD, default: today)")
 	runEvaluationCmd.Flags().String("ticker", "", "Single ticker to evaluate (default: all)")
 	runEvaluationCmd.Flags().String("model", "", "Single model to evaluate (default: all)")
