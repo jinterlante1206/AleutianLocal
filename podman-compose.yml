@@ -303,10 +303,10 @@ services:
       # Explicitly disable Weaviate/RAG to prevent lookup errors
       WEAVIATE_SERVICE_URL: ""
       RAG_ENGINE_URL: ""
-      # Connect to your Custom Services
-      ALEUTIAN_TIMESERIES_TOOL: http://finance-analysis-service:8000
-      ALEUTIAN_DATA_FETCHER_URL: http://finance-data-service:8000
-      SAPHENEIA_TRADING_SERVICE_URL: http://sapheneia-trading-service:9000
+      # Connect to Sapheneia Services (running in sapheneia docker-compose)
+      ALEUTIAN_TIMESERIES_TOOL: http://host.containers.internal:8000
+      ALEUTIAN_DATA_FETCHER_URL: http://host.containers.internal:8001
+      SAPHENEIA_TRADING_SERVICE_URL: http://host.containers.internal:12132
       SAPHENEIA_TRADING_API_KEY: default_trading_api_key_please_change
       # InfluxDB Config
       INFLUXDB_URL: http://influxdb:8086
@@ -324,11 +324,10 @@ services:
       - aleutian-network
     restart: unless-stopped
     depends_on:
-      # Wait for observability and your data services
+      # Wait for observability
       otel-collector:
         condition: service_started
-      finance-data-service:
-        condition: service_healthy
+      # Note: Sapheneia services are external (run via sapheneia/docker-compose.yml)
       # We DO NOT wait for Weaviate here
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:12210/health" ]
@@ -358,75 +357,20 @@ services:
       timeout: 5s
       retries: 20
 
-  finance-data-service:
-    build:
-      # Adjust path if necessary relative to where you run this file
-      context: /Users/jin/GolandProjects/SapheneiaAleutianMLOps/services/finance-data
-      dockerfile: Dockerfile
-    container_name: sapheneia-finance-data
-    ports: ["12131:8000"]
-    networks:
-      - aleutian-network
-    environment:
-      INFLUXDB_URL: http://influxdb:8086
-      INFLUXDB_TOKEN: your_super_secret_admin_token
-      INFLUXDB_ORG: aleutian-finance
-      INFLUXDB_BUCKET: financial-data
-    depends_on:
-      influxdb:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-  finance-analysis-service:
-    build:
-      context: /Users/jin/GolandProjects/SapheneiaAleutianMLOps/services/finance-analysis
-      dockerfile: Dockerfile
-    container_name: sapheneia-timeseries-analysis
-    ports: ["12129:8000"]
-    networks:
-      - aleutian-network
-    environment:
-      - INFLUXDB_URL=http://influxdb:8086
-      - INFLUXDB_TOKEN=your_super_secret_admin_token
-      - INFLUXDB_ORG=aleutian-finance
-      - INFLUXDB_BUCKET=financial-data
-    volumes:
-      - models_cache:/root/.cache/huggingface/
-    secrets:
-      - source: aleutian_hf_token
-    depends_on:
-      influxdb:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-  sapheneia-trading-service:
-    build:
-      context: /Users/jin/PycharmProjects/sapheneia
-      dockerfile: Dockerfile.trading
-    container_name: sapheneia-trading-service
-    ports: ["12132:9000"]
-    networks:
-      - aleutian-network
-    environment:
-      - TRADING_API_KEY=default_trading_api_key_please_change
-      - TRADING_API_PORT=9000
-      - TRADING_API_HOST=0.0.0.0
-      - ENVIRONMENT=production
-      - LOG_LEVEL=INFO
-      - RATE_LIMIT_ENABLED=true
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9000/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 20
+  # === 3. Sapheneia Services (External) ===
+  # Note: finance-data, finance-analysis (forecast), and trading services
+  # are now consolidated in /Users/jin/PycharmProjects/sapheneia/docker-compose.yml
+  #
+  # To start Sapheneia services:
+  #   cd /Users/jin/PycharmProjects/sapheneia
+  #   docker-compose up -d
+  #
+  # Services available:
+  #   - sapheneia-data (port 8001): Yahoo Finance data fetcher
+  #   - sapheneia-forecast (port 8000): Time-series forecasting
+  #   - sapheneia-trading (port 9000): Trading strategies
+  #
+  # Orchestrator connects to these services via the shared aleutian-network
 
   # === 3. Observability Stack (Keep this!) ===
   otel-collector:
@@ -496,5 +440,7 @@ volumes:
 
 networks:
   aleutian-network:
-    driver: bridge
-    name: aleutian-network
+#    driver: bridge
+#    name: aleutian-network
+    name: aleutian-shared
+    external: true

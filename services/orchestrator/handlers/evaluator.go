@@ -61,40 +61,173 @@ func NewEvaluator() (*Evaluator, error) {
 	}, nil
 }
 
-// RunEvaluation is the main entry point called by the CLI
-func (e *Evaluator) RunEvaluation(ctx context.Context, config *datatypes.EvaluationConfig) error {
-	slog.Info("Starting evaluation run",
-		"run_id", config.RunID,
-		"tickers", len(config.Tickers),
-		"models", len(config.Models))
+// RunScenario executes a backtest based on the YAML scenario file
+func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.BacktestScenario, runID string) error {
+	ticker := scenario.Evaluation.Ticker
+	slog.Info("Starting backtest loop", "run_id", runID, "ticker", ticker)
 
-	successCount := 0
-	errorCount := 0
+	// --- Parse Date Range for Data Fetch ---
+	// 1. Parse fetch_start_date (required)
+	fetchStartStr := scenario.Evaluation.FetchStartDate
+	if fetchStartStr == "" {
+		return fmt.Errorf("fetch_start_date is required in evaluation config")
+	}
 
-	for _, tickerInfo := range config.Tickers {
-		ticker := tickerInfo.Ticker
+	// Support both YYYY-MM-DD and YYYYMMDD formats
+	layout := "2006-01-02"
+	if len(fetchStartStr) == 8 {
+		layout = "20060102"
+	}
 
-		// 1. Get current price (needed for the simulation baseline)
-		currentPrice, err := e.GetCurrentPrice(ctx, ticker)
-		if err != nil {
-			slog.Error("Failed to get price", "ticker", ticker, "error", err)
-			errorCount++
-			continue
+	fetchStartDate, err := time.Parse(layout, fetchStartStr)
+	if err != nil {
+		return fmt.Errorf("invalid fetch_start_date format: %w", err)
+	}
+
+	// 2. Parse end_date (use from config or default to now)
+	var fetchEndDate time.Time
+	endDateStr := scenario.Evaluation.EndDate
+	if endDateStr == "" {
+		fetchEndDate = time.Now()
+	} else {
+		endLayout := "2006-01-02"
+		if len(endDateStr) == 8 {
+			endLayout = "20060102"
 		}
-
-		for _, model := range config.Models {
-			// 2. Evaluate specific ticker/model combo
-			err := e.EvaluateTickerModel(ctx, ticker, model, config, currentPrice)
-			if err != nil {
-				slog.Error("Evaluation failed", "ticker", ticker, "model", model, "error", err)
-				errorCount++
-			} else {
-				successCount++
-			}
+		fetchEndDate, err = time.Parse(endLayout, endDateStr)
+		if err != nil {
+			return fmt.Errorf("invalid end_date format: %w", err)
 		}
 	}
 
-	slog.Info("Evaluation run complete", "successes", successCount, "errors", errorCount)
+	slog.Info("Fetching data from absolute date range", "fetch_start", fetchStartDate.Format("2006-01-02"), "fetch_end", fetchEndDate.Format("2006-01-02"))
+
+	// 3. Fetch OHLC data using absolute date range
+	fullHistory, _, err := fetchOHLCFromInfluxByDateRange(ctx, ticker, fetchStartDate, fetchEndDate)
+	if err != nil {
+		return fmt.Errorf("failed to fetch history: %w", err)
+	}
+	// -------------------------------------
+
+	if len(fullHistory.Close) == 0 {
+		return fmt.Errorf("no historical data found for %s", ticker)
+	}
+
+	slog.Info("Data fetch complete",
+		"total_points", len(fullHistory.Close),
+		"date_range", fmt.Sprintf("%s to %s", fullHistory.Time[0].Format("2006-01-02"), fullHistory.Time[len(fullHistory.Time)-1].Format("2006-01-02")))
+
+	// 2. Determine Start Index
+	// (Parse EvaluationStartDate)
+	evalStartLayout := "2006-01-02"
+	if len(scenario.Evaluation.StartDate) == 8 {
+		evalStartLayout = "20060102"
+	}
+	evalStart, err := time.Parse(evalStartLayout, scenario.Evaluation.StartDate)
+	if err != nil {
+		return fmt.Errorf("invalid start date format: %w", err)
+	}
+
+	startIndex := -1
+	for i, t := range fullHistory.Time {
+		// Compare dates (ignoring time)
+		if !t.Before(evalStart) {
+			startIndex = i
+			break
+		}
+	}
+
+	if startIndex == -1 {
+		return fmt.Errorf("start date %s not found in loaded history (oldest data: %s, latest data: %s)",
+			scenario.Evaluation.StartDate, fullHistory.Time[0].Format("2006-01-02"), fullHistory.Time[len(fullHistory.Time)-1].Format("2006-01-02"))
+	}
+
+	// Ensure we have enough context *before* the start index
+	if startIndex < scenario.Forecast.ContextSize {
+		return fmt.Errorf("insufficient history before start date. Need %d days context, but only have %d days available (start_date=%s is at index %d, oldest_data=%s)",
+			scenario.Forecast.ContextSize, startIndex, scenario.Evaluation.StartDate, startIndex, fullHistory.Time[0].Format("2006-01-02"))
+	}
+
+	slog.Info("Evaluation date range validated",
+		"start_date", scenario.Evaluation.StartDate,
+		"start_index", startIndex,
+		"context_days_available", startIndex,
+		"context_days_required", scenario.Forecast.ContextSize)
+
+	endIndex := len(fullHistory.Close) - 1
+	slog.Info("Backtest range found", "start_date", fullHistory.Time[startIndex], "start_index", startIndex, "days_to_test", endIndex-startIndex)
+
+	// 3. Initialize Portfolio
+	currentPosition := scenario.Trading.InitialPosition
+	currentCash := scenario.Trading.InitialCash
+
+	// 4. The Backtest Loop
+	for i := startIndex; i <= endIndex; i++ {
+		// A. Get "Current" Price
+		currentSimulatedPrice := fullHistory.Close[i]
+		currentDate := fullHistory.Time[i]
+
+		// B. Simulate Forecast (Step 3)
+		// MVP: Simulate a forecast. Later, call e.CallForecastService with sliced history.
+		// simulatedForecast := currentSimulatedPrice * 1.002 // 0.2% predicted gain
+
+		// REAL CALL (If services support it):
+		// For now, we will stick to simulation or simple call to ensure pipeline works
+		// Since standard forecast API doesn't support "as of date" yet, we use a placeholder:
+		predictedPrice := currentSimulatedPrice * 1.005
+
+		// C. Execute Trade (Step 4)
+		tradingReq := datatypes.TradingSignalRequest{
+			Ticker:          ticker,
+			StrategyType:    scenario.Trading.StrategyType,
+			ForecastPrice:   predictedPrice,
+			CurrentPrice:    &currentSimulatedPrice,
+			CurrentPosition: currentPosition,
+			AvailableCash:   currentCash,
+			InitialCapital:  scenario.Trading.InitialCapital,
+			StrategyParams:  scenario.Trading.Params,
+		}
+
+		// Flatten the request for the Python API (required for StrategyParams)
+		signal, err := e.CallTradingService(ctx, tradingReq)
+		if err != nil {
+			slog.Error("Trade signal failed", "date", currentDate, "error", err)
+			continue
+		}
+
+		// D. Update State
+		currentPosition = signal.PositionAfter
+		currentCash = signal.AvailableCash
+
+		// E. Store Result
+		result := datatypes.EvaluationResult{
+			Ticker:          ticker,
+			Model:           scenario.Forecast.Model,
+			EvaluationDate:  currentDate.Format("20060102"),
+			RunID:           runID,
+			ForecastHorizon: scenario.Forecast.HorizonSize,
+			StrategyType:    scenario.Trading.StrategyType,
+			ForecastPrice:   predictedPrice,
+			CurrentPrice:    currentSimulatedPrice,
+			Action:          signal.Action,
+			Size:            signal.Size,
+			Value:           signal.Value,
+			Reason:          signal.Reason,
+			AvailableCash:   signal.AvailableCash,
+			PositionAfter:   signal.PositionAfter,
+			Timestamp:       currentDate,
+		}
+
+		if err := e.storage.StoreResult(ctx, &result); err != nil {
+			slog.Error("Failed to store result", "error", err)
+		}
+
+		if i%20 == 0 {
+			slog.Info("Progress", "date", currentDate.Format("20060102"), "cash", currentCash,
+				"pos", currentPosition)
+		}
+	}
+
 	return nil
 }
 
@@ -126,7 +259,7 @@ func (e *Evaluator) EvaluateTickerModel(
 		forecastPrice := forecast.Forecast[horizon-1]
 
 		// Build trading signal request
-		tradingReq := TradingSignalRequest{
+		tradingReq := datatypes.TradingSignalRequest{
 			Ticker:          ticker,
 			StrategyType:    config.StrategyType,
 			ForecastPrice:   forecastPrice,
@@ -215,9 +348,21 @@ func (e *Evaluator) CallForecastService(ctx context.Context, ticker, model strin
 	return &result, err
 }
 
-func (e *Evaluator) CallTradingService(ctx context.Context, req TradingSignalRequest) (*datatypes.TradingSignalResponse, error) {
+func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.TradingSignalRequest) (*datatypes.TradingSignalResponse, error) {
 	url := fmt.Sprintf("%s/trading/execute", e.tradingServiceURL)
-	reqBody, _ := json.Marshal(req)
+	flatReq := map[string]interface{}{
+		"ticker":           req.Ticker,
+		"strategy_type":    req.StrategyType,
+		"forecast_price":   req.ForecastPrice,
+		"current_price":    req.CurrentPrice,
+		"current_position": req.CurrentPosition,
+		"available_cash":   req.AvailableCash,
+		"initial_capital":  req.InitialCapital,
+	}
+	for key, value := range req.StrategyParams {
+		flatReq[key] = value
+	}
+	reqBody, _ := json.Marshal(flatReq)
 	httpReq, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 	httpReq.Header.Set("Content-Type", "application/json")
 
