@@ -308,7 +308,7 @@ services:
       # sapheneia mode: points to external Sapheneia containers
       ALEUTIAN_TIMESERIES_TOOL: ${ALEUTIAN_TIMESERIES_TOOL:-http://forecast-service:8000}
       ALEUTIAN_FORECAST_MODE: ${ALEUTIAN_FORECAST_MODE:-standalone}
-      ALEUTIAN_DATA_FETCHER_URL: ${ALEUTIAN_DATA_FETCHER_URL:-http://host.containers.internal:8001}
+      ALEUTIAN_DATA_FETCHER_URL: ${ALEUTIAN_DATA_FETCHER_URL:-http://data-fetcher:8001}
       SAPHENEIA_TRADING_SERVICE_URL: ${SAPHENEIA_TRADING_SERVICE_URL:-http://host.containers.internal:12132}
       SAPHENEIA_TRADING_API_KEY: ${SAPHENEIA_TRADING_API_KEY:-default_trading_api_key_please_change}
       # InfluxDB Config
@@ -327,9 +327,11 @@ services:
       - aleutian-network
     restart: unless-stopped
     depends_on:
-      # Wait for observability
+      # Wait for observability and data services
       otel-collector:
         condition: service_started
+      data-fetcher:
+        condition: service_healthy
       # Note: Sapheneia services are external (run via sapheneia/docker-compose.yml)
       # We DO NOT wait for Weaviate here
     healthcheck:
@@ -360,22 +362,41 @@ services:
       timeout: 5s
       retries: 20
 
-  # === 3. Sapheneia Services (External) ===
-  # Note: finance-data, finance-analysis (forecast), and trading services
-  # are now consolidated in /Users/jin/PycharmProjects/sapheneia/docker-compose.yml
-  #
-  # To start Sapheneia services:
-  #   cd /Users/jin/PycharmProjects/sapheneia
-  #   docker-compose up -d
-  #
-  # Services available:
-  #   - sapheneia-data (port 8001): Yahoo Finance data fetcher
-  #   - sapheneia-forecast (port 8000): Time-series forecasting
-  #   - sapheneia-trading (port 9000): Trading strategies
-  #
-  # Orchestrator connects to these services via the shared aleutian-network
+  # === 2b. Data Fetcher Service ===
+  # Fetches market data from Yahoo Finance and stores in InfluxDB
+  data-fetcher:
+    build:
+      context: .
+      dockerfile: ./services/data_fetcher/Dockerfile
+    container_name: aleutian-data-fetcher
+    ports: ["12001:8001"]
+    environment:
+      PORT: 8001
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: your_super_secret_admin_token
+      INFLUXDB_ORG: aleutian-finance
+      INFLUXDB_BUCKET: financial-data
+    networks:
+      - aleutian-network
+    restart: unless-stopped
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
-  # === 3. Observability Stack (Keep this!) ===
+  # === 3. Sapheneia Services (External - Optional) ===
+  # Note: When using --forecast-mode sapheneia, these external services are used.
+  # See /Users/jin/PycharmProjects/sapheneia/docker-compose.yml
+  #
+  # Services available externally:
+  #   - sapheneia-forecast (port 8000): Per-model forecast containers
+  #   - sapheneia-trading (port 9000): Trading strategies
+
+  # === 4. Observability Stack ===
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: aleutian-otel-collector
