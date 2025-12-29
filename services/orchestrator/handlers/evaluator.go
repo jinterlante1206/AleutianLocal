@@ -66,25 +66,14 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 	ticker := scenario.Evaluation.Ticker
 	slog.Info("Starting backtest loop", "run_id", runID, "ticker", ticker)
 
-	// --- Parse Date Range for Data Fetch ---
-	// 1. Parse fetch_start_date (required)
-	fetchStartStr := scenario.Evaluation.FetchStartDate
-	if fetchStartStr == "" {
-		return fmt.Errorf("fetch_start_date is required in evaluation config")
-	}
-
-	// Support both YYYY-MM-DD and YYYYMMDD formats
-	layout := "2006-01-02"
-	if len(fetchStartStr) == 8 {
-		layout = "20060102"
-	}
-
-	fetchStartDate, err := time.Parse(layout, fetchStartStr)
+	// Precheck and autofill data
+	adjustedFetchStart, err := e.EnsureDataAvailability(ctx, scenario)
 	if err != nil {
-		return fmt.Errorf("invalid fetch_start_date format: %w", err)
+		return fmt.Errorf("data availability check failed: %w", err)
 	}
+	fetchStartDate := adjustedFetchStart
 
-	// 2. Parse end_date (use from config or default to now)
+	// Parse end_date (use from config or default to now)
 	var fetchEndDate time.Time
 	endDateStr := scenario.Evaluation.EndDate
 	if endDateStr == "" {
@@ -102,13 +91,11 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 
 	slog.Info("Fetching data from absolute date range", "fetch_start", fetchStartDate.Format("2006-01-02"), "fetch_end", fetchEndDate.Format("2006-01-02"))
 
-	// 3. Fetch OHLC data using absolute date range
+	// Fetch OHLC data using absolute date range
 	fullHistory, _, err := fetchOHLCFromInfluxByDateRange(ctx, ticker, fetchStartDate, fetchEndDate)
 	if err != nil {
 		return fmt.Errorf("failed to fetch history: %w", err)
 	}
-	// -------------------------------------
-
 	if len(fullHistory.Close) == 0 {
 		return fmt.Errorf("no historical data found for %s", ticker)
 	}
@@ -163,20 +150,38 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 
 	// 4. The Backtest Loop
 	for i := startIndex; i <= endIndex; i++ {
-		// A. Get "Current" Price
 		currentSimulatedPrice := fullHistory.Close[i]
 		currentDate := fullHistory.Time[i]
 
-		// B. Simulate Forecast (Step 3)
-		// MVP: Simulate a forecast. Later, call e.CallForecastService with sliced history.
-		// simulatedForecast := currentSimulatedPrice * 1.002 // 0.2% predicted gain
+		// SLICE HISTORY: Grab exactly the N days leading up to and including today
+		// This guarantees the model ONLY sees data up to 'currentDate'
+		sliceStart := i - scenario.Forecast.ContextSize + 1
+		if sliceStart < 0 {
+			sliceStart = 0 // Safety clamp, though validation above prevents this
+		}
 
-		// REAL CALL (If services support it):
-		// For now, we will stick to simulation or simple call to ensure pipeline works
-		// Since standard forecast API doesn't support "as of date" yet, we use a placeholder:
-		predictedPrice := currentSimulatedPrice * 1.005
+		// Create the explicit context slice to send to the model
+		contextSlice := fullHistory.Close[sliceStart : i+1]
 
-		// C. Execute Trade (Step 4)
+		// Pass the slice directly to the service
+		forecast, err := e.CallForecastServiceAsOf(ctx, ticker, scenario.Forecast.Model,
+			scenario.Forecast.ContextSize, scenario.Forecast.HorizonSize, &currentDate, contextSlice)
+
+		if err != nil {
+			slog.Error("Forecast failed", "date", currentDate.Format("2006-01-02"), "error", err)
+			continue
+		}
+
+		// Use the first forecast value (1-day ahead prediction)
+		var predictedPrice float64
+		if len(forecast.Forecast) > 0 {
+			predictedPrice = forecast.Forecast[0]
+		} else {
+			slog.Warn("Empty forecast returned, skipping", "date", currentDate.Format("2006-01-02"))
+			continue
+		}
+
+		// --- Execute Trade ---
 		tradingReq := datatypes.TradingSignalRequest{
 			Ticker:          ticker,
 			StrategyType:    scenario.Trading.StrategyType,
@@ -188,18 +193,17 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 			StrategyParams:  scenario.Trading.Params,
 		}
 
-		// Flatten the request for the Python API (required for StrategyParams)
 		signal, err := e.CallTradingService(ctx, tradingReq)
 		if err != nil {
 			slog.Error("Trade signal failed", "date", currentDate, "error", err)
 			continue
 		}
 
-		// D. Update State
+		// Update State
 		currentPosition = signal.PositionAfter
 		currentCash = signal.AvailableCash
 
-		// E. Store Result
+		// Store Result
 		result := datatypes.EvaluationResult{
 			Ticker:          ticker,
 			Model:           scenario.Forecast.Model,
@@ -223,11 +227,9 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 		}
 
 		if i%20 == 0 {
-			slog.Info("Progress", "date", currentDate.Format("20060102"), "cash", currentCash,
-				"pos", currentPosition)
+			slog.Info("Progress", "date", currentDate.Format("20060102"), "cash", currentCash)
 		}
 	}
-
 	return nil
 }
 
@@ -319,16 +321,41 @@ func (e *Evaluator) EvaluateTickerModel(
 	return nil
 }
 
-// --- HTTP Helper Methods ---
+// --- HTTP Helper Methods ---the
 
 func (e *Evaluator) CallForecastService(ctx context.Context, ticker, model string, contextSize, horizonSize int) (*datatypes.ForecastResult, error) {
+	// Pass nil for asOfDate (implies "now")
+	// Pass nil for contextData (implies "fetch from DB")
+	return e.CallForecastServiceAsOf(ctx, ticker, model, contextSize, horizonSize, nil, nil)
+}
+
+func (e *Evaluator) CallForecastServiceAsOf(
+	ctx context.Context,
+	ticker, model string,
+	contextSize, horizonSize int,
+	asOfDate *time.Time,
+	contextData []float64, // <--- New Parameter
+) (*datatypes.ForecastResult, error) {
+
 	url := fmt.Sprintf("%s/v1/timeseries/forecast", e.orchestratorURL)
+
 	payload := map[string]interface{}{
 		"name":                 ticker,
 		"context_period_size":  contextSize,
 		"forecast_period_size": horizonSize,
 		"model":                model,
 	}
+
+	// Add as_of_date for metadata/logging
+	if asOfDate != nil {
+		payload["as_of_date"] = asOfDate.Format("2006-01-02")
+	}
+
+	// Add the explicit historical data (The Fix)
+	if len(contextData) > 0 {
+		payload["recent_data"] = contextData
+	}
+
 	reqBody, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -340,7 +367,8 @@ func (e *Evaluator) CallForecastService(ctx context.Context, ticker, model strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("forecast error status: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("forecast error status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result datatypes.ForecastResult
@@ -417,6 +445,48 @@ func (e *Evaluator) Close() error {
 	return nil
 }
 
+func (e *Evaluator) CheckDataCoverage(ctx context.Context,
+	ticker string) (*datatypes.DataCoverageInfo, error) {
+
+	query := fmt.Sprintf(`
+		from(bucket: "%s")
+            |> range(start: -20y)
+            |> filter(fn: (r) => r._measurement == "stock_prices")
+            |> filter(fn: (r) => r.ticker == "%s")
+            |> filter(fn: (r) => r._field == "close")
+            |> group()
+            |> reduce(
+                identity: {count: 0, first: time(v: "2100-01-01T00:00:00Z"), last: time(v: "1900-01-01T00:00:00Z")},
+                fn: (r, accumulator) => ({
+                  count: accumulator.count + 1,
+                  first: if r._time < accumulator.first then r._time else accumulator.first,
+                  last: if r._time > accumulator.last then r._time else accumulator.last
+                })
+            )
+	`, e.storage.bucket, ticker)
+
+	queryAPI := e.storage.client.QueryAPI(e.storage.org)
+	result, err := queryAPI.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query data coverage: %w", err)
+	}
+	info := &datatypes.DataCoverageInfo{Ticker: ticker, HasData: false}
+	if result.Next() {
+		record := result.Record()
+		if count, ok := record.ValueByKey("count").(int64); ok && count > 0 {
+			info.PointCount = int(count)
+			info.HasData = true
+			if first, ok := record.ValueByKey("first").(time.Time); ok {
+				info.OldestDate = first
+			}
+			if last, ok := record.ValueByKey("last").(time.Time); ok {
+				info.NewestDate = last
+			}
+		}
+	}
+	return info, result.Err()
+}
+
 // --- Internal Storage Implementation ---
 
 type InfluxDBStorage struct {
@@ -458,6 +528,194 @@ func NewInfluxDBStorage() (*InfluxDBStorage, error) {
 		bucket:   bucket,
 		org:      org,
 	}, nil
+}
+
+// FetchMissingData calls the data fetcher service to populate InfluxDB
+func (e *Evaluator) FetchMissingData(ctx context.Context, ticker string, startDate,
+	endDate time.Time) error {
+
+	url := fmt.Sprintf("%s/v1/data/fetch", e.orchestratorURL)
+
+	payload := map[string]interface{}{
+		"names":      []string{ticker},
+		"start_date": startDate.Format("2006-01-02"),
+		"end_date":   endDate.Format("2006-01-02"),
+		"interval":   "1d",
+	}
+
+	reqBody, _ := json.Marshal(payload)
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	slog.Info("Fetching missing data from external source",
+		"ticker", ticker,
+		"start", startDate.Format("2006-01-02"),
+		"end", endDate.Format("2006-01-02"))
+
+	resp, err := e.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("data fetch request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("data fetch failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	slog.Info("Data fetch completed successfully", "ticker", ticker)
+	return nil
+}
+
+// EnsureDataAvailability checks data coverage and fetches missing data if needed.
+// Returns the adjusted fetch_start_date if data isn't available as far back as requested.
+func (e *Evaluator) EnsureDataAvailability(ctx context.Context, scenario *datatypes.BacktestScenario) (adjustedFetchStart time.Time, err error) {
+	ticker := scenario.Evaluation.Ticker
+	contextSize := scenario.Forecast.ContextSize
+
+	// Parse the requested dates
+	layout := "2006-01-02"
+	if len(scenario.Evaluation.FetchStartDate) == 8 {
+		layout = "20060102"
+	}
+	requestedFetchStart, err := time.Parse(layout, scenario.Evaluation.FetchStartDate)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid fetch_start_date: %w", err)
+	}
+
+	endLayout := "2006-01-02"
+	if len(scenario.Evaluation.EndDate) == 8 {
+		endLayout = "20060102"
+	}
+	var requestedEnd time.Time
+	if scenario.Evaluation.EndDate == "" {
+		requestedEnd = time.Now()
+	} else {
+		requestedEnd, err = time.Parse(endLayout, scenario.Evaluation.EndDate)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("invalid end_date: %w", err)
+		}
+	}
+
+	// Step 1: Check current data coverage
+	slog.Info("Checking data availability in InfluxDB", "ticker", ticker)
+	coverage, err := e.CheckDataCoverage(ctx, ticker)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to check data coverage: %w", err)
+	}
+
+	if coverage.HasData {
+		slog.Info("Current data coverage",
+			"ticker", ticker,
+			"points", coverage.PointCount,
+			"oldest", coverage.OldestDate.Format("2006-01-02"),
+			"newest", coverage.NewestDate.Format("2006-01-02"))
+	} else {
+		slog.Info("No existing data found for ticker", "ticker", ticker)
+	}
+
+	// Step 2: Determine what data we need to fetch
+	needsFetch := false
+	fetchStart := requestedFetchStart
+	fetchEnd := requestedEnd
+
+	if !coverage.HasData {
+		// No data at all - fetch everything
+		needsFetch = true
+		slog.Warn("No data exists for ticker, will attempt to fetch",
+			"ticker", ticker,
+			"requested_start", requestedFetchStart.Format("2006-01-02"),
+			"requested_end", requestedEnd.Format("2006-01-02"))
+	} else {
+		// Check if we need earlier data
+		if requestedFetchStart.Before(coverage.OldestDate) {
+			needsFetch = true
+			fetchEnd = coverage.OldestDate.AddDate(0, 0, -1) // Fetch up to day before existing data
+			slog.Info("Need earlier data",
+				"requested_start", requestedFetchStart.Format("2006-01-02"),
+				"oldest_available", coverage.OldestDate.Format("2006-01-02"))
+		}
+		// Check if we need later data
+		if requestedEnd.After(coverage.NewestDate) {
+			if needsFetch {
+				// Need both earlier and later - fetch the whole range
+				fetchStart = requestedFetchStart
+				fetchEnd = requestedEnd
+			} else {
+				needsFetch = true
+				fetchStart = coverage.NewestDate.AddDate(0, 0, 1) // Fetch from day after existing data
+				fetchEnd = requestedEnd
+			}
+			slog.Info("Need later data",
+				"requested_end", requestedEnd.Format("2006-01-02"),
+				"newest_available", coverage.NewestDate.Format("2006-01-02"))
+		}
+	}
+
+	// Step 3: Fetch missing data if needed
+	if needsFetch {
+		err = e.FetchMissingData(ctx, ticker, fetchStart, fetchEnd)
+		if err != nil {
+			slog.Warn("Failed to fetch missing data", "error", err)
+			// Don't fail yet - we might still have enough data
+		} else {
+			// Re-check coverage after fetch
+			coverage, err = e.CheckDataCoverage(ctx, ticker)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("failed to re-check data coverage: %w", err)
+			}
+			slog.Info("Updated data coverage after fetch",
+				"ticker", ticker,
+				"points", coverage.PointCount,
+				"oldest", coverage.OldestDate.Format("2006-01-02"),
+				"newest", coverage.NewestDate.Format("2006-01-02"))
+		}
+	}
+
+	// Step 4: Validate we have enough data and adjust if needed
+	if !coverage.HasData {
+		return time.Time{}, fmt.Errorf("no data available for ticker %s after fetch attempt", ticker)
+	}
+
+	adjustedFetchStart = requestedFetchStart
+
+	// Check if oldest available is after what we requested
+	if coverage.OldestDate.After(requestedFetchStart) {
+		adjustedFetchStart = coverage.OldestDate
+		slog.Warn("DATA AVAILABILITY ALERT: Requested start date is earlier than available data",
+			"ticker", ticker,
+			"requested_start", requestedFetchStart.Format("2006-01-02"),
+			"oldest_available", coverage.OldestDate.Format("2006-01-02"),
+			"adjusted_fetch_start", adjustedFetchStart.Format("2006-01-02"))
+
+		fmt.Printf("\n⚠️  DATA AVAILABILITY WARNING\n")
+		fmt.Printf("   Requested fetch_start_date: %s\n", requestedFetchStart.Format("2006-01-02"))
+		fmt.Printf("   Oldest available data:      %s\n", coverage.OldestDate.Format("2006-01-02"))
+		fmt.Printf("   → Using oldest available as fetch_start_date\n\n")
+	}
+
+	// Calculate if evaluation start_date needs adjustment based on context requirement
+	evalLayout := "2006-01-02"
+	if len(scenario.Evaluation.StartDate) == 8 {
+		evalLayout = "20060102"
+	}
+	evalStart, _ := time.Parse(evalLayout, scenario.Evaluation.StartDate)
+
+	// Minimum evaluation start = oldest data + context_size trading days
+	// Approximate: context_size * 1.5 calendar days to account for weekends
+	minCalendarDays := int(float64(contextSize) * 1.5)
+	minEvalStart := coverage.OldestDate.AddDate(0, 0, minCalendarDays)
+
+	if evalStart.Before(minEvalStart) {
+		fmt.Printf("\n⚠️  CONTEXT REQUIREMENT WARNING\n")
+		fmt.Printf("   Evaluation start_date: %s\n", evalStart.Format("2006-01-02"))
+		fmt.Printf("   Required context:      %d trading days\n", contextSize)
+		fmt.Printf("   Oldest available data: %s\n", coverage.OldestDate.Format("2006-01-02"))
+		fmt.Printf("   Minimum eval start:    ~%s (oldest + %d calendar days)\n", minEvalStart.Format("2006-01-02"), minCalendarDays)
+		fmt.Printf("   → The evaluation will skip dates until sufficient context is available\n\n")
+	}
+
+	return adjustedFetchStart, nil
 }
 
 func (s *InfluxDBStorage) StoreResult(ctx context.Context, result *datatypes.EvaluationResult) error {
