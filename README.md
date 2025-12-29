@@ -349,7 +349,8 @@ Switch modes using `aleutian stack start --forecast-mode standalone` or `--forec
     * `--model <id>`: Model ID to use (default: `google/timesfm-2.0-500m-pytorch`).
     * `--horizon <int>`: Forecast horizon in days (default: 20).
     * `--context <int>`: Context window size in days (default: 300).
-    * **Example:** `aleutian timeseries forecast SPY --model chronos-t5-tiny --horizon 30`
+    * **Standalone mode example:** `aleutian timeseries forecast SPY --model chronos-t5-tiny --horizon 30`
+    * **Sapheneia mode example:** `aleutian timeseries forecast SPY --model amazon/chronos-t5-tiny --horizon 30`
 
 ---
 
@@ -447,6 +448,36 @@ aleutian stack start --forecast-mode sapheneia
 | TimesFM | `timesfm-2-0` | Untested | TBD |
 | Moirai | `moirai-1-1-small` | Untested | TBD |
 | Moment | `moment-small` | Untested | TBD |
+
+#### Model Naming Patterns
+
+The two modes accept different model name formats:
+
+| Mode | Accepted Format | Example |
+|------|-----------------|---------|
+| **Standalone** | Slug (short name) | `chronos-t5-tiny` |
+| **Standalone** | Full HuggingFace ID | `amazon/chronos-t5-tiny` |
+| **Sapheneia** | Full HuggingFace ID only | `amazon/chronos-t5-tiny` |
+
+**Why the difference?**
+- **Standalone mode** includes a normalizer that strips the organization prefix (`amazon/` → `chronos-t5-tiny`), so both formats work.
+- **Sapheneia mode** passes the model name directly to HuggingFace for download, which requires the full identifier.
+
+**Best Practice:** Always use the full HuggingFace ID (e.g., `amazon/chronos-t5-tiny`) for maximum compatibility across both modes.
+
+#### Service Ports
+
+Aleutian services use the 12000 port range to avoid conflicts with other services:
+
+| Service | Host Port | Internal Port |
+|---------|-----------|---------------|
+| Orchestrator | 12210 | 12210 |
+| Forecast | 12000 | 8000 |
+| Data Fetcher | 12001 | 8001 |
+| Weaviate | 12127 | 8080 |
+| InfluxDB | 12130 | 8086 |
+
+This allows Sapheneia (which uses ports 8000-8001) to run alongside Aleutian without conflicts.
 
 #### Configuration via Config File
 

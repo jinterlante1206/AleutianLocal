@@ -12,6 +12,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,27 +23,32 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"go.opentelemetry.io/otel"
 )
 
 // Create a new tracer
 var timeseriesTracer = otel.Tracer("aleutian.orchestrator.handlers")
 
-// Request structure to inspect just the routing key
-type TimeSeriesRoutingRequest struct {
-	Model string `json:"model"`
+// Request structure to inspect and augment the request
+type TimeSeriesRequest struct {
+	Model              string    `json:"model"`
+	Name               string    `json:"name,omitempty"`                 // Ticker, e.g. "SPY"
+	Data               []float64 `json:"data,omitempty"`                 // Actual history
+	RecentData         []float64 `json:"recent_data,omitempty"`          // Alias for Data
+	ContextPeriodSize  int       `json:"context_period_size,omitempty"`  // How much history to fetch
+	ForecastPeriodSize int       `json:"forecast_period_size,omitempty"` // Horizon (days to forecast)
+	Horizon            int       `json:"horizon,omitempty"`              // Alias for ForecastPeriodSize (standalone mode)
+	NumSamples         int       `json:"num_samples,omitempty"`          // Number of sample paths
+	AsOfDate           string    `json:"as_of_date,omitempty"`           // Date for forecast reference
 }
 
 // normalizeModelName converts a display name or huggingface ID to a standard "slug"
-// e.g.: "Chronos T5 (Tiny)" -> "chronos-t5-tiny"
 func normalizeModelName(input string) string {
-	// Lowercase everything
 	s := strings.ToLower(input)
-	// Remove the prefix
 	if idx := strings.LastIndex(s, "/"); idx != -1 {
 		s = s[idx+1:]
 	}
-	// Remove non-alphanumeric characters except hyphens
 	reg := regexp.MustCompile("[^a-z0-9]+")
 	s = reg.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
@@ -51,173 +57,217 @@ func normalizeModelName(input string) string {
 
 // Helper to resolve the target URL based on the model name
 func getSerivceURL(modelName string) (string, error) {
-	// Default URL (the primary container)
 	defaultURL := os.Getenv("ALEUTIAN_TIMESERIES_TOOL")
 	if defaultURL == "" {
 		defaultURL = "http://forecast-service:8000"
 	}
 
-	// Check forecast mode - standalone uses unified service, sapheneia uses per-model routing
 	forecastMode := os.Getenv("ALEUTIAN_FORECAST_MODE")
 	if forecastMode == "standalone" {
-		// In standalone mode, all models go to the unified forecast service
-		// The Python service handles model loading internally
-		slog.Info("Standalone mode: routing to unified forecast service", "model", modelName, "url", defaultURL)
+		// Standalone mode: all models go to the unified service
 		return defaultURL, nil
 	}
 
-	// Sapheneia mode (or unset) - use per-model routing
 	if modelName == "" {
 		slog.Error("Model Name was not set")
 		return defaultURL, nil
 	}
-	// normalize the model name
 	slug := normalizeModelName(modelName)
 
-	// Check for a specific Env Variable Override for the IP for a specific model
-	envVarKey := fmt.Sprintf("TIMESERIES_SERVICE_%s", strings.ReplaceAll(strings.ToUpper(slug),
-		"-", "_"))
+	envVarKey := fmt.Sprintf("TIMESERIES_SERVICE_%s", strings.ReplaceAll(strings.ToUpper(slug), "-", "_"))
 	if override := os.Getenv(envVarKey); override != "" {
-		slog.Info("Using environment override for model", "model", modelName, "url", override)
 		return override, nil
 	}
 
 	// Dynamic Routing Logic (Sapheneia mode)
-	// Model compatibility status (see docs/model_compatibility.md):
-	//   [VERIFIED]  = Tested and confirmed working
-	//   [UNTESTED]  = Listed but not yet verified
-	//   [BROKEN]    = Known issues, do not use
-	//
-	// In sapheneia mode, each model routes to its dedicated container.
 	switch slug {
-	// --- AMAZON CHRONOS T5 --- [VERIFIED]
-	case "chronos-t5-tiny": // [VERIFIED] 0.5GB VRAM
+	// --- AMAZON CHRONOS T5 ---
+	case "chronos-t5-tiny":
 		return "http://forecast-chronos-t5-tiny:8000", nil
-	case "chronos-t5-mini": // [VERIFIED] 1.0GB VRAM
+	case "chronos-t5-mini":
 		return "http://forecast-chronos-t5-mini:8000", nil
-	case "chronos-t5-small": // [VERIFIED] 2.0GB VRAM
+	case "chronos-t5-small":
 		return "http://forecast-chronos-t5-small:8000", nil
-	case "chronos-t5-base": // [VERIFIED] 4.0GB VRAM
+	case "chronos-t5-base":
 		return "http://forecast-chronos-t5-base:8000", nil
-	case "chronos-t5-large": // [VERIFIED] 8.0GB VRAM
+	case "chronos-t5-large":
 		return "http://forecast-chronos-t5-large:8000", nil
 
-	// --- AMAZON CHRONOS BOLT --- [BROKEN]
-	case "chronos-bolt-mini": // [BROKEN] Do not use
+	// --- AMAZON CHRONOS BOLT ---
+	case "chronos-bolt-mini":
 		return "http://forecast-chronos-bolt-mini:8000", nil
-	case "chronos-bolt-small": // [BROKEN] Do not use
+	case "chronos-bolt-small":
 		return "http://forecast-chronos-bolt-small:8000", nil
-	case "chronos-bolt-base": // [BROKEN] Do not use
+	case "chronos-bolt-base":
 		return "http://forecast-chronos-bolt-base:8000", nil
 
-	// --- GOOGLE TIMESFM --- [UNTESTED]
-	case "timesfm-1-0": // [UNTESTED] Priority for testing
+	// --- GOOGLE TIMESFM ---
+	case "timesfm-1-0":
 		return "http://forecast-timesfm-1-0:8000", nil
-	case "timesfm-2-0": // [UNTESTED]
+	case "timesfm-2-0":
 		return "http://forecast-timesfm-2-0:8000", nil
-	case "timesfm-2-5": // [UNTESTED]
+	case "timesfm-2-5":
 		return "http://forecast-timesfm-2-5:8000", nil
 
-	// --- SALESFORCE MOIRAI --- [UNTESTED]
-	case "moirai-1-1-small": // [UNTESTED]
+	// --- SALESFORCE MOIRAI ---
+	case "moirai-1-1-small":
 		return "http://forecast-moirai-1-1-small:8000", nil
-	case "moirai-1-1-base": // [UNTESTED]
+	case "moirai-1-1-base":
 		return "http://forecast-moirai-1-1-base:8000", nil
-	case "moirai-1-1-large": // [UNTESTED]
+	case "moirai-1-1-large":
 		return "http://forecast-moirai-1-1-large:8000", nil
-	case "moirai-2-0-small": // [UNTESTED]
+	case "moirai-2-0-small":
 		return "http://forecast-moirai-2-0-small:8000", nil
-	case "moirai-1-0-small": // [UNTESTED] (legacy slug)
+	case "moirai-1-0-small":
 		return "http://forecast-moirai-1-0-small:8000", nil
 
-	// --- IBM GRANITE --- [UNTESTED]
-	case "granite-ttm-r1": // [UNTESTED]
+	// --- IBM GRANITE ---
+	case "granite-ttm-r1":
 		return "http://forecast-granite-ttm-r1:8000", nil
-	case "granite-ttm-r2": // [UNTESTED]
+	case "granite-ttm-r2":
 		return "http://forecast-granite-ttm-r2:8000", nil
-	case "granite-flowstate": // [UNTESTED]
+	case "granite-flowstate":
 		return "http://forecast-granite-flowstate:8000", nil
-	case "granite-patchtsmixer": // [UNTESTED]
+	case "granite-patchtsmixer":
 		return "http://forecast-granite-patchtsmixer:8000", nil
-	case "granite-patchtst": // [UNTESTED]
+	case "granite-patchtst":
 		return "http://forecast-granite-patchtst:8000", nil
 
-	// --- AUTONLAB MOMENT --- [UNTESTED]
-	case "moment-small": // [UNTESTED]
+	// --- AUTONLAB MOMENT ---
+	case "moment-small":
 		return "http://forecast-moment-small:8000", nil
-	case "moment-base": // [UNTESTED]
+	case "moment-base":
 		return "http://forecast-moment-base:8000", nil
-	case "moment-large": // [UNTESTED]
+	case "moment-large":
 		return "http://forecast-moment-large:8000", nil
 
-	// --- ALIBABA YINGLONG --- [UNTESTED]
-	case "yinglong-6m": // [UNTESTED]
+	// --- ALIBABA YINGLONG ---
+	case "yinglong-6m":
 		return "http://forecast-yinglong-6m:8000", nil
-	case "yinglong-50m": // [UNTESTED]
+	case "yinglong-50m":
 		return "http://forecast-yinglong-50m:8000", nil
-	case "yinglong-110m": // [UNTESTED]
+	case "yinglong-110m":
 		return "http://forecast-yinglong-110m:8000", nil
-	case "yinglong-300m": // [UNTESTED]
+	case "yinglong-300m":
 		return "http://forecast-yinglong-300m:8000", nil
 
-	// --- MISC / SINGLE MODELS --- [UNTESTED]
-	case "lag-llama": // [UNTESTED]
+	// --- MISC / SINGLE MODELS ---
+	case "lag-llama":
 		return "http://forecast-lag-llama:8000", nil
-	case "kairos-10m": // [UNTESTED]
+	case "kairos-10m":
 		return "http://forecast-kairos-10m:8000", nil
-	case "kairos-50m": // [UNTESTED]
+	case "kairos-50m":
 		return "http://forecast-kairos-50m:8000", nil
-	case "timemoe-200m": // [UNTESTED]
+	case "timemoe-200m":
 		return "http://forecast-timemoe-200m:8000", nil
-	case "timer": // [UNTESTED]
+	case "timer":
 		return "http://forecast-timer:8000", nil
-	case "sundial": // [UNTESTED]
+	case "sundial":
 		return "http://forecast-sundial:8000", nil
-	case "toto": // [UNTESTED]
+	case "toto":
 		return "http://forecast-toto:8000", nil
-	case "falcon-tst": // [UNTESTED]
+	case "falcon-tst":
 		return "http://forecast-falcon-tst:8000", nil
-	case "tempopfn": // [UNTESTED]
+	case "tempopfn":
 		return "http://forecast-tempopfn:8000", nil
-	case "forecastpfn": // [UNTESTED]
+	case "forecastpfn":
 		return "http://forecast-forecastpfn:8000", nil
-	case "chattime": // [UNTESTED]
+	case "chattime":
 		return "http://forecast-chattime:8000", nil
-	case "opencity": // [UNTESTED]
+	case "opencity":
 		return "http://forecast-opencity:8000", nil
-	case "units": // [UNTESTED]
+	case "units":
 		return "http://forecast-units:8000", nil
 
-	// --- EARTH / WEATHER --- [UNTESTED]
-	case "prithvi-2-0-eo": // [UNTESTED]
+	// --- EARTH / WEATHER ---
+	case "prithvi-2-0-eo":
 		return "http://forecast-prithvi-2-0-eo:8000", nil
-	case "atmorep": // [UNTESTED]
+	case "atmorep":
 		return "http://forecast-atmorep:8000", nil
-	case "earthpt": // [UNTESTED]
+	case "earthpt":
 		return "http://forecast-earthpt:8000", nil
-	case "graphcast": // [UNTESTED]
+	case "graphcast":
 		return "http://forecast-graphcast:8000", nil
-	case "fourcastnet": // [UNTESTED]
+	case "fourcastnet":
 		return "http://forecast-fourcastnet:8000", nil
-	case "pangu-weather": // [UNTESTED]
+	case "pangu-weather":
 		return "http://forecast-pangu-weather:8000", nil
-	case "climax": // [UNTESTED]
+	case "climax":
 		return "http://forecast-climax:8000", nil
 
 	default:
-		slog.Warn("Unknown model requested, falling back to default", "model", modelName,
-			"slug", slug)
+		slog.Warn("Unknown model requested, falling back to default", "model", modelName, "slug", slug)
 		return defaultURL, nil
 	}
 }
 
+// fetchHistoryForForecast retrieves close prices from InfluxDB
+func fetchHistoryForForecast(ctx context.Context, ticker string, count int) ([]float64, error) {
+	// InfluxDB connection setup
+	influxURL := os.Getenv("INFLUXDB_URL")
+	if influxURL == "" {
+		influxURL = "http://influxdb:8086" // Internal default
+	}
+	influxToken := os.Getenv("INFLUXDB_TOKEN")
+	influxOrg := os.Getenv("INFLUXDB_ORG")
+	influxBucket := os.Getenv("INFLUXDB_BUCKET")
+
+	if influxToken == "" || influxOrg == "" || influxBucket == "" {
+		return nil, fmt.Errorf("InfluxDB credentials not fully configured")
+	}
+
+	client := influxdb2.NewClient(influxURL, influxToken)
+	defer client.Close()
+	queryAPI := client.QueryAPI(influxOrg)
+
+	// Calculate fetch range: context * 2 to account for weekends/holidays
+	calendarDays := int(float64(count) * 2.0)
+	if calendarDays < 14 {
+		calendarDays = 14 // Minimum fetch
+	}
+
+	query := fmt.Sprintf(`
+		from(bucket: "%s")
+		  |> range(start: -%dd)
+		  |> filter(fn: (r) => r._measurement == "stock_prices")
+		  |> filter(fn: (r) => r.ticker == "%s")
+		  |> filter(fn: (r) => r._field == "close")
+		  |> sort(columns: ["_time"], desc: false)
+		  |> tail(n: %d)
+	`, influxBucket, calendarDays, ticker, count)
+
+	slog.Info("Fetching history for forecast injection", "ticker", ticker, "days_needed", count)
+
+	result, err := queryAPI.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("InfluxDB query error: %w", err)
+	}
+
+	var prices []float64
+	for result.Next() {
+		if val, ok := result.Record().Value().(float64); ok {
+			prices = append(prices, val)
+		}
+	}
+
+	if result.Err() != nil {
+		return nil, result.Err()
+	}
+
+	if len(prices) == 0 {
+		return nil, fmt.Errorf("no data found for ticker %s", ticker)
+	}
+	return prices, nil
+}
+
 // HandleTimeSeriesForecast proxies requests to the Python timeseries-analysis-service
-func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
+// It also fetches historical data if only a ticker symbol is provided.
+func HandleTimeSeriesForecast() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx, span := timeseriesTracer.Start(c.Request.Context(), "HandleTimeSeriesForecast")
 		defer span.End()
 
-		// Read the raw request body
+		// 1. Read the raw request body
 		reqBodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			slog.Error("Failed to read request body", "error", err)
@@ -226,20 +276,59 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 			return
 		}
 
-		// Peek at the "model" field
-		var routingReq TimeSeriesRoutingRequest
-		_ = json.Unmarshal(reqBodyBytes, &routingReq)
-		baseURL, err := getSerivceURL(routingReq.Model)
+		// 2. Unmarshal to inspect
+		var req TimeSeriesRequest
+		if err := json.Unmarshal(reqBodyBytes, &req); err != nil {
+			slog.Error("Invalid JSON", "error", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format"})
+			return
+		}
+
+		// 3. INTELLIGENT FETCH: If data is missing but Ticker/Name exists, fetch from Influx
+		dataLen := len(req.Data)
+		if dataLen == 0 && len(req.RecentData) > 0 {
+			dataLen = len(req.RecentData)
+			req.Data = req.RecentData
+		}
+
+		if dataLen == 0 && req.Name != "" {
+			// Determine how much history to fetch
+			ctxSize := req.ContextPeriodSize
+			if ctxSize <= 0 {
+				ctxSize = 252 // Default to 1 trading year if not specified
+			}
+
+			slog.Info("Injecting historical data for forecast", "ticker", req.Name, "points", ctxSize)
+			history, err := fetchHistoryForForecast(ctx, req.Name, ctxSize)
+			if err != nil {
+				slog.Error("Failed to fetch history for forecast", "ticker", req.Name, "error", err)
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to fetch history for %s: %v", req.Name, err)})
+				return
+			}
+			// Update the request object
+			req.Data = history
+			req.RecentData = history // Set both for compatibility
+
+			// Re-marshal the body to send to Python
+			reqBodyBytes, err = json.Marshal(req)
+			if err != nil {
+				slog.Error("Failed to marshal updated request", "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal error processing request"})
+				return
+			}
+		}
+
+		// 4. Resolve routing
+		baseURL, err := getSerivceURL(req.Model)
 		if err != nil {
 			slog.Error("Routing error", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Service configuration error"})
 			return
 		}
 		targetURL := fmt.Sprintf("%s/v1/timeseries/forecast", baseURL)
-		slog.Info("Proxying time series forecast request", "target_url", targetURL)
 
-		// 3. Create and send the proxy request
-		slog.Info("Proxying time series forecast request", "target_url", targetURL)
+		// 5. Proxy the (potentially modified) request
+		slog.Info("Proxying time series forecast request", "target_url", targetURL, "model", req.Model)
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(reqBodyBytes))
 		if err != nil {
 			slog.Error("Failed to create request for time series service", "error", err)
@@ -265,7 +354,7 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 		}
 		defer resp.Body.Close()
 
-		// 4. Stream the response
+		// 6. Stream the response back
 		c.Status(resp.StatusCode)
 		for k, v := range resp.Header {
 			c.Header(k, strings.Join(v, ","))
