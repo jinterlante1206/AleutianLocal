@@ -19,6 +19,7 @@ var (
 	backendType     string
 	profile         string
 	forceBuild      bool
+	forecastMode    string // CLI override for forecast.mode (standalone/sapheneia)
 	pipelineType    string
 	noRag           bool
 	enableThinking  bool
@@ -239,6 +240,13 @@ var (
 		Short: "Show resource usage and health of running services.",
 		Run:   runStatus,
 	}
+
+	exportEvaluationCmd = &cobra.Command{
+		Use:   "export [run_id]",
+		Short: "Export evaluation results to CSV",
+		Args:  cobra.ExactArgs(1),
+		Run:   runExport, // Points to the function we just made
+	}
 )
 
 // init runs when the Go program starts
@@ -267,6 +275,7 @@ func init() {
 	deployCmd.Flags().BoolVar(&forceBuild, "build", false, "Force rebuild of container images")
 	deployCmd.Flags().Bool("force-recreate", false,
 		"automatically recreates the podman machine if a drift is detected.")
+	deployCmd.Flags().StringVar(&forecastMode, "forecast-mode", "", "Forecast service mode: 'standalone' (local) or 'sapheneia' (external)")
 	// --- Utility Commands ---
 	rootCmd.AddCommand(convertCmd)
 	convertCmd.Flags().StringVar(&quantizeType, "quantize", "q8_0", "Quantization type (f32, q8_0, bf16, f16)")
@@ -318,6 +327,8 @@ func init() {
 	runEvaluationCmd.Flags().String("date", "", "Evaluation date (YYYYMMDD, default: today)")
 	runEvaluationCmd.Flags().String("ticker", "", "Single ticker to evaluate (default: all)")
 	runEvaluationCmd.Flags().String("model", "", "Single model to evaluate (default: all)")
+	evaluationCmd.AddCommand(exportEvaluationCmd)
+	exportEvaluationCmd.Flags().StringP("output", "o", "", "Output filename (default: backtest_{RunID}.csv)")
 
 	// Policies
 	rootCmd.AddCommand(policyCmd)

@@ -407,6 +407,22 @@ func runStart(cmd *cobra.Command, args []string) {
 		fmt.Printf("Overriding backend to %s\n", backendType)
 	}
 
+	// Override forecast mode if specified via CLI flag
+	if forecastMode != "" {
+		switch forecastMode {
+		case "standalone":
+			config.Global.Forecast.Mode = config.ForecastModeStandalone
+			config.Global.Forecast.Enabled = true
+			fmt.Println("Overriding forecast mode to: standalone")
+		case "sapheneia":
+			config.Global.Forecast.Mode = config.ForecastModeSapheneia
+			config.Global.Forecast.Enabled = true
+			fmt.Println("Overriding forecast mode to: sapheneia")
+		default:
+			log.Printf("Warning: Unknown forecast mode '%s', valid options are 'standalone' or 'sapheneia'", forecastMode)
+		}
+	}
+
 	// 1. Get Force Flag
 	forceRecreate, _ := cmd.Flags().GetBool("force-recreate")
 
@@ -541,10 +557,38 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Extensions Loading
 	for _, extPath := range config.Global.Extensions {
 		if _, err := os.Stat(extPath); err == nil {
-			fmt.Printf("🔌 Loading Extension: %s\n", extPath)
+			fmt.Printf("Loading Extension: %s\n", extPath)
 			composeArgs = append(composeArgs, "-f", extPath)
 		} else {
 			log.Printf("Warning: Extension file not found: %s", extPath)
+		}
+	}
+
+	// Forecast module configuration
+	if config.Global.Forecast.Enabled {
+		forecastComposePath := filepath.Join(stackDir, "podman-compose.forecast.yml")
+
+		switch config.Global.Forecast.Mode {
+		case config.ForecastModeStandalone:
+			if _, err := os.Stat(forecastComposePath); err == nil {
+				fmt.Println("Loading standalone forecast service")
+				composeArgs = append(composeArgs, "-f", forecastComposePath)
+			}
+			dynamicEnv["ALEUTIAN_TIMESERIES_TOOL"] = "http://forecast-service:8000"
+			dynamicEnv["ALEUTIAN_FORECAST_MODE"] = "standalone"
+
+		case config.ForecastModeSapheneia:
+			fmt.Println("Using external Sapheneia forecast service")
+			dynamicEnv["ALEUTIAN_TIMESERIES_TOOL"] = "http://host.containers.internal:8000"
+			dynamicEnv["ALEUTIAN_FORECAST_MODE"] = "sapheneia"
+
+		default:
+			if !config.Global.Forecast.Mode.IsValid() {
+				log.Printf("Warning: Unknown forecast mode '%s', defaulting to standalone",
+					config.Global.Forecast.Mode)
+				dynamicEnv["ALEUTIAN_TIMESERIES_TOOL"] = "http://forecast-service:8000"
+				dynamicEnv["ALEUTIAN_FORECAST_MODE"] = "standalone"
+			}
 		}
 	}
 

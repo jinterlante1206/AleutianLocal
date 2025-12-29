@@ -18,6 +18,25 @@ import (
 	"strings"
 )
 
+// ForecastMode defines how the forecast service is deployed
+type ForecastMode string
+
+const (
+	// ForecastModeStandalone runs Aleutian's own forecast service
+	ForecastModeStandalone ForecastMode = "standalone"
+	// ForecastModeSapheneia connects to external Sapheneia containers
+	ForecastModeSapheneia ForecastMode = "sapheneia"
+)
+
+// IsValid checks if the mode is a known value
+func (m ForecastMode) IsValid() bool {
+	switch m {
+	case ForecastModeStandalone, ForecastModeSapheneia:
+		return true
+	}
+	return false
+}
+
 type AleutianConfig struct {
 	// Infrastructure (Podman Machine)
 	Machine MachineConfig `yaml:"machine"`
@@ -33,6 +52,9 @@ type AleutianConfig struct {
 
 	// ModelBackend: decides if you want local or cloud
 	ModelBackend BackendConfig `yaml:"model_backend"`
+
+	// Forecast: optional timeseries/forecast module configuration
+	Forecast ForecastConfig `yaml:"forecast"`
 }
 
 type MachineConfig struct {
@@ -55,6 +77,12 @@ type BackendConfig struct {
 	// Type can be "ollama", "openai", "anthropic", "remote_tgi", etc.
 	Type    string `yaml:"type"`
 	BaseURL string `yaml:"base_url,omitempty"`
+}
+
+// ForecastConfig configures the optional timeseries/forecast module
+type ForecastConfig struct {
+	Enabled bool         `yaml:"enabled"` // Enable/disable the forecast module
+	Mode    ForecastMode `yaml:"mode"`    // "standalone" or "sapheneia"
 }
 
 // findExternalDrives automatically discovers mounted external drives on macOS.
@@ -126,6 +154,10 @@ func DefaultConfig() AleutianConfig {
 		ModelBackend: BackendConfig{
 			Type:    "ollama",
 			BaseURL: "http://host.containers.internal:11434",
+		},
+		Forecast: ForecastConfig{
+			Enabled: true,
+			Mode:    ForecastModeStandalone,
 		},
 	}
 }

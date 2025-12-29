@@ -11,7 +11,7 @@ evaluation:
   end_date: "20240101"
 
 forecast:
-  model: "google/timesfm-2.0-500m-pytorch"
+  model: "amazon/chronos-t5-mini"
   context_size: 252
   horizon_size: 20
 

@@ -121,6 +121,15 @@ type BacktestScenario struct {
 	} `yaml:"trading" json:"trading"`
 }
 
+// DataCoverageInfo holds information about available data for a ticker in InfluxDB
+type DataCoverageInfo struct {
+	Ticker     string
+	OldestDate time.Time
+	NewestDate time.Time
+	PointCount int
+	HasData    bool
+}
+
 // --- Defaults ---
 
 var DefaultTickers = []TickerInfo{

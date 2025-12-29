@@ -303,11 +303,14 @@ services:
       # Explicitly disable Weaviate/RAG to prevent lookup errors
       WEAVIATE_SERVICE_URL: ""
       RAG_ENGINE_URL: ""
-      # Connect to Sapheneia Services (running in sapheneia docker-compose)
-      ALEUTIAN_TIMESERIES_TOOL: http://host.containers.internal:8000
-      ALEUTIAN_DATA_FETCHER_URL: http://host.containers.internal:8001
-      SAPHENEIA_TRADING_SERVICE_URL: http://host.containers.internal:12132
-      SAPHENEIA_TRADING_API_KEY: default_trading_api_key_please_change
+      # Forecast/Timeseries Config (set by aleutian stack based on config)
+      # standalone mode: points to local forecast-service (default)
+      # sapheneia mode: points to external Sapheneia containers
+      ALEUTIAN_TIMESERIES_TOOL: ${ALEUTIAN_TIMESERIES_TOOL:-http://forecast-service:8000}
+      ALEUTIAN_FORECAST_MODE: ${ALEUTIAN_FORECAST_MODE:-standalone}
+      ALEUTIAN_DATA_FETCHER_URL: ${ALEUTIAN_DATA_FETCHER_URL:-http://host.containers.internal:8001}
+      SAPHENEIA_TRADING_SERVICE_URL: ${SAPHENEIA_TRADING_SERVICE_URL:-http://host.containers.internal:12132}
+      SAPHENEIA_TRADING_API_KEY: ${SAPHENEIA_TRADING_API_KEY:-default_trading_api_key_please_change}
       # InfluxDB Config
       INFLUXDB_URL: http://influxdb:8086
       INFLUXDB_TOKEN: your_super_secret_admin_token

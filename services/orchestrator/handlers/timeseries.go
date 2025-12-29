@@ -54,8 +54,19 @@ func getSerivceURL(modelName string) (string, error) {
 	// Default URL (the primary container)
 	defaultURL := os.Getenv("ALEUTIAN_TIMESERIES_TOOL")
 	if defaultURL == "" {
-		defaultURL = "http://forecast-primary:8000"
+		defaultURL = "http://forecast-service:8000"
 	}
+
+	// Check forecast mode - standalone uses unified service, sapheneia uses per-model routing
+	forecastMode := os.Getenv("ALEUTIAN_FORECAST_MODE")
+	if forecastMode == "standalone" {
+		// In standalone mode, all models go to the unified forecast service
+		// The Python service handles model loading internally
+		slog.Info("Standalone mode: routing to unified forecast service", "model", modelName, "url", defaultURL)
+		return defaultURL, nil
+	}
+
+	// Sapheneia mode (or unset) - use per-model routing
 	if modelName == "" {
 		slog.Error("Model Name was not set")
 		return defaultURL, nil
@@ -71,121 +82,126 @@ func getSerivceURL(modelName string) (string, error) {
 		return override, nil
 	}
 
-	// Dynamic Routing Logic
-	// You can map specific model names to specific container service names here in Podman,
-	// the host is the container name.
+	// Dynamic Routing Logic (Sapheneia mode)
+	// Model compatibility status (see docs/model_compatibility.md):
+	//   [VERIFIED]  = Tested and confirmed working
+	//   [UNTESTED]  = Listed but not yet verified
+	//   [BROKEN]    = Known issues, do not use
+	//
+	// In sapheneia mode, each model routes to its dedicated container.
 	switch slug {
-	// --- AMAZON CHRONOS ---
-	case "chronos-t5-tiny":
+	// --- AMAZON CHRONOS T5 --- [VERIFIED]
+	case "chronos-t5-tiny": // [VERIFIED] 0.5GB VRAM
 		return "http://forecast-chronos-t5-tiny:8000", nil
-	case "chronos-t5-mini":
+	case "chronos-t5-mini": // [VERIFIED] 1.0GB VRAM
 		return "http://forecast-chronos-t5-mini:8000", nil
-	case "chronos-t5-small":
+	case "chronos-t5-small": // [VERIFIED] 2.0GB VRAM
 		return "http://forecast-chronos-t5-small:8000", nil
-	case "chronos-t5-base":
+	case "chronos-t5-base": // [VERIFIED] 4.0GB VRAM
 		return "http://forecast-chronos-t5-base:8000", nil
-	case "chronos-t5-large":
+	case "chronos-t5-large": // [VERIFIED] 8.0GB VRAM
 		return "http://forecast-chronos-t5-large:8000", nil
-	case "chronos-bolt-mini":
+
+	// --- AMAZON CHRONOS BOLT --- [BROKEN]
+	case "chronos-bolt-mini": // [BROKEN] Do not use
 		return "http://forecast-chronos-bolt-mini:8000", nil
-	case "chronos-bolt-small":
+	case "chronos-bolt-small": // [BROKEN] Do not use
 		return "http://forecast-chronos-bolt-small:8000", nil
-	case "chronos-bolt-base":
+	case "chronos-bolt-base": // [BROKEN] Do not use
 		return "http://forecast-chronos-bolt-base:8000", nil
 
-	// --- GOOGLE TIMESFM ---
-	case "timesfm-1-0":
+	// --- GOOGLE TIMESFM --- [UNTESTED]
+	case "timesfm-1-0": // [UNTESTED] Priority for testing
 		return "http://forecast-timesfm-1-0:8000", nil
-	case "timesfm-2-0":
+	case "timesfm-2-0": // [UNTESTED]
 		return "http://forecast-timesfm-2-0:8000", nil
-	case "timesfm-2-5":
+	case "timesfm-2-5": // [UNTESTED]
 		return "http://forecast-timesfm-2-5:8000", nil
 
-	// --- SALESFORCE MOIRAI ---
-	case "moirai-1-1-small":
+	// --- SALESFORCE MOIRAI --- [UNTESTED]
+	case "moirai-1-1-small": // [UNTESTED]
 		return "http://forecast-moirai-1-1-small:8000", nil
-	case "moirai-1-1-base":
+	case "moirai-1-1-base": // [UNTESTED]
 		return "http://forecast-moirai-1-1-base:8000", nil
-	case "moirai-1-1-large":
+	case "moirai-1-1-large": // [UNTESTED]
 		return "http://forecast-moirai-1-1-large:8000", nil
-	case "moirai-2-0-small":
+	case "moirai-2-0-small": // [UNTESTED]
 		return "http://forecast-moirai-2-0-small:8000", nil
-	// (Added compatibility for older 1.0 slugs if needed)
-	case "moirai-1-0-small":
+	case "moirai-1-0-small": // [UNTESTED] (legacy slug)
 		return "http://forecast-moirai-1-0-small:8000", nil
 
-	// --- IBM GRANITE ---
-	case "granite-ttm-r1":
+	// --- IBM GRANITE --- [UNTESTED]
+	case "granite-ttm-r1": // [UNTESTED]
 		return "http://forecast-granite-ttm-r1:8000", nil
-	case "granite-ttm-r2":
+	case "granite-ttm-r2": // [UNTESTED]
 		return "http://forecast-granite-ttm-r2:8000", nil
-	case "granite-flowstate":
+	case "granite-flowstate": // [UNTESTED]
 		return "http://forecast-granite-flowstate:8000", nil
-	case "granite-patchtsmixer":
+	case "granite-patchtsmixer": // [UNTESTED]
 		return "http://forecast-granite-patchtsmixer:8000", nil
-	case "granite-patchtst":
+	case "granite-patchtst": // [UNTESTED]
 		return "http://forecast-granite-patchtst:8000", nil
 
-	// --- AUTONLAB MOMENT ---
-	case "moment-small":
+	// --- AUTONLAB MOMENT --- [UNTESTED]
+	case "moment-small": // [UNTESTED]
 		return "http://forecast-moment-small:8000", nil
-	case "moment-base":
+	case "moment-base": // [UNTESTED]
 		return "http://forecast-moment-base:8000", nil
-	case "moment-large":
+	case "moment-large": // [UNTESTED]
 		return "http://forecast-moment-large:8000", nil
 
-	// --- ALIBABA YINGLONG ---
-	case "yinglong-6m":
+	// --- ALIBABA YINGLONG --- [UNTESTED]
+	case "yinglong-6m": // [UNTESTED]
 		return "http://forecast-yinglong-6m:8000", nil
-	case "yinglong-50m":
+	case "yinglong-50m": // [UNTESTED]
 		return "http://forecast-yinglong-50m:8000", nil
-	case "yinglong-110m":
+	case "yinglong-110m": // [UNTESTED]
 		return "http://forecast-yinglong-110m:8000", nil
-	case "yinglong-300m":
+	case "yinglong-300m": // [UNTESTED]
 		return "http://forecast-yinglong-300m:8000", nil
 
-	// --- MISC / SINGLE MODELS ---
-	case "lag-llama":
+	// --- MISC / SINGLE MODELS --- [UNTESTED]
+	case "lag-llama": // [UNTESTED]
 		return "http://forecast-lag-llama:8000", nil
-	case "kairos-10m":
+	case "kairos-10m": // [UNTESTED]
 		return "http://forecast-kairos-10m:8000", nil
-	case "kairos-50m":
+	case "kairos-50m": // [UNTESTED]
 		return "http://forecast-kairos-50m:8000", nil
-	case "timemoe-200m":
+	case "timemoe-200m": // [UNTESTED]
 		return "http://forecast-timemoe-200m:8000", nil
-	case "timer":
+	case "timer": // [UNTESTED]
 		return "http://forecast-timer:8000", nil
-	case "sundial":
+	case "sundial": // [UNTESTED]
 		return "http://forecast-sundial:8000", nil
-	case "toto":
+	case "toto": // [UNTESTED]
 		return "http://forecast-toto:8000", nil
-	case "falcon-tst":
+	case "falcon-tst": // [UNTESTED]
 		return "http://forecast-falcon-tst:8000", nil
-	case "tempopfn":
+	case "tempopfn": // [UNTESTED]
 		return "http://forecast-tempopfn:8000", nil
-	case "forecastpfn":
+	case "forecastpfn": // [UNTESTED]
 		return "http://forecast-forecastpfn:8000", nil
-	case "chattime":
+	case "chattime": // [UNTESTED]
 		return "http://forecast-chattime:8000", nil
-	case "opencity":
+	case "opencity": // [UNTESTED]
 		return "http://forecast-opencity:8000", nil
-	case "units":
+	case "units": // [UNTESTED]
 		return "http://forecast-units:8000", nil
 
-	// --- EARTH / WEATHER ---
-	case "prithvi-2-0-eo":
+	// --- EARTH / WEATHER --- [UNTESTED]
+	case "prithvi-2-0-eo": // [UNTESTED]
 		return "http://forecast-prithvi-2-0-eo:8000", nil
-	case "atmorep":
+	case "atmorep": // [UNTESTED]
 		return "http://forecast-atmorep:8000", nil
-	case "earthpt":
+	case "earthpt": // [UNTESTED]
 		return "http://forecast-earthpt:8000", nil
-	case "graphcast":
+	case "graphcast": // [UNTESTED]
 		return "http://forecast-graphcast:8000", nil
-	case "fourcastnet":
+	case "fourcastnet": // [UNTESTED]
 		return "http://forecast-fourcastnet:8000", nil
-	case "pangu-weather":
+	case "pangu-weather": // [UNTESTED]
 		return "http://forecast-pangu-weather:8000", nil
-	case "climax":
+	case "climax": // [UNTESTED]
 		return "http://forecast-climax:8000", nil
 
 	default:

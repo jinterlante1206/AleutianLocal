@@ -137,7 +137,8 @@ func fetchOHLCFromInfluxByDateRange(ctx context.Context, ticker string, startDat
 }
 
 // fetchOHLCFromInflux retrieves OHLC historical data from InfluxDB using relative days (for real-time trading)
-func fetchOHLCFromInflux(ctx context.Context, ticker string, days int) (*datatypes.OHLCData, float64, error) {
+// If asOfDate is provided, data is fetched up to that date (for backtesting). Otherwise, fetches up to now.
+func fetchOHLCFromInflux(ctx context.Context, ticker string, days int, asOfDate *time.Time) (*datatypes.OHLCData, float64, error) {
 	// Get InfluxDB configuration from environment OR use defaults
 	// This allows the CLI (running on host) to connect to localhost:12130
 	influxURL := os.Getenv("INFLUXDB_URL")
@@ -173,16 +174,22 @@ func fetchOHLCFromInflux(ctx context.Context, ticker string, days int) (*datatyp
 	// Calculate calendar days (trading days * 1.6 to account for weekends/holidays)
 	calendarDays := int(float64(days) * 1.6)
 
+	// Determine stop time (for backtesting vs real-time)
+	stopTime := "now()"
+	if asOfDate != nil {
+		stopTime = asOfDate.Format(time.RFC3339)
+	}
+
 	// Query to fetch OHLC data
 	query := fmt.Sprintf(`
 		from(bucket: "%s")
-		  |> range(start: -%dd)
+		  |> range(start: -%dd, stop: %s)
 		  |> filter(fn: (r) => r._measurement == "stock_prices")
 		  |> filter(fn: (r) => r.ticker == "%s")
 		  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
 		  |> sort(columns: ["_time"], desc: false)
 		  |> tail(n: %d)
-	`, influxBucket, calendarDays, ticker, days)
+	`, influxBucket, calendarDays, stopTime, ticker, days)
 
 	slog.Info("Fetching OHLC data from InfluxDB", "ticker", ticker, "days", days)
 
@@ -273,7 +280,7 @@ func HandleTradingSignal() gin.HandlerFunc {
 			"forecast_price", req.ForecastPrice)
 
 		// 2. Fetch OHLC data from InfluxDB
-		ohlcData, latestPrice, err := fetchOHLCFromInflux(ctx, req.Ticker, req.HistoryDays)
+		ohlcData, latestPrice, err := fetchOHLCFromInflux(ctx, req.Ticker, req.HistoryDays, nil)
 		if err != nil {
 			slog.Error("Failed to fetch OHLC data", "error", err, "ticker", req.Ticker)
 			c.JSON(http.StatusServiceUnavailable, gin.H{
