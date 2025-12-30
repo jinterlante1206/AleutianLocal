@@ -17,13 +17,22 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+)
+
+// Retry configuration
+const (
+	maxRetries     = 3
+	baseRetryDelay = 500 * time.Millisecond
+	maxRetryDelay  = 10 * time.Second
 )
 
 // Evaluator handles the logic of running forecasts and checking trading signals
@@ -142,40 +151,133 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 		"context_days_required", scenario.Forecast.ContextSize)
 
 	endIndex := len(fullHistory.Close) - 1
-	slog.Info("Backtest range found", "start_date", fullHistory.Time[startIndex], "start_index", startIndex, "days_to_test", endIndex-startIndex)
+	totalDays := endIndex - startIndex + 1
+	slog.Info("Backtest range found", "start_date", fullHistory.Time[startIndex], "start_index", startIndex, "days_to_test", totalDays)
 
-	// 3. Initialize Portfolio
+	// 3. Pre-fetch all forecasts in parallel
+	type forecastJob struct {
+		index       int
+		date        time.Time
+		price       float64
+		contextData []float64
+	}
+
+	type forecastResult struct {
+		index    int
+		date     time.Time
+		price    float64
+		forecast *datatypes.ForecastResult
+		err      error
+	}
+
+	// Build job list
+	jobs := make([]forecastJob, 0, totalDays)
+	for i := startIndex; i <= endIndex; i++ {
+		sliceStart := i - scenario.Forecast.ContextSize + 1
+		if sliceStart < 0 {
+			sliceStart = 0
+		}
+		contextSlice := make([]float64, i+1-sliceStart)
+		copy(contextSlice, fullHistory.Close[sliceStart:i+1])
+
+		jobs = append(jobs, forecastJob{
+			index:       i,
+			date:        fullHistory.Time[i],
+			price:       fullHistory.Close[i],
+			contextData: contextSlice,
+		})
+	}
+
+	// Parallel forecast fetching with worker pool
+	numWorkers := 4 // Configurable concurrency
+	if envWorkers := os.Getenv("ALEUTIAN_FORECAST_WORKERS"); envWorkers != "" {
+		if n, err := fmt.Sscanf(envWorkers, "%d", &numWorkers); n == 1 && err == nil && numWorkers > 0 {
+			// Use env value
+		}
+	}
+
+	slog.Info("Fetching forecasts in parallel", "total_days", totalDays, "workers", numWorkers)
+	startTime := time.Now()
+
+	jobChan := make(chan forecastJob, len(jobs))
+	resultChan := make(chan forecastResult, len(jobs))
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobChan {
+				forecast, err := e.CallForecastServiceAsOf(ctx, ticker, scenario.Forecast.Model,
+					scenario.Forecast.ContextSize, scenario.Forecast.HorizonSize, &job.date, job.contextData)
+				resultChan <- forecastResult{
+					index:    job.index,
+					date:     job.date,
+					price:    job.price,
+					forecast: forecast,
+					err:      err,
+				}
+			}
+		}()
+	}
+
+	// Send jobs
+	for _, job := range jobs {
+		jobChan <- job
+	}
+	close(jobChan)
+
+	// Wait for all workers and close results
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results into a map
+	forecasts := make(map[int]forecastResult)
+	successCount := 0
+	failCount := 0
+	for result := range resultChan {
+		forecasts[result.index] = result
+		if result.err != nil {
+			failCount++
+		} else {
+			successCount++
+		}
+	}
+
+	fetchDuration := time.Since(startTime)
+	slog.Info("Forecast fetching complete",
+		"duration", fetchDuration,
+		"success", successCount,
+		"failed", failCount,
+		"avg_per_forecast", fetchDuration/time.Duration(totalDays))
+
+	// 4. Initialize Portfolio
 	currentPosition := scenario.Trading.InitialPosition
 	currentCash := scenario.Trading.InitialCash
 
-	// 4. The Backtest Loop
+	// 5. Sequential trading loop using pre-fetched forecasts
 	for i := startIndex; i <= endIndex; i++ {
-		currentSimulatedPrice := fullHistory.Close[i]
-		currentDate := fullHistory.Time[i]
-
-		// SLICE HISTORY: Grab exactly the N days leading up to and including today
-		// This guarantees the model ONLY sees data up to 'currentDate'
-		sliceStart := i - scenario.Forecast.ContextSize + 1
-		if sliceStart < 0 {
-			sliceStart = 0 // Safety clamp, though validation above prevents this
+		fr, ok := forecasts[i]
+		if !ok {
+			slog.Error("Missing forecast for index", "index", i)
+			continue
 		}
 
-		// Create the explicit context slice to send to the model
-		contextSlice := fullHistory.Close[sliceStart : i+1]
+		currentSimulatedPrice := fr.price
+		currentDate := fr.date
 
-		// Pass the slice directly to the service
-		forecast, err := e.CallForecastServiceAsOf(ctx, ticker, scenario.Forecast.Model,
-			scenario.Forecast.ContextSize, scenario.Forecast.HorizonSize, &currentDate, contextSlice)
-
-		if err != nil {
-			slog.Error("Forecast failed", "date", currentDate.Format("2006-01-02"), "error", err)
+		if fr.err != nil {
+			slog.Error("Forecast failed", "date", currentDate.Format("2006-01-02"), "error", fr.err)
 			continue
 		}
 
 		// Use the first forecast value (1-day ahead prediction)
 		var predictedPrice float64
-		if len(forecast.Forecast) > 0 {
-			predictedPrice = forecast.Forecast[0]
+		if len(fr.forecast.Forecast) > 0 {
+			predictedPrice = fr.forecast.Forecast[0]
 		} else {
 			slog.Warn("Empty forecast returned, skipping", "date", currentDate.Format("2006-01-02"))
 			continue
@@ -321,7 +423,47 @@ func (e *Evaluator) EvaluateTickerModel(
 	return nil
 }
 
-// --- HTTP Helper Methods ---the
+// --- HTTP Helper Methods ---
+
+// retryWithBackoff executes a function with exponential backoff retry logic
+func retryWithBackoff(ctx context.Context, operation string, fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("context cancelled: %w", err)
+		}
+
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+
+		if attempt < maxRetries-1 {
+			// Calculate delay with jitter
+			delay := baseRetryDelay * time.Duration(1<<uint(attempt))
+			if delay > maxRetryDelay {
+				delay = maxRetryDelay
+			}
+			// Add jitter (±25%)
+			jitter := time.Duration(rand.Int63n(int64(delay / 2)))
+			delay = delay + jitter - (delay / 4)
+
+			slog.Warn("Retrying operation",
+				"operation", operation,
+				"attempt", attempt+1,
+				"max_attempts", maxRetries,
+				"delay", delay,
+				"error", lastErr)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	return fmt.Errorf("operation %s failed after %d attempts: %w", operation, maxRetries, lastErr)
+}
 
 func (e *Evaluator) CallForecastService(ctx context.Context, ticker, model string, contextSize, horizonSize int) (*datatypes.ForecastResult, error) {
 	// Pass nil for asOfDate (implies "now")
@@ -334,46 +476,57 @@ func (e *Evaluator) CallForecastServiceAsOf(
 	ticker, model string,
 	contextSize, horizonSize int,
 	asOfDate *time.Time,
-	contextData []float64, // <--- New Parameter
+	contextData []float64,
 ) (*datatypes.ForecastResult, error) {
+	var result *datatypes.ForecastResult
 
-	url := fmt.Sprintf("%s/v1/timeseries/forecast", e.orchestratorURL)
+	err := retryWithBackoff(ctx, "forecast", func() error {
+		url := fmt.Sprintf("%s/v1/timeseries/forecast", e.orchestratorURL)
 
-	payload := map[string]interface{}{
-		"name":                 ticker,
-		"context_period_size":  contextSize,
-		"forecast_period_size": horizonSize,
-		"model":                model,
-	}
+		payload := map[string]interface{}{
+			"name":                 ticker,
+			"context_period_size":  contextSize,
+			"forecast_period_size": horizonSize,
+			"model":                model,
+		}
 
-	// Add as_of_date for metadata/logging
-	if asOfDate != nil {
-		payload["as_of_date"] = asOfDate.Format("2006-01-02")
-	}
+		// Add as_of_date for metadata/logging
+		if asOfDate != nil {
+			payload["as_of_date"] = asOfDate.Format("2006-01-02")
+		}
 
-	// Add the explicit historical data (The Fix)
-	if len(contextData) > 0 {
-		payload["recent_data"] = contextData
-	}
+		// Add the explicit historical data
+		if len(contextData) > 0 {
+			payload["recent_data"] = contextData
+		}
 
-	reqBody, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
-	req.Header.Set("Content-Type", "application/json")
+		reqBody, _ := json.Marshal(payload)
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		resp, err := e.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("forecast error status %d: %s", resp.StatusCode, string(body))
-	}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			// Don't retry on 4xx errors (client errors)
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				return fmt.Errorf("forecast error status %d: %s (not retryable)", resp.StatusCode, string(body))
+			}
+			return fmt.Errorf("forecast error status %d: %s", resp.StatusCode, string(body))
+		}
 
-	var result datatypes.ForecastResult
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	return &result, err
+		result = &datatypes.ForecastResult{}
+		return json.NewDecoder(resp.Body).Decode(result)
+	})
+
+	return result, err
 }
 
 func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.TradingSignalRequest) (*datatypes.TradingSignalResponse, error) {

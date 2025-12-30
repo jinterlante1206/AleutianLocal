@@ -121,33 +121,51 @@ class ModelLoadRequest(BaseModel):
     model: str = Field(..., description="Model slug to load/unload")
 
 
-def evict_oldest_model():
-    """Evict the oldest model that is not in use (FIFO)"""
+def evict_oldest_model(max_attempts: int = 60) -> bool:
+    """Evict the oldest model that is not in use (FIFO)
+
+    Args:
+        max_attempts: Maximum number of retry attempts if all models are in use.
+                      With 0.5s sleep, 60 attempts = 30 seconds max wait.
+
+    Returns:
+        True if a model was evicted, False if eviction failed after max attempts.
+
+    Raises:
+        RuntimeError: If unable to evict any model after max_attempts.
+    """
     import time
+    import gc
 
-    with MODEL_LOCK:
-        for model_slug in list(LOADED_MODELS.keys()):
-            # Skip models currently in use
-            if MODEL_IN_USE.get(model_slug, 0) > 0:
-                logger.info(f"Model {model_slug} in use, skipping eviction")
-                continue
+    for attempt in range(max_attempts):
+        with MODEL_LOCK:
+            for model_slug in list(LOADED_MODELS.keys()):
+                # Skip models currently in use
+                if MODEL_IN_USE.get(model_slug, 0) > 0:
+                    logger.info(f"Model {model_slug} in use, skipping eviction")
+                    continue
 
-            # Evict this model
-            logger.info(f"Evicting model {model_slug} (FIFO)")
-            del LOADED_MODELS[model_slug]
+                # Evict this model
+                logger.info(f"Evicting model {model_slug} (FIFO)")
+                del LOADED_MODELS[model_slug]
 
-            # Force garbage collection and clear CUDA cache
-            import gc
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                # Force garbage collection and clear CUDA cache
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-            return True
+                return True
 
-    # If all models are in use, wait briefly and retry
-    logger.warning("All models in use, waiting for one to become available...")
-    time.sleep(0.5)
-    return evict_oldest_model()
+        # All models are in use, wait briefly and retry
+        if attempt < max_attempts - 1:
+            logger.warning(f"All models in use, waiting... (attempt {attempt + 1}/{max_attempts})")
+            time.sleep(0.5)
+
+    # Failed to evict after all attempts
+    raise RuntimeError(
+        f"Unable to evict any model after {max_attempts} attempts. "
+        f"All {len(LOADED_MODELS)} models are in use."
+    )
 
 
 def mark_model_in_use(model_slug: str):

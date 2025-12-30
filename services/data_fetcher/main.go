@@ -318,14 +318,15 @@ func (s *Server) getLatestTimestamp(ticker string, defaultStartDate string) (tim
 		return defaultStartTime, err
 	}
 
-	if result.Next() {
+	// Guard against nil result (can happen with empty query results)
+	if result != nil && result.Next() {
 		// Use the later of record time or user's requested start time
 		recordTime := result.Record().Time().Add(24 * time.Hour) // +1 day to avoid duplicates
 		if recordTime.After(defaultStartTime) {
 			return recordTime, nil
 		}
 	}
-	if result.Err() != nil {
+	if result != nil && result.Err() != nil {
 		return defaultStartTime, result.Err()
 	}
 
@@ -463,6 +464,13 @@ func (s *Server) handleQueryData(c *gin.Context) {
 	if err != nil {
 		slog.Error("Query failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Query failed", "details": err.Error()})
+		return
+	}
+
+	// Guard against nil result (can happen with empty query results)
+	if result == nil {
+		slog.Warn("Query returned nil result", "ticker", req.Ticker)
+		c.JSON(http.StatusOK, DataQueryResponse{Ticker: req.Ticker, Data: []DataPoint{}, Count: 0})
 		return
 	}
 
