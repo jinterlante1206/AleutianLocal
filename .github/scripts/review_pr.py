@@ -5,8 +5,8 @@ import os
 import sys
 from typing import Optional
 
-import google.generativeai as genai
-from github import Github
+from google import genai
+from github import Github, Auth
 from github.PullRequest import PullRequest
 from github.File import File
 
@@ -36,13 +36,12 @@ except ValueError:
     sys.exit(1)
 
 # 2. Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-pro")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 def get_pr_diff() -> tuple[list[File], PullRequest]:
     """Fetch PR files and metadata from GitHub."""
-    g = Github(GITHUB_TOKEN, timeout=REQUEST_TIMEOUT)
+    g = Github(auth=Auth.Token(GITHUB_TOKEN), timeout=REQUEST_TIMEOUT)
     repo = g.get_repo(REPO_NAME)
     pr = repo.get_pull(PR_NUMBER)
     return list(pr.get_files()), pr
@@ -114,9 +113,9 @@ Do not comment on formatting, import order, or line length.
 ```
 """
     try:
-        response = model.generate_content(
-            prompt,
-            request_options={"timeout": REQUEST_TIMEOUT}
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=prompt,
         )
         return response.text
     except Exception as e:
