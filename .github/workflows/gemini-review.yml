@@ -46,6 +46,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
             You are a Principal Software Architect reviewing this PR for a privacy-focused
             financial data platform. Provide a HIGH-LEVEL review focusing on:
