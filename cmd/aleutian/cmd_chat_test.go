@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -94,5 +95,5 @@ func TestClientSideToolsSecurity(t *testing.T) {
 }
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && s[0:len(substr)] == substr // simplistic check
+	return strings.Contains(s, substr)
 }
