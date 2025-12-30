@@ -12,6 +12,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,27 +23,32 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"go.opentelemetry.io/otel"
 )
 
 // Create a new tracer
 var timeseriesTracer = otel.Tracer("aleutian.orchestrator.handlers")
 
-// Request structure to inspect just the routing key
-type TimeSeriesRoutingRequest struct {
-	Model string `json:"model"`
+// Request structure to inspect and augment the request
+type TimeSeriesRequest struct {
+	Model              string    `json:"model"`
+	Name               string    `json:"name,omitempty"`                 // Ticker, e.g. "SPY"
+	Data               []float64 `json:"data,omitempty"`                 // Actual history
+	RecentData         []float64 `json:"recent_data,omitempty"`          // Alias for Data
+	ContextPeriodSize  int       `json:"context_period_size,omitempty"`  // How much history to fetch
+	ForecastPeriodSize int       `json:"forecast_period_size,omitempty"` // Horizon (days to forecast)
+	Horizon            int       `json:"horizon,omitempty"`              // Alias for ForecastPeriodSize (standalone mode)
+	NumSamples         int       `json:"num_samples,omitempty"`          // Number of sample paths
+	AsOfDate           string    `json:"as_of_date,omitempty"`           // Date for forecast reference
 }
 
 // normalizeModelName converts a display name or huggingface ID to a standard "slug"
-// e.g.: "Chronos T5 (Tiny)" -> "chronos-t5-tiny"
 func normalizeModelName(input string) string {
-	// Lowercase everything
 	s := strings.ToLower(input)
-	// Remove the prefix
 	if idx := strings.LastIndex(s, "/"); idx != -1 {
 		s = s[idx+1:]
 	}
-	// Remove non-alphanumeric characters except hyphens
 	reg := regexp.MustCompile("[^a-z0-9]+")
 	s = reg.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
@@ -51,31 +57,31 @@ func normalizeModelName(input string) string {
 
 // Helper to resolve the target URL based on the model name
 func getSerivceURL(modelName string) (string, error) {
-	// Default URL (the primary container)
 	defaultURL := os.Getenv("ALEUTIAN_TIMESERIES_TOOL")
 	if defaultURL == "" {
-		defaultURL = "http://forecast-primary:8000"
+		defaultURL = "http://forecast-service:8000"
 	}
+
+	forecastMode := os.Getenv("ALEUTIAN_FORECAST_MODE")
+	if forecastMode == "standalone" {
+		// Standalone mode: all models go to the unified service
+		return defaultURL, nil
+	}
+
 	if modelName == "" {
 		slog.Error("Model Name was not set")
 		return defaultURL, nil
 	}
-	// normalize the model name
 	slug := normalizeModelName(modelName)
 
-	// Check for a specific Env Variable Override for the IP for a specific model
-	envVarKey := fmt.Sprintf("TIMESERIES_SERVICE_%s", strings.ReplaceAll(strings.ToUpper(slug),
-		"-", "_"))
+	envVarKey := fmt.Sprintf("TIMESERIES_SERVICE_%s", strings.ReplaceAll(strings.ToUpper(slug), "-", "_"))
 	if override := os.Getenv(envVarKey); override != "" {
-		slog.Info("Using environment override for model", "model", modelName, "url", override)
 		return override, nil
 	}
 
-	// Dynamic Routing Logic
-	// You can map specific model names to specific container service names here in Podman,
-	// the host is the container name.
+	// Dynamic Routing Logic (Sapheneia mode)
 	switch slug {
-	// --- AMAZON CHRONOS ---
+	// --- AMAZON CHRONOS T5 ---
 	case "chronos-t5-tiny":
 		return "http://forecast-chronos-t5-tiny:8000", nil
 	case "chronos-t5-mini":
@@ -86,6 +92,8 @@ func getSerivceURL(modelName string) (string, error) {
 		return "http://forecast-chronos-t5-base:8000", nil
 	case "chronos-t5-large":
 		return "http://forecast-chronos-t5-large:8000", nil
+
+	// --- AMAZON CHRONOS BOLT ---
 	case "chronos-bolt-mini":
 		return "http://forecast-chronos-bolt-mini:8000", nil
 	case "chronos-bolt-small":
@@ -110,7 +118,6 @@ func getSerivceURL(modelName string) (string, error) {
 		return "http://forecast-moirai-1-1-large:8000", nil
 	case "moirai-2-0-small":
 		return "http://forecast-moirai-2-0-small:8000", nil
-	// (Added compatibility for older 1.0 slugs if needed)
 	case "moirai-1-0-small":
 		return "http://forecast-moirai-1-0-small:8000", nil
 
@@ -189,19 +196,78 @@ func getSerivceURL(modelName string) (string, error) {
 		return "http://forecast-climax:8000", nil
 
 	default:
-		slog.Warn("Unknown model requested, falling back to default", "model", modelName,
-			"slug", slug)
+		slog.Warn("Unknown model requested, falling back to default", "model", modelName, "slug", slug)
 		return defaultURL, nil
 	}
 }
 
+// fetchHistoryForForecast retrieves close prices from InfluxDB
+func fetchHistoryForForecast(ctx context.Context, ticker string, count int) ([]float64, error) {
+	// InfluxDB connection setup
+	influxURL := os.Getenv("INFLUXDB_URL")
+	if influxURL == "" {
+		influxURL = "http://influxdb:8086" // Internal default
+	}
+	influxToken := os.Getenv("INFLUXDB_TOKEN")
+	influxOrg := os.Getenv("INFLUXDB_ORG")
+	influxBucket := os.Getenv("INFLUXDB_BUCKET")
+
+	if influxToken == "" || influxOrg == "" || influxBucket == "" {
+		return nil, fmt.Errorf("InfluxDB credentials not fully configured")
+	}
+
+	client := influxdb2.NewClient(influxURL, influxToken)
+	defer client.Close()
+	queryAPI := client.QueryAPI(influxOrg)
+
+	// Calculate fetch range: context * 2 to account for weekends/holidays
+	calendarDays := int(float64(count) * 2.0)
+	if calendarDays < 14 {
+		calendarDays = 14 // Minimum fetch
+	}
+
+	query := fmt.Sprintf(`
+		from(bucket: "%s")
+		  |> range(start: -%dd)
+		  |> filter(fn: (r) => r._measurement == "stock_prices")
+		  |> filter(fn: (r) => r.ticker == "%s")
+		  |> filter(fn: (r) => r._field == "close")
+		  |> sort(columns: ["_time"], desc: false)
+		  |> tail(n: %d)
+	`, influxBucket, calendarDays, ticker, count)
+
+	slog.Info("Fetching history for forecast injection", "ticker", ticker, "days_needed", count)
+
+	result, err := queryAPI.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("InfluxDB query error: %w", err)
+	}
+
+	var prices []float64
+	for result.Next() {
+		if val, ok := result.Record().Value().(float64); ok {
+			prices = append(prices, val)
+		}
+	}
+
+	if result.Err() != nil {
+		return nil, result.Err()
+	}
+
+	if len(prices) == 0 {
+		return nil, fmt.Errorf("no data found for ticker %s", ticker)
+	}
+	return prices, nil
+}
+
 // HandleTimeSeriesForecast proxies requests to the Python timeseries-analysis-service
-func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
+// It also fetches historical data if only a ticker symbol is provided.
+func HandleTimeSeriesForecast() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx, span := timeseriesTracer.Start(c.Request.Context(), "HandleTimeSeriesForecast")
 		defer span.End()
 
-		// Read the raw request body
+		// 1. Read the raw request body
 		reqBodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			slog.Error("Failed to read request body", "error", err)
@@ -210,20 +276,59 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 			return
 		}
 
-		// Peek at the "model" field
-		var routingReq TimeSeriesRoutingRequest
-		_ = json.Unmarshal(reqBodyBytes, &routingReq)
-		baseURL, err := getSerivceURL(routingReq.Model)
+		// 2. Unmarshal to inspect
+		var req TimeSeriesRequest
+		if err := json.Unmarshal(reqBodyBytes, &req); err != nil {
+			slog.Error("Invalid JSON", "error", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON format"})
+			return
+		}
+
+		// 3. INTELLIGENT FETCH: If data is missing but Ticker/Name exists, fetch from Influx
+		dataLen := len(req.Data)
+		if dataLen == 0 && len(req.RecentData) > 0 {
+			dataLen = len(req.RecentData)
+			req.Data = req.RecentData
+		}
+
+		if dataLen == 0 && req.Name != "" {
+			// Determine how much history to fetch
+			ctxSize := req.ContextPeriodSize
+			if ctxSize <= 0 {
+				ctxSize = 252 // Default to 1 trading year if not specified
+			}
+
+			slog.Info("Injecting historical data for forecast", "ticker", req.Name, "points", ctxSize)
+			history, err := fetchHistoryForForecast(ctx, req.Name, ctxSize)
+			if err != nil {
+				slog.Error("Failed to fetch history for forecast", "ticker", req.Name, "error", err)
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to fetch history for %s: %v", req.Name, err)})
+				return
+			}
+			// Update the request object
+			req.Data = history
+			req.RecentData = history // Set both for compatibility
+
+			// Re-marshal the body to send to Python
+			reqBodyBytes, err = json.Marshal(req)
+			if err != nil {
+				slog.Error("Failed to marshal updated request", "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal error processing request"})
+				return
+			}
+		}
+
+		// 4. Resolve routing
+		baseURL, err := getSerivceURL(req.Model)
 		if err != nil {
 			slog.Error("Routing error", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Service configuration error"})
 			return
 		}
 		targetURL := fmt.Sprintf("%s/v1/timeseries/forecast", baseURL)
-		slog.Info("Proxying time series forecast request", "target_url", targetURL)
 
-		// 3. Create and send the proxy request
-		slog.Info("Proxying time series forecast request", "target_url", targetURL)
+		// 5. Proxy the (potentially modified) request
+		slog.Info("Proxying time series forecast request", "target_url", targetURL, "model", req.Model)
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(reqBodyBytes))
 		if err != nil {
 			slog.Error("Failed to create request for time series service", "error", err)
@@ -232,6 +337,13 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
+
+		// Inject the API key so Sapheneia accepts the request
+		apiKey := os.Getenv("SAPHENEIA_TRADING_API_KEY")
+		if apiKey != "" {
+			httpReq.Header.Set("X-API-Key", apiKey)
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 
 		resp, err := http.DefaultClient.Do(httpReq)
 		if err != nil {
@@ -242,7 +354,7 @@ func HandleTimeSeriesForecast() gin.HandlerFunc { // <-- RENAMED
 		}
 		defer resp.Body.Close()
 
-		// 4. Stream the response
+		// 6. Stream the response back
 		c.Status(resp.StatusCode)
 		for k, v := range resp.Header {
 			c.Header(k, strings.Join(v, ","))

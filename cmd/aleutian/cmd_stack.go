@@ -407,6 +407,22 @@ func runStart(cmd *cobra.Command, args []string) {
 		fmt.Printf("Overriding backend to %s\n", backendType)
 	}
 
+	// Override forecast mode if specified via CLI flag
+	if forecastMode != "" {
+		switch forecastMode {
+		case "standalone":
+			config.Global.Forecast.Mode = config.ForecastModeStandalone
+			config.Global.Forecast.Enabled = true
+			fmt.Println("Overriding forecast mode to: standalone")
+		case "sapheneia":
+			config.Global.Forecast.Mode = config.ForecastModeSapheneia
+			config.Global.Forecast.Enabled = true
+			fmt.Println("Overriding forecast mode to: sapheneia")
+		default:
+			log.Printf("Warning: Unknown forecast mode '%s', valid options are 'standalone' or 'sapheneia'", forecastMode)
+		}
+	}
+
 	// 1. Get Force Flag
 	forceRecreate, _ := cmd.Flags().GetBool("force-recreate")
 
@@ -522,7 +538,17 @@ func runStart(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// 5. Inject into the map that gets passed to Podman Compose
+	// 5. Verify external cache is accessible from containers (macOS VM issue)
+	machineName := config.Global.Machine.Id
+	if machineName == "" {
+		machineName = "podman-machine-default"
+	}
+	finalCachePath, err = verifyAndFixExternalCache(finalCachePath, stackDir, machineName, forceRecreate)
+	if err != nil {
+		log.Fatalf("Cache configuration failed: %v", err)
+	}
+
+	// 6. Inject into the map that gets passed to Podman Compose
 	if dynamicEnv == nil {
 		dynamicEnv = make(map[string]string)
 	}
@@ -541,10 +567,38 @@ func runStart(cmd *cobra.Command, args []string) {
 	// Extensions Loading
 	for _, extPath := range config.Global.Extensions {
 		if _, err := os.Stat(extPath); err == nil {
-			fmt.Printf("🔌 Loading Extension: %s\n", extPath)
+			fmt.Printf("Loading Extension: %s\n", extPath)
 			composeArgs = append(composeArgs, "-f", extPath)
 		} else {
 			log.Printf("Warning: Extension file not found: %s", extPath)
+		}
+	}
+
+	// Forecast module configuration
+	if config.Global.Forecast.Enabled {
+		forecastComposePath := filepath.Join(stackDir, "podman-compose.forecast.yml")
+
+		switch config.Global.Forecast.Mode {
+		case config.ForecastModeStandalone:
+			if _, err := os.Stat(forecastComposePath); err == nil {
+				fmt.Println("Loading standalone forecast service")
+				composeArgs = append(composeArgs, "-f", forecastComposePath)
+			}
+			dynamicEnv["ALEUTIAN_TIMESERIES_TOOL"] = "http://forecast-service:8000"
+			dynamicEnv["ALEUTIAN_FORECAST_MODE"] = "standalone"
+
+		case config.ForecastModeSapheneia:
+			fmt.Println("Using external Sapheneia forecast service")
+			dynamicEnv["ALEUTIAN_TIMESERIES_TOOL"] = "http://host.containers.internal:8000"
+			dynamicEnv["ALEUTIAN_FORECAST_MODE"] = "sapheneia"
+
+		default:
+			if !config.Global.Forecast.Mode.IsValid() {
+				log.Printf("Warning: Unknown forecast mode '%s', defaulting to standalone",
+					config.Global.Forecast.Mode)
+				dynamicEnv["ALEUTIAN_TIMESERIES_TOOL"] = "http://forecast-service:8000"
+				dynamicEnv["ALEUTIAN_FORECAST_MODE"] = "standalone"
+			}
 		}
 	}
 
@@ -615,14 +669,27 @@ func hasForeignWorkloads() (bool, []string, error) {
 func waitForServicesReady() error {
 	timeout := 60 * time.Second
 	deadline := time.Now().Add(timeout)
+
+	// Build list of services to check based on what's actually running
 	criticalServices := []struct {
-		name string
-		url  string
+		name          string
+		url           string
+		containerName string // Container name to check if it's running
 	}{
-		{"Orchestrator", fmt.Sprintf("%s/health", getOrchestratorBaseURL())},
-		{"Weaviate", "http://localhost:8080/v1/.well-known/ready"},
+		{"Orchestrator", fmt.Sprintf("%s/health", getOrchestratorBaseURL()), "aleutian-go-orchestrator"},
+		{"Data Fetcher", "http://localhost:12001/health", "aleutian-data-fetcher"},
+		{"Weaviate", "http://localhost:8080/v1/.well-known/ready", "weaviate-db"},
 	}
+
 	for _, svc := range criticalServices {
+		// Check if the container is actually running before waiting for it
+		checkCmd := exec.Command("podman", "ps", "--filter", fmt.Sprintf("name=%s", svc.containerName), "--format", "{{.Names}}")
+		out, err := checkCmd.Output()
+		if err != nil || strings.TrimSpace(string(out)) == "" {
+			// Container not running, skip this health check
+			continue
+		}
+
 		fmt.Printf("   Checking %s... ", svc.name)
 		for time.Now().Before(deadline) {
 			resp, err := http.Get(svc.url)
@@ -683,15 +750,27 @@ func runStatus(cmd *cobra.Command, args []string) {
 
 	fmt.Println("\nService Health:")
 	healthChecks := []struct {
-		name string
-		url  string
+		name          string
+		url           string
+		containerName string // Optional: if set, only check if container is running
 	}{
-		{"Orchestrator", fmt.Sprintf("%s/health", getOrchestratorBaseURL())},
-		{"Weaviate", "http://localhost:12127/v1/.well-known/ready"},
-		{"Ollama", "http://localhost:11434"},
+		{"Orchestrator", fmt.Sprintf("%s/health", getOrchestratorBaseURL()), "aleutian-go-orchestrator"},
+		{"Data Fetcher", "http://localhost:12001/health", "aleutian-data-fetcher"},
+		{"Weaviate", "http://localhost:12127/v1/.well-known/ready", "weaviate-db"},
+		{"Forecast", "http://localhost:12000/health", "aleutian-forecast"},
+		{"Ollama", "http://localhost:11434", ""}, // Ollama runs on host, always check
 	}
 
 	for _, hc := range healthChecks {
+		// Skip container-based services that aren't running
+		if hc.containerName != "" {
+			checkCmd := exec.Command("podman", "ps", "--filter", fmt.Sprintf("name=%s", hc.containerName), "--format", "{{.Names}}")
+			out, err := checkCmd.Output()
+			if err != nil || strings.TrimSpace(string(out)) == "" {
+				continue // Container not running, skip
+			}
+		}
+
 		status := "Unreachable"
 		client := http.Client{Timeout: 2 * time.Second}
 		resp, err := client.Get(hc.url)
@@ -725,11 +804,54 @@ func runStop(cmd *cobra.Command, args []string) {
 		stackDir = "."
 	}
 
-	err = runPodmanCompose(stackDir, nil, "down")
+	// Step 1: Stop all Aleutian containers gracefully (with timeout)
+	// Use name filter as it's more reliable than compose project label
+	fmt.Println("   Stopping containers...")
+	stopCmd := exec.Command("podman", "stop", "-t", "10", "-a", "--filter", "name=aleutian-")
+	stopCmd.Stdout = io.Discard
+	stopCmd.Stderr = io.Discard
+	stopCmd.Run() // Ignore errors - some containers may already be stopped
+
+	// Step 2: Force stop any that didn't stop gracefully
+	forceStopCmd := exec.Command("podman", "stop", "-t", "0", "-a", "--filter", "name=aleutian-")
+	forceStopCmd.Stdout = io.Discard
+	forceStopCmd.Stderr = io.Discard
+	forceStopCmd.Run()
+
+	// Step 3: Now run compose down to clean up networks/pods
+	err = runPodmanCompose(stackDir, nil, "down", "--remove-orphans")
 	if err != nil {
-		log.Printf("Warning: Failed to stop services: %v", err)
-	} else {
-		fmt.Println("\nLocal Aleutian services stopped.")
+		// If compose down still fails, try force cleanup
+		log.Printf("Warning: Compose down had issues, attempting force cleanup...")
+		forceCleanup()
+	}
+
+	fmt.Println("\nLocal Aleutian services stopped.")
+}
+
+// forceCleanup removes all Aleutian containers and pods when compose down fails
+func forceCleanup() {
+	// Remove containers by name pattern
+	rmCmd := exec.Command("podman", "rm", "-f", "-a", "--filter", "name=aleutian-")
+	rmCmd.Stdout = io.Discard
+	rmCmd.Stderr = io.Discard
+	rmCmd.Run()
+
+	// Also try by compose project label (covers both naming conventions)
+	rmCmd2 := exec.Command("podman", "rm", "-f", "-a", "--filter", "label=io.podman.compose.project=aleutianlocal")
+	rmCmd2.Stdout = io.Discard
+	rmCmd2.Stderr = io.Discard
+	rmCmd2.Run()
+
+	// Remove pods that match aleutian pattern
+	// First list them, then remove
+	listPodsCmd := exec.Command("podman", "pod", "ls", "-q", "--filter", "name=aleutian")
+	output, err := listPodsCmd.Output()
+	if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		podIDs := strings.Fields(string(output))
+		for _, podID := range podIDs {
+			exec.Command("podman", "pod", "rm", "-f", podID).Run()
+		}
 	}
 }
 
@@ -806,29 +928,35 @@ func runLogsCommand(cmd *cobra.Command, args []string) {
 }
 
 func runPodmanCompose(stackDir string, extraEnv map[string]string, args ...string) error {
-	fmt.Printf("Executing: podman-compose %s (in %s)\n", strings.Join(args, " "), stackDir)
-
 	composeFilePath := filepath.Join(stackDir, "podman-compose.yml")
 	overrideFilePath := filepath.Join(stackDir, "podman-compose.override.yml")
+
+	// Always start with base compose file
 	fileArgs := []string{"-f", composeFilePath}
 
+	// Add override if it exists
 	if _, err := os.Stat(overrideFilePath); err == nil {
 		fileArgs = append(fileArgs, "-f", overrideFilePath)
 		fmt.Println("    (Including podman-compose.override.yml)")
 	}
-	hasFileFlag := false
-	for _, arg := range args {
-		if arg == "-f" {
-			hasFileFlag = true
-			break
+
+	// Separate -f flags and other args from the input
+	var extraFileArgs []string
+	var otherArgs []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-f" && i+1 < len(args) {
+			extraFileArgs = append(extraFileArgs, "-f", args[i+1])
+			i++ // skip the path
+		} else {
+			otherArgs = append(otherArgs, args[i])
 		}
 	}
-	var cmdArgs []string
-	if hasFileFlag {
-		cmdArgs = args
-	} else {
-		cmdArgs = append(fileArgs, args...)
-	}
+
+	// Build final command: base files + extra files + other args
+	cmdArgs := append(fileArgs, extraFileArgs...)
+	cmdArgs = append(cmdArgs, otherArgs...)
+
+	fmt.Printf("Executing: podman-compose %s (in %s)\n", strings.Join(cmdArgs, " "), stackDir)
 
 	cmd := exec.Command("podman-compose", cmdArgs...)
 	cmd.Dir = stackDir

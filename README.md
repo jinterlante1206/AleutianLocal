@@ -156,6 +156,29 @@ Your Aleutian stack is now ready! You can manage it using aleutian stack stop or
 
 The `aleutian` CLI is your primary interface for interacting with the AleutianLocal stack. Once installed, these commands can be run from any directory.
 
+### Quick Reference
+
+| Command | Description |
+|---------|-------------|
+| `aleutian stack start` | Start all services (use `--forecast-mode standalone` or `sapheneia`) |
+| `aleutian stack stop` | Stop all running services |
+| `aleutian stack status` | Show health and resource usage |
+| `aleutian stack logs [service]` | Stream container logs |
+| `aleutian stack destroy` | **DANGER:** Remove all containers and data |
+| `aleutian ask "question"` | RAG-powered Q&A against your documents |
+| `aleutian chat` | Interactive chat session (use `--thinking` for Claude) |
+| `aleutian trace "query"` | Autonomous code analysis agent |
+| `aleutian populate vectordb <path>` | Ingest documents with security scanning |
+| `aleutian timeseries fetch <tickers>` | Fetch historical market data |
+| `aleutian timeseries forecast <ticker>` | Run time-series forecast |
+| `aleutian evaluate run --config <file>` | Run model backtesting |
+| `aleutian evaluate export <run_id>` | Export results to CSV |
+| `aleutian weaviate summary` | Show vector DB stats |
+| `aleutian session list` | List conversation sessions |
+| `aleutian policy verify` | Verify embedded DLP rules |
+| `aleutian convert <model>` | Convert HuggingFace model to GGUF |
+| `aleutian pull <model>` | Download model to local cache |
+
 ---
 
 ### `stack`: Manage Local Services
@@ -166,12 +189,17 @@ Control the lifecycle of the Aleutian containers. These commands automatically m
     * **Auto-Optimization:** Automatically detects RAM/VRAM to select a profile (`standard`, `performance`, `ultra`).
     * **Self-Healing:** Detects and repairs broken Podman machine mounts or networking issues.
     * **Flags:**
-        * `--profile <mode>`: **Crucial for customizers.** Use `--profile manual` to disable the auto-optimization engine. This is required if you have defined custom model parameters (like `OLLAMA_MODEL`) in your `podman-compose.override.yml` and don't want the CLI to overwrite them.
-        * `--backend <type>`: Switch LLM backend (`ollama`, `openai`, `anthropic`).
+        * `--profile <mode>`: **Crucial for customizers.** Use `--profile manual` to disable the auto-optimization engine. This is required if you have defined custom model parameters (like `OLLAMA_MODEL`) in your `podman-compose.override.yml` and don't want the CLI to overwrite them. Options: `auto`, `low`, `standard`, `performance`, `ultra`, `manual`.
+        * `--backend <type>`: Switch LLM backend (`ollama`, `openai`, `anthropic`). Skips local model checks if not 'ollama'.
         * `--build`: Force a rebuild of container images (useful for developers).
+        * `--force-recreate`: Automatically recreates the Podman machine if a drift is detected.
+        * `--forecast-mode <mode>`: Override forecast service mode without editing `~/.aleutian/aleutian.yaml`. Options:
+            * `standalone` (default): Uses Aleutian's built-in forecast service (`services/forecast/server.py`). All models are loaded on-demand by a single unified Python service.
+            * `sapheneia`: Routes forecast requests to external Sapheneia containers. Each model runs in its own dedicated container for maximum GPU utilization.
 * `aleutian stack stop`: Gracefully stops all running services (`podman-compose down`).
 * `aleutian stack destroy`: **DANGER.** Wipes the Weaviate database and removes all containers and volumes.
 * `aleutian stack logs [service]`: Streams logs. Example: `aleutian stack logs orchestrator`.
+* `aleutian stack status`: Show resource usage and health of running services. Displays CPU/memory usage for each container.
 
 ---
 
@@ -217,11 +245,12 @@ Ask questions against your ingested data.
 Start a stateful chat session with the configured LLM.
 
 * `aleutian chat`
-* **Thinking Mode:**
-    * `--thinking`: Enables "Extended Thinking" (requires Claude 3.7+ backend) for complex reasoning tasks.
-    * `--budget <tokens>`: Set the token budget for thinking (default: 2048).
-* **History:**
-    * `--resume <session_id>`: Resume a previous conversation context (informational in v0.3.0).
+* **Flags:**
+    * `--resume <session_id>`: Resume a conversation using a specific session ID.
+    * `--thinking`: Enables "Extended Thinking" (requires Claude 3.7+ backend) for complex reasoning tasks. When enabled, the LLM can use a "thinking" phase before responding.
+    * `--budget <tokens>`: Token budget for thinking (default: 2048). Higher values allow more complex reasoning but increase latency and cost.
+* **Example:** `aleutian chat --thinking --budget 4096`
+
 ---
 
 ### `populate`: Ingest Documents Securely
@@ -238,9 +267,12 @@ Scan and add local files or directories to the Weaviate vector database. This co
        - **Batch Embedding:** Sends chunks to the embedding server in efficient batches.
        - **Batch Storage:** Imports chunks, vectors, and parent-child metadata into Weaviate in a single transaction.
 * **Flags:**
-  * `--force`: Force ingestion and skip the interactive policy prompt. Files with findings will be ingested and logged as "accepted (forced)".
-  * `--data-space <name>`: Segregate data into logical namespaces (e.g., `work`, `personal`, `project-x`).
-  * `--version <tag>`: Apply a version tag to the ingested chunks (e.g., `v1.0`, `2025-Q4`).
+    * `--force`: Force ingestion, skipping policy/secret checks. Files with findings are logged but ingested.
+    * `--data-space <name>`: The logical data space to ingest into (e.g., `work`, `personal`, `project-x`). Default: `default`.
+    * `--version <tag>`: A version tag for this ingestion (e.g., `v1.1`, `2025-Q4`). Default: `latest`.
+* **Examples:**
+    * `aleutian populate vectordb ./docs --data-space engineering --version v2.0`
+    * `aleutian populate vectordb ./src --force` (skip security prompts)
 
 ---
 
@@ -272,9 +304,13 @@ Perform administrative maintenance on the Weaviate instance.
 
 * `aleutian weaviate summary`: Display the current Weaviate schema, object counts, and class definitions.
 * `aleutian weaviate backup <backup_id>`: Create a filesystem backup within the Weaviate container.
+    * **Example:** `aleutian weaviate backup daily-2025-12-28`
 * `aleutian weaviate restore <backup_id>`: Restore the database from a previous backup ID.
-* `aleutian weaviate delete <source_name>`: Remove all documents and chunks associated with a specific source file (e.g., `aleutian weaviate delete "docs/meeting_notes.md"`).
-* `aleutian weaviate wipeout --force`: **DANGER!** Deletes *all* data, schemas, and classes from Weaviate. Irreversible.
+    * **Example:** `aleutian weaviate restore daily-2025-12-28`
+* `aleutian weaviate delete <source_name>`: Remove all documents and chunks associated with a specific source file.
+    * **Example:** `aleutian weaviate delete "docs/meeting_notes.md"`
+* `aleutian weaviate wipeout`: **DANGER!** Deletes *all* data, schemas, and classes from Weaviate. Irreversible.
+    * `--force`: Required to confirm the deletion of all data.
 
 ---
 
@@ -300,21 +336,160 @@ Manage and verify the embedded Data Loss Prevention (DLP) rules.
 
 ### `timeseries`: Forecasting (Experimental)
 
-Perform time-series analysis and forecasting using specialized foundation models.
+Perform time-series analysis and forecasting using specialized foundation models. The forecast service can run in two modes:
+- **Standalone mode** (default): Aleutian runs its own unified forecast service that loads models on-demand.
+- **Sapheneia mode**: Routes requests to external Sapheneia containers for dedicated GPU inference.
+
+Switch modes using `aleutian stack start --forecast-mode standalone` or `--forecast-mode sapheneia`.
 
 * `aleutian timeseries fetch [tickers]`: Fetch historical data for specific tickers.
     * `--days <int>`: Number of days of history to fetch (default: 365).
+    * **Example:** `aleutian timeseries fetch SPY QQQ --days 500`
 * `aleutian timeseries forecast [ticker]`: Run a forecast on a ticker.
     * `--model <id>`: Model ID to use (default: `google/timesfm-2.0-500m-pytorch`).
     * `--horizon <int>`: Forecast horizon in days (default: 20).
     * `--context <int>`: Context window size in days (default: 300).
+    * **Standalone mode example:** `aleutian timeseries forecast SPY --model chronos-t5-tiny --horizon 30`
+    * **Sapheneia mode example:** `aleutian timeseries forecast SPY --model amazon/chronos-t5-tiny --horizon 30`
+
+---
+
+### `evaluate`: Model Evaluation & Backtesting
+
+Run forecast evaluations across multiple models and tickers using configurable strategy files.
+
+* `aleutian evaluate run`: Run evaluation for specified date, tickers, and models.
+    * `--config <path>`: Path to scenario configuration file (YAML). See `strategies/*.yaml` for examples.
+    * `--date <YYYYMMDD>`: Evaluation date (default: today).
+    * `--ticker <symbol>`: Single ticker to evaluate (default: all tickers in config).
+    * `--model <id>`: Single model to evaluate (default: all models in config).
+    * **Example:** `aleutian evaluate run --config strategies/spy_threshold_v1.yaml --date 20251220`
+* `aleutian evaluate export [run_id]`: Export evaluation results to CSV.
+    * `--output <filename>` (`-o`): Output filename (default: `backtest_{RunID}.csv`).
+    * **Example:** `aleutian evaluate export abc123 -o my_backtest.csv`
+
+**Strategy Configuration Example** (`strategies/spy_threshold_v1.yaml`):
+```yaml
+version: "1.0.0"
+name: "spy-threshold-demo"
+description: "Simple threshold-based strategy for SPY"
+
+data:
+  tickers: ["SPY"]
+  context_days: 300
+
+forecast:
+  model: "chronos-t5-tiny"
+  horizon: 20
+
+evaluation:
+  lookback_days: 60
+  trade_cost_bps: 5
+```
 
 ---
 
 ### Model Management Utilities
 
 * `aleutian pull <model_id>`: Instruct the Orchestrator to download a specific model to the local cache immediately.
+    * **Example:** `aleutian pull google/timesfm-2.0-500m-pytorch`
 * `aleutian cache-all <json_file>`: Bulk download models defined in a JSON list. Useful for hydrating a fresh install in an air-gapped environment.
+    * **Example:** `aleutian cache-all models_to_cache.json`
+
+---
+
+### Forecast Service Architecture
+
+Aleutian supports two forecast deployment modes, configurable via CLI or config file:
+
+#### Standalone Mode (Default)
+
+```bash
+aleutian stack start                        # Uses standalone by default
+aleutian stack start --forecast-mode standalone   # Explicit
+```
+
+- **Single Container:** Runs `services/forecast/server.py` - a unified Python service
+- **On-Demand Loading:** Models are loaded into memory when first requested
+- **Resource Efficient:** Only one container, shares GPU/CPU across all models
+- **Best For:** Development, testing, single-user workloads, CPU-only systems
+
+**How it works:**
+1. Request arrives at Orchestrator → routed to `http://forecast-service:8000`
+2. Forecast service checks if model is loaded, loads it if not
+3. Runs inference and returns predictions
+
+#### Sapheneia Mode
+
+```bash
+aleutian stack start --forecast-mode sapheneia
+```
+
+- **Per-Model Containers:** Each model runs in its own dedicated container
+- **Pre-Loaded Models:** Models are loaded at container startup
+- **Maximum Throughput:** Each container gets dedicated GPU resources
+- **Best For:** Production workloads, multi-GPU systems, low-latency requirements
+
+**How it works:**
+1. Request arrives at Orchestrator with model name (e.g., `chronos-t5-tiny`)
+2. Orchestrator routes to dedicated container (e.g., `http://forecast-chronos-t5-tiny:8000`)
+3. Pre-loaded model runs inference immediately
+
+#### Supported Models
+
+| Model Family | Model ID | Status | VRAM |
+|--------------|----------|--------|------|
+| Chronos T5 | `chronos-t5-tiny` | Verified | 0.5GB |
+| Chronos T5 | `chronos-t5-mini` | Verified | 1.0GB |
+| Chronos T5 | `chronos-t5-small` | Verified | 2.0GB |
+| Chronos T5 | `chronos-t5-base` | Verified | 4.0GB |
+| Chronos T5 | `chronos-t5-large` | Verified | 8.0GB |
+| TimesFM | `timesfm-1-0` | Untested | TBD |
+| TimesFM | `timesfm-2-0` | Untested | TBD |
+| Moirai | `moirai-1-1-small` | Untested | TBD |
+| Moment | `moment-small` | Untested | TBD |
+
+#### Model Naming Patterns
+
+The two modes accept different model name formats:
+
+| Mode | Accepted Format | Example |
+|------|-----------------|---------|
+| **Standalone** | Slug (short name) | `chronos-t5-tiny` |
+| **Standalone** | Full HuggingFace ID | `amazon/chronos-t5-tiny` |
+| **Sapheneia** | Full HuggingFace ID only | `amazon/chronos-t5-tiny` |
+
+**Why the difference?**
+- **Standalone mode** includes a normalizer that strips the organization prefix (`amazon/` → `chronos-t5-tiny`), so both formats work.
+- **Sapheneia mode** passes the model name directly to HuggingFace for download, which requires the full identifier.
+
+**Best Practice:** Always use the full HuggingFace ID (e.g., `amazon/chronos-t5-tiny`) for maximum compatibility across both modes.
+
+#### Service Ports
+
+Aleutian services use the 12000 port range to avoid conflicts with other services:
+
+| Service | Host Port | Internal Port |
+|---------|-----------|---------------|
+| Orchestrator | 12210 | 12210 |
+| Forecast | 12000 | 8000 |
+| Data Fetcher | 12001 | 8001 |
+| Weaviate | 12127 | 8080 |
+| InfluxDB | 12130 | 8086 |
+
+This allows Sapheneia (which uses ports 8000-8001) to run alongside Aleutian without conflicts.
+
+#### Configuration via Config File
+
+You can also configure forecast mode in `~/.aleutian/aleutian.yaml`:
+
+```yaml
+forecast:
+  enabled: true
+  mode: "standalone"  # Options: standalone | sapheneia
+```
+
+The CLI flag `--forecast-mode` always overrides the config file setting.
 
 ---
 

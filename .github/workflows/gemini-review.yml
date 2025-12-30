@@ -1,31 +1,92 @@
-name: Gemini Code Review
+name: AI Code Review
 
 on:
   pull_request:
     types: [opened, synchronize]
 
 jobs:
-  review:
+  # Gemini: Detailed code-level review (bugs, performance, best practices)
+  gemini-review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write # Important: allows the bot to comment
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install google-generativeai PyGithub
+        run: pip install google-genai PyGithub
 
       - name: Run Gemini Review
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Auto-provided by GitHub
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO_NAME: ${{ github.repository }}
         run: python .github/scripts/review_pr.py
+
+  # Claude: Architecture, security, and privacy review
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Claude Architecture & Security Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are a Principal Software Architect reviewing this PR for a privacy-focused
+            financial data platform. Provide a HIGH-LEVEL review focusing on:
+
+            ## 1. Architecture & Design
+            - Does this change follow separation of concerns?
+            - Are there any god objects or tight coupling introduced?
+            - Is the change consistent with existing patterns in the codebase?
+            - Could this be simplified or made more maintainable?
+
+            ## 2. Security (CRITICAL)
+            - Input validation: Are all external inputs validated?
+            - Injection risks: SQL, command, path traversal, XSS
+            - Secrets: Any hardcoded credentials or API keys?
+            - Auth/AuthZ: Are there proper ownership checks?
+
+            ## 3. Privacy & Compliance
+            - PII handling: Is sensitive data properly protected?
+            - Data flow: Could this leak data to logs or external services?
+            - GDPR/CCPA: Are there privacy implications?
+
+            ## 4. Reliability
+            - Error handling: Are failures handled gracefully?
+            - Timeouts: Do external calls have proper timeouts?
+            - Resource cleanup: Are connections/files properly closed?
+
+            Format your response as:
+
+            ## Architecture
+            [findings or "Looks good"]
+
+            ## Security
+            [findings or "No issues found"]
+
+            ## Privacy
+            [findings or "No concerns"]
+
+            ## Reliability
+            [findings or "Solid"]
+
+            Be concise. Skip sections with no issues. Don't nitpick formatting.
+          claude_args: "--max-turns 10"
+          allow_partial: true
