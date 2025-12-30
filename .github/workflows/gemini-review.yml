@@ -88,4 +88,5 @@ jobs:
             [findings or "Solid"]
 
             Be concise. Skip sections with no issues. Don't nitpick formatting.
-          claude_args: "--max-turns 5"
+          claude_args: "--max-turns 10"
+          allow_partial: true
