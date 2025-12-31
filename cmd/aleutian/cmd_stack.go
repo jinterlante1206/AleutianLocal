@@ -557,12 +557,9 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	printStartupSummary(stackDir, dynamicEnv)
 
-	composeArgs := []string{"-f", filepath.Join(stackDir, "podman-compose.yml")}
-	overridePath := filepath.Join(stackDir, "podman-compose.override.yml")
-	if _, err := os.Stat(overridePath); err == nil {
-		fmt.Println("🔌 Loading local override configuration")
-		composeArgs = append(composeArgs, "-f", overridePath)
-	}
+	// composeArgs: only add EXTRA files here (extensions, forecast)
+	// Base compose + override are handled by runPodmanCompose
+	var composeArgs []string
 
 	// Extensions Loading
 	for _, extPath := range config.Global.Extensions {

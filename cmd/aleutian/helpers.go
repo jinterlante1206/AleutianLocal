@@ -258,7 +258,25 @@ func ensureStackDir(cliVersion string) (string, error) {
 		slog.Warn("Could not read existing stack version file", "path", versionFilePath, "error", err)
 	}
 
-	if _, err := os.Stat(composeFilePath); errors.Is(err, os.ErrNotExist) || (storedVersion != cliVersion && cliVersion != "dev") {
+	// Dev mode: use current working directory if it has podman-compose.yml
+	if cliVersion == "dev" {
+		cwd, _ := os.Getwd()
+		localCompose := filepath.Join(cwd, "podman-compose.yml")
+		if _, err := os.Stat(localCompose); err == nil {
+			slog.Info("Dev mode: using local repo", "path", cwd)
+			fmt.Printf("Using local stack files from %s\n", cwd)
+			return cwd, nil
+		}
+	}
+
+	composeExists := true
+	if _, err := os.Stat(composeFilePath); errors.Is(err, os.ErrNotExist) {
+		composeExists = false
+	}
+
+	needsUpdate := !composeExists || (storedVersion != cliVersion && cliVersion != "dev")
+
+	if needsUpdate {
 		if storedVersion != cliVersion && storedVersion != "" {
 			slog.Info("Detected stack version mismatch", "stored", storedVersion, "cli", cliVersion)
 			fmt.Printf("Updating stack files in %s to match CLI version %s...\n", stackDir, cliVersion)

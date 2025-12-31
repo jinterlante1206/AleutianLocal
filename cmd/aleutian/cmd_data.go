@@ -13,6 +13,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,10 +23,13 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/pkg/ux"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/spf13/cobra"
 )
@@ -108,12 +112,37 @@ func logFindingsToFile(findings []policy_engine.ScanFinding) {
 	fmt.Printf("\nScan log with all decisions written to %s\n", logFileName)
 }
 
+// scanResult holds the result of scanning a single file
+type scanResult struct {
+	FilePath string
+	Content  []byte
+	Findings []policy_engine.ScanFinding
+	Error    error
+}
+
+// ingestResult tracks the outcome of ingesting a file
+type ingestResult struct {
+	FilePath string
+	Chunks   int
+	Error    error
+}
+
 func populateVectorDB(cmd *cobra.Command, args []string) {
-	// FIX: Use helper instead of loading missing config file
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	baseURL := getOrchestratorBaseURL()
 	orchestratorURL := fmt.Sprintf("%s/v1/documents", baseURL)
 
-	fmt.Println("Initializing the VectorDB population process... Finding all files...")
+	dataSpace, _ := cmd.Flags().GetString("data-space")
+	versionTag, _ := cmd.Flags().GetString("version")
+	force, _ := cmd.Flags().GetBool("force")
+
+	// Phase 1: Discover files with spinner
+	ux.Title("Aleutian Ingest")
+	spin := ux.NewSpinner("Scanning for files...")
+	spin.Start()
+
 	var allFiles []string
 	for _, path := range args {
 		err := filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
@@ -122,130 +151,309 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 			}
 			if info.IsDir() {
 				if blockedDirs[info.Name()] {
-					log.Printf("Skipping blocked directory: %s\n", p)
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if !info.IsDir() {
-				ext := filepath.Ext(p)
-				if !allowedFileExts[ext] {
-					return nil
-				}
+			ext := filepath.Ext(p)
+			if allowedFileExts[ext] {
 				allFiles = append(allFiles, p)
 			}
 			return nil
 		})
 		if err != nil {
-			log.Printf("Error walking path %s: %v", path, err)
+			ux.Warning(fmt.Sprintf("Error walking %s: %v", path, err))
 		}
 	}
+
 	if len(allFiles) == 0 {
-		fmt.Println("No valid files found to process.")
+		spin.StopWithWarning("No valid files found")
 		return
 	}
-	fmt.Printf("Found %d files. Starting policy scan...\n", len(allFiles))
+	spin.StopWithSuccess(fmt.Sprintf("Found %d files", len(allFiles)))
 
+	// Phase 2: Parallel policy scan
 	policyEngine, err := policy_engine.NewPolicyEngine()
 	if err != nil {
-		log.Fatalf("FATAL: Could not initialize the policy engine: %v", err)
+		ux.Error(fmt.Sprintf("Could not initialize policy engine: %v", err))
+		return
 	}
 
-	var approvedFiles []string
-	var allFindings []policy_engine.ScanFinding
-	reader := bufio.NewReader(os.Stdin)
-	dataSpace, _ := cmd.Flags().GetString("data-space")
-	versionTag, _ := cmd.Flags().GetString("version")
-	force, _ := cmd.Flags().GetBool("force")
+	ux.Info("Scanning for secrets and policy violations...")
 
-	for _, file := range allFiles {
-		fmt.Printf("\nScanning file: %s\n", file)
-		content, err := os.ReadFile(file)
-		if err != nil {
-			log.Printf("Could not read file %s: %v", file, err)
-			continue
-		}
+	// Parallel scanning with worker pool
+	numScanners := runtime.NumCPU()
+	fileChan := make(chan string, len(allFiles))
+	resultChan := make(chan scanResult, len(allFiles))
 
-		findings := policyEngine.ScanFileContent(string(content))
-
-		currentUser, err := user.Current()
-		reviewer := "John Doe"
-		if err == nil {
-			reviewer = currentUser.Username
-		}
-		decision := "accepted"
-		proceed := true
-
-		if len(findings) > 0 {
-			fmt.Printf("Found %d potential issue(s) in '%s':\n", len(findings), file)
-			fmt.Println("-------------------------------------------------")
-			for _, f := range findings {
-				fmt.Printf("  [L%d] %s Confidence | %s | %s\n", f.LineNumber, f.Confidence,
-					f.ClassificationName, f.PatternId)
-				fmt.Printf("    Reason: %s\n", f.PatternDescription)
-				fmt.Printf("    Match:  '%s'\n\n", f.MatchedContent)
-			}
-			if force {
-				fmt.Println("Force flag detected. Proceeding despite policy violation.")
-				decision = "accepted (forced)"
-			} else {
-				fmt.Print("Do you want to proceed with this file? (yes/no): ")
-				input, _ := reader.ReadString('\n')
-				input = strings.ToLower(strings.TrimSpace(input))
-
-				if input != "yes" && input != "y" {
-					decision = "rejected"
-					proceed = false
-					fmt.Println("Skipping file based on user decision.")
-				} else {
-					decision = "accepted (user override)"
-					fmt.Println("Proceeding with file based on user decision.")
+	// Start scanner workers
+	var scanWg sync.WaitGroup
+	for i := 0; i < numScanners; i++ {
+		scanWg.Add(1)
+		go func() {
+			defer scanWg.Done()
+			for filePath := range fileChan {
+				content, err := os.ReadFile(filePath)
+				if err != nil {
+					resultChan <- scanResult{FilePath: filePath, Error: err}
+					continue
+				}
+				findings := policyEngine.ScanFileContent(string(content))
+				resultChan <- scanResult{
+					FilePath: filePath,
+					Content:  content,
+					Findings: findings,
 				}
 			}
+		}()
+	}
+
+	// Feed files to scanners
+	go func() {
+		for _, f := range allFiles {
+			fileChan <- f
+		}
+		close(fileChan)
+	}()
+
+	// Collect results in background
+	go func() {
+		scanWg.Wait()
+		close(resultChan)
+	}()
+
+	// Process scan results
+	var approvedFiles []string
+	var approvedContents [][]byte
+	var allFindings []policy_engine.ScanFinding
+	var filesWithSecrets []scanResult
+	var cleanFiles []scanResult
+
+	// Collect all results first
+	var scannedCount int32
+	progressDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-ticker.C:
+				current := atomic.LoadInt32(&scannedCount)
+				if ux.ShouldShowProgress() {
+					fmt.Printf("\r  Scanned %d/%d files...", current, len(allFiles))
+				}
+			}
+		}
+	}()
+
+	for result := range resultChan {
+		atomic.AddInt32(&scannedCount, 1)
+		if result.Error != nil {
+			ux.Warning(fmt.Sprintf("Could not read %s: %v", result.FilePath, result.Error))
+			continue
+		}
+		if len(result.Findings) > 0 {
+			filesWithSecrets = append(filesWithSecrets, result)
 		} else {
-			fmt.Println("No issues found.")
+			cleanFiles = append(cleanFiles, result)
+		}
+	}
+	close(progressDone)
+	fmt.Print("\r\033[K") // Clear progress line
+
+	// Clean files are auto-approved
+	for _, f := range cleanFiles {
+		approvedFiles = append(approvedFiles, f.FilePath)
+		approvedContents = append(approvedContents, f.Content)
+		ux.FileStatus(f.FilePath, ux.IconSuccess, "")
+	}
+
+	// Handle files with secrets via bidirectional prompts
+	if len(filesWithSecrets) > 0 {
+		currentUser, _ := user.Current()
+		reviewer := "unknown"
+		if currentUser != nil {
+			reviewer = currentUser.Username
 		}
 
-		for i := range findings {
-			findings[i].FilePath = file
-			findings[i].ReviewTimestamp = time.Now().UnixMilli()
-			findings[i].UserDecision = decision
-			findings[i].Reviewer = reviewer
-		}
-		allFindings = append(allFindings, findings...)
+		if force {
+			// Force mode: approve all with warning
+			ux.Warning(fmt.Sprintf("Force mode: approving %d files with detected secrets", len(filesWithSecrets)))
+			for _, f := range filesWithSecrets {
+				approvedFiles = append(approvedFiles, f.FilePath)
+				approvedContents = append(approvedContents, f.Content)
+				for i := range f.Findings {
+					f.Findings[i].FilePath = f.FilePath
+					f.Findings[i].ReviewTimestamp = time.Now().UnixMilli()
+					f.Findings[i].UserDecision = "accepted (forced)"
+					f.Findings[i].Reviewer = reviewer
+				}
+				allFindings = append(allFindings, f.Findings...)
+			}
+		} else {
+			// Interactive mode: ask about each file
+			for _, f := range filesWithSecrets {
+				// Convert findings to UX format
+				uxFindings := make([]ux.SecretFinding, len(f.Findings))
+				for i, finding := range f.Findings {
+					uxFindings[i] = ux.SecretFinding{
+						LineNumber:  finding.LineNumber,
+						PatternID:   finding.PatternId,
+						PatternName: finding.ClassificationName,
+						Confidence:  string(finding.Confidence),
+						Match:       finding.MatchedContent,
+						Reason:      finding.PatternDescription,
+					}
+				}
 
-		if proceed {
-			approvedFiles = append(approvedFiles, file)
+				action, err := ux.AskSecretAction(ux.SecretPromptOptions{
+					FilePath: f.FilePath,
+					Findings: uxFindings,
+				})
+				if err != nil {
+					ux.Warning(fmt.Sprintf("Prompt error, skipping %s", f.FilePath))
+					action = ux.SecretActionSkip
+				}
+
+				decision := "rejected"
+				switch action {
+				case ux.SecretActionProceed:
+					decision = "accepted (user override)"
+					approvedFiles = append(approvedFiles, f.FilePath)
+					approvedContents = append(approvedContents, f.Content)
+					ux.FileStatus(f.FilePath, ux.IconWarning, "approved with secrets")
+				case ux.SecretActionSkip:
+					decision = "rejected"
+					ux.FileStatus(f.FilePath, ux.IconError, "skipped")
+				}
+
+				for i := range f.Findings {
+					f.Findings[i].FilePath = f.FilePath
+					f.Findings[i].ReviewTimestamp = time.Now().UnixMilli()
+					f.Findings[i].UserDecision = decision
+					f.Findings[i].Reviewer = reviewer
+				}
+				allFindings = append(allFindings, f.Findings...)
+			}
 		}
 	}
 
+	// Log findings
 	if len(allFindings) > 0 {
 		logFindingsToFile(allFindings)
 	}
 
+	skipped := len(allFiles) - len(approvedFiles)
+	ux.Summary(len(approvedFiles), skipped, len(allFiles))
+
 	if len(approvedFiles) == 0 {
-		fmt.Println("\nNo files were approved for ingestion. Process complete.")
+		ux.Warning("No files approved for ingestion")
 		return
 	}
 
-	fmt.Printf("\nScan complete. %d files approved. Starting parallel ingestion with 10 workers...\n", len(approvedFiles))
+	// Phase 3: Parallel ingestion
+	ux.Info(fmt.Sprintf("Ingesting %d files...", len(approvedFiles)))
+
 	numWorkers := 10
-	var wg sync.WaitGroup
-	jobs := make(chan string, len(approvedFiles))
+	jobChan := make(chan int, len(approvedFiles))
+	ingestResultChan := make(chan ingestResult, len(approvedFiles))
 
-	for w := 1; w <= numWorkers; w++ {
-		wg.Add(1)
-		// Updated to match new signature
-		go fileWorker(w, &wg, jobs, orchestratorURL, dataSpace, versionTag)
+	// Start ingestion workers
+	var ingestWg sync.WaitGroup
+	client := &http.Client{Timeout: 5 * time.Minute}
+
+	for w := 0; w < numWorkers; w++ {
+		ingestWg.Add(1)
+		go func() {
+			defer ingestWg.Done()
+			for idx := range jobChan {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				filePath := approvedFiles[idx]
+				content := approvedContents[idx]
+
+				postBody, _ := json.Marshal(map[string]string{
+					"source":      filePath,
+					"content":     string(content),
+					"data_space":  dataSpace,
+					"version_tag": versionTag,
+				})
+
+				resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
+				if err != nil {
+					ingestResultChan <- ingestResult{FilePath: filePath, Error: err}
+					continue
+				}
+
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+
+				if resp.StatusCode >= 400 {
+					ingestResultChan <- ingestResult{
+						FilePath: filePath,
+						Error:    fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
+					}
+					continue
+				}
+
+				var ingestResp map[string]interface{}
+				chunks := 0
+				if err := json.Unmarshal(bodyBytes, &ingestResp); err == nil {
+					if c, ok := ingestResp["chunks_processed"].(float64); ok {
+						chunks = int(c)
+					}
+				}
+				ingestResultChan <- ingestResult{FilePath: filePath, Chunks: chunks}
+			}
+		}()
 	}
 
-	for _, file := range approvedFiles {
-		jobs <- file
-	}
-	close(jobs)
+	// Feed jobs
+	go func() {
+		for i := range approvedFiles {
+			jobChan <- i
+		}
+		close(jobChan)
+	}()
 
-	wg.Wait()
-	fmt.Println("\nWeaviate population process complete.")
+	// Collect ingestion results with progress
+	go func() {
+		ingestWg.Wait()
+		close(ingestResultChan)
+	}()
+
+	var ingestedCount, totalChunks int
+	var errors []string
+	progressSpin := ux.NewProgressSpinner("Ingesting", len(approvedFiles))
+	progressSpin.Start()
+
+	for result := range ingestResultChan {
+		ingestedCount++
+		progressSpin.SetProgress(ingestedCount)
+		if result.Error != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.FilePath, result.Error))
+		} else {
+			totalChunks += result.Chunks
+		}
+	}
+
+	progressSpin.Stop()
+
+	// Final summary
+	if len(errors) > 0 {
+		ux.Warning(fmt.Sprintf("%d files failed to ingest", len(errors)))
+		for _, e := range errors {
+			ux.Info("  " + e)
+		}
+	}
+
+	ux.Success(fmt.Sprintf("Ingestion complete: %d files → %d chunks", ingestedCount-len(errors), totalChunks))
 }
 
 func runDeleteSession(cmd *cobra.Command, args []string) {

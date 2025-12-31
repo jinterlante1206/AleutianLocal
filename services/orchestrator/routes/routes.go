@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
@@ -42,11 +43,15 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		v1.POST("/agent/step", handlers.HandleAgentStep(policyEngine))
 		// We need the Vector DB for the following Routes to be successfully registered
 		if client != nil {
+			// Create ChatRAGService for conversational RAG endpoint
+			chatRAGService := services.NewChatRAGService(client, globalLLMClient, policyEngine)
+
 			v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient, policyEngine))
+			v1.POST("/chat/rag", handlers.HandleChatRAG(chatRAGService)) // Conversational RAG (default for CLI)
 			v1.POST("/documents", handlers.CreateDocument(client))
 			v1.GET("/documents", handlers.ListDocuments(client))
 			v1.DELETE("/document", handlers.DeleteBySource(client))
-			v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient))
+			v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient)) // Single-shot RAG (aleutian ask)
 			// Session administration routes
 			sessions := v1.Group("/sessions")
 			{
