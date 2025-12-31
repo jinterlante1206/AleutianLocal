@@ -134,9 +134,21 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	baseURL := getOrchestratorBaseURL()
 	orchestratorURL := fmt.Sprintf("%s/v1/documents", baseURL)
 
-	dataSpace, _ := cmd.Flags().GetString("data-space")
-	versionTag, _ := cmd.Flags().GetString("version")
-	force, _ := cmd.Flags().GetBool("force")
+	dataSpace, err := cmd.Flags().GetString("data-space")
+	if err != nil {
+		ux.Error(fmt.Sprintf("Failed to read 'data-space' flag: %v", err))
+		return
+	}
+	versionTag, err := cmd.Flags().GetString("version")
+	if err != nil {
+		ux.Error(fmt.Sprintf("Failed to read 'version' flag: %v", err))
+		return
+	}
+	force, err := cmd.Flags().GetBool("force")
+	if err != nil {
+		ux.Error(fmt.Sprintf("Failed to read 'force' flag: %v", err))
+		return
+	}
 
 	// Phase 1: Discover files with spinner
 	ux.Title("Aleutian Ingest")
@@ -378,21 +390,36 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 				filePath := approvedFiles[idx]
 				content := approvedContents[idx]
 
-				postBody, _ := json.Marshal(map[string]string{
+				postBody, err := json.Marshal(map[string]string{
 					"source":      filePath,
 					"content":     string(content),
 					"data_space":  dataSpace,
 					"version_tag": versionTag,
 				})
+				if err != nil {
+					ingestResultChan <- ingestResult{FilePath: filePath, Error: fmt.Errorf("marshal error: %w", err)}
+					continue
+				}
 
-				resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
+				req, err := http.NewRequestWithContext(ctx, "POST", orchestratorURL, bytes.NewBuffer(postBody))
+				if err != nil {
+					ingestResultChan <- ingestResult{FilePath: filePath, Error: fmt.Errorf("request creation error: %w", err)}
+					continue
+				}
+				req.Header.Set("Content-Type", "application/json")
+
+				resp, err := client.Do(req)
 				if err != nil {
 					ingestResultChan <- ingestResult{FilePath: filePath, Error: err}
 					continue
 				}
 
-				bodyBytes, _ := io.ReadAll(resp.Body)
+				bodyBytes, err := io.ReadAll(resp.Body)
 				resp.Body.Close()
+				if err != nil {
+					ingestResultChan <- ingestResult{FilePath: filePath, Error: fmt.Errorf("read response error: %w", err)}
+					continue
+				}
 
 				if resp.StatusCode >= 400 {
 					ingestResultChan <- ingestResult{
