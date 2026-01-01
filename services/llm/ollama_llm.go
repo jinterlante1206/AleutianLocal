@@ -123,7 +123,17 @@ func (o *OllamaClient) Generate(ctx context.Context, prompt string,
 		span.SetStatus(codes.Error, err.Error())
 		return "", fmt.Errorf("failed to marshal request to Ollama: %w", err)
 	}
-	resp, err := o.httpClient.Post(generateURL, "application/json", bytes.NewBuffer(reqBodyBytes))
+
+	// Use NewRequestWithContext to respect context cancellation/timeout
+	req, err := http.NewRequestWithContext(ctx, "POST", generateURL, bytes.NewBuffer(reqBodyBytes))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("failed to create request to Ollama: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.httpClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -214,7 +224,17 @@ func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal chat request to Ollama: %w", err)
 	}
-	resp, err := o.httpClient.Post(chatURL, "application/json", bytes.NewBuffer(reqBody))
+
+	// Use NewRequestWithContext to respect context cancellation/timeout
+	req, err := http.NewRequestWithContext(ctx, "POST", chatURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", fmt.Errorf("failed to create chat request to Ollama: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.httpClient.Do(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

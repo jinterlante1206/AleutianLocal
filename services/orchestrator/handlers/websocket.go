@@ -44,10 +44,51 @@ type WSResponse struct {
 // Using map[string]interface{} for flexibility
 // type ActionResponse map[string]interface{}
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
+// getAllowedOrigins returns the list of allowed WebSocket origins.
+// Reads from WEBSOCKET_ALLOWED_ORIGINS env var (comma-separated).
+// Defaults to localhost origins for development.
+func getAllowedOrigins() []string {
+	origins := os.Getenv("WEBSOCKET_ALLOWED_ORIGINS")
+	if origins == "" {
+		// Default to localhost for development
+		return []string{
+			"http://localhost:3000",
+			"http://localhost:8080",
+			"http://127.0.0.1:3000",
+			"http://127.0.0.1:8080",
+		}
+	}
+	return strings.Split(origins, ",")
+}
+
+// checkOrigin validates WebSocket connection origins against allowed list.
+// This prevents CSRF attacks by rejecting requests from unauthorized origins.
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// No origin header - allow same-origin requests (non-browser clients)
 		return true
-	},
+	}
+
+	allowedOrigins := getAllowedOrigins()
+	for _, allowed := range allowedOrigins {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "*" {
+			// Wildcard - allow all (only for explicit opt-in)
+			slog.Warn("WebSocket using wildcard origin - not recommended for production")
+			return true
+		}
+		if origin == allowed {
+			return true
+		}
+	}
+
+	slog.Warn("WebSocket origin rejected", "origin", origin, "allowed", allowedOrigins)
+	return false
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: checkOrigin,
 	// 10MB Read Buffer
 	ReadBufferSize: 10 * 1024 * 1024,
 	// 10MB Write Buffer

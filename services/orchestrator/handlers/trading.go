@@ -23,6 +23,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
+	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 )
 
@@ -30,6 +31,11 @@ import (
 
 // fetchOHLCFromInfluxByDateRange retrieves OHLC historical data from InfluxDB using absolute date ranges
 func fetchOHLCFromInfluxByDateRange(ctx context.Context, ticker string, startDate, endDate time.Time) (*datatypes.OHLCData, float64, error) {
+	// Validate ticker to prevent Flux injection
+	if err := validation.ValidateTicker(ticker); err != nil {
+		return nil, 0, fmt.Errorf("invalid ticker: %w", err)
+	}
+
 	// Get InfluxDB configuration from environment OR use defaults
 	// This allows the CLI (running on host) to connect to localhost:12130
 	influxURL := os.Getenv("INFLUXDB_URL")
@@ -139,6 +145,11 @@ func fetchOHLCFromInfluxByDateRange(ctx context.Context, ticker string, startDat
 // fetchOHLCFromInflux retrieves OHLC historical data from InfluxDB using relative days (for real-time trading)
 // If asOfDate is provided, data is fetched up to that date (for backtesting). Otherwise, fetches up to now.
 func fetchOHLCFromInflux(ctx context.Context, ticker string, days int, asOfDate *time.Time) (*datatypes.OHLCData, float64, error) {
+	// Validate ticker to prevent Flux injection
+	if err := validation.ValidateTicker(ticker); err != nil {
+		return nil, 0, fmt.Errorf("invalid ticker: %w", err)
+	}
+
 	// Get InfluxDB configuration from environment OR use defaults
 	// This allows the CLI (running on host) to connect to localhost:12130
 	influxURL := os.Getenv("INFLUXDB_URL")
