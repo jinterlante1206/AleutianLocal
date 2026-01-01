@@ -11,31 +11,49 @@
 package main
 
 import (
+	"github.com/jinterlante1206/AleutianLocal/pkg/ux"
 	"github.com/spf13/cobra"
 )
 
 // --- Global Command Variables ---
 var (
-	backendType     string
-	profile         string
-	forceBuild      bool
-	forecastMode    string // CLI override for forecast.mode (standalone/sapheneia)
-	pipelineType    string
-	noRag           bool
-	enableThinking  bool
-	budgetTokens    int
-	quantizeType    string
-	isLocalPath     bool
-	fetchDays       int
-	forecastModel   string
-	forecastHorizon int
-	forecastContext int
+	backendType      string
+	profile          string
+	forceBuild       bool
+	forecastMode     string // CLI override for forecast.mode (standalone/sapheneia)
+	pipelineType     string
+	noRag            bool
+	enableThinking   bool
+	budgetTokens     int
+	quantizeType     string
+	isLocalPath      bool
+	fetchDays        int
+	forecastModel    string
+	forecastHorizon  int
+	forecastContext  int
+	personalityLevel string // UX personality level (full/standard/minimal/machine)
 
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
 		Short: "A cli to manage the Aleutian FOSS private AI appliance",
-		Long: `Aleutian is a tool for deploying and managing a complete, 
+		Long: `Aleutian is a tool for deploying and managing a complete,
 				offline AI stack on your own infrastructure.`,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Initialize UX personality from flag or environment
+			if personalityLevel != "" {
+				ux.SetPersonalityLevel(ux.ParsePersonalityLevel(personalityLevel))
+			} else {
+				ux.InitPersonality()
+			}
+		},
+	}
+
+	// ingestCmd is a simplified alias for populate vectordb
+	ingestCmd = &cobra.Command{
+		Use:     "ingest [path...]",
+		Short:   "Ingest documents into the knowledge base (alias for populate vectordb)",
+		Aliases: []string{"i"},
+		Run:     populateVectorDB,
 	}
 	// --- RAG / Ask ---
 	askCmd = &cobra.Command{
@@ -251,6 +269,16 @@ var (
 
 // init runs when the Go program starts
 func init() {
+	// Global UX personality flag
+	rootCmd.PersistentFlags().StringVar(&personalityLevel, "personality", "",
+		"Output style: full (default, rich nautical), standard, minimal, or machine (scripting)")
+
+	// Simplified ingest alias
+	rootCmd.AddCommand(ingestCmd)
+	ingestCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
+	ingestCmd.Flags().String("data-space", "default", "The logical data space to ingest into")
+	ingestCmd.Flags().String("version", "latest", "A version tag for this ingestion")
+
 	rootCmd.AddCommand(askCmd)
 	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking",
 		"RAG pipeline to use(e.g., standard, reranking, raptor, graph, rig, semantic")

@@ -24,6 +24,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
+	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
 	"go.opentelemetry.io/otel"
 )
 
@@ -203,6 +204,11 @@ func getSerivceURL(modelName string) (string, error) {
 
 // fetchHistoryForForecast retrieves close prices from InfluxDB
 func fetchHistoryForForecast(ctx context.Context, ticker string, count int) ([]float64, error) {
+	// Validate ticker to prevent Flux injection
+	if err := validation.ValidateTicker(ticker); err != nil {
+		return nil, fmt.Errorf("invalid ticker: %w", err)
+	}
+
 	// InfluxDB connection setup
 	influxURL := os.Getenv("INFLUXDB_URL")
 	if influxURL == "" {

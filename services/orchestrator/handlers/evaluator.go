@@ -25,6 +25,7 @@ import (
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
+	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 )
 
@@ -569,6 +570,11 @@ func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.Tradin
 }
 
 func (e *Evaluator) GetCurrentPrice(ctx context.Context, ticker string) (float64, error) {
+	// Validate ticker to prevent Flux injection
+	if err := validation.ValidateTicker(ticker); err != nil {
+		return 0, fmt.Errorf("invalid ticker: %w", err)
+	}
+
 	// Simple Influx query to get the last known close price
 	query := fmt.Sprintf(`
 		from(bucket: "%s")
@@ -600,6 +606,11 @@ func (e *Evaluator) Close() error {
 
 func (e *Evaluator) CheckDataCoverage(ctx context.Context,
 	ticker string) (*datatypes.DataCoverageInfo, error) {
+
+	// Validate ticker to prevent Flux injection
+	if err := validation.ValidateTicker(ticker); err != nil {
+		return nil, fmt.Errorf("invalid ticker: %w", err)
+	}
 
 	query := fmt.Sprintf(`
 		from(bucket: "%s")
@@ -658,8 +669,7 @@ func NewInfluxDBStorage() (*InfluxDBStorage, error) {
 
 	token := os.Getenv("INFLUXDB_TOKEN")
 	if token == "" {
-		// Try to fallback to the default dev token
-		token = "your_super_secret_admin_token"
+		return nil, fmt.Errorf("INFLUXDB_TOKEN environment variable is required")
 	}
 
 	org := os.Getenv("INFLUXDB_ORG")

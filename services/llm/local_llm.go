@@ -88,7 +88,15 @@ func (l *LocalLlamaCppClient) Generate(ctx context.Context, prompt string,
 		return "", fmt.Errorf("Failed to marshal the payload %w", err)
 	}
 	slog.Info("Calling Llama.cpp Generate", "url", completionURL)
-	resp, err := l.httpClient.Post(completionURL, "application/json", bytes.NewBuffer(reqBodyBytes))
+
+	// Use NewRequestWithContext to respect context cancellation/timeout
+	req, err := http.NewRequestWithContext(ctx, "POST", completionURL, bytes.NewBuffer(reqBodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request to llm: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := l.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to make a request to the llm: %w", err)
 	}

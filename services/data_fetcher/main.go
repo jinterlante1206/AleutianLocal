@@ -22,6 +22,7 @@ import (
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
+	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
 )
 
 const (
@@ -124,7 +125,8 @@ func main() {
 		influxURL = "http://influxdb:8086"
 	}
 	if influxToken == "" {
-		influxToken = "your_super_secret_admin_token"
+		slog.Error("INFLUXDB_TOKEN environment variable is required")
+		os.Exit(1)
 	}
 	if influxOrg == "" {
 		influxOrg = "aleutian-finance"
@@ -210,6 +212,16 @@ func (s *Server) handleFetchData(c *gin.Context) {
 	if len(req.Tickers) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No tickers provided"})
 		return
+	}
+
+	// Validate all tickers to prevent Flux injection
+	for i, ticker := range req.Tickers {
+		sanitized, err := validation.SanitizeTicker(ticker)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ticker", "details": err.Error()})
+			return
+		}
+		req.Tickers[i] = sanitized
 	}
 
 	if req.Interval == "" {
@@ -428,6 +440,14 @@ func (s *Server) handleQueryData(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Ticker is required"})
 		return
 	}
+
+	// Validate ticker to prevent Flux injection
+	sanitizedTicker, err := validation.SanitizeTicker(req.Ticker)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ticker", "details": err.Error()})
+		return
+	}
+	req.Ticker = sanitizedTicker
 
 	if req.Days <= 0 {
 		req.Days = 252 // Default to 1 year of trading days
