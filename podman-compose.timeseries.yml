@@ -311,9 +311,9 @@ services:
       ALEUTIAN_DATA_FETCHER_URL: ${ALEUTIAN_DATA_FETCHER_URL:-http://data-fetcher:8001}
       SAPHENEIA_TRADING_SERVICE_URL: ${SAPHENEIA_TRADING_SERVICE_URL:-http://host.containers.internal:12132}
       SAPHENEIA_TRADING_API_KEY: ${SAPHENEIA_TRADING_API_KEY:-default_trading_api_key_please_change}
-      # InfluxDB Config
+      # InfluxDB Config (token injected by aleutian stack start)
       INFLUXDB_URL: http://influxdb:8086
-      INFLUXDB_TOKEN: your_super_secret_admin_token
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN}
       INFLUXDB_ORG: aleutian-finance
       INFLUXDB_BUCKET: financial-data
       # Observability
@@ -355,7 +355,8 @@ services:
       - DOCKER_INFLUXDB_INIT_PASSWORD=adminadmin
       - DOCKER_INFLUXDB_INIT_ORG=aleutian-finance
       - DOCKER_INFLUXDB_INIT_BUCKET=financial-data
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=your_super_secret_admin_token
+      # Token injected by aleutian stack start (auto-generated if not exists)
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8086/health" ]
       interval: 10s
@@ -373,7 +374,7 @@ services:
     environment:
       PORT: 8001
       INFLUXDB_URL: http://influxdb:8086
-      INFLUXDB_TOKEN: your_super_secret_admin_token
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN}
       INFLUXDB_ORG: aleutian-finance
       INFLUXDB_BUCKET: financial-data
     networks:

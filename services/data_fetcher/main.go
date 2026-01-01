@@ -125,7 +125,8 @@ func main() {
 		influxURL = "http://influxdb:8086"
 	}
 	if influxToken == "" {
-		influxToken = "your_super_secret_admin_token"
+		slog.Error("INFLUXDB_TOKEN environment variable is required")
+		os.Exit(1)
 	}
 	if influxOrg == "" {
 		influxOrg = "aleutian-finance"

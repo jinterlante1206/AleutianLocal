@@ -36,7 +36,7 @@ func fetchOHLCFromInfluxByDateRange(ctx context.Context, ticker string, startDat
 		return nil, 0, fmt.Errorf("invalid ticker: %w", err)
 	}
 
-	// Get InfluxDB configuration from environment OR use defaults
+	// Get InfluxDB configuration from environment
 	// This allows the CLI (running on host) to connect to localhost:12130
 	influxURL := os.Getenv("INFLUXDB_URL")
 	if influxURL == "" {
@@ -45,7 +45,7 @@ func fetchOHLCFromInfluxByDateRange(ctx context.Context, ticker string, startDat
 
 	influxToken := os.Getenv("INFLUXDB_TOKEN")
 	if influxToken == "" {
-		influxToken = "your_super_secret_admin_token"
+		return nil, 0, fmt.Errorf("INFLUXDB_TOKEN environment variable is required")
 	}
 
 	influxOrg := os.Getenv("INFLUXDB_ORG")
@@ -56,10 +56,6 @@ func fetchOHLCFromInfluxByDateRange(ctx context.Context, ticker string, startDat
 	influxBucket := os.Getenv("INFLUXDB_BUCKET")
 	if influxBucket == "" {
 		influxBucket = "financial-data"
-	}
-
-	if influxURL == "" || influxToken == "" || influxOrg == "" || influxBucket == "" {
-		return nil, 0, fmt.Errorf("InfluxDB configuration not set in environment")
 	}
 
 	// Create InfluxDB client
@@ -150,7 +146,7 @@ func fetchOHLCFromInflux(ctx context.Context, ticker string, days int, asOfDate 
 		return nil, 0, fmt.Errorf("invalid ticker: %w", err)
 	}
 
-	// Get InfluxDB configuration from environment OR use defaults
+	// Get InfluxDB configuration from environment
 	// This allows the CLI (running on host) to connect to localhost:12130
 	influxURL := os.Getenv("INFLUXDB_URL")
 	if influxURL == "" {
@@ -159,7 +155,7 @@ func fetchOHLCFromInflux(ctx context.Context, ticker string, days int, asOfDate 
 
 	influxToken := os.Getenv("INFLUXDB_TOKEN")
 	if influxToken == "" {
-		influxToken = "your_super_secret_admin_token"
+		return nil, 0, fmt.Errorf("INFLUXDB_TOKEN environment variable is required")
 	}
 
 	influxOrg := os.Getenv("INFLUXDB_ORG")
@@ -170,10 +166,6 @@ func fetchOHLCFromInflux(ctx context.Context, ticker string, days int, asOfDate 
 	influxBucket := os.Getenv("INFLUXDB_BUCKET")
 	if influxBucket == "" {
 		influxBucket = "financial-data"
-	}
-
-	if influxURL == "" || influxToken == "" || influxOrg == "" || influxBucket == "" {
-		return nil, 0, fmt.Errorf("InfluxDB configuration not set in environment")
 	}
 
 	// Create InfluxDB client

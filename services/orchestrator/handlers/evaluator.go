@@ -669,8 +669,7 @@ func NewInfluxDBStorage() (*InfluxDBStorage, error) {
 
 	token := os.Getenv("INFLUXDB_TOKEN")
 	if token == "" {
-		// Try to fallback to the default dev token
-		token = "your_super_secret_admin_token"
+		return nil, fmt.Errorf("INFLUXDB_TOKEN environment variable is required")
 	}
 
 	org := os.Getenv("INFLUXDB_ORG")
