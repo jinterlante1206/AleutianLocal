@@ -13,6 +13,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/pkg/ux"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/spf13/cobra"
 )
@@ -91,117 +93,149 @@ func runAskCommand(cmd *cobra.Command, args []string) {
 
 func runChatCommand(cmd *cobra.Command, args []string) {
 	baseURL := getOrchestratorBaseURL()
-	orchestratorURL := fmt.Sprintf("%s/v1/chat/direct", baseURL)
-
 	resumeID, _ := cmd.Flags().GetString("resume")
-	messages := []datatypes.Message{}
 
-	if resumeID != "" {
-		fmt.Printf("Resuming chat session: %s\n", resumeID)
-		historyURL := fmt.Sprintf("%s/v1/sessions/%s/history", baseURL, resumeID)
-
-		resp, err := http.Get(historyURL)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			log.Fatalf("Failed to get history for session %s: %v", resumeID, err)
-		}
-
-		type HistoryTurn struct {
-			Question string `json:"question"`
-			Answer   string `json:"answer"`
-		}
-		var historyResp map[string]map[string][]HistoryTurn
-		if err := json.NewDecoder(resp.Body).Decode(&historyResp); err != nil {
-			resp.Body.Close()
-			log.Fatalf("Failed to parse session history: %v", err)
-		}
-		resp.Body.Close()
-
-		history, ok := historyResp["Get"]["Conversation"]
-		if !ok {
-			log.Fatalf("No 'Conversation' data found in history response.")
-		}
-		for _, turn := range history {
-			messages = append(messages, datatypes.Message{Role: "user", Content: turn.Question})
-			messages = append(messages, datatypes.Message{Role: "assistant", Content: turn.Answer})
-		}
-		fmt.Printf("Loaded %d previous turns. You can start chatting.\n", len(history))
-
+	// Determine chat mode based on --no-rag flag
+	if noRag {
+		runDirectChatLoop(baseURL, resumeID)
 	} else {
-		fmt.Println("Starting a new chat session (no RAG). Type 'exit' or 'quit' to end.")
-		messages = append(messages, datatypes.Message{
-			Role:    "system",
-			Content: "You are a helpful, technically gifted assistant",
-		})
+		runRAGChatLoop(baseURL, resumeID)
 	}
+}
 
+// runRAGChatLoop handles RAG-enabled chat (default mode).
+//
+// This function orchestrates the chat UI and delegates communication
+// to the RAG ChatService. The loop is intentionally thin - it handles
+// only input/output while the service handles all HTTP mechanics.
+//
+// Flow:
+//  1. Create ChatService and ChatUI instances
+//  2. Display header
+//  3. Read user input
+//  4. Call service.SendMessage()
+//  5. Display response and sources via UI
+//  6. Repeat until exit
+func runRAGChatLoop(baseURL, resumeID string) {
+	// Create service and UI
+	ui := ux.NewChatUI()
+	service := NewRAGChatService(RAGChatServiceConfig{
+		BaseURL:   baseURL,
+		SessionID: resumeID,
+		Pipeline:  pipelineType,
+	})
+	defer service.Close()
+
+	// Display header
+	ui.Header(ux.ChatModeRAG, pipelineType, resumeID)
+
+	// Main chat loop
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("> ")
+		fmt.Print(ui.Prompt())
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
+
 		if input == "exit" || input == "quit" {
-			fmt.Println("ending chat")
+			ui.SessionEnd(service.GetSessionID())
 			break
 		}
 		if input == "" {
 			continue
 		}
 
-		messages = append(messages, datatypes.Message{Role: "user", Content: input})
-		reqBody := DirectChatRequest{
-			Messages:       messages,
-			EnableThinking: enableThinking,
-			BudgetTokens:   budgetTokens,
-		}
-		postBody, err := json.Marshal(reqBody)
+		// Show spinner during request
+		spinner := ux.NewSpinner("Searching knowledge base...")
+		spinner.Start()
+
+		// Use background context - CLI doesn't need cancellation
+		resp, err := service.SendMessage(context.Background(), input)
+		spinner.Stop()
+
 		if err != nil {
-			fmt.Printf("Error: failed to create the chat request: %v", err)
+			ui.Error(err)
 			continue
 		}
 
-		client := &http.Client{Timeout: 3 * time.Minute}
-		// Use the simple spinner for normal chat, reserve the heavy monitor for Trace
-		done := make(chan bool)
-		statsChan := make(chan string)
-		go showSpinner("Thinking", done, statsChan)
+		// Display response and sources
+		ui.Response(resp.Answer)
+		if len(resp.Sources) > 0 {
+			ui.Sources(resp.Sources)
+		} else {
+			ui.NoSources()
+		}
+		fmt.Println()
+	}
+}
 
-		resp, err := client.Post(orchestratorURL, "application/json", bytes.NewBuffer(postBody))
-		done <- true
+// runDirectChatLoop handles direct LLM chat (--no-rag mode).
+//
+// This function orchestrates the chat UI and delegates communication
+// to the Direct ChatService. Unlike RAG chat, conversation history is
+// maintained client-side by the service.
+//
+// Flow:
+//  1. Create DirectChatService and ChatUI instances
+//  2. Load session history if resuming
+//  3. Display header
+//  4. Read user input
+//  5. Call service.SendMessage() (service manages history internally)
+//  6. Display response via UI
+//  7. Repeat until exit
+func runDirectChatLoop(baseURL, resumeID string) {
+	// Create service and UI
+	ui := ux.NewChatUI()
+	service := NewDirectChatService(DirectChatServiceConfig{
+		BaseURL:        baseURL,
+		SessionID:      resumeID,
+		EnableThinking: enableThinking,
+		BudgetTokens:   budgetTokens,
+	})
+	defer service.Close()
+
+	// Load session history if resuming
+	if resumeID != "" {
+		turns, err := service.LoadSessionHistory(context.Background(), resumeID)
 		if err != nil {
-			fmt.Printf("failed to send the request to the orchestrator: %v", err)
-			if len(messages) > 0 {
-				messages = messages[:len(messages)-1]
-			}
-			continue
+			log.Fatalf("Failed to load session history: %v", err)
 		}
-		defer resp.Body.Close()
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		ui.SessionResume(resumeID, turns)
+	}
 
-		if resp.StatusCode != http.StatusOK {
-			fmt.Printf("error: Orchestrator returned status %d: %s\n", resp.StatusCode, string(bodyBytes))
-			if len(messages) > 0 {
-				messages = messages[:len(messages)-1]
-			}
+	// Display header
+	ui.Header(ux.ChatModeDirect, "", service.GetSessionID())
+
+	// Main chat loop
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print(ui.Prompt())
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+
+		if input == "exit" || input == "quit" {
+			ui.SessionEnd(service.GetSessionID())
+			break
+		}
+		if input == "" {
 			continue
 		}
 
-		var chatResp DirectChatResponse
-		if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
-			fmt.Printf("Failed to parse the chat response: %v", err)
-			if len(messages) > 0 {
-				messages = messages[:len(messages)-1]
-			}
+		// Show spinner during request
+		spinner := ux.NewSpinner("Thinking...")
+		spinner.Start()
+
+		// Use background context - CLI doesn't need cancellation
+		resp, err := service.SendMessage(context.Background(), input)
+		spinner.Stop()
+
+		if err != nil {
+			ui.Error(err)
 			continue
 		}
-		if chatResp.Answer == "" {
-			fmt.Println("Error: Received empty response from Orchestrator.")
-			if len(messages) > 0 {
-				messages = messages[:len(messages)-1]
-			}
-			continue
-		}
-		messages = append(messages, datatypes.Message{Role: "assistant", Content: chatResp.Answer})
-		fmt.Println(chatResp.Answer)
+
+		// Display response (direct chat has no sources)
+		ui.Response(resp.Answer)
+		fmt.Println()
 	}
 }
 

@@ -138,7 +138,7 @@ var (
 	// --- Chat ---
 	chatCmd = &cobra.Command{
 		Use:   "chat",
-		Short: "Starts an interactive chat session",
+		Short: "Starts an interactive RAG chat session (use --no-rag for direct LLM)",
 		Run:   runChatCommand, // Defined in cmd_chat.go
 	}
 
@@ -318,11 +318,13 @@ func init() {
 	sessionCmd.AddCommand(listSessionsCmd)
 	sessionCmd.AddCommand(deleteSessionCmd)
 
-	// chat command
+	// chat command - RAG is default, use --no-rag to disable
 	rootCmd.AddCommand(chatCmd)
 	chatCmd.Flags().String("resume", "", "Resume a conversation using a specific session ID.")
 	chatCmd.Flags().BoolVar(&enableThinking, "thinking", false, "Enable Extended Thinking (Claude only)")
 	chatCmd.Flags().IntVar(&budgetTokens, "budget", 2048, "Token budget for thinking (default 2048)")
+	chatCmd.Flags().BoolVar(&noRag, "no-rag", false, "Disable RAG and use direct LLM chat")
+	chatCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking", "RAG pipeline (standard, reranking, raptor, graph)")
 
 	rootCmd.AddCommand(traceCmd)
 
