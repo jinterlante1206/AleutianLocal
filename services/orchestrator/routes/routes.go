@@ -21,6 +21,27 @@ import (
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
+// SetupRoutes configures all HTTP routes for the orchestrator service.
+//
+// # Description
+//
+// Registers all API endpoints with the Gin router. Some endpoints require
+// a Weaviate client for vector database operations; these are only registered
+// when client is not nil.
+//
+// # Inputs
+//
+//   - router: Gin engine instance
+//   - client: Weaviate client (may be nil if vector DB not available)
+//   - globalLLMClient: LLM client for chat operations
+//   - policyEngine: Policy engine for sensitive data scanning
+//
+// # Endpoints
+//
+//   - GET /health: Health check
+//   - POST /v1/chat/direct: Direct LLM chat (always available)
+//   - POST /v1/chat/rag: Conversational RAG (requires Weaviate)
+//   - And more (see route registration below)
 func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient llm.LLMClient,
 	policyEngine *policy_engine.PolicyEngine) {
 
@@ -32,26 +53,35 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		c.Redirect(http.StatusMovedPermanently, "/ui/chat.html")
 	})
 
+	// Create ChatHandler with optional RAG service
+	// RAG service is only available when vector DB (Weaviate) is configured
+	var chatRAGService *services.ChatRAGService
+	if client != nil {
+		chatRAGService = services.NewChatRAGService(client, globalLLMClient, policyEngine)
+	}
+	chatHandler := handlers.NewChatHandler(globalLLMClient, policyEngine, chatRAGService)
+
 	// API version 1 group
 	v1 := router.Group("/v1")
 	{
-		v1.POST("/chat/direct", handlers.HandleDirectChat(globalLLMClient, policyEngine))
+		// Chat endpoints using the new ChatHandler interface
+		v1.POST("/chat/direct", chatHandler.HandleDirectChat)
+
 		v1.POST("/timeseries/forecast", handlers.HandleTimeSeriesForecast())
 		v1.POST("/data/fetch", handlers.HandleDataFetch())
 		v1.POST("/trading/signal", handlers.HandleTradingSignal())
 		v1.POST("/models/pull", handlers.HandleModelPull())
 		v1.POST("/agent/step", handlers.HandleAgentStep(policyEngine))
-		// We need the Vector DB for the following Routes to be successfully registered
-		if client != nil {
-			// Create ChatRAGService for conversational RAG endpoint
-			chatRAGService := services.NewChatRAGService(client, globalLLMClient, policyEngine)
 
+		// Vector DB-dependent routes (requires Weaviate client)
+		if client != nil {
 			v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient, policyEngine))
-			v1.POST("/chat/rag", handlers.HandleChatRAG(chatRAGService)) // Conversational RAG (default for CLI)
+			v1.POST("/chat/rag", chatHandler.HandleChatRAG) // Conversational RAG (default for CLI)
 			v1.POST("/documents", handlers.CreateDocument(client))
 			v1.GET("/documents", handlers.ListDocuments(client))
 			v1.DELETE("/document", handlers.DeleteBySource(client))
 			v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient)) // Single-shot RAG (aleutian ask)
+
 			// Session administration routes
 			sessions := v1.Group("/sessions")
 			{
@@ -60,6 +90,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 				sessions.GET("/:sessionId/documents", handlers.GetSessionDocuments(client))
 				sessions.DELETE("/:sessionId", handlers.DeleteSessions(client))
 			}
+
 			// Weaviate administration routes
 			weaviateAdmin := v1.Group("/weaviate")
 			{

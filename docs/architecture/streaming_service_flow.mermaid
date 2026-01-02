@@ -1,0 +1,52 @@
+ flowchart TB
+      subgraph "User Layer"
+          CLI[cmd_chat.go]
+      end
+
+      subgraph "Service Layer (cmd/aleutian/)"
+          CS[ChatService<br/>chat_service.go]
+          SCS[StreamingChatService<br/>streaming_service.go]
+      end
+
+      subgraph "Transport Layer"
+          HTTP1[HTTP POST<br/>/v1/chat/rag]
+          HTTP2[HTTP POST<br/>/v1/chat/rag/stream]
+          HTTP3[HTTP POST<br/>/v1/chat/direct]
+          HTTP4[HTTP POST<br/>/v1/chat/direct/stream]
+      end
+
+      subgraph "Streaming Infrastructure (pkg/ux/)"
+          Parser[SSEParser<br/>parser.go]
+          Reader[SSEStreamReader<br/>reader.go]
+          Renderer[StreamRenderer<br/>renderer.go]
+          Events[StreamEvent<br/>events.go]
+      end
+
+      subgraph "Output"
+          Term[Terminal]
+          Result[StreamResult]
+      end
+
+      CLI -->|non-streaming| CS
+      CLI -->|streaming| SCS
+
+      CS --> HTTP1
+      CS --> HTTP3
+      HTTP1 -->|JSON| CS
+      HTTP3 -->|JSON| CS
+
+      SCS --> HTTP2
+      SCS --> HTTP4
+      HTTP2 -->|SSE stream| Parser
+      HTTP4 -->|SSE stream| Parser
+
+      Parser -->|StreamEvent| Reader
+      Reader -->|callback| SCS
+      SCS -->|route events| Renderer
+
+      Renderer --> Term
+      Renderer --> Result
+
+      Events -.->|data types| Parser
+      Events -.->|data types| Reader
+      Events -.->|data types| Renderer

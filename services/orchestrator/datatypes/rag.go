@@ -107,9 +107,40 @@ type RagEngineResponse struct {
 	Sources []SourceInfo `json:"sources,omitempty"`
 }
 
+// Message represents a single message in a conversation.
+//
+// # Description
+//
+// Message is the fundamental unit of conversation in both direct chat and RAG
+// chat endpoints. Each message has a role (who said it) and content (what they said).
+// Optional ID and timestamp fields enable database storage and audit trails.
+//
+// # Fields
+//
+//   - MessageID: Optional. Unique identifier for this message (UUID v4).
+//     Used for database correlation and message-level operations.
+//   - Timestamp: Optional. Unix timestamp in milliseconds (UTC) when message was created.
+//     Used for ordering, audit trails, and retention policies.
+//   - Role: Required. The role of the message sender.
+//     Must be one of: "user", "assistant", "system".
+//   - Content: Required. The message text content.
+//     Limited to 32KB per SEC-003 compliance.
+//
+// # Validation
+//
+//   - Role: required, must be "user", "assistant", or "system"
+//   - Content: required, max 32KB (validated via maxbytes custom validator in chat.go)
+//   - MessageID: optional, but if provided must be valid UUID v4
+//   - Timestamp: optional, but if provided must be > 0
+//
+// # Security References
+//
+//   - SEC-003: Message size limits (security_architecture_review.md)
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	MessageID string `json:"message_id,omitempty" validate:"omitempty,uuid4"`
+	Timestamp int64  `json:"timestamp,omitempty" validate:"omitempty,gt=0"`
+	Role      string `json:"role" validate:"required,oneof=user assistant system"`
+	Content   string `json:"content" validate:"required,maxbytes"`
 }
 
 var httpClient = &http.Client{

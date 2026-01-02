@@ -13,6 +13,7 @@ package handlers
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
@@ -21,147 +22,248 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
-var chatTracer = otel.Tracer("aleutian.orchestrator.handlers")
+// =============================================================================
+// Interface Definition
+// =============================================================================
 
-type DirectChatRequest struct {
-	Messages       []datatypes.Message `json:"messages"`
-	EnableThinking bool                `json:"enable_thinking"` // New
-	BudgetTokens   int                 `json:"budget_tokens"`   // New
-	Tools          []interface{}       `json:"tools"`           // New
+// ChatHandler defines the contract for handling chat HTTP requests.
+//
+// # Description
+//
+// ChatHandler abstracts chat endpoint handling, enabling different
+// implementations and facilitating testing via mocks. The interface
+// follows the single-method-per-operation pattern for clarity.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use by multiple goroutines.
+// HTTP handlers are called concurrently by the Gin framework.
+//
+// # Limitations
+//
+//   - Streaming endpoints not included (separate interface)
+//
+// # Assumptions
+//
+//   - All dependencies are properly initialized before handler use
+//   - Gin context is valid and not nil
+type ChatHandler interface {
+	// HandleDirectChat processes direct LLM chat requests (no RAG).
+	HandleDirectChat(c *gin.Context)
+
+	// HandleChatRAG processes conversational RAG requests.
+	HandleChatRAG(c *gin.Context)
 }
 
-func HandleDirectChat(llmClient llm.LLMClient, pe *policy_engine.PolicyEngine) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx, span := chatTracer.Start(c.Request.Context(), "HandleDirectChat")
-		defer span.End()
-		var req DirectChatRequest
-		if err := c.BindJSON(&req); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			slog.Error("Failed to parse the chat request", "error", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-			return
-		}
+// =============================================================================
+// Struct Definition
+// =============================================================================
 
-		if len(req.Messages) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "no messages provided"})
-			return
-		}
+// chatHandler implements ChatHandler for production use.
+//
+// # Description
+//
+// chatHandler coordinates between HTTP layer and business logic.
+// It performs only HTTP-related tasks:
+//   - Request parsing and validation
+//   - Error mapping to HTTP status codes
+//   - Response serialization
+//
+// All business logic is delegated to injected services.
+//
+// # Fields
+//
+//   - llmClient: LLM client for direct chat generation
+//   - policyEngine: Policy engine for sensitive data scanning
+//   - ragService: Service for RAG chat processing
+//   - tracer: OpenTelemetry tracer for distributed tracing
+//
+// # Thread Safety
+//
+// Thread-safe. All fields are read-only after construction.
+// No shared mutable state between requests.
+//
+// # Limitations
+//
+//   - Does not support streaming (will be added separately)
+//
+// # Assumptions
+//
+//   - Dependencies are non-nil and properly configured
+type chatHandler struct {
+	llmClient    llm.LLMClient
+	policyEngine *policy_engine.PolicyEngine
+	ragService   *services.ChatRAGService
+	tracer       trace.Tracer
+}
 
-		// Scan the last message (the user's new input)
-		// Optionally loop through all if you want to be extra safe
-		lastMsg := req.Messages[len(req.Messages)-1]
-		if lastMsg.Role == "user" {
-			findings := pe.ScanFileContent(lastMsg.Content)
-			if len(findings) > 0 {
-				slog.Warn("Blocked chat request due to policy violation", "findings", len(findings))
-				c.JSON(http.StatusForbidden, gin.H{
-					"error":    "Policy Violation: Message contains sensitive data.",
-					"findings": findings,
-				})
-				return
-			}
-		}
+// =============================================================================
+// Constructor
+// =============================================================================
 
-		params := llm.GenerationParams{
-			EnableThinking:  req.EnableThinking,
-			BudgetTokens:    req.BudgetTokens,
-			ToolDefinitions: req.Tools,
-		}
-		answer, err := llmClient.Chat(ctx, req.Messages, params)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			slog.Error("LLMClient.Chat failed", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"answer": answer})
+// NewChatHandler creates a ChatHandler with the provided dependencies.
+//
+// # Description
+//
+// Creates a fully configured chatHandler for production use.
+// All dependencies must be properly initialized before calling.
+// Panics if llmClient or policyEngine is nil (programming errors).
+//
+// # Inputs
+//
+//   - llmClient: LLM client for direct chat. Must not be nil.
+//   - policyEngine: Policy scanner. Must not be nil.
+//   - ragService: RAG chat service. May be nil if RAG is not used.
+//
+// # Outputs
+//
+//   - ChatHandler: Ready for use with Gin router
+//
+// # Examples
+//
+//	handler := handlers.NewChatHandler(llmClient, policyEngine, ragService)
+//	router.POST("/v1/chat/direct", handler.HandleDirectChat)
+//	router.POST("/v1/chat/rag", handler.HandleChatRAG)
+//
+// # Limitations
+//
+//   - Panics on nil llmClient or policyEngine
+//
+// # Assumptions
+//
+//   - llmClient and policyEngine are non-nil and ready for use
+func NewChatHandler(
+	llmClient llm.LLMClient,
+	policyEngine *policy_engine.PolicyEngine,
+	ragService *services.ChatRAGService,
+) ChatHandler {
+	if llmClient == nil {
+		panic("NewChatHandler: llmClient must not be nil")
+	}
+	if policyEngine == nil {
+		panic("NewChatHandler: policyEngine must not be nil")
+	}
+
+	return &chatHandler{
+		llmClient:    llmClient,
+		policyEngine: policyEngine,
+		ragService:   ragService,
+		tracer:       otel.Tracer("aleutian.orchestrator.handlers.chat"),
 	}
 }
 
-// HandleChatRAG returns a gin.HandlerFunc that handles conversational RAG requests.
+// =============================================================================
+// Handler Methods
+// =============================================================================
+
+// HandleDirectChat processes direct LLM chat requests.
 //
-// This handler is the HTTP layer for the ChatRAGService. It performs only
-// HTTP-related tasks:
-//   - Binding and parsing the JSON request body
-//   - Calling the service layer for business logic
-//   - Mapping service errors to appropriate HTTP status codes
-//   - Serializing and returning the JSON response
+// # Description
 //
-// All business logic (validation, policy scanning, RAG orchestration) is
-// delegated to the ChatRAGService, keeping this handler thin and focused.
+// Handles POST /v1/chat/direct requests. The flow is:
+//  1. Parse request body
+//  2. Validate request (request_id and timestamp are required)
+//  3. Scan last user message for policy violations
+//  4. Call LLM client with messages and parameters
+//  5. Return response with answer, response_id, and processing time
 //
-// Request/Response:
+// # Inputs
 //
-//	POST /v1/chat/rag
-//	Content-Type: application/json
+//   - c: Gin context containing the HTTP request
 //
-//	Request Body:
+// Request Body (datatypes.DirectChatRequest):
+//   - request_id: Required. UUID v4 identifier for tracing.
+//   - timestamp: Required. Unix timestamp in milliseconds (UTC).
+//   - messages: Required. Array of message objects (1-100) with role and content.
+//   - enable_thinking: Optional. Enable extended thinking mode.
+//   - budget_tokens: Optional. Token budget for thinking (0-65536).
+//   - tools: Optional. Tool definitions for function calling.
+//
+// # Outputs
+//
+// HTTP Responses:
+//   - 200 OK: DirectChatResponse with answer, response_id, timestamp
+//   - 400 Bad Request: {"error": "invalid request body"} or {"error": "validation failed: ..."}
+//   - 403 Forbidden: {"error": "Policy Violation...", "findings": [...]}
+//   - 500 Internal Server Error: {"error": "Failed to process request"}
+//
+// # Examples
+//
+// Request:
+//
+//	POST /v1/chat/direct
 //	{
-//	    "message": "What is the authentication flow?",
-//	    "session_id": "optional-session-id",
-//	    "pipeline": "reranking",
-//	    "bearing": "optional-topic-filter",
-//	    "stream": false,
-//	    "history": []
+//	    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+//	    "timestamp": 1735817400000,
+//	    "messages": [{"role": "user", "content": "Hello"}]
 //	}
 //
-//	Response (200 OK):
+// Response:
+//
 //	{
-//	    "id": "response-uuid",
-//	    "created_at": 1704067200,
-//	    "answer": "The authentication flow...",
-//	    "session_id": "session-uuid",
-//	    "sources": [...],
-//	    "turn_count": 1
+//	    "response_id": "660f9500-f39c-52e5-b827-557766551111",
+//	    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+//	    "timestamp": 1735817401250,
+//	    "answer": "Hello! How can I help you?",
+//	    "processing_time_ms": 1250
 //	}
 //
-// Error Responses:
-//   - 400 Bad Request: Invalid JSON or validation failure
-//   - 403 Forbidden: Policy violation (sensitive data detected)
-//   - 500 Internal Server Error: RAG engine or LLM failure
+// # Limitations
 //
-// Parameters:
-//   - service: A configured ChatRAGService instance. The service must be
-//     initialized with all required dependencies (Weaviate client, LLM client,
-//     policy engine). Must not be nil.
+//   - No streaming support (use streaming endpoint instead)
+//   - Only scans last user message for policy (not full history)
 //
-// Example:
+// # Assumptions
 //
-//	chatRAGService := services.NewChatRAGService(weaviateClient, llmClient, policyEngine)
-//	router.POST("/v1/chat/rag", handlers.HandleChatRAG(chatRAGService))
-func HandleChatRAG(service *services.ChatRAGService) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx, span := chatTracer.Start(c.Request.Context(), "HandleChatRAG")
-		defer span.End()
+//   - Request body is valid JSON
+//   - LLM client is available and responding
+//
+// # Security References
+//
+//   - SEC-003: Message size limits enforced via validation
+//   - SEC-005: Internal errors not exposed to client
+func (h *chatHandler) HandleDirectChat(c *gin.Context) {
+	ctx, span := h.tracer.Start(c.Request.Context(), "HandleDirectChat")
+	defer span.End()
 
-		// Step 1: Parse request body
-		var req datatypes.ChatRAGRequest
-		if err := c.BindJSON(&req); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "invalid request body")
-			slog.Error("Failed to parse chat RAG request", "error", err)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "invalid request body",
-			})
-			return
-		}
+	startTime := time.Now()
 
-		// Step 2: Call service layer
-		resp, err := service.Process(ctx, &req)
-		if err != nil {
-			span.RecordError(err)
+	// Step 1: Parse request body
+	var req datatypes.DirectChatRequest
+	if err := c.BindJSON(&req); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid request body")
+		slog.Error("Failed to parse the chat request", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
 
-			// Check for policy violation (403)
-			if services.IsPolicyViolation(err) {
-				span.SetStatus(codes.Error, "policy violation")
-				findings := services.GetPolicyFindings(err)
-				slog.Warn("Blocked chat RAG request due to policy violation",
+	// Step 2: Validate request
+	if err := req.Validate(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "validation failed")
+		slog.Error("Request validation failed",
+			"error", err,
+			"requestId", req.RequestID,
+		)
+		// SEC-005: Sanitize validation errors - do not expose internal field names
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: validation failed"})
+		return
+	}
+
+	// Step 3: Scan the last user message for policy violations
+	// NOTE: Only scans last message, not full history (performance tradeoff)
+	if len(req.Messages) > 0 {
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role == "user" {
+			findings := h.policyEngine.ScanFileContent(lastMsg.Content)
+			if len(findings) > 0 {
+				slog.Warn("Blocked chat request due to policy violation",
 					"findings", len(findings),
-					"requestId", req.Id,
+					"requestId", req.RequestID,
 				)
 				c.JSON(http.StatusForbidden, gin.H{
 					"error":    "Policy Violation: Message contains sensitive data.",
@@ -169,22 +271,154 @@ func HandleChatRAG(service *services.ChatRAGService) gin.HandlerFunc {
 				})
 				return
 			}
+		}
+	}
 
-			// All other errors are internal server errors
-			span.SetStatus(codes.Error, err.Error())
-			slog.Error("Chat RAG processing failed",
-				"error", err,
+	// Step 4: Call LLM client
+	params := llm.GenerationParams{
+		EnableThinking:  req.EnableThinking,
+		BudgetTokens:    req.BudgetTokens,
+		ToolDefinitions: req.Tools,
+	}
+	answer, err := h.llmClient.Chat(ctx, req.Messages, params)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "LLM chat failed")
+		slog.Error("LLMClient.Chat failed",
+			"error", err,
+			"requestId", req.RequestID,
+		)
+		// SEC-005: Do NOT expose internal error details to client
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process request"})
+		return
+	}
+
+	// Step 5: Build and return response
+	processingTime := time.Since(startTime).Milliseconds()
+	resp := datatypes.NewDirectChatResponse(req.RequestID, answer)
+	resp.ProcessingTimeMs = processingTime
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// HandleChatRAG processes conversational RAG requests.
+//
+// # Description
+//
+// Handles POST /v1/chat/rag requests. Delegates all business logic
+// to ChatRAGService, performing only HTTP-layer operations:
+//  1. Parse request body
+//  2. Call service.Process()
+//  3. Map errors to HTTP status codes
+//  4. Return response
+//
+// # Inputs
+//
+//   - c: Gin context containing the HTTP request
+//
+// Request Body (datatypes.ChatRAGRequest):
+//   - message: Required. User's query.
+//   - session_id: Optional. Existing session to continue.
+//   - pipeline: Optional. RAG pipeline name (default: "reranking").
+//   - bearing: Optional. Topic filter for retrieval.
+//   - stream: Optional. Enable streaming (not yet implemented).
+//   - history: Optional. Previous conversation turns.
+//
+// # Outputs
+//
+// HTTP Responses:
+//   - 200 OK: ChatRAGResponse with answer, sources, session_id
+//   - 400 Bad Request: {"error": "invalid request body"}
+//   - 403 Forbidden: {"error": "Policy Violation...", "findings": [...]}
+//   - 500 Internal Server Error: {"error": "Failed to process request"}
+//
+// # Examples
+//
+// Request:
+//
+//	POST /v1/chat/rag
+//	{"message": "What is authentication?", "pipeline": "reranking"}
+//
+// Response:
+//
+//	{
+//	    "id": "resp-uuid",
+//	    "created_at": 1735817400000,
+//	    "answer": "Authentication is...",
+//	    "sources": [...],
+//	    "session_id": "sess-uuid",
+//	    "turn_count": 1
+//	}
+//
+// # Limitations
+//
+//   - Streaming not yet implemented (stream flag ignored)
+//   - Requires ragService to be non-nil
+//
+// # Assumptions
+//
+//   - RAG service and engine are available
+//
+// # Security References
+//
+//   - SEC-005: Internal errors not exposed to client
+func (h *chatHandler) HandleChatRAG(c *gin.Context) {
+	ctx, span := h.tracer.Start(c.Request.Context(), "HandleChatRAG")
+	defer span.End()
+
+	// Check if RAG service is available
+	if h.ragService == nil {
+		slog.Error("RAG service not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "RAG service not available"})
+		return
+	}
+
+	// Step 1: Parse request body
+	var req datatypes.ChatRAGRequest
+	if err := c.BindJSON(&req); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid request body")
+		slog.Error("Failed to parse chat RAG request", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid request body",
+		})
+		return
+	}
+
+	// Step 2: Call service layer
+	resp, err := h.ragService.Process(ctx, &req)
+	if err != nil {
+		span.RecordError(err)
+
+		// Check for policy violation (403)
+		if services.IsPolicyViolation(err) {
+			span.SetStatus(codes.Error, "policy violation")
+			findings := services.GetPolicyFindings(err)
+			slog.Warn("Blocked chat RAG request due to policy violation",
+				"findings", len(findings),
 				"requestId", req.Id,
-				"sessionId", req.SessionId,
 			)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "Failed to process request",
-				"details": err.Error(),
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":    "Policy Violation: Message contains sensitive data.",
+				"findings": findings,
 			})
 			return
 		}
 
-		// Step 3: Return successful response
-		c.JSON(http.StatusOK, resp)
+		// All other errors are internal server errors
+		// SEC-005: Do NOT expose internal error details to client
+		span.SetStatus(codes.Error, "processing failed")
+		slog.Error("Chat RAG processing failed",
+			"error", err,
+			"requestId", req.Id,
+			"sessionId", req.SessionId,
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to process request",
+		})
+		return
 	}
+
+	// Step 3: Return successful response
+	c.JSON(http.StatusOK, resp)
 }

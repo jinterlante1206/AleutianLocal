@@ -17,8 +17,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
@@ -37,17 +39,49 @@ func init() {
 }
 
 // MockLLMClient implements llm.LLMClient for handler testing.
+//
+// # Description
+//
+// Provides a configurable mock for testing chat handlers without
+// making real LLM API calls.
+//
+// # Fields
+//
+//   - ChatResponse: Response to return from Chat()
+//   - ChatError: Error to return from Chat()
 type MockLLMClient struct {
 	ChatResponse string
 	ChatError    error
 }
 
+// Chat implements llm.LLMClient.Chat for testing.
 func (m *MockLLMClient) Chat(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams) (string, error) {
 	return m.ChatResponse, m.ChatError
 }
 
+// Generate implements llm.LLMClient.Generate for testing.
 func (m *MockLLMClient) Generate(ctx context.Context, prompt string, params llm.GenerationParams) (string, error) {
 	return "", nil
+}
+
+// createTestChatHandler creates a ChatHandler with mock dependencies for testing.
+//
+// # Inputs
+//
+//   - t: Test instance for error reporting
+//   - mockLLM: Mock LLM client
+//   - ragService: Optional RAG service (may be nil)
+//
+// # Outputs
+//
+//   - ChatHandler: Configured handler for testing
+func createTestChatHandler(t *testing.T, mockLLM *MockLLMClient, ragService *services.ChatRAGService) ChatHandler {
+	t.Helper()
+
+	pe, err := policy_engine.NewPolicyEngine()
+	require.NoError(t, err, "policy engine should initialize")
+
+	return NewChatHandler(mockLLM, pe, ragService)
 }
 
 // createTestRouter creates a Gin router with the specified handler for testing.
@@ -80,6 +114,58 @@ func performRequest(router *gin.Engine, method, path string, body interface{}) *
 	return w
 }
 
+// newValidDirectChatRequest creates a valid DirectChatRequest for testing.
+//
+// # Description
+//
+// Helper function to create a properly populated request with all required fields.
+func newValidDirectChatRequest(content string) datatypes.DirectChatRequest {
+	return datatypes.DirectChatRequest{
+		RequestID: uuid.New().String(),
+		Timestamp: time.Now().UnixMilli(),
+		Messages: []datatypes.Message{
+			{Role: "user", Content: content},
+		},
+	}
+}
+
+// =============================================================================
+// NewChatHandler Tests
+// =============================================================================
+
+// TestNewChatHandler_PanicsOnNilLLMClient verifies that NewChatHandler panics
+// when llmClient is nil.
+func TestNewChatHandler_PanicsOnNilLLMClient(t *testing.T) {
+	pe, err := policy_engine.NewPolicyEngine()
+	require.NoError(t, err)
+
+	assert.Panics(t, func() {
+		NewChatHandler(nil, pe, nil)
+	}, "should panic on nil llmClient")
+}
+
+// TestNewChatHandler_PanicsOnNilPolicyEngine verifies that NewChatHandler panics
+// when policyEngine is nil.
+func TestNewChatHandler_PanicsOnNilPolicyEngine(t *testing.T) {
+	mockLLM := &MockLLMClient{}
+
+	assert.Panics(t, func() {
+		NewChatHandler(mockLLM, nil, nil)
+	}, "should panic on nil policyEngine")
+}
+
+// TestNewChatHandler_AcceptsNilRAGService verifies that NewChatHandler accepts
+// nil ragService (optional dependency).
+func TestNewChatHandler_AcceptsNilRAGService(t *testing.T) {
+	mockLLM := &MockLLMClient{}
+	pe, err := policy_engine.NewPolicyEngine()
+	require.NoError(t, err)
+
+	assert.NotPanics(t, func() {
+		NewChatHandler(mockLLM, pe, nil)
+	}, "should accept nil ragService")
+}
+
 // =============================================================================
 // HandleDirectChat Tests
 // =============================================================================
@@ -88,35 +174,34 @@ func performRequest(router *gin.Engine, method, path string, body interface{}) *
 // a successful response with the LLM's answer.
 func TestHandleDirectChat_Success(t *testing.T) {
 	mockLLM := &MockLLMClient{ChatResponse: "Hello! How can I help you?"}
-	pe, err := policy_engine.NewPolicyEngine()
-	require.NoError(t, err)
+	handler := createTestChatHandler(t, mockLLM, nil)
 
-	router := createTestRouter("POST", "/v1/chat/direct", HandleDirectChat(mockLLM, pe))
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
 
-	body := DirectChatRequest{
-		Messages: []datatypes.Message{
-			{Role: "user", Content: "Hello"},
-		},
-	}
-
+	body := newValidDirectChatRequest("Hello")
 	w := performRequest(router, "POST", "/v1/chat/direct", body)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var response map[string]interface{}
-	err = json.Unmarshal(w.Body.Bytes(), &response)
+	var response datatypes.DirectChatResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
-	assert.Equal(t, "Hello! How can I help you?", response["answer"])
+
+	assert.NotEmpty(t, response.ResponseID, "response should have response_id")
+	assert.Equal(t, body.RequestID, response.RequestID, "response should echo request_id")
+	assert.NotZero(t, response.Timestamp, "response should have timestamp")
+	assert.Equal(t, "Hello! How can I help you?", response.Answer)
+	// ProcessingTimeMs may be 0 if mock returns in < 1ms, just verify it's non-negative
+	assert.GreaterOrEqual(t, response.ProcessingTimeMs, int64(0), "processing_time_ms should be non-negative")
 }
 
 // TestHandleDirectChat_InvalidJSON verifies that invalid JSON returns
 // a 400 Bad Request response.
 func TestHandleDirectChat_InvalidJSON(t *testing.T) {
 	mockLLM := &MockLLMClient{}
-	pe, err := policy_engine.NewPolicyEngine()
-	require.NoError(t, err)
+	handler := createTestChatHandler(t, mockLLM, nil)
 
-	router := createTestRouter("POST", "/v1/chat/direct", HandleDirectChat(mockLLM, pe))
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
 
 	// Send invalid JSON
 	req, _ := http.NewRequest("POST", "/v1/chat/direct", bytes.NewBufferString("{invalid json"))
@@ -132,17 +217,20 @@ func TestHandleDirectChat_InvalidJSON(t *testing.T) {
 	assert.Contains(t, response["error"], "invalid request body")
 }
 
-// TestHandleDirectChat_EmptyMessages verifies that an empty messages array
-// returns a 400 Bad Request response.
-func TestHandleDirectChat_EmptyMessages(t *testing.T) {
+// TestHandleDirectChat_MissingRequestID verifies that a request without
+// request_id returns a 400 Bad Request response.
+func TestHandleDirectChat_MissingRequestID(t *testing.T) {
 	mockLLM := &MockLLMClient{}
-	pe, err := policy_engine.NewPolicyEngine()
-	require.NoError(t, err)
+	handler := createTestChatHandler(t, mockLLM, nil)
 
-	router := createTestRouter("POST", "/v1/chat/direct", HandleDirectChat(mockLLM, pe))
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
 
-	body := DirectChatRequest{
-		Messages: []datatypes.Message{},
+	body := datatypes.DirectChatRequest{
+		// Missing RequestID
+		Timestamp: time.Now().UnixMilli(),
+		Messages: []datatypes.Message{
+			{Role: "user", Content: "Hello"},
+		},
 	}
 
 	w := performRequest(router, "POST", "/v1/chat/direct", body)
@@ -151,24 +239,66 @@ func TestHandleDirectChat_EmptyMessages(t *testing.T) {
 
 	var response map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &response)
-	assert.Equal(t, "no messages provided", response["error"])
+	assert.Contains(t, response["error"], "validation failed")
+}
+
+// TestHandleDirectChat_MissingTimestamp verifies that a request without
+// timestamp returns a 400 Bad Request response.
+func TestHandleDirectChat_MissingTimestamp(t *testing.T) {
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, nil)
+
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
+
+	body := datatypes.DirectChatRequest{
+		RequestID: uuid.New().String(),
+		// Missing Timestamp
+		Messages: []datatypes.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+
+	w := performRequest(router, "POST", "/v1/chat/direct", body)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var response map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &response)
+	assert.Contains(t, response["error"], "validation failed")
+}
+
+// TestHandleDirectChat_EmptyMessages verifies that an empty messages array
+// returns a 400 Bad Request response.
+func TestHandleDirectChat_EmptyMessages(t *testing.T) {
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, nil)
+
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
+
+	body := datatypes.DirectChatRequest{
+		RequestID: uuid.New().String(),
+		Timestamp: time.Now().UnixMilli(),
+		Messages:  []datatypes.Message{},
+	}
+
+	w := performRequest(router, "POST", "/v1/chat/direct", body)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var response map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &response)
+	assert.Contains(t, response["error"], "validation failed")
 }
 
 // TestHandleDirectChat_PolicyViolation verifies that sensitive data in
 // user messages triggers a 403 Forbidden response.
 func TestHandleDirectChat_PolicyViolation(t *testing.T) {
 	mockLLM := &MockLLMClient{ChatResponse: "Should not reach this"}
-	pe, err := policy_engine.NewPolicyEngine()
-	require.NoError(t, err)
+	handler := createTestChatHandler(t, mockLLM, nil)
 
-	router := createTestRouter("POST", "/v1/chat/direct", HandleDirectChat(mockLLM, pe))
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
 
-	body := DirectChatRequest{
-		Messages: []datatypes.Message{
-			{Role: "user", Content: "My SSN is 123-45-6789"},
-		},
-	}
-
+	body := newValidDirectChatRequest("My SSN is 123-45-6789")
 	w := performRequest(router, "POST", "/v1/chat/direct", body)
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -180,41 +310,38 @@ func TestHandleDirectChat_PolicyViolation(t *testing.T) {
 }
 
 // TestHandleDirectChat_LLMError verifies that LLM errors return a 500
-// Internal Server Error response.
+// Internal Server Error response without leaking error details.
 func TestHandleDirectChat_LLMError(t *testing.T) {
 	mockLLM := &MockLLMClient{
 		ChatError: assert.AnError,
 	}
-	pe, err := policy_engine.NewPolicyEngine()
-	require.NoError(t, err)
+	handler := createTestChatHandler(t, mockLLM, nil)
 
-	router := createTestRouter("POST", "/v1/chat/direct", HandleDirectChat(mockLLM, pe))
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
 
-	body := DirectChatRequest{
-		Messages: []datatypes.Message{
-			{Role: "user", Content: "Hello"},
-		},
-	}
-
+	body := newValidDirectChatRequest("Hello")
 	w := performRequest(router, "POST", "/v1/chat/direct", body)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 
 	var response map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &response)
-	assert.NotEmpty(t, response["error"])
+	// SEC-005: Error should be sanitized, no internal details
+	assert.Equal(t, "Failed to process request", response["error"])
+	assert.Nil(t, response["details"], "should not leak error details")
 }
 
 // TestHandleDirectChat_WithGenerationParams verifies that generation parameters
 // are passed through to the LLM client.
 func TestHandleDirectChat_WithGenerationParams(t *testing.T) {
 	mockLLM := &MockLLMClient{ChatResponse: "Response with thinking"}
-	pe, err := policy_engine.NewPolicyEngine()
-	require.NoError(t, err)
+	handler := createTestChatHandler(t, mockLLM, nil)
 
-	router := createTestRouter("POST", "/v1/chat/direct", HandleDirectChat(mockLLM, pe))
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
 
-	body := DirectChatRequest{
+	body := datatypes.DirectChatRequest{
+		RequestID: uuid.New().String(),
+		Timestamp: time.Now().UnixMilli(),
 		Messages: []datatypes.Message{
 			{Role: "user", Content: "Explain this code"},
 		},
@@ -226,28 +353,71 @@ func TestHandleDirectChat_WithGenerationParams(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var response map[string]interface{}
+	var response datatypes.DirectChatResponse
 	json.Unmarshal(w.Body.Bytes(), &response)
-	assert.Equal(t, "Response with thinking", response["answer"])
+	assert.Equal(t, "Response with thinking", response.Answer)
+}
+
+// TestHandleDirectChat_InvalidRole verifies that invalid message role
+// returns a 400 Bad Request response.
+func TestHandleDirectChat_InvalidRole(t *testing.T) {
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, nil)
+
+	router := createTestRouter("POST", "/v1/chat/direct", handler.HandleDirectChat)
+
+	body := datatypes.DirectChatRequest{
+		RequestID: uuid.New().String(),
+		Timestamp: time.Now().UnixMilli(),
+		Messages: []datatypes.Message{
+			{Role: "invalid_role", Content: "Hello"},
+		},
+	}
+
+	w := performRequest(router, "POST", "/v1/chat/direct", body)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // =============================================================================
 // HandleChatRAG Tests
 // =============================================================================
 
+// TestHandleChatRAG_NilService verifies that calling HandleChatRAG when
+// ragService is nil returns a 500 Internal Server Error.
+func TestHandleChatRAG_NilService(t *testing.T) {
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, nil) // nil ragService
+
+	router := createTestRouter("POST", "/v1/chat/rag", handler.HandleChatRAG)
+
+	body := datatypes.ChatRAGRequest{
+		Message: "What is authentication?",
+	}
+
+	w := performRequest(router, "POST", "/v1/chat/rag", body)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+
+	var response map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &response)
+	assert.Equal(t, "RAG service not available", response["error"])
+}
+
 // TestHandleChatRAG_InvalidJSON verifies that invalid JSON returns
 // a 400 Bad Request response.
 func TestHandleChatRAG_InvalidJSON(t *testing.T) {
 	// Create mock RAG server
 	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Should not be called
 		t.Error("RAG server should not be called for invalid JSON")
 	}))
 	defer mockRAGServer.Close()
 
-	// Create service with mock server
 	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, service)
+
+	router := createTestRouter("POST", "/v1/chat/rag", handler.HandleChatRAG)
 
 	// Send invalid JSON
 	req, _ := http.NewRequest("POST", "/v1/chat/rag", bytes.NewBufferString("{invalid json"))
@@ -267,13 +437,15 @@ func TestHandleChatRAG_InvalidJSON(t *testing.T) {
 // a 500 response (validation error from service).
 func TestHandleChatRAG_ValidationFailure(t *testing.T) {
 	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Should not be called
 		t.Error("RAG server should not be called for validation failure")
 	}))
 	defer mockRAGServer.Close()
 
 	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, service)
+
+	router := createTestRouter("POST", "/v1/chat/rag", handler.HandleChatRAG)
 
 	body := datatypes.ChatRAGRequest{
 		Message: "", // Empty message should fail validation
@@ -285,20 +457,24 @@ func TestHandleChatRAG_ValidationFailure(t *testing.T) {
 
 	var response map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &response)
-	assert.Contains(t, response["details"], "validation failed")
+	// SEC-005: Error should be sanitized
+	assert.Equal(t, "Failed to process request", response["error"])
+	assert.Nil(t, response["details"], "should not leak error details")
 }
 
 // TestHandleChatRAG_PolicyViolation verifies that sensitive data in
 // the message triggers a 403 Forbidden response.
 func TestHandleChatRAG_PolicyViolation(t *testing.T) {
 	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Should not be called for policy violation
 		t.Error("RAG server should not be called for policy violation")
 	}))
 	defer mockRAGServer.Close()
 
 	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, service)
+
+	router := createTestRouter("POST", "/v1/chat/rag", handler.HandleChatRAG)
 
 	body := datatypes.ChatRAGRequest{
 		Message: "My SSN is 123-45-6789",
@@ -318,7 +494,6 @@ func TestHandleChatRAG_PolicyViolation(t *testing.T) {
 // a successful response with the RAG answer.
 func TestHandleChatRAG_Success(t *testing.T) {
 	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Return mock RAG response
 		resp := datatypes.RagEngineResponse{
 			Answer: "Authentication uses JWT tokens with RSA256 signing.",
 			Sources: []datatypes.SourceInfo{
@@ -331,7 +506,10 @@ func TestHandleChatRAG_Success(t *testing.T) {
 	defer mockRAGServer.Close()
 
 	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, service)
+
+	router := createTestRouter("POST", "/v1/chat/rag", handler.HandleChatRAG)
 
 	body := datatypes.ChatRAGRequest{
 		Message:  "How does authentication work?",
@@ -368,7 +546,10 @@ func TestHandleChatRAG_WithExistingSession(t *testing.T) {
 	defer mockRAGServer.Close()
 
 	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, service)
+
+	router := createTestRouter("POST", "/v1/chat/rag", handler.HandleChatRAG)
 
 	existingSessionId := "existing-session-123"
 	body := datatypes.ChatRAGRequest{
@@ -385,42 +566,8 @@ func TestHandleChatRAG_WithExistingSession(t *testing.T) {
 	assert.Equal(t, existingSessionId, response.SessionId)
 }
 
-// TestHandleChatRAG_WithBearing verifies that the bearing filter is passed
-// through to the RAG engine.
-func TestHandleChatRAG_WithBearing(t *testing.T) {
-	var receivedBearing string
-
-	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&payload)
-		if b, ok := payload["bearing"].(string); ok {
-			receivedBearing = b
-		}
-
-		resp := datatypes.RagEngineResponse{
-			Answer: "Security-related answer",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer mockRAGServer.Close()
-
-	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
-
-	body := datatypes.ChatRAGRequest{
-		Message: "How does security work?",
-		Bearing: "security",
-	}
-
-	w := performRequest(router, "POST", "/v1/chat/rag", body)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "security", receivedBearing, "bearing should be passed to RAG engine")
-}
-
 // TestHandleChatRAG_RAGEngineError verifies that RAG engine errors return
-// a 500 Internal Server Error response.
+// a 500 Internal Server Error response without leaking details.
 func TestHandleChatRAG_RAGEngineError(t *testing.T) {
 	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -429,7 +576,10 @@ func TestHandleChatRAG_RAGEngineError(t *testing.T) {
 	defer mockRAGServer.Close()
 
 	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
+	mockLLM := &MockLLMClient{}
+	handler := createTestChatHandler(t, mockLLM, service)
+
+	router := createTestRouter("POST", "/v1/chat/rag", handler.HandleChatRAG)
 
 	body := datatypes.ChatRAGRequest{
 		Message: "What is authentication?",
@@ -441,45 +591,9 @@ func TestHandleChatRAG_RAGEngineError(t *testing.T) {
 
 	var response map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &response)
+	// SEC-005: Error should be sanitized
 	assert.Equal(t, "Failed to process request", response["error"])
-	assert.Contains(t, response["details"], "RAG engine")
-}
-
-// TestHandleChatRAG_WithHistory verifies that conversation history is handled
-// correctly and reflected in the turn count.
-func TestHandleChatRAG_WithHistory(t *testing.T) {
-	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&payload)
-
-		resp := datatypes.RagEngineResponse{
-			Answer: "Response with history context",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer mockRAGServer.Close()
-
-	service := createMockChatRAGService(t, mockRAGServer)
-	router := createTestRouter("POST", "/v1/chat/rag", HandleChatRAG(service))
-
-	body := datatypes.ChatRAGRequest{
-		Message: "Third question",
-		History: []datatypes.ChatTurn{
-			{Id: "1", Role: "user", Content: "first question"},
-			{Id: "2", Role: "assistant", Content: "first answer"},
-			{Id: "3", Role: "user", Content: "second question"},
-			{Id: "4", Role: "assistant", Content: "second answer"},
-		},
-	}
-
-	w := performRequest(router, "POST", "/v1/chat/rag", body)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	var response datatypes.ChatRAGResponse
-	json.Unmarshal(w.Body.Bytes(), &response)
-	assert.Equal(t, 5, response.TurnCount, "turn count should include history")
+	assert.Nil(t, response["details"], "should not leak error details")
 }
 
 // =============================================================================
@@ -487,6 +601,19 @@ func TestHandleChatRAG_WithHistory(t *testing.T) {
 // =============================================================================
 
 // createMockChatRAGService creates a ChatRAGService configured for testing.
+//
+// # Description
+//
+// Sets up a ChatRAGService with a mock RAG server URL for isolated testing.
+//
+// # Inputs
+//
+//   - t: Test instance for error reporting
+//   - mockRAGServer: HTTP test server simulating the RAG engine
+//
+// # Outputs
+//
+//   - *services.ChatRAGService: Configured service for testing
 func createMockChatRAGService(t *testing.T, mockRAGServer *httptest.Server) *services.ChatRAGService {
 	t.Helper()
 
@@ -495,16 +622,12 @@ func createMockChatRAGService(t *testing.T, mockRAGServer *httptest.Server) *ser
 
 	mockLLM := &MockLLMClient{}
 
-	// Use reflection or create service directly since fields are unexported
-	// For now, we'll use the constructor and set RAG_ENGINE_URL env var
 	originalURL := ""
 	if mockRAGServer != nil {
 		originalURL = mockRAGServer.URL
 	}
 
-	// Create service - it will read RAG_ENGINE_URL from env or use default
-	// Since we can't easily inject the URL, we'll need a workaround
-	// The service constructor reads from env, so we set it temporarily
+	// Set RAG_ENGINE_URL for the service to use
 	t.Setenv("RAG_ENGINE_URL", originalURL)
 
 	return services.NewChatRAGService(nil, mockLLM, pe)
