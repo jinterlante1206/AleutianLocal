@@ -26,10 +26,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -113,8 +117,13 @@ func NewChatServiceResponse(answer, sessionID string, sources []ux.SourceInfo) *
 //
 // Thread Safety:
 //
-//	ChatService implementations are NOT thread-safe. Each goroutine should
-//	have its own ChatService instance if concurrent access is needed.
+//	ChatService implementations are thread-safe. A sync.Mutex protects
+//	concurrent access to mutable state (session ID, message history).
+//
+// Context Support:
+//
+//	All operations accept context.Context for cancellation and timeout
+//	control. Pass context.Background() if no cancellation is needed.
 //
 // Example usage:
 //
@@ -124,7 +133,10 @@ func NewChatServiceResponse(answer, sessionID string, sources []ux.SourceInfo) *
 //	})
 //	defer service.Close()
 //
-//	resp, err := service.SendMessage("What is authentication?")
+//	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+//	defer cancel()
+//
+//	resp, err := service.SendMessage(ctx, "What is authentication?")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -139,6 +151,7 @@ type ChatService interface {
 	//   - Updating internal state (session ID, message history)
 	//
 	// Parameters:
+	//   - ctx: Context for cancellation and timeout control
 	//   - message: The user's input text. Must not be empty.
 	//
 	// Returns:
@@ -148,11 +161,12 @@ type ChatService interface {
 	//     using fmt.Errorf with %w for error chain inspection.
 	//
 	// Error conditions:
+	//   - Context cancelled or deadline exceeded
 	//   - Network errors (connection refused, timeout)
 	//   - Server errors (non-200 status codes)
 	//   - Parse errors (invalid JSON response)
 	//   - Empty response from server
-	SendMessage(message string) (*ChatServiceResponse, error)
+	SendMessage(ctx context.Context, message string) (*ChatServiceResponse, error)
 
 	// GetSessionID returns the current session identifier.
 	//
@@ -191,7 +205,8 @@ type ChatService interface {
 // Production code uses defaultHTTPClient which wraps the standard http.Client.
 // Tests use mockHTTPClient which returns configured responses.
 //
-// See docs/code_quality_lessons/002_http_clients_microservices.md for testing patterns.
+// All methods accept context.Context for cancellation and timeout control.
+// See docs/code_quality_lessons/003_http_client_security_hardening.md for patterns.
 //
 // Example mock:
 //
@@ -203,27 +218,29 @@ type ChatService interface {
 //	}
 //	service := NewRAGChatServiceWithClient(mock, config)
 type HTTPClient interface {
-	// Post sends an HTTP POST request.
+	// Post sends an HTTP POST request with context support.
 	//
 	// Parameters:
+	//   - ctx: Context for cancellation and timeout control
 	//   - url: The target URL
 	//   - contentType: The Content-Type header value (typically "application/json")
 	//   - body: The request body reader
 	//
 	// Returns:
 	//   - *http.Response: The response (caller must close Body)
-	//   - error: Non-nil if the request failed
-	Post(url, contentType string, body io.Reader) (*http.Response, error)
+	//   - error: Non-nil if the request failed or context was cancelled
+	Post(ctx context.Context, url, contentType string, body io.Reader) (*http.Response, error)
 
-	// Get sends an HTTP GET request.
+	// Get sends an HTTP GET request with context support.
 	//
 	// Parameters:
+	//   - ctx: Context for cancellation and timeout control
 	//   - url: The target URL
 	//
 	// Returns:
 	//   - *http.Response: The response (caller must close Body)
-	//   - error: Non-nil if the request failed
-	Get(url string) (*http.Response, error)
+	//   - error: Non-nil if the request failed or context was cancelled
+	Get(ctx context.Context, url string) (*http.Response, error)
 }
 
 // defaultHTTPClient wraps http.Client to implement the HTTPClient interface.
@@ -234,14 +251,29 @@ type defaultHTTPClient struct {
 	client *http.Client
 }
 
-// Post implements HTTPClient.Post by delegating to http.Client.Post.
-func (c *defaultHTTPClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
-	return c.client.Post(url, contentType, body)
+// Post implements HTTPClient.Post with context support.
+//
+// Creates an HTTP request with the given context, allowing cancellation
+// and timeout propagation from the caller.
+func (c *defaultHTTPClient) Post(ctx context.Context, targetURL, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	return c.client.Do(req)
 }
 
-// Get implements HTTPClient.Get by delegating to http.Client.Get.
-func (c *defaultHTTPClient) Get(url string) (*http.Response, error) {
-	return c.client.Get(url)
+// Get implements HTTPClient.Get with context support.
+//
+// Creates an HTTP request with the given context, allowing cancellation
+// and timeout propagation from the caller.
+func (c *defaultHTTPClient) Get(ctx context.Context, targetURL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	return c.client.Do(req)
 }
 
 // =============================================================================
@@ -258,16 +290,23 @@ func (c *defaultHTTPClient) Get(url string) (*http.Response, error) {
 // The service tracks the session ID returned by the server, automatically
 // including it in subsequent requests to maintain conversation continuity.
 //
+// Thread Safety:
+//
+//	This implementation is thread-safe. The mutex protects sessionID
+//	from concurrent read/write access.
+//
 // Fields:
 //   - client: HTTP client for making requests (injectable for testing)
 //   - baseURL: Base URL of the orchestrator service
 //   - sessionID: Current session ID (updated after each response)
 //   - pipeline: RAG pipeline to use (e.g., "reranking", "graph")
+//   - mu: Mutex protecting sessionID
 type ragChatService struct {
 	client    HTTPClient
 	baseURL   string
 	sessionID string
 	pipeline  string
+	mu        sync.Mutex
 }
 
 // RAGChatServiceConfig contains configuration for creating a ragChatService.
@@ -352,49 +391,105 @@ func NewRAGChatServiceWithClient(client HTTPClient, config RAGChatServiceConfig)
 //
 // The server-assigned session ID is stored and automatically included
 // in subsequent requests for conversation continuity.
-func (s *ragChatService) SendMessage(message string) (*ChatServiceResponse, error) {
+//
+// Thread Safety: Uses mutex to protect sessionID access.
+// Logging: Logs request/response events for audit trail.
+func (s *ragChatService) SendMessage(ctx context.Context, message string) (*ChatServiceResponse, error) {
 	requestID := uuid.New().String()
 	requestTime := time.Now().UnixMilli()
 
-	url := fmt.Sprintf("%s/v1/chat/rag", s.baseURL)
+	targetURL := fmt.Sprintf("%s/v1/chat/rag", s.baseURL)
+
+	// Read session ID with lock
+	s.mu.Lock()
+	currentSessionID := s.sessionID
+	s.mu.Unlock()
+
+	slog.Debug("sending RAG chat message",
+		"request_id", requestID,
+		"session_id", currentSessionID,
+		"pipeline", s.pipeline,
+		"message_length", len(message),
+	)
 
 	reqBody := datatypes.ChatRAGRequest{
 		Id:        requestID,
 		CreatedAt: requestTime,
 		Message:   message,
-		SessionId: s.sessionID,
+		SessionId: currentSessionID,
 		Pipeline:  s.pipeline,
 	}
 
 	postBody, err := json.Marshal(reqBody)
 	if err != nil {
+		slog.Error("failed to marshal RAG request",
+			"request_id", requestID,
+			"error", err,
+		)
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := s.client.Post(url, "application/json", bytes.NewBuffer(postBody))
+	resp, err := s.client.Post(ctx, targetURL, "application/json", bytes.NewBuffer(postBody))
 	if err != nil {
+		slog.Error("RAG HTTP request failed",
+			"request_id", requestID,
+			"url", targetURL,
+			"error", err,
+		)
 		return nil, fmt.Errorf("http post: %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
+		slog.Error("failed to read RAG response body",
+			"request_id", requestID,
+			"error", err,
+		)
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		slog.Error("RAG server returned error",
+			"request_id", requestID,
+			"status_code", resp.StatusCode,
+			"response_body", string(bodyBytes),
+		)
 		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var chatResp datatypes.ChatRAGResponse
 	if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
+		slog.Error("failed to parse RAG response",
+			"request_id", requestID,
+			"error", err,
+		)
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
-	// Update session ID for subsequent requests
+	// Update session ID for subsequent requests (with lock)
+	s.mu.Lock()
+	oldSessionID := s.sessionID
 	if chatResp.SessionId != "" {
 		s.sessionID = chatResp.SessionId
 	}
+	returnSessionID := s.sessionID
+	s.mu.Unlock()
+
+	if oldSessionID != returnSessionID {
+		slog.Info("RAG session ID updated",
+			"request_id", requestID,
+			"old_session_id", oldSessionID,
+			"new_session_id", returnSessionID,
+		)
+	}
+
+	slog.Debug("RAG chat response received",
+		"request_id", requestID,
+		"session_id", returnSessionID,
+		"answer_length", len(chatResp.Answer),
+		"sources_count", len(chatResp.Sources),
+	)
 
 	// Convert sources from datatypes to ux format
 	sources := make([]ux.SourceInfo, len(chatResp.Sources))
@@ -406,14 +501,18 @@ func (s *ragChatService) SendMessage(message string) (*ChatServiceResponse, erro
 		}
 	}
 
-	return NewChatServiceResponse(chatResp.Answer, s.sessionID, sources), nil
+	return NewChatServiceResponse(chatResp.Answer, returnSessionID, sources), nil
 }
 
 // GetSessionID returns the current session ID.
 //
 // Returns empty string if no session has been established yet.
 // After the first successful SendMessage, returns the server-assigned session ID.
+//
+// Thread Safety: Uses mutex to protect sessionID access.
 func (s *ragChatService) GetSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.sessionID
 }
 
@@ -444,6 +543,11 @@ func (s *ragChatService) Close() error {
 //   - Assistant responses are appended after successful responses
 //   - On error, the last user message is removed to maintain consistency
 //
+// Thread Safety:
+//
+//	This implementation is thread-safe. The mutex protects messages slice
+//	and sessionID from concurrent access.
+//
 // Fields:
 //   - client: HTTP client for making requests
 //   - baseURL: Base URL of the orchestrator service
@@ -451,6 +555,7 @@ func (s *ragChatService) Close() error {
 //   - messages: Conversation history (system + user + assistant messages)
 //   - enableThinking: Enable extended thinking mode (Claude only)
 //   - budgetTokens: Token budget for thinking mode
+//   - mu: Mutex protecting messages and sessionID
 type directChatService struct {
 	client         HTTPClient
 	baseURL        string
@@ -458,6 +563,7 @@ type directChatService struct {
 	messages       []datatypes.Message
 	enableThinking bool
 	budgetTokens   int
+	mu             sync.Mutex
 }
 
 // DirectChatServiceConfig contains configuration for creating a directChatService.
@@ -549,8 +655,24 @@ func NewDirectChatServiceWithClient(client HTTPClient, config DirectChatServiceC
 //	If any step fails after adding the user message, the message is removed
 //	from history to maintain consistency. This ensures the next SendMessage
 //	call doesn't include a dangling user message.
-func (s *directChatService) SendMessage(message string) (*ChatServiceResponse, error) {
-	url := fmt.Sprintf("%s/v1/chat/direct", s.baseURL)
+//
+// Thread Safety: Uses mutex to protect messages slice access.
+// Logging: Logs request/response events for audit trail.
+func (s *directChatService) SendMessage(ctx context.Context, message string) (*ChatServiceResponse, error) {
+	requestID := uuid.New().String()
+	targetURL := fmt.Sprintf("%s/v1/chat/direct", s.baseURL)
+
+	// Lock for the entire operation to maintain message history consistency
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	slog.Debug("sending direct chat message",
+		"request_id", requestID,
+		"session_id", s.sessionID,
+		"message_length", len(message),
+		"history_length", len(s.messages),
+		"thinking_enabled", s.enableThinking,
+	)
 
 	// Add user message to history
 	s.messages = append(s.messages, datatypes.Message{Role: "user", Content: message})
@@ -563,51 +685,85 @@ func (s *directChatService) SendMessage(message string) (*ChatServiceResponse, e
 
 	postBody, err := json.Marshal(reqBody)
 	if err != nil {
-		s.removeLastMessage()
+		slog.Error("failed to marshal direct chat request",
+			"request_id", requestID,
+			"error", err,
+		)
+		s.removeLastMessageLocked()
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := s.client.Post(url, "application/json", bytes.NewBuffer(postBody))
+	resp, err := s.client.Post(ctx, targetURL, "application/json", bytes.NewBuffer(postBody))
 	if err != nil {
-		s.removeLastMessage()
+		slog.Error("direct chat HTTP request failed",
+			"request_id", requestID,
+			"url", targetURL,
+			"error", err,
+		)
+		s.removeLastMessageLocked()
 		return nil, fmt.Errorf("http post: %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		s.removeLastMessage()
+		slog.Error("failed to read direct chat response body",
+			"request_id", requestID,
+			"error", err,
+		)
+		s.removeLastMessageLocked()
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		s.removeLastMessage()
+		slog.Error("direct chat server returned error",
+			"request_id", requestID,
+			"status_code", resp.StatusCode,
+			"response_body", string(bodyBytes),
+		)
+		s.removeLastMessageLocked()
 		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var chatResp DirectChatResponse
 	if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
-		s.removeLastMessage()
+		slog.Error("failed to parse direct chat response",
+			"request_id", requestID,
+			"error", err,
+		)
+		s.removeLastMessageLocked()
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
 	if chatResp.Answer == "" {
-		s.removeLastMessage()
+		slog.Warn("direct chat server returned empty response",
+			"request_id", requestID,
+		)
+		s.removeLastMessageLocked()
 		return nil, fmt.Errorf("empty response from server")
 	}
 
 	// Add assistant response to history
 	s.messages = append(s.messages, datatypes.Message{Role: "assistant", Content: chatResp.Answer})
 
+	slog.Debug("direct chat response received",
+		"request_id", requestID,
+		"session_id", s.sessionID,
+		"answer_length", len(chatResp.Answer),
+		"new_history_length", len(s.messages),
+	)
+
 	// Direct chat has no sources
 	return NewChatServiceResponse(chatResp.Answer, s.sessionID, nil), nil
 }
 
-// removeLastMessage removes the last message from history.
+// removeLastMessageLocked removes the last message from history.
 //
 // Called on error to maintain message history consistency.
 // Safe to call even if messages is empty.
-func (s *directChatService) removeLastMessage() {
+//
+// MUST be called while holding s.mu lock.
+func (s *directChatService) removeLastMessageLocked() {
 	if len(s.messages) > 0 {
 		s.messages = s.messages[:len(s.messages)-1]
 	}
@@ -617,7 +773,11 @@ func (s *directChatService) removeLastMessage() {
 //
 // For direct chat, this is purely for client tracking and is not used by
 // the server.
+//
+// Thread Safety: Uses mutex to protect sessionID access.
 func (s *directChatService) GetSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.sessionID
 }
 
@@ -634,7 +794,8 @@ func (s *directChatService) Close() error {
 // the message history, allowing continuation of a previous conversation.
 //
 // Parameters:
-//   - sessionID: The session ID to resume
+//   - ctx: Context for cancellation and timeout control
+//   - sessionID: The session ID to resume (will be URL-escaped for security)
 //
 // Returns:
 //   - int: Number of conversation turns loaded
@@ -644,24 +805,47 @@ func (s *directChatService) Close() error {
 //   - Replaces current message history with loaded history
 //   - Updates sessionID to the provided value
 //
+// Security:
+//   - SessionID is URL-escaped to prevent path traversal attacks
+//   - All state mutations are protected by mutex
+//
 // Example:
 //
 //	service := NewDirectChatService(config)
-//	turns, err := service.LoadSessionHistory("sess-abc123")
+//	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+//	defer cancel()
+//	turns, err := service.LoadSessionHistory(ctx, "sess-abc123")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //	fmt.Printf("Loaded %d previous turns\n", turns)
-func (s *directChatService) LoadSessionHistory(sessionID string) (int, error) {
-	historyURL := fmt.Sprintf("%s/v1/sessions/%s/history", s.baseURL, sessionID)
+func (s *directChatService) LoadSessionHistory(ctx context.Context, sessionID string) (int, error) {
+	// SECURITY: Escape sessionID to prevent path traversal attacks
+	// e.g., "../../../admin" becomes "..%2F..%2F..%2Fadmin"
+	escapedSessionID := url.PathEscape(sessionID)
+	historyURL := fmt.Sprintf("%s/v1/sessions/%s/history", s.baseURL, escapedSessionID)
 
-	resp, err := s.client.Get(historyURL)
+	slog.Debug("loading session history",
+		"session_id", sessionID,
+		"escaped_session_id", escapedSessionID,
+		"url", historyURL,
+	)
+
+	resp, err := s.client.Get(ctx, historyURL)
 	if err != nil {
+		slog.Error("failed to load session history",
+			"session_id", sessionID,
+			"error", err,
+		)
 		return 0, fmt.Errorf("http get: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		slog.Error("session history request failed",
+			"session_id", sessionID,
+			"status_code", resp.StatusCode,
+		)
 		return 0, fmt.Errorf("failed to get history (status %d)", resp.StatusCode)
 	}
 
@@ -672,13 +856,24 @@ func (s *directChatService) LoadSessionHistory(sessionID string) (int, error) {
 	}
 	var historyResp map[string]map[string][]HistoryTurn
 	if err := json.NewDecoder(resp.Body).Decode(&historyResp); err != nil {
+		slog.Error("failed to parse session history",
+			"session_id", sessionID,
+			"error", err,
+		)
 		return 0, fmt.Errorf("parse history: %w", err)
 	}
 
 	history, ok := historyResp["Get"]["Conversation"]
 	if !ok {
+		slog.Warn("no conversation data in history response",
+			"session_id", sessionID,
+		)
 		return 0, fmt.Errorf("no conversation data in history response")
 	}
+
+	// Lock for state mutation
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Reset messages and rebuild from history
 	s.messages = make([]datatypes.Message, 0, len(history)*2+1)
@@ -693,5 +888,12 @@ func (s *directChatService) LoadSessionHistory(sessionID string) (int, error) {
 	}
 
 	s.sessionID = sessionID
+
+	slog.Info("session history loaded",
+		"session_id", sessionID,
+		"turns_loaded", len(history),
+		"total_messages", len(s.messages),
+	)
+
 	return len(history), nil
 }

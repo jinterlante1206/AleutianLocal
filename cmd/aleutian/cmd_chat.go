@@ -13,6 +13,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -147,7 +148,8 @@ func runRAGChatLoop(baseURL, resumeID string) {
 		spinner := ux.NewSpinner("Searching knowledge base...")
 		spinner.Start()
 
-		resp, err := service.SendMessage(input)
+		// Use background context - CLI doesn't need cancellation
+		resp, err := service.SendMessage(context.Background(), input)
 		spinner.Stop()
 
 		if err != nil {
@@ -193,7 +195,7 @@ func runDirectChatLoop(baseURL, resumeID string) {
 
 	// Load session history if resuming
 	if resumeID != "" {
-		turns, err := service.LoadSessionHistory(resumeID)
+		turns, err := service.LoadSessionHistory(context.Background(), resumeID)
 		if err != nil {
 			log.Fatalf("Failed to load session history: %v", err)
 		}
@@ -222,7 +224,8 @@ func runDirectChatLoop(baseURL, resumeID string) {
 		spinner := ux.NewSpinner("Thinking...")
 		spinner.Start()
 
-		resp, err := service.SendMessage(input)
+		// Use background context - CLI doesn't need cancellation
+		resp, err := service.SendMessage(context.Background(), input)
 		spinner.Stop()
 
 		if err != nil {
