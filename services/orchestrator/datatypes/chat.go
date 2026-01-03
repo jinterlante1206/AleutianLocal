@@ -138,6 +138,12 @@ func validateMaxBytes(fl validator.FieldLevel) bool {
 //   - RequestID is generated client-side (UUID v4)
 //   - Timestamp is Unix UTC timestamp in milliseconds
 //
+// # Hash Chain
+//
+// ContentHash contains SHA-256 hash of the messages content for integrity
+// verification. The server computes this on receipt and includes it in
+// audit logs.
+//
 // # Security References
 //
 //   - SEC-003: Message size limits (security_architecture_review.md)
@@ -149,6 +155,7 @@ type DirectChatRequest struct {
 	EnableThinking bool          `json:"enable_thinking"`
 	BudgetTokens   int           `json:"budget_tokens" validate:"gte=0,lte=65536"`
 	Tools          []interface{} `json:"tools,omitempty"`
+	ContentHash    string        `json:"content_hash,omitempty"`
 }
 
 // Validate validates the DirectChatRequest fields.
@@ -234,6 +241,12 @@ func (r *DirectChatRequest) EnsureDefaults() {
 //
 //   - ThinkingContent only populated for Claude with extended thinking
 //
+// # Hash Chain
+//
+// ContentHash is SHA-256 hash of the answer content for integrity verification.
+// ChainHash is the final hash if this response was generated via streaming
+// (accumulated from all StreamEvent hashes).
+//
 // # Database Schema Alignment
 //
 //   - ResponseID: Primary key for responses table
@@ -247,6 +260,8 @@ type DirectChatResponse struct {
 	ThinkingContent  string      `json:"thinking,omitempty"`
 	Usage            *TokenUsage `json:"usage,omitempty"`
 	ProcessingTimeMs int64       `json:"processing_time_ms,omitempty"`
+	ContentHash      string      `json:"content_hash,omitempty"`
+	ChainHash        string      `json:"chain_hash,omitempty"`
 }
 
 // NewDirectChatResponse creates a new DirectChatResponse with auto-generated

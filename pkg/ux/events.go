@@ -187,6 +187,14 @@ type StreamEvent struct {
 	// RequestID correlates this event with the originating request.
 	// May be set by the server or propagated from the request.
 	RequestID string `json:"request_id,omitempty"`
+
+	// Hash is the SHA-256 hash of this event for tamper-evident logging.
+	// Formula: SHA256(Content || CreatedAt || PrevHash)
+	Hash string `json:"hash,omitempty"`
+
+	// PrevHash is the hash of the previous event in the chain.
+	// First event has empty PrevHash; subsequent events chain to previous.
+	PrevHash string `json:"prev_hash,omitempty"`
 }
 
 // IsTerminal returns true if this event ends the stream.
@@ -270,6 +278,15 @@ type StreamResult struct {
 
 	// FirstTokenAt is when the first token event arrived (Unix ms).
 	FirstTokenAt int64 `json:"first_token_at,omitempty"`
+
+	// ChainHash is the final hash of the event chain.
+	// This is the Hash from the last (done/error) event.
+	// Used to verify the complete stream integrity.
+	ChainHash string `json:"chain_hash,omitempty"`
+
+	// ContentHash is SHA-256 hash of the accumulated answer content.
+	// Used for content integrity verification separate from the chain.
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // HasError returns true if the stream ended with an error.

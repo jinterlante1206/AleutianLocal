@@ -1,52 +1,155 @@
- flowchart TB
-      subgraph "User Layer"
-          CLI[cmd_chat.go]
-      end
+flowchart TB
+    subgraph CLI["CLI Layer (cmd/aleutian)"]
+        CMD[cmd_chat.go<br/>runChatCommand]
 
-      subgraph "Service Layer (cmd/aleutian/)"
-          CS[ChatService<br/>chat_service.go]
-          SCS[StreamingChatService<br/>streaming_service.go]
-      end
+        subgraph Runners["Chat Runners - CONNECTED"]
+            CR[chat_runner.go<br/>ChatRunner Interface]
+            DRC[chat_runner_direct.go<br/>DirectChatRunner]
+            RRC[chat_runner_rag.go<br/>RAGChatRunner]
+        end
 
-      subgraph "Transport Layer"
-          HTTP1[HTTP POST<br/>/v1/chat/rag]
-          HTTP2[HTTP POST<br/>/v1/chat/rag/stream]
-          HTTP3[HTTP POST<br/>/v1/chat/direct]
-          HTTP4[HTTP POST<br/>/v1/chat/direct/stream]
-      end
+        subgraph BlockingServices["Blocking Services - CONNECTED"]
+            CS[chat_service.go<br/>Blocking HTTP]
+        end
 
-      subgraph "Streaming Infrastructure (pkg/ux/)"
-          Parser[SSEParser<br/>parser.go]
-          Reader[SSEStreamReader<br/>reader.go]
-          Renderer[StreamRenderer<br/>renderer.go]
-          Events[StreamEvent<br/>events.go]
-      end
+        subgraph StreamingServices["Streaming Services - PENDING CLI WIRE"]
+            SS[streaming_service.go<br/>SSE Client]
+        end
+    end
 
-      subgraph "Output"
-          Term[Terminal]
-          Result[StreamResult]
-      end
+    subgraph UX["UX Layer (pkg/ux)"]
+        subgraph UXConnected["CONNECTED"]
+            SP[spinner.go]
+            CU[chat_ui.go]
+            ST[styles.go]
+        end
 
-      CLI -->|non-streaming| CS
-      CLI -->|streaming| SCS
+        subgraph UXPending["PENDING CLI WIRE"]
+            EV[events.go]
+            PA[parser.go]
+            RD[reader.go]
+            RN[renderer.go<br/>StreamRenderer]
+        end
+    end
 
-      CS --> HTTP1
-      CS --> HTTP3
-      HTTP1 -->|JSON| CS
-      HTTP3 -->|JSON| CS
+    subgraph Server["Orchestrator (services/orchestrator)"]
+        subgraph Routes["routes.go"]
+            R1[POST /v1/chat/direct]
+            R2[POST /v1/chat/rag]
+            R3[POST /v1/chat/direct/stream<br/>IMPLEMENTED]
+            R4[POST /v1/chat/rag/stream<br/>IMPLEMENTED]
+            R5[GET /metrics<br/>IMPLEMENTED]
+        end
 
-      SCS --> HTTP2
-      SCS --> HTTP4
-      HTTP2 -->|SSE stream| Parser
-      HTTP4 -->|SSE stream| Parser
+        subgraph Handlers["handlers/"]
+            subgraph BlockingHandlers["chat.go"]
+                CHI[ChatHandler Interface]
+                HDC[HandleDirectChat]
+                HCR[HandleChatRAG]
+            end
+            subgraph StreamingHandlers["chat_streaming.go - NEW"]
+                SCHI[StreamingChatHandler]
+                HDCS[HandleDirectChatStream]
+                HCRS[HandleChatRAGStream]
+            end
+            subgraph SSEWriter["sse_writer.go - NEW"]
+                SSEW[SSE Writer<br/>Hash Chain + Keepalive]
+            end
+        end
 
-      Parser -->|StreamEvent| Reader
-      Reader -->|callback| SCS
-      SCS -->|route events| Renderer
+        subgraph Observability["observability/ - NEW"]
+            MET[metrics.go<br/>Prometheus Metrics]
+        end
 
-      Renderer --> Term
-      Renderer --> Result
+        subgraph DataTypes["datatypes/"]
+            DCReq[DirectChatRequest]
+            DCRes[DirectChatResponse]
+            CRReq[ChatRAGRequest]
+            CRRes[ChatRAGResponse]
+            MSG[Message]
+        end
 
-      Events -.->|data types| Parser
-      Events -.->|data types| Reader
-      Events -.->|data types| Renderer
+        subgraph BizLogic["services/"]
+            CRAGS[ChatRAGService]
+        end
+    end
+
+    subgraph External["External Services"]
+        LLM[(LLM Provider)]
+        WV[(Weaviate<br/>Vector DB)]
+    end
+
+    %% Current working flow (green path)
+    CMD --> CR
+    CR --> DRC & RRC
+    DRC --> CS
+    RRC --> CS
+    CS -->|HTTP POST| R1 & R2
+
+    %% Streaming flow (would work with CLI wire-up)
+    SS -.->|SSE| R3 & R4
+    SS -.-> EV & PA & RD & RN
+
+    %% Connected UX
+    DRC --> SP & CU
+    RRC --> SP & CU
+
+    %% Blocking handler internals
+    R1 --> HDC
+    R2 --> HCR
+    HDC --> DCReq & DCRes
+    HCR --> CRReq & CRRes & CRAGS
+    CRAGS --> WV
+    HDC & HCR --> LLM
+
+    %% Streaming handler internals
+    R3 --> HDCS
+    R4 --> HCRS
+    HDCS --> SSEW
+    HCRS --> SSEW
+    HDCS & HCRS --> LLM
+    HDCS & HCRS --> MET
+    SSEW --> MET
+
+    %% Metrics endpoint
+    R5 --> MET
+
+    %% Styling - Implemented components (green)
+    style CMD fill:#4ade80,stroke:#166534
+    style CR fill:#4ade80,stroke:#166534
+    style DRC fill:#4ade80,stroke:#166534
+    style RRC fill:#4ade80,stroke:#166534
+    style CS fill:#4ade80,stroke:#166534
+    style SP fill:#4ade80,stroke:#166534
+    style CU fill:#4ade80,stroke:#166534
+    style ST fill:#4ade80,stroke:#166534
+    style R1 fill:#4ade80,stroke:#166534
+    style R2 fill:#4ade80,stroke:#166534
+    style R3 fill:#4ade80,stroke:#166534
+    style R4 fill:#4ade80,stroke:#166534
+    style R5 fill:#4ade80,stroke:#166534
+    style CHI fill:#4ade80,stroke:#166534
+    style HDC fill:#4ade80,stroke:#166534
+    style HCR fill:#4ade80,stroke:#166534
+    style SCHI fill:#4ade80,stroke:#166534
+    style HDCS fill:#4ade80,stroke:#166534
+    style HCRS fill:#4ade80,stroke:#166534
+    style SSEW fill:#4ade80,stroke:#166534
+    style DCReq fill:#4ade80,stroke:#166534
+    style DCRes fill:#4ade80,stroke:#166534
+    style CRReq fill:#4ade80,stroke:#166534
+    style CRRes fill:#4ade80,stroke:#166534
+    style MSG fill:#4ade80,stroke:#166534
+    style CRAGS fill:#4ade80,stroke:#166534
+    style LLM fill:#4ade80,stroke:#166534
+    style WV fill:#4ade80,stroke:#166534
+
+    %% Observability (blue)
+    style MET fill:#60a5fa,stroke:#1d4ed8
+
+    %% Pending CLI wire-up (orange)
+    style SS fill:#fb923c,stroke:#c2410c
+    style EV fill:#fb923c,stroke:#c2410c
+    style PA fill:#fb923c,stroke:#c2410c
+    style RD fill:#fb923c,stroke:#c2410c
+    style RN fill:#fb923c,stroke:#c2410c

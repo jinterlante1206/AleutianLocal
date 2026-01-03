@@ -22,11 +22,29 @@ const (
 	ChatModeDirect
 )
 
-// SourceInfo represents a source citation from RAG
+// SourceInfo represents a source citation from RAG retrieval.
+//
+// # Description
+//
+// SourceInfo captures metadata about a document retrieved during RAG
+// processing. Each source has a unique ID and timestamp for database
+// storage and audit trails.
+//
+// # Fields
+//
+//   - Id: Unique identifier for this source record (UUID v4).
+//   - CreatedAt: Unix timestamp in milliseconds when source was retrieved.
+//   - Source: Document name, path, or URL identifying the source.
+//   - Distance: Vector distance (lower = more similar). Used by some pipelines.
+//   - Score: Relevance score (higher = more relevant). Used by reranking pipelines.
+//   - Hash: SHA-256 hash of source content for tamper detection.
 type SourceInfo struct {
-	Source   string
-	Distance float64
-	Score    float64
+	Id        string
+	CreatedAt int64
+	Source    string
+	Distance  float64
+	Score     float64
+	Hash      string
 }
 
 // ChatUI defines the interface for chat user interface operations.

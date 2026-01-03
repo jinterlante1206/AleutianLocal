@@ -64,6 +64,18 @@ func (m *MockLLMClient) Generate(ctx context.Context, prompt string, params llm.
 	return "", nil
 }
 
+// ChatStream implements llm.LLMClient.ChatStream for testing.
+// Returns an error indicating streaming is not implemented in mock.
+func (m *MockLLMClient) ChatStream(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams, callback llm.StreamCallback) error {
+	// For testing, emit the ChatResponse as a single token if set
+	if m.ChatResponse != "" {
+		if err := callback(llm.StreamEvent{Type: llm.StreamEventToken, Content: m.ChatResponse}); err != nil {
+			return err
+		}
+	}
+	return m.ChatError
+}
+
 // createTestChatHandler creates a ChatHandler with mock dependencies for testing.
 //
 // # Inputs

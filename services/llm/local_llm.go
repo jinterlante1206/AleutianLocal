@@ -122,3 +122,33 @@ func (l *LocalLlamaCppClient) Chat(ctx context.Context, messages []datatypes.Mes
 	slog.Warn("LocalLlamaCppClient.Chat is not fully implemented yet. Using Generate with last message.")
 	return "", fmt.Errorf("chat method not implemented for LocalLlamaCppClient")
 }
+
+// ChatStream streams a conversation response token-by-token.
+//
+// # Description
+//
+// Currently not implemented for LocalLlamaCppClient. Returns an error
+// indicating that streaming is not supported for this backend.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout.
+//   - messages: Conversation history.
+//   - params: Generation parameters.
+//   - callback: Callback for streaming events.
+//
+// # Outputs
+//
+//   - error: Always returns ErrStreamingNotSupported.
+//
+// # Limitations
+//
+//   - Streaming is not implemented for llama.cpp backend.
+//
+// # Assumptions
+//
+//   - None.
+func (l *LocalLlamaCppClient) ChatStream(ctx context.Context, messages []datatypes.Message,
+	params GenerationParams, callback StreamCallback) error {
+	return fmt.Errorf("streaming not supported for LocalLlamaCppClient")
+}

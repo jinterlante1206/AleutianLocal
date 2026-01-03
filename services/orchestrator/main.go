@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/observability"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/routes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
@@ -96,6 +97,10 @@ func main() {
 		log.Fatalf("failed to setup the OTLP tracer: %v", err)
 	}
 	defer cleanup(context.Background())
+
+	// --- Init Prometheus metrics ---
+	observability.InitMetrics()
+	slog.Info("Initialized Prometheus metrics for streaming")
 
 	weaviateURL := os.Getenv("WEAVIATE_SERVICE_URL")
 	// Sanitize: Trim quotes and whitespace just in case Podman passes them literally

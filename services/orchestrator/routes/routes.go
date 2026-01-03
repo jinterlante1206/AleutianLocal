@@ -18,6 +18,7 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
@@ -46,6 +47,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 	policyEngine *policy_engine.PolicyEngine) {
 
 	router.GET("/health", handlers.HealthCheck)
+	router.GET("/metrics", gin.WrapH(promhttp.Handler())) // Prometheus metrics
 	router.StaticFS("/ui", http.Dir("/app/ui"))
 
 	// Add a friendly redirect from /chat to the actual HTML file
@@ -61,11 +63,15 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 	}
 	chatHandler := handlers.NewChatHandler(globalLLMClient, policyEngine, chatRAGService)
 
+	// Create StreamingChatHandler for SSE streaming endpoints
+	streamingHandler := handlers.NewStreamingChatHandler(globalLLMClient, policyEngine, chatRAGService)
+
 	// API version 1 group
 	v1 := router.Group("/v1")
 	{
 		// Chat endpoints using the new ChatHandler interface
 		v1.POST("/chat/direct", chatHandler.HandleDirectChat)
+		v1.POST("/chat/direct/stream", streamingHandler.HandleDirectChatStream)
 
 		v1.POST("/timeseries/forecast", handlers.HandleTimeSeriesForecast())
 		v1.POST("/data/fetch", handlers.HandleDataFetch())
@@ -76,7 +82,8 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		// Vector DB-dependent routes (requires Weaviate client)
 		if client != nil {
 			v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient, policyEngine))
-			v1.POST("/chat/rag", chatHandler.HandleChatRAG) // Conversational RAG (default for CLI)
+			v1.POST("/chat/rag", chatHandler.HandleChatRAG)                   // Conversational RAG (default for CLI)
+			v1.POST("/chat/rag/stream", streamingHandler.HandleChatRAGStream) // Streaming RAG
 			v1.POST("/documents", handlers.CreateDocument(client))
 			v1.GET("/documents", handlers.ListDocuments(client))
 			v1.DELETE("/document", handlers.DeleteBySource(client))

@@ -263,3 +263,33 @@ func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
 	}
 	return ollamaResp.Message.Content, nil
 }
+
+// ChatStream streams a conversation response token-by-token.
+//
+// # Description
+//
+// Currently not implemented for OllamaClient. Returns an error
+// indicating that streaming is not supported for this backend.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout.
+//   - messages: Conversation history.
+//   - params: Generation parameters.
+//   - callback: Callback for streaming events.
+//
+// # Outputs
+//
+//   - error: Always returns ErrStreamingNotSupported.
+//
+// # Limitations
+//
+//   - Streaming is not implemented for Ollama backend.
+//
+// # Assumptions
+//
+//   - None.
+func (o *OllamaClient) ChatStream(ctx context.Context, messages []datatypes.Message,
+	params GenerationParams, callback StreamCallback) error {
+	return fmt.Errorf("streaming not supported for OllamaClient")
+}

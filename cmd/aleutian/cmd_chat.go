@@ -45,15 +45,9 @@ type DirectChatResponse struct {
 }
 
 type RAGResponse struct {
-	Answer    string       `json:"answer"`
-	SessionId string       `json:"session_id"`
-	Sources   []SourceInfo `json:"sources,omitempty"`
-}
-
-type SourceInfo struct {
-	Source   string  `json:"source"`
-	Distance float64 `json:"distance,omitempty"`
-	Score    float64 `json:"score,omitempty"`
+	Answer    string                 `json:"answer"`
+	SessionId string                 `json:"session_id"`
+	Sources   []datatypes.SourceInfo `json:"sources,omitempty"`
 }
 
 type PodmanStats struct {
