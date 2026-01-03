@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -72,7 +73,7 @@ import (
 //   - Session ID (if provided) exists on server
 //   - UI is ready for output
 type DirectChatRunner struct {
-	service   *directChatService
+	service   *directStreamingChatService // Concrete type for LoadSessionHistory access
 	ui        ux.ChatUI
 	input     InputReader
 	sessionID string
@@ -143,12 +144,14 @@ func NewDirectChatRunner(config DirectChatRunnerConfig) ChatRunner {
 		budgetTokens = 2048
 	}
 
-	// Create production dependencies
-	service := NewDirectChatService(DirectChatServiceConfig{
+	// Create production dependencies - streaming service for real-time output
+	service := NewDirectStreamingChatService(DirectStreamingChatServiceConfig{
 		BaseURL:        config.BaseURL,
 		SessionID:      config.SessionID,
 		EnableThinking: config.EnableThinking,
 		BudgetTokens:   budgetTokens,
+		Writer:         os.Stdout,
+		Personality:    personality,
 	})
 
 	ui := ux.NewChatUI()
@@ -172,7 +175,7 @@ func NewDirectChatRunner(config DirectChatRunnerConfig) ChatRunner {
 //
 // # Inputs
 //
-//   - service: *directChatService implementation (concrete type for LoadSessionHistory)
+//   - service: *directStreamingChatService implementation (concrete type for LoadSessionHistory)
 //   - ui: ChatUI instance (can use NewChatUIWithWriter for testing)
 //   - input: InputReader implementation (use MockInputReader for testing)
 //   - sessionID: Session ID for resume (empty for new sessions)
@@ -184,7 +187,7 @@ func NewDirectChatRunner(config DirectChatRunnerConfig) ChatRunner {
 // # Examples
 //
 //	// Test setup with mock service
-//	mockService := NewDirectChatServiceWithClient(mockHTTPClient, config)
+//	mockService := NewDirectStreamingChatServiceWithClient(mockHTTPClient, config)
 //	mockInput := NewMockInputReader([]string{"hello", "exit"})
 //	var buf bytes.Buffer
 //	ui := ux.NewChatUIWithWriter(&buf, ux.PersonalityStandard)
@@ -195,14 +198,14 @@ func NewDirectChatRunner(config DirectChatRunnerConfig) ChatRunner {
 // # Limitations
 //
 //   - Caller is responsible for dependency lifecycle
-//   - Service must be concrete *directChatService type
+//   - Service must be concrete *directStreamingChatService type
 //
 // # Assumptions
 //
 //   - All dependencies are non-nil and properly initialized
 //   - Service is ready to accept messages
 func NewDirectChatRunnerWithDeps(
-	service *directChatService,
+	service *directStreamingChatService,
 	ui ux.ChatUI,
 	input InputReader,
 	sessionID string,
@@ -374,9 +377,10 @@ func (r *DirectChatRunner) loadHistory(ctx context.Context) error {
 //
 // # Description
 //
-// Sends the message to the direct chat service and displays the response.
-// Shows a spinner while waiting for the response. Unlike RAG mode,
-// direct chat does not display sources.
+// Sends the message to the direct streaming service. The response is
+// rendered in real-time as tokens arrive via the StreamRenderer.
+// No spinner is needed since tokens appear immediately.
+// Unlike RAG mode, direct chat does not display sources.
 //
 // # Inputs
 //
@@ -389,26 +393,21 @@ func (r *DirectChatRunner) loadHistory(ctx context.Context) error {
 //
 // # Limitations
 //
-//   - Spinner cannot be cancelled mid-animation
+//   - Streaming requires server SSE support
 //
 // # Assumptions
 //
 //   - Message is non-empty (caller validates)
 func (r *DirectChatRunner) handleMessage(ctx context.Context, message string) error {
-	// Show spinner during request
-	spinner := ux.NewSpinner("Thinking...")
-	spinner.Start()
-
-	// Send message to service
-	resp, err := r.service.SendMessage(ctx, message)
-	spinner.Stop()
-
+	// Streaming service renders tokens in real-time via StreamRenderer
+	// No spinner needed - user sees tokens as they arrive
+	_, err := r.service.SendMessage(ctx, message)
 	if err != nil {
 		return err
 	}
 
-	// Display response (direct chat has no sources)
-	r.ui.Response(resp.Answer)
+	// Response already displayed during streaming
+	// via StreamRenderer.OnToken(), OnDone() callbacks
 	fmt.Println()
 
 	return nil

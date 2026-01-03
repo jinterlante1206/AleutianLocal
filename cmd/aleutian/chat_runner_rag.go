@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -70,7 +71,7 @@ import (
 //   - UI is ready for output (terminal is available)
 //   - Context cancellation is set up by caller for graceful shutdown
 type RAGChatRunner struct {
-	service          ChatService
+	service          StreamingChatService
 	ui               ux.ChatUI
 	input            InputReader
 	pipeline         string
@@ -133,11 +134,13 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		personality = ux.GetPersonality().Level
 	}
 
-	// Create production dependencies
-	service := NewRAGChatService(RAGChatServiceConfig{
-		BaseURL:   config.BaseURL,
-		SessionID: config.SessionID,
-		Pipeline:  pipeline,
+	// Create production dependencies - streaming service for real-time output
+	service := NewRAGStreamingChatService(RAGStreamingChatServiceConfig{
+		BaseURL:     config.BaseURL,
+		SessionID:   config.SessionID,
+		Pipeline:    pipeline,
+		Writer:      os.Stdout,
+		Personality: personality,
 	})
 
 	ui := ux.NewChatUI()
@@ -162,7 +165,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 //
 // # Inputs
 //
-//   - service: ChatService implementation (real or mock)
+//   - service: StreamingChatService implementation (real or mock)
 //   - ui: ChatUI instance (can use NewChatUIWithWriter for testing)
 //   - input: InputReader implementation (use MockInputReader for testing)
 //   - pipeline: Pipeline name for display in header
@@ -174,9 +177,9 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 // # Examples
 //
 //	// Test setup
-//	mockService := &mockChatService{
-//	    sendMessageFunc: func(ctx context.Context, msg string) (*ChatServiceResponse, error) {
-//	        return &ChatServiceResponse{Answer: "Hello!"}, nil
+//	mockService := &mockStreamingChatService{
+//	    sendMessageFunc: func(ctx context.Context, msg string) (*ux.StreamResult, error) {
+//	        return &ux.StreamResult{Answer: "Hello!"}, nil
 //	    },
 //	}
 //	mockInput := NewMockInputReader([]string{"hello", "exit"})
@@ -196,7 +199,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 //   - All dependencies are non-nil and properly initialized
 //   - Service is ready to accept messages
 func NewRAGChatRunnerWithDeps(
-	service ChatService,
+	service StreamingChatService,
 	ui ux.ChatUI,
 	input InputReader,
 	pipeline string,
@@ -321,8 +324,9 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 //
 // # Description
 //
-// Sends the message to the RAG service and displays the response.
-// Shows a spinner while waiting for the response.
+// Sends the message to the RAG streaming service. The response is
+// rendered in real-time as tokens arrive via the StreamRenderer.
+// No spinner is needed since tokens appear immediately.
 //
 // # Inputs
 //
@@ -335,33 +339,21 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 //
 // # Limitations
 //
-//   - Spinner cannot be cancelled mid-animation
+//   - Streaming requires server SSE support
 //
 // # Assumptions
 //
 //   - Message is non-empty (caller validates)
 func (r *RAGChatRunner) handleMessage(ctx context.Context, message string) error {
-	// Show spinner during request
-	spinner := ux.NewSpinner("Searching knowledge base...")
-	spinner.Start()
-
-	// Send message to service
-	resp, err := r.service.SendMessage(ctx, message)
-	spinner.Stop()
-
+	// Streaming service renders tokens in real-time via StreamRenderer
+	// No spinner needed - user sees tokens as they arrive
+	_, err := r.service.SendMessage(ctx, message)
 	if err != nil {
 		return err
 	}
 
-	// Display response
-	r.ui.Response(resp.Answer)
-
-	// Display sources if available
-	if len(resp.Sources) > 0 {
-		r.ui.Sources(resp.Sources)
-	} else {
-		r.ui.NoSources()
-	}
+	// Response and sources already displayed during streaming
+	// via StreamRenderer.OnToken(), OnSources(), OnDone() callbacks
 	fmt.Println()
 
 	return nil
