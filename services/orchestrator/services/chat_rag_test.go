@@ -56,6 +56,19 @@ func (m *MockLLMClient) Generate(ctx context.Context, prompt string, params llm.
 	return "", nil
 }
 
+// ChatStream implements the llm.LLMClient interface for testing.
+// Emits ChatResponse as a single token event.
+func (m *MockLLMClient) ChatStream(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams, callback llm.StreamCallback) error {
+	m.ChatCallCount++
+	m.LastMessages = messages
+	if m.ChatResponse != "" {
+		if err := callback(llm.StreamEvent{Type: llm.StreamEventToken, Content: m.ChatResponse}); err != nil {
+			return err
+		}
+	}
+	return m.ChatError
+}
+
 // =============================================================================
 // NewChatRAGService Tests
 // =============================================================================

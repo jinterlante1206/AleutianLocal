@@ -1,6 +1,17 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -247,4 +258,369 @@ func (a *AnthropicClient) Chat(ctx context.Context, messages []datatypes.Message
 	}
 
 	return finalText, nil
+}
+
+// =============================================================================
+// Streaming Types (for SSE parsing)
+// =============================================================================
+
+// anthropicStreamEvent represents a single SSE event from Anthropic.
+type anthropicStreamEvent struct {
+	Type string `json:"type"`
+}
+
+// anthropicContentBlockDelta contains delta content for streaming.
+type anthropicContentBlockDelta struct {
+	Type  string                `json:"type"`
+	Index int                   `json:"index"`
+	Delta anthropicDeltaContent `json:"delta"`
+}
+
+// anthropicDeltaContent contains the actual text delta.
+type anthropicDeltaContent struct {
+	Type     string `json:"type"` // "text_delta" or "thinking_delta"
+	Text     string `json:"text,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
+}
+
+// anthropicMessageDelta contains the message-level delta (stop reason, etc).
+type anthropicMessageDelta struct {
+	Type  string `json:"type"`
+	Delta struct {
+		StopReason string `json:"stop_reason,omitempty"`
+	} `json:"delta"`
+}
+
+// anthropicStreamError represents an error event in the stream.
+type anthropicStreamError struct {
+	Type  string `json:"type"`
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// =============================================================================
+// Streaming Implementation
+// =============================================================================
+
+// ChatStream implements streaming chat for the LLMClient interface.
+//
+// # Description
+//
+// Sends a chat request to Anthropic with streaming enabled, then reads
+// the SSE response line-by-line and calls the callback for each token.
+// Handles both regular text tokens and thinking tokens.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout.
+//   - messages: Conversation history.
+//   - params: Generation parameters.
+//   - callback: Called for each streaming event.
+//
+// # Outputs
+//
+//   - error: Non-nil on network failure, API error, or callback abort.
+//
+// # Examples
+//
+//	err := client.ChatStream(ctx, messages, params, func(e StreamEvent) error {
+//	    if e.Type == StreamEventToken {
+//	        fmt.Print(e.Content)
+//	    }
+//	    return nil
+//	})
+//
+// # Limitations
+//
+//   - Requires valid Anthropic API key
+//   - Timeout applies to entire stream duration
+//
+// # Assumptions
+//
+//   - Anthropic API is available
+//   - Network is stable for stream duration
+func (a *AnthropicClient) ChatStream(
+	ctx context.Context,
+	messages []datatypes.Message,
+	params GenerationParams,
+	callback StreamCallback,
+) error {
+	// Build the streaming request (reuse logic from Chat)
+	reqPayload, err := a.buildStreamRequest(messages, params)
+	if err != nil {
+		return err
+	}
+
+	// Create HTTP request
+	reqBodyBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", defaultBaseURL, bytes.NewBuffer(reqBodyBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("x-api-key", a.apiKey)
+	req.Header.Set("anthropic-version", anthropicAPIVersion)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("accept", "text/event-stream")
+
+	slog.Debug("Sending streaming request to Anthropic", "model", a.model)
+
+	// Use a longer timeout for streaming
+	streamClient := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		// Send error event to callback
+		_ = callback(StreamEvent{Type: StreamEventError, Error: err.Error()})
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		errMsg := fmt.Sprintf("Anthropic API returned status %d", resp.StatusCode)
+		_ = callback(StreamEvent{Type: StreamEventError, Error: errMsg})
+		return fmt.Errorf("%s: %s", errMsg, string(bodyBytes))
+	}
+
+	// Process SSE stream
+	return a.processSSEStream(ctx, resp.Body, callback)
+}
+
+// buildStreamRequest creates the Anthropic request payload with streaming enabled.
+//
+// # Description
+//
+// Builds the request payload similar to Chat but with Stream: true.
+// Extracts system prompts and converts messages to Anthropic format.
+//
+// # Inputs
+//
+//   - messages: Conversation history.
+//   - params: Generation parameters.
+//
+// # Outputs
+//
+//   - anthropicRequest: Request payload ready for JSON marshaling.
+//   - error: Non-nil if construction fails.
+func (a *AnthropicClient) buildStreamRequest(
+	messages []datatypes.Message,
+	params GenerationParams,
+) (anthropicRequest, error) {
+	var apiMessages []anthropicMessage
+	var systemPrompt string
+
+	// Convert generic messages to Anthropic format
+	for _, msg := range messages {
+		if strings.ToLower(msg.Role) == "system" {
+			systemPrompt = msg.Content
+			continue
+		}
+		apiMessages = append(apiMessages, anthropicMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+
+	// Handle System Prompt with Caching
+	var systemBlocks []systemBlock
+	if systemPrompt != "" {
+		block := systemBlock{
+			Type: "text",
+			Text: systemPrompt,
+		}
+		if len(systemPrompt) > 1024 {
+			block.CacheControl = &cacheControl{Type: "ephemeral"}
+		}
+		systemBlocks = append(systemBlocks, block)
+	}
+
+	// Build Payload with streaming enabled
+	reqPayload := anthropicRequest{
+		Model:     a.model,
+		Messages:  apiMessages,
+		System:    systemBlocks,
+		MaxTokens: 4096,
+		Stream:    true, // Enable streaming
+	}
+
+	// Apply optional parameters
+	if params.Temperature != nil {
+		reqPayload.Temperature = params.Temperature
+	}
+	if params.TopP != nil {
+		reqPayload.TopP = params.TopP
+	}
+	if params.TopK != nil {
+		reqPayload.TopK = params.TopK
+	}
+	if len(params.Stop) > 0 {
+		reqPayload.StopSeqs = params.Stop
+	}
+
+	// Handle tools
+	if len(params.ToolDefinitions) > 0 {
+		var tools []toolsDefinition
+		toolBytes, _ := json.Marshal(params.ToolDefinitions)
+		_ = json.Unmarshal(toolBytes, &tools)
+		reqPayload.Tools = tools
+	}
+
+	// Enable Thinking if requested
+	if params.EnableThinking {
+		reqPayload.Thinking = &thinkingParams{
+			Type:         "enabled",
+			BudgetTokens: params.BudgetTokens,
+		}
+		minRequired := params.BudgetTokens + 2048
+		if reqPayload.MaxTokens < minRequired {
+			reqPayload.MaxTokens = minRequired
+		}
+	}
+
+	return reqPayload, nil
+}
+
+// processSSEStream reads and processes the SSE event stream.
+//
+// # Description
+//
+// Reads the SSE stream line-by-line, parses events, and calls the
+// callback for token and thinking events. Handles errors gracefully
+// by calling the callback with an error event.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation.
+//   - body: HTTP response body containing SSE events.
+//   - callback: Called for each streaming event.
+//
+// # Outputs
+//
+//   - error: Non-nil on parse error, stream error, or callback abort.
+func (a *AnthropicClient) processSSEStream(
+	ctx context.Context,
+	body io.Reader,
+	callback StreamCallback,
+) error {
+	scanner := bufio.NewScanner(body)
+	var eventType string
+	var dataBuffer strings.Builder
+
+	for scanner.Scan() {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			_ = callback(StreamEvent{Type: StreamEventError, Error: "stream cancelled"})
+			return ctx.Err()
+		default:
+		}
+
+		line := scanner.Text()
+
+		// Empty line signals end of event
+		if line == "" {
+			if dataBuffer.Len() > 0 && eventType != "" {
+				if err := a.handleSSEEvent(eventType, dataBuffer.String(), callback); err != nil {
+					return err
+				}
+				dataBuffer.Reset()
+				eventType = ""
+			}
+			continue
+		}
+
+		// Parse SSE format
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			dataBuffer.WriteString(strings.TrimPrefix(line, "data: "))
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		_ = callback(StreamEvent{Type: StreamEventError, Error: err.Error()})
+		return fmt.Errorf("stream read error: %w", err)
+	}
+
+	return nil
+}
+
+// handleSSEEvent processes a single SSE event.
+//
+// # Description
+//
+// Parses the SSE event data and calls the appropriate callback based
+// on event type. Handles content_block_delta (tokens), error events,
+// and message completion.
+//
+// # Inputs
+//
+//   - eventType: SSE event type (content_block_delta, error, etc.)
+//   - data: JSON data payload.
+//   - callback: Callback to invoke.
+//
+// # Outputs
+//
+//   - error: Non-nil on parse error or callback error.
+func (a *AnthropicClient) handleSSEEvent(
+	eventType string,
+	data string,
+	callback StreamCallback,
+) error {
+	switch eventType {
+	case "content_block_delta":
+		var delta anthropicContentBlockDelta
+		if err := json.Unmarshal([]byte(data), &delta); err != nil {
+			slog.Warn("Failed to parse content_block_delta", "error", err, "data", data)
+			return nil // Don't fail on parse errors, continue stream
+		}
+
+		// Determine event type based on delta type
+		switch delta.Delta.Type {
+		case "text_delta":
+			if delta.Delta.Text != "" {
+				if err := callback(StreamEvent{
+					Type:    StreamEventToken,
+					Content: delta.Delta.Text,
+				}); err != nil {
+					return fmt.Errorf("callback error: %w", err)
+				}
+			}
+		case "thinking_delta":
+			if delta.Delta.Thinking != "" {
+				if err := callback(StreamEvent{
+					Type:    StreamEventThinking,
+					Content: delta.Delta.Thinking,
+				}); err != nil {
+					return fmt.Errorf("callback error: %w", err)
+				}
+			}
+		}
+
+	case "error":
+		var streamErr anthropicStreamError
+		if err := json.Unmarshal([]byte(data), &streamErr); err != nil {
+			slog.Warn("Failed to parse error event", "error", err, "data", data)
+			_ = callback(StreamEvent{Type: StreamEventError, Error: "stream error"})
+			return fmt.Errorf("stream error: %s", data)
+		}
+		errMsg := fmt.Sprintf("%s: %s", streamErr.Error.Type, streamErr.Error.Message)
+		_ = callback(StreamEvent{Type: StreamEventError, Error: errMsg})
+		return fmt.Errorf("Anthropic stream error: %s", errMsg)
+
+	case "message_start", "content_block_start", "content_block_stop", "message_delta", "message_stop", "ping":
+		// These are informational events, ignore them
+		slog.Debug("Received SSE event", "type", eventType)
+
+	default:
+		slog.Debug("Unknown SSE event type", "type", eventType, "data", data)
+	}
+
+	return nil
 }

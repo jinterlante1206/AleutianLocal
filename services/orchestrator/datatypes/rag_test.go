@@ -211,10 +211,10 @@ func TestChatRAGRequest_Validate_OptionalFields(t *testing.T) {
 func TestChatRAGRequest_EnsureDefaults_PopulatesEmptyFields(t *testing.T) {
 	req := &ChatRAGRequest{Message: "test"}
 
-	// Capture time before and after to verify timestamp
-	beforeTime := time.Now().Unix()
+	// Capture time before and after to verify timestamp (milliseconds)
+	beforeTime := time.Now().UnixMilli()
 	req.EnsureDefaults()
-	afterTime := time.Now().Unix()
+	afterTime := time.Now().UnixMilli()
 
 	t.Run("generates non-empty ID", func(t *testing.T) {
 		assert.NotEmpty(t, req.Id, "Id should be populated")
@@ -414,9 +414,9 @@ func TestNewChatRAGResponse_SetsAllFields(t *testing.T) {
 	}
 	turnCount := 5
 
-	beforeTime := time.Now().Unix()
+	beforeTime := time.Now().UnixMilli()
 	resp := NewChatRAGResponse(answer, sessionId, sources, turnCount)
-	afterTime := time.Now().Unix()
+	afterTime := time.Now().UnixMilli()
 
 	assert.NotEmpty(t, resp.Id, "Id should be generated")
 	assert.GreaterOrEqual(t, resp.CreatedAt, beforeTime, "CreatedAt should be >= beforeTime")
@@ -488,9 +488,9 @@ func TestNewStreamEvent_CreatesEventWithType(t *testing.T) {
 
 	for _, eventType := range eventTypes {
 		t.Run(eventType, func(t *testing.T) {
-			beforeTime := time.Now().Unix()
+			beforeTime := time.Now().UnixMilli()
 			event := NewStreamEvent(eventType)
-			afterTime := time.Now().Unix()
+			afterTime := time.Now().UnixMilli()
 
 			assert.NotEmpty(t, event.Id, "Id should be generated")
 			assert.GreaterOrEqual(t, event.CreatedAt, beforeTime)

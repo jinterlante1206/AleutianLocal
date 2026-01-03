@@ -79,3 +79,33 @@ func (o *OpenAIClient) Chat(ctx context.Context, messages []datatypes.Message, p
 	slog.Warn("OpenAIClient.Chat is not fully implemented yet. Using Generate with last message.")
 	return "", fmt.Errorf("Chat method not implemented for OpenAIClient")
 }
+
+// ChatStream streams a conversation response token-by-token.
+//
+// # Description
+//
+// Currently not implemented for OpenAIClient. Returns an error
+// indicating that streaming is not supported for this backend.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout.
+//   - messages: Conversation history.
+//   - params: Generation parameters.
+//   - callback: Callback for streaming events.
+//
+// # Outputs
+//
+//   - error: Always returns ErrStreamingNotSupported.
+//
+// # Limitations
+//
+//   - Streaming is not implemented for OpenAI backend.
+//
+// # Assumptions
+//
+//   - None.
+func (o *OpenAIClient) ChatStream(ctx context.Context, messages []datatypes.Message,
+	params GenerationParams, callback StreamCallback) error {
+	return fmt.Errorf("streaming not supported for OpenAIClient")
+}
