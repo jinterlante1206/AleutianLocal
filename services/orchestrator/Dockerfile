@@ -12,6 +12,7 @@ RUN go mod download
 
 # Copy the rest of the source code for the entire project
 COPY services/ ./services/
+COPY pkg/ ./pkg/
 
 # Build the orchestrator binary, pointing to its package path from the root
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /app/orchestrator ./services/orchestrator
