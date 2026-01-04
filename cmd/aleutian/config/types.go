@@ -8,6 +8,31 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
+/*
+Package config provides configuration types and loading for the Aleutian CLI.
+
+# Overview
+
+This package defines the configuration schema for Aleutian, including:
+  - Machine configuration for Podman VM
+  - Model backend settings (Ollama, OpenAI, Anthropic)
+  - Feature toggles and extensions
+  - Forecast module configuration
+  - Custom optimization profiles
+
+# Configuration File
+
+The configuration is stored at ~/.aleutian/aleutian.yaml and is created
+automatically on first run with sensible defaults.
+
+# Example
+
+	model_backend:
+	  type: ollama
+	  ollama:
+	    embedding_model: nomic-embed-text-v2-moe
+	    disk_limit_gb: 50
+*/
 package config
 
 import (
@@ -16,19 +41,64 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
-// ForecastMode defines how the forecast service is deployed
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+const (
+	// DefaultEmbeddingModel is the default model for document embeddings.
+	DefaultEmbeddingModel = "nomic-embed-text-v2-moe"
+
+	// DefaultLLMModel is the default model for chat/generation.
+	DefaultLLMModel = "gpt-oss"
+
+	// DefaultDiskLimitGB is the default maximum disk space for models.
+	DefaultDiskLimitGB = 50
+
+	// DefaultOllamaHostURL is the Ollama URL when accessed from the host.
+	DefaultOllamaHostURL = "http://localhost:11434"
+
+	// DefaultOllamaContainerURL is the Ollama URL when accessed from containers.
+	DefaultOllamaContainerURL = "http://host.containers.internal:11434"
+)
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+// ForecastMode defines how the forecast service is deployed.
+//
+// # Description
+//
+// ForecastMode determines whether Aleutian runs its own forecast service
+// or connects to an external Sapheneia instance.
+//
+// # Values
+//
+//   - ForecastModeStandalone: Runs Aleutian's containerized forecast service
+//   - ForecastModeSapheneia: Connects to external Sapheneia containers
 type ForecastMode string
 
 const (
-	// ForecastModeStandalone runs Aleutian's own forecast service
+	// ForecastModeStandalone runs Aleutian's own forecast service.
 	ForecastModeStandalone ForecastMode = "standalone"
-	// ForecastModeSapheneia connects to external Sapheneia containers
+
+	// ForecastModeSapheneia connects to external Sapheneia containers.
 	ForecastModeSapheneia ForecastMode = "sapheneia"
 )
 
-// IsValid checks if the mode is a known value
+// IsValid checks if the mode is a known value.
+//
+// # Description
+//
+// Returns true if the ForecastMode is one of the defined constants.
+//
+// # Outputs
+//
+//   - bool: True if valid, false otherwise
 func (m ForecastMode) IsValid() bool {
 	switch m {
 	case ForecastModeStandalone, ForecastModeSapheneia:
@@ -37,55 +107,395 @@ func (m ForecastMode) IsValid() bool {
 	return false
 }
 
+// -----------------------------------------------------------------------------
+// Primary Configuration Types
+// -----------------------------------------------------------------------------
+
+// AleutianConfig is the root configuration structure for the Aleutian CLI.
+//
+// # Description
+//
+// Contains all configuration sections for the Aleutian system, including
+// infrastructure, model backend, features, and optional modules.
+//
+// # Fields
+//
+//   - Machine: Podman machine configuration (macOS only)
+//   - Extensions: Paths to custom compose files
+//   - Secrets: Secret storage configuration
+//   - Features: Feature toggle flags
+//   - ModelBackend: LLM backend configuration
+//   - Forecast: Timeseries forecasting module
+//   - Profiles: Custom optimization profiles
+//
+// # Example
+//
+//	cfg := config.DefaultConfig()
+//	cfg.ModelBackend.Type = "ollama"
+//	cfg.ModelBackend.Ollama.EmbeddingModel = "nomic-embed-text-v2-moe"
 type AleutianConfig struct {
-	// Infrastructure (Podman Machine)
+	// Meta contains versioning and audit information.
+	// Required for compliance with GDPR, HIPAA, and CCPA.
+	Meta ConfigMeta `yaml:"meta"`
+
+	// Machine configures the Podman virtual machine (macOS only).
 	Machine MachineConfig `yaml:"machine"`
 
-	// Extensions: Paths to custom docker/podman-compose files
+	// Extensions lists paths to custom podman-compose files.
 	Extensions []string `yaml:"extensions"`
 
-	// Secrets: Pointes to where secrets are stored like the keychain or env
+	// Secrets configures secret storage (env vars or keychain).
 	Secrets SecretsConfig `yaml:"secrets"`
 
-	// Features: toggle for system services
+	// Features toggles optional system services.
 	Features FeatureConfig `yaml:"features"`
 
-	// ModelBackend: decides if you want local or cloud
+	// ModelBackend configures the LLM backend (ollama, openai, etc.).
 	ModelBackend BackendConfig `yaml:"model_backend"`
 
-	// Forecast: optional timeseries/forecast module configuration
+	// Forecast configures the optional timeseries forecast module.
 	Forecast ForecastConfig `yaml:"forecast"`
+
+	// Profiles defines custom optimization profiles.
+	// These extend the built-in profiles (low, standard, performance, ultra).
+	Profiles []ProfileConfig `yaml:"profiles,omitempty"`
 }
 
+// -----------------------------------------------------------------------------
+// Infrastructure Configuration
+// -----------------------------------------------------------------------------
+
+// MachineConfig configures the Podman virtual machine.
+//
+// # Description
+//
+// On macOS, containers run inside a Linux VM managed by Podman.
+// This configuration controls the VM's resources and mount points.
+//
+// # Fields
+//
+//   - Id: Machine name (default: "podman-machine-default")
+//   - CPUCount: Number of CPU cores allocated
+//   - MemoryAmount: RAM in MB allocated to the VM
+//   - Drives: Host paths to mount into the VM
+//
+// # Limitations
+//
+// This configuration is only used on macOS. On Linux, containers
+// run natively without a VM.
 type MachineConfig struct {
-	Id           string   `yaml:"id"`            // e.g. podman-machine-default
-	CPUCount     int      `yaml:"cpu_count"`     // e.g. 6
-	MemoryAmount int      `yaml:"memory_amount"` // e.g. 20480
-	Drives       []string `yaml:"drives"`        // e.g. ["/Volumes/ai_models"]
+	// Id is the Podman machine name.
+	Id string `yaml:"id"`
+
+	// CPUCount is the number of CPU cores for the VM.
+	CPUCount int `yaml:"cpu_count"`
+
+	// MemoryAmount is the RAM allocation in MB.
+	MemoryAmount int `yaml:"memory_amount"`
+
+	// Drives lists host paths to mount into the VM.
+	Drives []string `yaml:"drives"`
 }
 
+// SecretsConfig configures how secrets are stored and accessed.
+//
+// # Description
+//
+// Determines whether secrets are read from environment variables
+// or from the system keychain (macOS) / secret store.
 type SecretsConfig struct {
+	// UseEnv enables reading secrets from environment variables.
 	UseEnv bool `yaml:"use_env"`
 }
 
+// FeatureConfig toggles optional system features.
+//
+// # Description
+//
+// Controls which optional services are enabled in the stack.
 type FeatureConfig struct {
+	// Observability enables metrics, tracing, and logging services.
 	Observability bool `yaml:"observability"`
-	RagEngine     bool `yaml:"rag_engine"`
+
+	// RagEngine enables the RAG (Retrieval-Augmented Generation) pipeline.
+	RagEngine bool `yaml:"rag_engine"`
 }
 
+// -----------------------------------------------------------------------------
+// Model Backend Configuration
+// -----------------------------------------------------------------------------
+
+// BackendConfig configures the LLM backend.
+//
+// # Description
+//
+// Determines which LLM provider is used and its configuration.
+// Supports local (Ollama) and cloud (OpenAI, Anthropic) backends.
+//
+// # Fields
+//
+//   - Type: Backend type ("ollama", "openai", "anthropic", "remote_tgi")
+//   - BaseURL: API endpoint for cloud backends
+//   - Ollama: Ollama-specific configuration (when Type is "ollama")
+//
+// # Example
+//
+//	backend := BackendConfig{
+//	    Type: "ollama",
+//	    Ollama: OllamaConfig{
+//	        EmbeddingModel: "nomic-embed-text-v2-moe",
+//	        DiskLimitGB:    50,
+//	    },
+//	}
 type BackendConfig struct {
-	// Type can be "ollama", "openai", "anthropic", "remote_tgi", etc.
-	Type    string `yaml:"type"`
+	// Type specifies the backend: "ollama", "openai", "anthropic", "remote_tgi".
+	Type string `yaml:"type"`
+
+	// BaseURL is the API endpoint for cloud backends.
+	BaseURL string `yaml:"base_url,omitempty"`
+
+	// Ollama contains Ollama-specific settings.
+	// Only used when Type is "ollama".
+	Ollama OllamaConfig `yaml:"ollama,omitempty"`
+}
+
+// OllamaConfig configures the Ollama model backend.
+//
+// # Description
+//
+// Contains settings specific to running Ollama locally, including
+// which models to use for embeddings and LLM, and resource limits.
+//
+// # Fields
+//
+//   - EmbeddingModel: Model for document embeddings (default: nomic-embed-text-v2-moe)
+//   - LLMModel: Model for chat/generation (default: determined by profile)
+//   - DiskLimitGB: Maximum disk space for models (default: 50)
+//   - BaseURL: Ollama API endpoint (default: http://localhost:11434)
+//
+// # Example
+//
+//	ollama := OllamaConfig{
+//	    EmbeddingModel: "nomic-embed-text-v2-moe",
+//	    LLMModel:       "gpt-oss:7b",
+//	    DiskLimitGB:    100,
+//	}
+type OllamaConfig struct {
+	// EmbeddingModel is the model used for document embeddings.
+	// Default: "nomic-embed-text-v2-moe"
+	EmbeddingModel string `yaml:"embedding_model,omitempty"`
+
+	// LLMModel is the model used for chat/generation.
+	// If empty, the model is determined by the optimization profile.
+	LLMModel string `yaml:"llm_model,omitempty"`
+
+	// DiskLimitGB is the maximum disk space (GB) for storing models.
+	// Default: 50
+	DiskLimitGB int64 `yaml:"disk_limit_gb,omitempty"`
+
+	// BaseURL is the Ollama API endpoint.
+	// Default: "http://localhost:11434" for host access.
 	BaseURL string `yaml:"base_url,omitempty"`
 }
 
-// ForecastConfig configures the optional timeseries/forecast module
-type ForecastConfig struct {
-	Enabled bool         `yaml:"enabled"` // Enable/disable the forecast module
-	Mode    ForecastMode `yaml:"mode"`    // "standalone" or "sapheneia"
+// GetEmbeddingModel returns the configured embedding model or the default.
+//
+// # Description
+//
+// Returns the embedding model from configuration, falling back to
+// DefaultEmbeddingModel if not configured.
+//
+// # Outputs
+//
+//   - string: The embedding model name
+func (c *OllamaConfig) GetEmbeddingModel() string {
+	if c.EmbeddingModel == "" {
+		return DefaultEmbeddingModel
+	}
+	return c.EmbeddingModel
 }
 
+// GetDiskLimitGB returns the configured disk limit or the default.
+//
+// # Description
+//
+// Returns the disk limit from configuration, falling back to
+// DefaultDiskLimitGB if not configured or zero.
+//
+// # Outputs
+//
+//   - int64: The disk limit in gigabytes
+func (c *OllamaConfig) GetDiskLimitGB() int64 {
+	if c.DiskLimitGB <= 0 {
+		return DefaultDiskLimitGB
+	}
+	return c.DiskLimitGB
+}
+
+// GetBaseURL returns the configured base URL or the default.
+//
+// # Description
+//
+// Returns the Ollama API URL from configuration, falling back to
+// DefaultOllamaHostURL if not configured.
+//
+// # Outputs
+//
+//   - string: The Ollama API base URL
+func (c *OllamaConfig) GetBaseURL() string {
+	if c.BaseURL == "" {
+		return DefaultOllamaHostURL
+	}
+	return c.BaseURL
+}
+
+// -----------------------------------------------------------------------------
+// Forecast Configuration
+// -----------------------------------------------------------------------------
+
+// ForecastConfig configures the optional timeseries forecast module.
+//
+// # Description
+//
+// Controls the forecast/timeseries functionality, including whether
+// to run a local service or connect to external Sapheneia.
+type ForecastConfig struct {
+	// Enabled toggles the forecast module on/off.
+	Enabled bool `yaml:"enabled"`
+
+	// Mode determines deployment: "standalone" or "sapheneia".
+	Mode ForecastMode `yaml:"mode"`
+}
+
+// -----------------------------------------------------------------------------
+// Profile Configuration
+// -----------------------------------------------------------------------------
+
+// ProfileConfig defines a custom optimization profile.
+//
+// # Description
+//
+// Allows users to define custom profiles that extend or override
+// the built-in profiles (low, standard, performance, ultra).
+//
+// # Fields
+//
+//   - Name: Unique identifier for the profile
+//   - OllamaModel: LLM model to use with this profile
+//   - MaxTokens: Context window size
+//   - RerankerModel: Reranking model for RAG
+//   - MinRAM_MB: Minimum RAM required to use this profile
+//
+// # Example YAML
+//
+//	profiles:
+//	  - name: my-custom
+//	    ollama_model: mixtral:8x7b
+//	    max_tokens: 16384
+//	    reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+//	    min_ram_mb: 48000
+type ProfileConfig struct {
+	// Name is the unique identifier for this profile.
+	Name string `yaml:"name"`
+
+	// OllamaModel is the LLM model to use with this profile.
+	OllamaModel string `yaml:"ollama_model"`
+
+	// MaxTokens is the context window size for the LLM.
+	MaxTokens int `yaml:"max_tokens"`
+
+	// RerankerModel is the model used for reranking in RAG.
+	RerankerModel string `yaml:"reranker_model"`
+
+	// MinRAM_MB is the minimum RAM (in MB) required for this profile.
+	MinRAM_MB int64 `yaml:"min_ram_mb"`
+}
+
+// -----------------------------------------------------------------------------
+// Configuration Metadata (Versioning & Audit)
+// -----------------------------------------------------------------------------
+
+// ConfigMeta contains metadata for configuration versioning and auditing.
+//
+// # Description
+//
+// Tracks when and how the configuration was created or modified.
+// Required for compliance with GDPR, HIPAA, and CCPA audit requirements.
+//
+// # Fields
+//
+//   - Version: Schema version for migration support
+//   - CreatedAt: Unix millisecond timestamp when config was first created
+//   - ModifiedAt: Unix millisecond timestamp when config was last modified
+//   - ModifiedBy: Identifier of who/what modified the config
+//
+// # Timestamp Format
+//
+// All timestamps are stored as Unix milliseconds (int64) for precision
+// and easy comparison. Use time.UnixMilli() to convert.
+type ConfigMeta struct {
+	// Version is the configuration schema version.
+	// Used for migration when schema changes.
+	Version string `yaml:"version"`
+
+	// CreatedAt is the Unix millisecond timestamp when config was created.
+	CreatedAt int64 `yaml:"created_at"`
+
+	// ModifiedAt is the Unix millisecond timestamp when config was last modified.
+	ModifiedAt int64 `yaml:"modified_at"`
+
+	// ModifiedBy identifies who or what modified the config.
+	// Examples: "user", "aleutian-cli", "migration-v2"
+	ModifiedBy string `yaml:"modified_by"`
+}
+
+// CreatedAtTime returns the CreatedAt timestamp as a time.Time.
+//
+// # Description
+//
+// Converts the Unix millisecond timestamp to a Go time.Time value.
+//
+// # Outputs
+//
+//   - time.Time: The creation time
+func (m *ConfigMeta) CreatedAtTime() time.Time {
+	return time.UnixMilli(m.CreatedAt)
+}
+
+// ModifiedAtTime returns the ModifiedAt timestamp as a time.Time.
+//
+// # Description
+//
+// Converts the Unix millisecond timestamp to a Go time.Time value.
+//
+// # Outputs
+//
+//   - time.Time: The modification time
+func (m *ConfigMeta) ModifiedAtTime() time.Time {
+	return time.UnixMilli(m.ModifiedAt)
+}
+
+// CurrentConfigVersion is the current configuration schema version.
+const CurrentConfigVersion = "1.0.0"
+
+// -----------------------------------------------------------------------------
+// Helper Functions
+// -----------------------------------------------------------------------------
+
 // findExternalDrives automatically discovers mounted external drives on macOS.
+//
+// # Description
+//
+// Scans /Volumes for mounted external drives, filtering out system volumes
+// like "Macintosh HD" and hidden directories.
+//
+// # Outputs
+//
+//   - []string: List of external drive paths, or nil on non-macOS or error
+//
+// # Limitations
+//
+// Only works on macOS. Returns nil on other platforms.
 func findExternalDrives() []string {
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -116,14 +526,25 @@ func findExternalDrives() []string {
 	return externalDrives
 }
 
-func DefaultConfig() AleutianConfig {
-	// Determine safe default mounts based on the Host OS
+// buildDefaultDrives determines default mount paths based on the host OS.
+//
+// # Description
+//
+// Creates a list of default paths to mount into the Podman VM.
+// Includes the user's home directory and platform-specific mount points.
+//
+// # Outputs
+//
+//   - []string: List of paths to mount
+func buildDefaultDrives() []string {
 	var defaultDrives []string
+
 	// Always mount the user's home directory
 	home, err := os.UserHomeDir()
 	if err == nil {
 		defaultDrives = append(defaultDrives, home)
 	}
+
 	if runtime.GOOS == "darwin" {
 		if _, err := os.Stat("/Volumes"); err == nil {
 			defaultDrives = append(defaultDrives, "/Volumes")
@@ -138,12 +559,55 @@ func DefaultConfig() AleutianConfig {
 			defaultDrives = append(defaultDrives, "/media")
 		}
 	}
+
+	return defaultDrives
+}
+
+// newConfigMeta creates a new ConfigMeta with current timestamp.
+//
+// # Description
+//
+// Initializes metadata for a new configuration file with the
+// current schema version and creation timestamp.
+//
+// # Outputs
+//
+//   - ConfigMeta: Initialized metadata
+func newConfigMeta() ConfigMeta {
+	now := time.Now().UnixMilli()
+	return ConfigMeta{
+		Version:    CurrentConfigVersion,
+		CreatedAt:  now,
+		ModifiedAt: now,
+		ModifiedBy: "aleutian-cli",
+	}
+}
+
+// DefaultConfig returns the default Aleutian configuration.
+//
+// # Description
+//
+// Creates a new AleutianConfig with sensible defaults for all settings.
+// This is used when no configuration file exists on first run.
+//
+// # Outputs
+//
+//   - AleutianConfig: Configuration with default values
+//
+// # Default Values
+//
+//   - Machine: 6 CPUs, 20GB RAM, auto-detected drives
+//   - Backend: Ollama with default embedding model
+//   - Features: Observability and RAG enabled
+//   - Forecast: Standalone mode enabled
+func DefaultConfig() AleutianConfig {
 	return AleutianConfig{
+		Meta: newConfigMeta(),
 		Machine: MachineConfig{
 			Id:           "podman-machine-default",
 			CPUCount:     6,
 			MemoryAmount: 20480,
-			Drives:       defaultDrives,
+			Drives:       buildDefaultDrives(),
 		},
 		Extensions: []string{},
 		Secrets:    SecretsConfig{UseEnv: false},
@@ -153,11 +617,17 @@ func DefaultConfig() AleutianConfig {
 		},
 		ModelBackend: BackendConfig{
 			Type:    "ollama",
-			BaseURL: "http://host.containers.internal:11434",
+			BaseURL: DefaultOllamaContainerURL,
+			Ollama: OllamaConfig{
+				EmbeddingModel: DefaultEmbeddingModel,
+				DiskLimitGB:    DefaultDiskLimitGB,
+				BaseURL:        DefaultOllamaHostURL,
+			},
 		},
 		Forecast: ForecastConfig{
 			Enabled: true,
 			Mode:    ForecastModeStandalone,
 		},
+		Profiles: []ProfileConfig{},
 	}
 }

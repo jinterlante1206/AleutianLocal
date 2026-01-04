@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 # --- Global Configuration ---
 WEAVIATE_SERVICE_URL = os.getenv("WEAVIATE_SERVICE_URL", "http://weaviate-db:8080")
 WEAVIATE_GRPC_PORT = int(os.getenv("WEAVIATE_GRPC_PORT", "50051"))
-EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://embedding-server:8000/embed")
+EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://ollama-embeddings:11434/api/embed")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text-v2-moe")
 LLM_BACKEND_TYPE = os.getenv("LLM_BACKEND_TYPE", "ollama")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.containers.internal:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3") # Changed default from gpt-oss
@@ -163,6 +164,7 @@ class RAGEngineRequest(BaseModel):
 
 pipeline_config = {
     "embedding_url": EMBEDDING_SERVICE_URL,
+    "embedding_model": EMBEDDING_MODEL,
     "llm_backend_type": LLM_BACKEND_TYPE,
     "llm_service_url": llm_service_url, # Pass the determined URL
     "ollama_model": OLLAMA_MODEL,

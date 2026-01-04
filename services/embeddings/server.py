@@ -28,7 +28,7 @@ from typing import List
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = os.getenv("MODEL_NAME", "google/embeddinggemma-300m")
+MODEL_NAME = os.getenv("MODEL_NAME", "BAAI/bge-small-en-v1.5")
 
 # create the request data class
 class BatchEmbeddingRequest(BaseModel):
@@ -143,10 +143,12 @@ def get_embedding(text: str) -> List[float]:
 
         logger.info("determining which embedings to use for:" + MODEL_NAME)
         # Consistent embedding extraction (mean pooling)
-        if MODEL_NAME == "google/embeddinggemma-300m":
-            logger.info("processing for google/embeddinggemma-300m")
+        model_org = MODEL_NAME.split("/")[0].lower()
+        if model_org == "baai" or MODEL_NAME == "google/embeddinggemma-300m":
+            # BGE and EmbeddingGemma use mean pooling
+            logger.info(f"processing with mean pooling for {MODEL_NAME}")
             embeddings = outputs.last_hidden_state.mean(dim=1)
-        elif MODEL_NAME.split("/")[0].lower() == "qwen":
+        elif model_org == "qwen":
             logger.info("processing for Qwen")
             embeddings = last_token_pool(outputs.last_hidden_state, inputs['attention_mask'])
         else:
@@ -226,10 +228,12 @@ async def batch_embed_text(request: BatchEmbeddingRequest):
             outputs = model(**inputs)
 
             logger.info("determining which embedings to use for:" + MODEL_NAME)
-            if MODEL_NAME == "google/embeddinggemma-300m":
-                logger.info("processing for google/embeddinggemma-300m")
+            model_org = MODEL_NAME.split("/")[0].lower()
+            if model_org == "baai" or MODEL_NAME == "google/embeddinggemma-300m":
+                # BGE and EmbeddingGemma use mean pooling
+                logger.info(f"processing with mean pooling for {MODEL_NAME}")
                 embeddings = outputs.last_hidden_state.mean(dim=1)
-            elif MODEL_NAME.split("/")[0].lower() == "qwen":
+            elif model_org == "qwen":
                 logger.info("processing for Qwen")
                 embeddings = last_token_pool(outputs.last_hidden_state, inputs['attention_mask'])
             else:
@@ -256,12 +260,15 @@ async def batch_embed_text(request: BatchEmbeddingRequest):
         raise HTTPException(status_code=500, detail=f"Failed to process batch: {e}")
 
 
-@app.get("/health", status_code=200)
+@app.get("/health")
 async def health_check():
     if model_ready and model is not None and tokenizer is not None:
-        return {"status": "ok"}
+        return {"status": "ok", "model": MODEL_NAME}
     else:
-        return {"status": "initializing"}
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "initializing", "model": MODEL_NAME}
+        )
 
 
 if __name__ == "__main__":

@@ -304,6 +304,7 @@ func init() {
 	deployCmd.Flags().Bool("force-recreate", false,
 		"automatically recreates the podman machine if a drift is detected.")
 	deployCmd.Flags().StringVar(&forecastMode, "forecast-mode", "", "Forecast service mode: 'standalone' (local) or 'sapheneia' (external)")
+	deployCmd.Flags().Bool("skip-model-check", false, "Skip automatic model verification and pulling (for offline use)")
 	// --- Utility Commands ---
 	rootCmd.AddCommand(convertCmd)
 	convertCmd.Flags().StringVar(&quantizeType, "quantize", "q8_0", "Quantization type (f32, q8_0, bf16, f16)")

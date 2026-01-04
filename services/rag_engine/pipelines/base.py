@@ -192,6 +192,7 @@ class BaseRAGPipeline:
 
         # --- Shared Configuration ---
         self.embedding_url = config.get("embedding_url")
+        self.embedding_model = config.get("embedding_model", "nomic-embed-text-v2-moe")
         self.llm_backend = config.get("llm_backend_type", "ollama")
         self.llm_url = config.get("llm_service_url") # Base URL for the backend
         self.prompt_template = PROMPT_TEMPLATE # Use template read from env
@@ -262,11 +263,12 @@ class BaseRAGPipeline:
 
     async def _get_embedding(self, text: str) -> list[float]:
         """
-        Calls the embedding service to get a vector for the text.
+        Calls Ollama's embedding API to get a vector for the query text.
 
         What it Does:
-        Takes a string of text, sends it to the `embedding-server` via an
-        HTTP POST request, and returns the resulting vector (list of floats).
+        Takes a string of text (the user's query), prepends the "search_query:"
+        prefix required by nomic-embed-text models, sends it to Ollama's
+        /api/embed endpoint, and returns the resulting vector.
 
         How it Fits:
         This is the very first step of the "Retrieve" phase. The user's
@@ -276,7 +278,8 @@ class BaseRAGPipeline:
         Why it Does This:
         To translate the user's human-language query into the mathematical
         representation (a vector) that Weaviate uses to perform semantic
-        similarity searches.
+        similarity searches. The "search_query:" prefix tells the nomic
+        model this is a query (not a document), enabling asymmetric search.
 
         Parameters
         ----------
@@ -299,14 +302,29 @@ class BaseRAGPipeline:
         if not text:
              logger.warning("Empty text passed to _get_embedding.")
              return []
+
+        # Add search_query prefix for nomic-embed-text models
+        prefixed_text = f"search_query: {text}"
+
         try:
-            response = await self.http_client.post(self.embedding_url, json={"texts": [text,]})
+            # Ollama /api/embed format
+            payload = {
+                "model": self.embedding_model,
+                "input": [prefixed_text]
+            }
+            response = await self.http_client.post(self.embedding_url, json=payload)
             response.raise_for_status()
             data = response.json()
-            if "vectors" not in data or not isinstance(data["vectors"], list):
-                logger.error(f"Invalid embedding response format: {data}")
+
+            # Ollama returns {"model": "...", "embeddings": [[...]]}
+            if "embeddings" not in data or not isinstance(data["embeddings"], list):
+                logger.error(f"Invalid Ollama embedding response format: {data}")
                 raise ValueError("Invalid embedding response format")
-            return data["vectors"][0]
+            if len(data["embeddings"]) == 0:
+                logger.error("Ollama returned empty embeddings array")
+                raise ValueError("Empty embeddings returned")
+
+            return data["embeddings"][0]
         except httpx.HTTPStatusError as e:
             error_detail = "No detail provided"
             try:
@@ -315,13 +333,13 @@ class BaseRAGPipeline:
                 error_detail = e.response.text
 
             logger.error(
-                f"Embedding service at {self.embedding_url} returned status {e.response.status_code}. "
+                f"Ollama embedding service at {self.embedding_url} returned status {e.response.status_code}. "
                 f"Detail: {error_detail}",
                 exc_info=True
             )
             raise RuntimeError(f"Embedding service failed: {error_detail}")
         except httpx.RequestError as httpxRequestError:
-            logger.error(f"HTTP error calling embedding service at {self.embedding_url}: {httpxRequestError}")
+            logger.error(f"HTTP error calling Ollama embedding service at {self.embedding_url}: {httpxRequestError}")
             raise ConnectionError(f"Failed to connect to embedding service: {httpxRequestError}")
         except Exception as e:
             logger.error(f"Failed to get embedding: {e}", exc_info=True)

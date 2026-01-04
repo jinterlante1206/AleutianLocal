@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -70,16 +69,21 @@ type IngestedDocument struct {
 	IngestedAt   int64  `json:"ingested_at"`
 }
 
-type BatchEmbeddingRequest struct {
-	Texts []string `json:"texts"`
+// OllamaEmbedRequest is the request format for Ollama's /api/embed endpoint.
+type OllamaEmbedRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
 }
-type BatchEmbeddingResponse struct {
-	Id        string      `json:"id"`
-	Timestamp int64       `json:"timestamp"`
-	Vectors   [][]float32 `json:"vectors"`
-	Model     string      `json:"model"`
-	Dim       int         `json:"dim"`
+
+// OllamaEmbedResponse is the response format from Ollama's /api/embed endpoint.
+type OllamaEmbedResponse struct {
+	Model      string      `json:"model"`
+	Embeddings [][]float32 `json:"embeddings"`
 }
+
+// NomicDocumentPrefix is prepended to documents for nomic-embed-text models.
+// This helps the model distinguish between queries and documents.
+const NomicDocumentPrefix = "search_document: "
 
 type gqlAggregateResponse struct {
 	Aggregate struct {
@@ -240,13 +244,16 @@ func ListDocuments(client *weaviate.Client) gin.HandlerFunc {
 
 // RunIngestion is the refactored, reusable logic for ingesting a document.
 func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocumentRequest) (int, error) {
-	embeddingServiceBaseURL := os.Getenv("EMBEDDING_SERVICE_URL")
-	if embeddingServiceBaseURL == "" {
+	embeddingServiceURL := os.Getenv("EMBEDDING_SERVICE_URL")
+	if embeddingServiceURL == "" {
 		slog.Error("EMBEDDING_SERVICE_URL not set for orchestrator")
 		return 0, fmt.Errorf("Embedding service not configured")
 	}
-	batchEmbeddingURL := strings.TrimSuffix(embeddingServiceBaseURL, "/embed") + "/batch_embed"
-	slog.Info("Ingestion request received", "source", req.Source)
+	embeddingModel := os.Getenv("EMBEDDING_MODEL")
+	if embeddingModel == "" {
+		embeddingModel = "nomic-embed-text-v2-moe"
+	}
+	slog.Info("Ingestion request received", "source", req.Source, "embedding_model", embeddingModel)
 
 	// --- GET SPLITTER ---
 	splitter := getSplitterForFile(req.Source)
@@ -263,7 +270,7 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 	}
 	slog.Info("Split document into chunks", "source", req.Source, "chunk_count", len(chunks))
 
-	vectors, err := callBatchEmbed(batchEmbeddingURL, chunks)
+	vectors, err := callOllamaEmbed(embeddingServiceURL, embeddingModel, chunks)
 	if err != nil {
 		slog.Error("Failed to get batch embeddings", "source", req.Source, "error", err)
 		return 0, err
@@ -351,36 +358,49 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 	return chunksCreated, nil
 }
 
-func callBatchEmbed(batchEmbedURL string, chunks []string) ([][]float32, error) {
-	reqBody := BatchEmbeddingRequest{Texts: chunks}
+// callOllamaEmbed calls Ollama's /api/embed endpoint with document prefixes.
+// For nomic-embed-text models, documents must be prefixed with "search_document: "
+// to distinguish them from queries (which use "search_query: ").
+func callOllamaEmbed(embedURL string, model string, chunks []string) ([][]float32, error) {
+	// Add document prefix for nomic models
+	prefixedChunks := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		prefixedChunks[i] = NomicDocumentPrefix + chunk
+	}
+
+	reqBody := OllamaEmbedRequest{
+		Model: model,
+		Input: prefixedChunks,
+	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal batch embed request: %w", err)
+		return nil, fmt.Errorf("failed to marshal ollama embed request: %w", err)
 	}
 
 	// Use a client with a longer timeout for batch processing
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Post(batchEmbedURL, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := client.Post(embedURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, fmt.Errorf("failed to call /batch_embed endpoint: %w", err)
+		return nil, fmt.Errorf("failed to call ollama /api/embed endpoint: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read /batch_embed response body: %w", err)
+		return nil, fmt.Errorf("failed to read ollama embed response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("/batch_embed returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("ollama /api/embed returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var batchResp BatchEmbeddingResponse
-	if err = json.Unmarshal(body, &batchResp); err != nil {
-		return nil, fmt.Errorf("failed to decode batch embed response: %w", err)
+	var embedResp OllamaEmbedResponse
+	if err = json.Unmarshal(body, &embedResp); err != nil {
+		return nil, fmt.Errorf("failed to decode ollama embed response: %w", err)
 	}
 
-	return batchResp.Vectors, nil
+	slog.Debug("Ollama embeddings received", "model", embedResp.Model, "count", len(embedResp.Embeddings))
+	return embedResp.Embeddings, nil
 }
 
 func getSplitterForFile(filename string) textsplitter.TextSplitter {
