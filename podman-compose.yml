@@ -90,7 +90,7 @@ services:
     build:
       context: .
       dockerfile: ./services/orchestrator/Dockerfile
-    container_name: aleutian-orchestrator
+    container_name: aleutian-go-orchestrator
     ports:
       - "12210:12210"
     environment:

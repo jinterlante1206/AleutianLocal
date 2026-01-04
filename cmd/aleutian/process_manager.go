@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // -----------------------------------------------------------------------------
@@ -332,6 +333,9 @@ type MockProcessManager struct {
 
 	// Calls records all method invocations for verification
 	Calls []ProcessManagerCall
+
+	// mu protects Calls for concurrent access
+	mu sync.Mutex
 }
 
 // ProcessManagerCall records a single method invocation.
@@ -344,6 +348,8 @@ type ProcessManagerCall struct {
 
 // Run delegates to RunFunc and records the call.
 func (m *MockProcessManager) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Calls = append(m.Calls, ProcessManagerCall{
 		Method: "Run",
 		Name:   name,
@@ -357,6 +363,8 @@ func (m *MockProcessManager) Run(ctx context.Context, name string, args ...strin
 
 // RunWithInput delegates to RunWithInputFunc and records the call.
 func (m *MockProcessManager) RunWithInput(ctx context.Context, name string, input []byte, args ...string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Calls = append(m.Calls, ProcessManagerCall{
 		Method: "RunWithInput",
 		Name:   name,
@@ -371,6 +379,8 @@ func (m *MockProcessManager) RunWithInput(ctx context.Context, name string, inpu
 
 // Start delegates to StartFunc and records the call.
 func (m *MockProcessManager) Start(ctx context.Context, name string, args ...string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Calls = append(m.Calls, ProcessManagerCall{
 		Method: "Start",
 		Name:   name,
@@ -384,6 +394,8 @@ func (m *MockProcessManager) Start(ctx context.Context, name string, args ...str
 
 // IsRunning delegates to IsRunningFunc and records the call.
 func (m *MockProcessManager) IsRunning(ctx context.Context, pattern string) (bool, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Calls = append(m.Calls, ProcessManagerCall{
 		Method: "IsRunning",
 		Name:   pattern,
@@ -396,7 +408,18 @@ func (m *MockProcessManager) IsRunning(ctx context.Context, pattern string) (boo
 
 // Reset clears all recorded calls.
 func (m *MockProcessManager) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Calls = nil
+}
+
+// GetCalls returns a copy of all recorded calls.
+func (m *MockProcessManager) GetCalls() []ProcessManagerCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]ProcessManagerCall, len(m.Calls))
+	copy(result, m.Calls)
+	return result
 }
 
 // Compile-time interface compliance check.

@@ -52,6 +52,7 @@ type testDiagnosticsStorage struct {
 	storedData []byte
 	returnPath string
 	storeError error
+	mu         sync.Mutex
 }
 
 // newTestStorage creates a test storage wrapper with defaults.
@@ -85,6 +86,8 @@ func newTestStorage() *testDiagnosticsStorage {
 
 	// Configure the mock to capture data and return the configured path
 	ts.StoreFunc = func(ctx context.Context, data []byte, meta StorageMetadata) (string, error) {
+		ts.mu.Lock()
+		defer ts.mu.Unlock()
 		if ts.storeError != nil {
 			return "", ts.storeError
 		}
@@ -118,6 +121,8 @@ func newTestStorage() *testDiagnosticsStorage {
 //
 //   - Store was called
 func (ts *testDiagnosticsStorage) GetStoredData() []byte {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	return ts.storedData
 }
 
@@ -143,6 +148,8 @@ func (ts *testDiagnosticsStorage) GetStoredData() []byte {
 //
 //   - None
 func (ts *testDiagnosticsStorage) SetReturnPath(path string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	ts.returnPath = path
 }
 
@@ -168,6 +175,8 @@ func (ts *testDiagnosticsStorage) SetReturnPath(path string) {
 //
 //   - None
 func (ts *testDiagnosticsStorage) SetStoreError(err error) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	ts.storeError = err
 }
 
