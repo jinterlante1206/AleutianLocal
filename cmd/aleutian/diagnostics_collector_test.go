@@ -34,154 +34,240 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Mock Storage Implementation
+// Test Storage Helper - uses MockDiagnosticsStorage from diagnostics_mocks.go
 // -----------------------------------------------------------------------------
 
-// MockDiagnosticsStorage is a test double for DiagnosticsStorage.
-type MockDiagnosticsStorage struct {
-	mu            sync.Mutex
-	storedData    []byte
-	storedMeta    StorageMetadata
-	storeError    error
-	loadError     error
-	pruneCount    int
-	storageType   string
-	returnPath    string
-	storeCount    int
-	retentionDays int
+// testDiagnosticsStorage wraps MockDiagnosticsStorage with test-specific helpers.
+//
+// # Description
+//
+// Provides a simplified interface for tests that need to capture stored data
+// and configure specific return values. Uses the shared MockDiagnosticsStorage.
+//
+// # Thread Safety
+//
+// testDiagnosticsStorage is safe for concurrent use.
+type testDiagnosticsStorage struct {
+	*MockDiagnosticsStorage
+	storedData []byte
+	returnPath string
+	storeError error
 }
 
-// Store records the data and returns a mock location.
-func (m *MockDiagnosticsStorage) Store(ctx context.Context, data []byte, meta StorageMetadata) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.storeError != nil {
-		return "", m.storeError
+// newTestStorage creates a test storage wrapper with defaults.
+//
+// # Description
+//
+// Creates a storage that captures data and returns "/mock/diagnostics/test.json".
+//
+// # Outputs
+//
+//   - *testDiagnosticsStorage: Ready-to-use test storage
+//
+// # Examples
+//
+//	storage := newTestStorage()
+//	storage.Store(ctx, data, meta)
+//	stored := storage.GetStoredData()
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - None
+func newTestStorage() *testDiagnosticsStorage {
+	ts := &testDiagnosticsStorage{
+		MockDiagnosticsStorage: NewMockDiagnosticsStorage(),
+		returnPath:             "/mock/diagnostics/test.json",
 	}
-	m.storedData = data
-	m.storedMeta = meta
-	m.storeCount++
-	if m.returnPath != "" {
-		return m.returnPath, nil
+
+	// Configure the mock to capture data and return the configured path
+	ts.StoreFunc = func(ctx context.Context, data []byte, meta StorageMetadata) (string, error) {
+		if ts.storeError != nil {
+			return "", ts.storeError
+		}
+		ts.storedData = data
+		return ts.returnPath, nil
 	}
-	return "/mock/diagnostics/test.json", nil
-}
 
-// Load returns stored data or an error.
-func (m *MockDiagnosticsStorage) Load(ctx context.Context, location string) ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.loadError != nil {
-		return nil, m.loadError
-	}
-	return m.storedData, nil
-}
-
-// List returns an empty list.
-func (m *MockDiagnosticsStorage) List(ctx context.Context, limit int) ([]string, error) {
-	return []string{}, nil
-}
-
-// Prune returns the configured count.
-func (m *MockDiagnosticsStorage) Prune(ctx context.Context) (int, error) {
-	return m.pruneCount, nil
-}
-
-// SetRetentionDays sets retention.
-func (m *MockDiagnosticsStorage) SetRetentionDays(days int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.retentionDays = days
-}
-
-// GetRetentionDays returns retention.
-func (m *MockDiagnosticsStorage) GetRetentionDays() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.retentionDays
-}
-
-// Type returns the storage type.
-func (m *MockDiagnosticsStorage) Type() string {
-	if m.storageType != "" {
-		return m.storageType
-	}
-	return "mock"
+	return ts
 }
 
 // GetStoredData returns what was stored.
-func (m *MockDiagnosticsStorage) GetStoredData() []byte {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.storedData
+//
+// # Description
+//
+// Returns the data passed to the last Store call.
+//
+// # Outputs
+//
+//   - []byte: Last stored data
+//
+// # Examples
+//
+//	storage.Store(ctx, []byte("test"), meta)
+//	data := storage.GetStoredData()
+//
+// # Limitations
+//
+//   - Only returns last store, not history
+//
+// # Assumptions
+//
+//   - Store was called
+func (ts *testDiagnosticsStorage) GetStoredData() []byte {
+	return ts.storedData
+}
+
+// SetReturnPath configures the path returned by Store.
+//
+// # Description
+//
+// Sets the location string returned by Store.
+//
+// # Inputs
+//
+//   - path: Path to return
+//
+// # Examples
+//
+//	storage.SetReturnPath("/custom/path.json")
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - None
+func (ts *testDiagnosticsStorage) SetReturnPath(path string) {
+	ts.returnPath = path
+}
+
+// SetStoreError configures Store to return an error.
+//
+// # Description
+//
+// Sets an error that Store will return.
+//
+// # Inputs
+//
+//   - err: Error to return
+//
+// # Examples
+//
+//	storage.SetStoreError(errors.New("disk full"))
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - None
+func (ts *testDiagnosticsStorage) SetStoreError(err error) {
+	ts.storeError = err
 }
 
 // GetStoreCount returns how many times Store was called.
-func (m *MockDiagnosticsStorage) GetStoreCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.storeCount
+//
+// # Description
+//
+// Returns the call count from the underlying mock.
+//
+// # Outputs
+//
+//   - int: Number of Store calls
+//
+// # Examples
+//
+//	storage.Store(ctx, data, meta)
+//	count := storage.GetStoreCount()
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - None
+func (ts *testDiagnosticsStorage) GetStoreCount() int {
+	return ts.StoreCallCount()
 }
-
-var _ DiagnosticsStorage = (*MockDiagnosticsStorage)(nil)
 
 // -----------------------------------------------------------------------------
-// Mock Metrics Implementation
+// Test Metrics Helper - uses MockDiagnosticsMetrics from diagnostics_mocks.go
 // -----------------------------------------------------------------------------
 
-// MockDiagnosticsMetrics is a test double for DiagnosticsMetrics.
-type MockDiagnosticsMetrics struct {
-	mu              sync.Mutex
-	collectionCount int
-	errorCount      int
-	lastSeverity    DiagnosticsSeverity
-	lastReason      string
-	lastDuration    int64
-	lastSize        int64
+// testDiagnosticsMetrics wraps MockDiagnosticsMetrics with test-specific helpers.
+//
+// # Description
+//
+// Provides a simplified interface for tests that need to track metrics calls.
+//
+// # Thread Safety
+//
+// testDiagnosticsMetrics is safe for concurrent use.
+type testDiagnosticsMetrics struct {
+	*MockDiagnosticsMetrics
 }
 
-// RecordCollection records a collection event.
-func (m *MockDiagnosticsMetrics) RecordCollection(severity DiagnosticsSeverity, reason string, durationMs, sizeBytes int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.collectionCount++
-	m.lastSeverity = severity
-	m.lastReason = reason
-	m.lastDuration = durationMs
-	m.lastSize = sizeBytes
+// newTestMetrics creates a test metrics wrapper.
+//
+// # Description
+//
+// Creates a metrics recorder that tracks calls.
+//
+// # Outputs
+//
+//   - *testDiagnosticsMetrics: Ready-to-use test metrics
+//
+// # Examples
+//
+//	metrics := newTestMetrics()
+//	metrics.RecordCollection(SeverityInfo, "test", 100, 1024)
+//	count := metrics.GetCollectionCount()
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - None
+func newTestMetrics() *testDiagnosticsMetrics {
+	return &testDiagnosticsMetrics{
+		MockDiagnosticsMetrics: NewMockDiagnosticsMetrics(),
+	}
 }
-
-// RecordError records an error.
-func (m *MockDiagnosticsMetrics) RecordError(errorType string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.errorCount++
-}
-
-// RecordContainerHealth is a no-op.
-func (m *MockDiagnosticsMetrics) RecordContainerHealth(containerName, serviceType, status string) {}
-
-// RecordContainerMetrics is a no-op.
-func (m *MockDiagnosticsMetrics) RecordContainerMetrics(containerName string, cpuPercent float64, memoryMB int64) {
-}
-
-// RecordPruned is a no-op.
-func (m *MockDiagnosticsMetrics) RecordPruned(count int) {}
-
-// RecordStoredCount is a no-op.
-func (m *MockDiagnosticsMetrics) RecordStoredCount(count int) {}
-
-// Register is a no-op.
-func (m *MockDiagnosticsMetrics) Register() error { return nil }
 
 // GetCollectionCount returns the collection count.
-func (m *MockDiagnosticsMetrics) GetCollectionCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.collectionCount
+//
+// # Description
+//
+// Returns the number of RecordCollection calls.
+//
+// # Outputs
+//
+//   - int: Number of RecordCollection calls
+//
+// # Examples
+//
+//	metrics.RecordCollection(SeverityInfo, "test", 100, 1024)
+//	count := metrics.GetCollectionCount()
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - None
+func (tm *testDiagnosticsMetrics) GetCollectionCount() int {
+	return tm.RecordCollectionCallCount()
 }
-
-var _ DiagnosticsMetrics = (*MockDiagnosticsMetrics)(nil)
 
 // -----------------------------------------------------------------------------
 // Mock Process Manager Helper
@@ -241,7 +327,7 @@ func configurePodmanUnavailable(pm *MockProcessManager) {
 // TestNewDiagnosticsCollectorWithDeps verifies dependency injection.
 func TestNewDiagnosticsCollectorWithDeps(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	collector := NewDiagnosticsCollectorWithDeps(mockPM, formatter, mockStorage, "test-version")
@@ -262,7 +348,7 @@ func TestNewDiagnosticsCollectorWithDeps(t *testing.T) {
 // TestDefaultDiagnosticsCollector_Collect_Success verifies successful collection.
 func TestDefaultDiagnosticsCollector_Collect_Success(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	// Configure mock to return podman version
@@ -320,7 +406,7 @@ func TestDefaultDiagnosticsCollector_Collect_Success(t *testing.T) {
 // TestDefaultDiagnosticsCollector_Collect_PodmanUnavailable verifies graceful degradation.
 func TestDefaultDiagnosticsCollector_Collect_PodmanUnavailable(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	// Configure mock to fail podman version
@@ -361,7 +447,7 @@ func TestDefaultDiagnosticsCollector_Collect_PodmanUnavailable(t *testing.T) {
 // TestDefaultDiagnosticsCollector_Collect_WithContainerLogs verifies log collection.
 func TestDefaultDiagnosticsCollector_Collect_WithContainerLogs(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	// Configure mock responses
@@ -404,9 +490,8 @@ func TestDefaultDiagnosticsCollector_Collect_WithContainerLogs(t *testing.T) {
 // TestDefaultDiagnosticsCollector_Collect_StorageError verifies storage failure handling.
 func TestDefaultDiagnosticsCollector_Collect_StorageError(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{
-		storeError: fmt.Errorf("disk full"),
-	}
+	mockStorage := newTestStorage()
+	mockStorage.SetStoreError(fmt.Errorf("disk full"))
 	formatter := NewJSONDiagnosticsFormatter()
 
 	configurePodmanAvailable(mockPM, "[]")
@@ -430,7 +515,7 @@ func TestDefaultDiagnosticsCollector_Collect_StorageError(t *testing.T) {
 // TestDefaultDiagnosticsCollector_Collect_WithTags verifies tag propagation.
 func TestDefaultDiagnosticsCollector_Collect_WithTags(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	configurePodmanAvailable(mockPM, "[]")
@@ -468,8 +553,8 @@ func TestDefaultDiagnosticsCollector_Collect_WithTags(t *testing.T) {
 // TestDefaultDiagnosticsCollector_Collect_WithMetrics verifies metrics recording.
 func TestDefaultDiagnosticsCollector_Collect_WithMetrics(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
-	mockMetrics := &MockDiagnosticsMetrics{}
+	mockStorage := newTestStorage()
+	mockMetrics := newTestMetrics()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	configurePodmanAvailable(mockPM, "[]")
@@ -499,7 +584,7 @@ func TestDefaultDiagnosticsCollector_Collect_WithMetrics(t *testing.T) {
 // TestDefaultDiagnosticsCollector_GetLastResult verifies result caching.
 func TestDefaultDiagnosticsCollector_GetLastResult(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	configurePodmanAvailable(mockPM, "[]")
@@ -532,8 +617,10 @@ func TestDefaultDiagnosticsCollector_GetLastResult(t *testing.T) {
 // TestDefaultDiagnosticsCollector_SetStorage verifies storage swapping.
 func TestDefaultDiagnosticsCollector_SetStorage(t *testing.T) {
 	mockPM := newTestProcessManager()
-	storage1 := &MockDiagnosticsStorage{returnPath: "/path1/test.json"}
-	storage2 := &MockDiagnosticsStorage{returnPath: "/path2/test.json"}
+	storage1 := newTestStorage()
+	storage1.SetReturnPath("/path1/test.json")
+	storage2 := newTestStorage()
+	storage2.SetReturnPath("/path2/test.json")
 	formatter := NewJSONDiagnosticsFormatter()
 
 	configurePodmanAvailable(mockPM, "[]")
@@ -560,7 +647,7 @@ func TestDefaultDiagnosticsCollector_SetStorage(t *testing.T) {
 // TestDefaultDiagnosticsCollector_SetFormatter verifies formatter swapping.
 func TestDefaultDiagnosticsCollector_SetFormatter(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 
 	configurePodmanAvailable(mockPM, "[]")
 
@@ -590,7 +677,7 @@ func TestDefaultDiagnosticsCollector_SetFormatter(t *testing.T) {
 // TestDefaultDiagnosticsCollector_Concurrent verifies thread safety.
 func TestDefaultDiagnosticsCollector_Concurrent(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	configurePodmanAvailable(mockPM, "[]")
@@ -762,7 +849,7 @@ func TestParseDiskString(t *testing.T) {
 // TestDefaultDiagnosticsCollector_ParseMachineList verifies machine parsing.
 func TestDefaultDiagnosticsCollector_ParseMachineList(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	collector := NewDiagnosticsCollectorWithDeps(mockPM, formatter, mockStorage, "0.4.0")
@@ -794,7 +881,7 @@ func TestDefaultDiagnosticsCollector_ParseMachineList(t *testing.T) {
 // TestDefaultDiagnosticsCollector_ParseContainerList verifies container parsing.
 func TestDefaultDiagnosticsCollector_ParseContainerList(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	collector := NewDiagnosticsCollectorWithDeps(mockPM, formatter, mockStorage, "0.4.0")
@@ -831,7 +918,7 @@ func TestDefaultDiagnosticsCollector_ParseContainerList(t *testing.T) {
 // TestDefaultDiagnosticsCollector_GetContainerLog_NotRunning verifies log handling for stopped containers.
 func TestDefaultDiagnosticsCollector_GetContainerLog_NotRunning(t *testing.T) {
 	mockPM := newTestProcessManager()
-	mockStorage := &MockDiagnosticsStorage{}
+	mockStorage := newTestStorage()
 	formatter := NewJSONDiagnosticsFormatter()
 
 	collector := NewDiagnosticsCollectorWithDeps(mockPM, formatter, mockStorage, "0.4.0")
