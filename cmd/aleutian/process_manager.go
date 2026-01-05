@@ -30,6 +30,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -187,6 +189,97 @@ type ProcessManager interface {
 	//
 	//   - pgrep is available on the system (standard on macOS/Linux)
 	IsRunning(ctx context.Context, pattern string) (bool, int, error)
+
+	// RunInDir executes a command in a specific directory with environment variables.
+	//
+	// # Description
+	//
+	// Executes the specified command in the given working directory with custom
+	// environment variables. Returns separate stdout/stderr and the exit code,
+	// enabling detailed error diagnostics.
+	//
+	// # Inputs
+	//
+	//   - ctx: Context for cancellation/timeout
+	//   - dir: Working directory for command execution
+	//   - env: Environment variables in KEY=VALUE format (appended to current env)
+	//   - name: The executable name or path
+	//   - args: Command arguments (variadic)
+	//
+	// # Outputs
+	//
+	//   - stdout: Standard output as string
+	//   - stderr: Standard error as string
+	//   - exitCode: Process exit code (0 for success)
+	//   - error: Non-nil only for execution failures (not non-zero exit)
+	//
+	// # Example
+	//
+	//   stdout, stderr, code, err := pm.RunInDir(ctx,
+	//       "/home/user/.aleutian",
+	//       []string{"OLLAMA_MODEL=gpt-oss"},
+	//       "podman-compose", "up", "-d",
+	//   )
+	//   if err != nil {
+	//       return fmt.Errorf("failed to execute: %w", err)
+	//   }
+	//   if code != 0 {
+	//       return fmt.Errorf("command failed (exit %d): %s", code, stderr)
+	//   }
+	//
+	// # Limitations
+	//
+	//   - All output is buffered in memory
+	//   - Environment is inherited from parent plus provided env
+	//
+	// # Assumptions
+	//
+	//   - Working directory exists and is accessible
+	//   - Environment variables are properly formatted
+	RunInDir(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error)
+
+	// RunStreaming executes a command and streams output to a writer.
+	//
+	// # Description
+	//
+	// Executes the specified command and streams combined stdout/stderr to
+	// the provided writer in real-time. Useful for long-running commands
+	// where output should be displayed as it's produced.
+	//
+	// # Inputs
+	//
+	//   - ctx: Context for cancellation (terminates the process)
+	//   - dir: Working directory for command execution
+	//   - w: Writer to receive output (typically os.Stdout)
+	//   - name: The executable name or path
+	//   - args: Command arguments (variadic)
+	//
+	// # Outputs
+	//
+	//   - error: Non-nil if command fails to start or is cancelled
+	//
+	// # Example
+	//
+	//   ctx, cancel := context.WithCancel(context.Background())
+	//   defer cancel()
+	//   err := pm.RunStreaming(ctx,
+	//       "/home/user/.aleutian",
+	//       os.Stdout,
+	//       "podman-compose", "logs", "-f",
+	//   )
+	//   // Returns when context is cancelled or command exits
+	//
+	// # Limitations
+	//
+	//   - Cannot capture output separately (streams directly)
+	//   - Exit code is embedded in error (use exec.ExitError)
+	//   - Combines stdout and stderr into single stream
+	//
+	// # Assumptions
+	//
+	//   - Writer is safe for concurrent writes
+	//   - Working directory exists and is accessible
+	RunStreaming(ctx context.Context, dir string, w io.Writer, name string, args ...string) error
 }
 
 // -----------------------------------------------------------------------------
@@ -299,6 +392,121 @@ func (pm *DefaultProcessManager) IsRunning(ctx context.Context, pattern string) 
 	return false, 0, nil
 }
 
+// RunInDir executes a command in a specific directory with environment variables.
+//
+// # Description
+//
+// Executes the specified command in the given working directory with custom
+// environment variables. Returns separate stdout/stderr and the exit code.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation/timeout
+//   - dir: Working directory for command execution
+//   - env: Environment variables in KEY=VALUE format
+//   - name: The executable name or path
+//   - args: Command arguments (variadic)
+//
+// # Outputs
+//
+//   - stdout: Standard output as string
+//   - stderr: Standard error as string
+//   - exitCode: Process exit code (0 for success)
+//   - error: Non-nil only for execution failures (not non-zero exit)
+//
+// # Example
+//
+//	stdout, stderr, code, err := pm.RunInDir(ctx,
+//	    "/home/user/.aleutian",
+//	    []string{"OLLAMA_MODEL=gpt-oss"},
+//	    "podman-compose", "up", "-d",
+//	)
+//
+// # Limitations
+//
+//   - All output is buffered in memory
+//
+// # Assumptions
+//
+//   - Working directory exists
+func (pm *DefaultProcessManager) RunInDir(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+
+	// Inherit current environment and add custom variables
+	cmd.Env = append(os.Environ(), env...)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	runErr := cmd.Run()
+
+	stdout = stdoutBuf.String()
+	stderr = stderrBuf.String()
+
+	// Extract exit code
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+			// Non-zero exit is not an error for this method
+			return stdout, stderr, exitCode, nil
+		}
+		// Actual execution failure (command not found, etc.)
+		return stdout, stderr, -1, runErr
+	}
+
+	return stdout, stderr, 0, nil
+}
+
+// RunStreaming executes a command and streams output to a writer.
+//
+// # Description
+//
+// Executes the specified command and streams combined stdout/stderr to
+// the provided writer in real-time.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation (terminates the process)
+//   - dir: Working directory for command execution
+//   - w: Writer to receive output
+//   - name: The executable name or path
+//   - args: Command arguments (variadic)
+//
+// # Outputs
+//
+//   - error: Non-nil if command fails to start or is cancelled
+//
+// # Example
+//
+//	err := pm.RunStreaming(ctx, "/path", os.Stdout, "podman-compose", "logs", "-f")
+//
+// # Limitations
+//
+//   - Cannot capture output separately
+//
+// # Assumptions
+//
+//   - Writer is safe for concurrent writes
+func (pm *DefaultProcessManager) RunStreaming(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = w
+	cmd.Stderr = w
+
+	if err := cmd.Run(); err != nil {
+		// Context cancellation is expected for streaming commands
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+
+	return nil
+}
+
 // -----------------------------------------------------------------------------
 // Mock Implementation for Testing
 // -----------------------------------------------------------------------------
@@ -331,6 +539,12 @@ type MockProcessManager struct {
 	// IsRunningFunc is called when IsRunning is invoked
 	IsRunningFunc func(ctx context.Context, pattern string) (bool, int, error)
 
+	// RunInDirFunc is called when RunInDir is invoked
+	RunInDirFunc func(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error)
+
+	// RunStreamingFunc is called when RunStreaming is invoked
+	RunStreamingFunc func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error
+
 	// Calls records all method invocations for verification
 	Calls []ProcessManagerCall
 
@@ -344,6 +558,8 @@ type ProcessManagerCall struct {
 	Name   string
 	Args   []string
 	Input  []byte
+	Dir    string
+	Env    []string
 }
 
 // Run delegates to RunFunc and records the call.
@@ -404,6 +620,105 @@ func (m *MockProcessManager) IsRunning(ctx context.Context, pattern string) (boo
 		panic("MockProcessManager.IsRunningFunc not set")
 	}
 	return m.IsRunningFunc(ctx, pattern)
+}
+
+// RunInDir delegates to RunInDirFunc and records the call.
+//
+// # Description
+//
+// Records the call with dir and env, then delegates to RunInDirFunc.
+// Panics if RunInDirFunc is nil to catch missing mock configuration.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation/timeout
+//   - dir: Working directory for command execution
+//   - env: Environment variables in KEY=VALUE format
+//   - name: The executable name or path
+//   - args: Command arguments (variadic)
+//
+// # Outputs
+//
+//   - stdout: Standard output as string
+//   - stderr: Standard error as string
+//   - exitCode: Process exit code
+//   - error: From RunInDirFunc
+//
+// # Example
+//
+//	mock.RunInDirFunc = func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
+//	    return "output", "", 0, nil
+//	}
+//
+// # Limitations
+//
+//   - Panics if RunInDirFunc not set
+//
+// # Assumptions
+//
+//   - RunInDirFunc is set before calling
+func (m *MockProcessManager) RunInDir(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Calls = append(m.Calls, ProcessManagerCall{
+		Method: "RunInDir",
+		Name:   name,
+		Args:   args,
+		Dir:    dir,
+		Env:    env,
+	})
+	if m.RunInDirFunc == nil {
+		panic("MockProcessManager.RunInDirFunc not set")
+	}
+	return m.RunInDirFunc(ctx, dir, env, name, args...)
+}
+
+// RunStreaming delegates to RunStreamingFunc and records the call.
+//
+// # Description
+//
+// Records the call with dir, then delegates to RunStreamingFunc.
+// Panics if RunStreamingFunc is nil to catch missing mock configuration.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation
+//   - dir: Working directory for command execution
+//   - w: Writer to receive output
+//   - name: The executable name or path
+//   - args: Command arguments (variadic)
+//
+// # Outputs
+//
+//   - error: From RunStreamingFunc
+//
+// # Example
+//
+//	mock.RunStreamingFunc = func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
+//	    w.Write([]byte("streaming output"))
+//	    return nil
+//	}
+//
+// # Limitations
+//
+//   - Panics if RunStreamingFunc not set
+//
+// # Assumptions
+//
+//   - RunStreamingFunc is set before calling
+func (m *MockProcessManager) RunStreaming(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Calls = append(m.Calls, ProcessManagerCall{
+		Method: "RunStreaming",
+		Name:   name,
+		Args:   args,
+		Dir:    dir,
+	})
+	if m.RunStreamingFunc == nil {
+		panic("MockProcessManager.RunStreamingFunc not set")
+	}
+	return m.RunStreamingFunc(ctx, dir, w, name, args...)
 }
 
 // Reset clears all recorded calls.

@@ -24,6 +24,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -473,6 +474,388 @@ func TestMockProcessManager_MultipleCommands(t *testing.T) {
 		if len(mock.Calls[i].Args) != len(expected.args) {
 			t.Errorf("call[%d].Args = %v, want %v", i, mock.Calls[i].Args, expected.args)
 		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// RunInDir Tests
+// -----------------------------------------------------------------------------
+
+// TestDefaultProcessManager_RunInDir_Success verifies RunInDir with directory and env.
+//
+// # Description
+//
+// Tests that RunInDir correctly executes a command in the specified directory
+// with custom environment variables.
+//
+// # Inputs
+//
+//   - Working directory: /tmp
+//   - Environment: TEST_VAR=test_value
+//   - Command: sh -c 'echo $TEST_VAR && pwd'
+//
+// # Outputs
+//
+//   - stdout containing env var value and directory
+//   - empty stderr
+//   - exit code 0
+//
+// # Limitations
+//
+//   - Uses /tmp which may not exist on all systems
+//
+// # Assumptions
+//
+//   - /tmp directory exists and is writable
+func TestDefaultProcessManager_RunInDir_Success(t *testing.T) {
+	pm := NewDefaultProcessManager()
+	ctx := context.Background()
+
+	stdout, stderr, exitCode, err := pm.RunInDir(
+		ctx,
+		"/tmp",
+		[]string{"TEST_VAR=hello_from_env"},
+		"sh", "-c", "echo $TEST_VAR",
+	)
+
+	if err != nil {
+		t.Fatalf("RunInDir() unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("RunInDir() exitCode = %d, want 0", exitCode)
+	}
+	if !strings.Contains(stdout, "hello_from_env") {
+		t.Errorf("RunInDir() stdout = %q, want to contain %q", stdout, "hello_from_env")
+	}
+	if stderr != "" {
+		t.Errorf("RunInDir() stderr = %q, want empty", stderr)
+	}
+}
+
+// TestDefaultProcessManager_RunInDir_NonZeroExit verifies non-zero exit handling.
+//
+// # Description
+//
+// Tests that RunInDir correctly returns exit code without error when
+// the command fails with non-zero exit code.
+//
+// # Inputs
+//
+//   - Command: false (always exits with 1)
+//
+// # Outputs
+//
+//   - exit code 1
+//   - err is nil (non-zero exit is not an error)
+//
+// # Limitations
+//
+//   - Relies on 'false' command existing
+//
+// # Assumptions
+//
+//   - 'false' command is available on the system
+func TestDefaultProcessManager_RunInDir_NonZeroExit(t *testing.T) {
+	pm := NewDefaultProcessManager()
+	ctx := context.Background()
+
+	_, _, exitCode, err := pm.RunInDir(ctx, "", nil, "false")
+
+	if err != nil {
+		t.Fatalf("RunInDir() unexpected error: %v (non-zero exit should not be an error)", err)
+	}
+	if exitCode != 1 {
+		t.Errorf("RunInDir() exitCode = %d, want 1", exitCode)
+	}
+}
+
+// TestDefaultProcessManager_RunInDir_CommandNotFound verifies error for missing command.
+//
+// # Description
+//
+// Tests that RunInDir returns an error (not just exit code) when the
+// command itself cannot be found.
+//
+// # Inputs
+//
+//   - Command: nonexistent-command-12345
+//
+// # Outputs
+//
+//   - error is not nil
+//   - exit code is -1
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - nonexistent-command-12345 does not exist
+func TestDefaultProcessManager_RunInDir_CommandNotFound(t *testing.T) {
+	pm := NewDefaultProcessManager()
+	ctx := context.Background()
+
+	_, _, exitCode, err := pm.RunInDir(ctx, "", nil, "nonexistent-command-12345")
+
+	if err == nil {
+		t.Fatal("RunInDir() expected error for non-existent command, got nil")
+	}
+	if exitCode != -1 {
+		t.Errorf("RunInDir() exitCode = %d, want -1", exitCode)
+	}
+}
+
+// TestDefaultProcessManager_RunInDir_Stderr verifies stderr capture.
+//
+// # Description
+//
+// Tests that RunInDir correctly captures stderr separately from stdout.
+//
+// # Inputs
+//
+//   - Command: sh -c 'echo stdout; echo stderr >&2'
+//
+// # Outputs
+//
+//   - stdout contains "stdout"
+//   - stderr contains "stderr"
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - sh is available
+func TestDefaultProcessManager_RunInDir_Stderr(t *testing.T) {
+	pm := NewDefaultProcessManager()
+	ctx := context.Background()
+
+	stdout, stderr, exitCode, err := pm.RunInDir(
+		ctx, "", nil,
+		"sh", "-c", "echo stdout; echo stderr >&2",
+	)
+
+	if err != nil {
+		t.Fatalf("RunInDir() unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("RunInDir() exitCode = %d, want 0", exitCode)
+	}
+	if !strings.Contains(stdout, "stdout") {
+		t.Errorf("RunInDir() stdout = %q, want to contain 'stdout'", stdout)
+	}
+	if !strings.Contains(stderr, "stderr") {
+		t.Errorf("RunInDir() stderr = %q, want to contain 'stderr'", stderr)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// RunStreaming Tests
+// -----------------------------------------------------------------------------
+
+// TestDefaultProcessManager_RunStreaming_Success verifies streaming output.
+//
+// # Description
+//
+// Tests that RunStreaming correctly streams output to the provided writer.
+//
+// # Inputs
+//
+//   - Command: echo "streaming output"
+//   - Writer: bytes.Buffer
+//
+// # Outputs
+//
+//   - Writer contains "streaming output"
+//   - error is nil
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - echo command is available
+func TestDefaultProcessManager_RunStreaming_Success(t *testing.T) {
+	pm := NewDefaultProcessManager()
+	ctx := context.Background()
+
+	var buf strings.Builder
+	err := pm.RunStreaming(ctx, "", &buf, "echo", "streaming output")
+
+	if err != nil {
+		t.Fatalf("RunStreaming() unexpected error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "streaming output") {
+		t.Errorf("RunStreaming() output = %q, want to contain 'streaming output'", buf.String())
+	}
+}
+
+// TestDefaultProcessManager_RunStreaming_ContextCancellation verifies cancellation.
+//
+// # Description
+//
+// Tests that RunStreaming respects context cancellation.
+//
+// # Inputs
+//
+//   - Cancelled context
+//   - Command: sleep 10
+//
+// # Outputs
+//
+//   - error indicating cancellation
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - sleep command is available
+func TestDefaultProcessManager_RunStreaming_ContextCancellation(t *testing.T) {
+	pm := NewDefaultProcessManager()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel immediately
+	cancel()
+
+	var buf strings.Builder
+	err := pm.RunStreaming(ctx, "", &buf, "sleep", "10")
+
+	if err == nil {
+		t.Fatal("RunStreaming() expected error for cancelled context, got nil")
+	}
+	if err != context.Canceled {
+		t.Errorf("RunStreaming() error = %v, want context.Canceled", err)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Mock RunInDir and RunStreaming Tests
+// -----------------------------------------------------------------------------
+
+// TestMockProcessManager_RunInDir verifies mock RunInDir behavior.
+//
+// # Description
+//
+// Tests that MockProcessManager correctly delegates to RunInDirFunc
+// and records the call with dir and env.
+//
+// # Inputs
+//
+//   - dir: /test/dir
+//   - env: ["VAR=value"]
+//
+// # Outputs
+//
+//   - Call recorded with correct dir and env
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - RunInDirFunc is set
+func TestMockProcessManager_RunInDir(t *testing.T) {
+	mock := &MockProcessManager{
+		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
+			return "stdout", "stderr", 0, nil
+		},
+	}
+
+	ctx := context.Background()
+	stdout, stderr, exitCode, err := mock.RunInDir(
+		ctx,
+		"/test/dir",
+		[]string{"VAR=value"},
+		"podman-compose", "up", "-d",
+	)
+
+	if err != nil {
+		t.Fatalf("RunInDir() unexpected error: %v", err)
+	}
+	if stdout != "stdout" || stderr != "stderr" || exitCode != 0 {
+		t.Errorf("RunInDir() = (%q, %q, %d), want (stdout, stderr, 0)", stdout, stderr, exitCode)
+	}
+
+	// Verify call was recorded
+	if len(mock.Calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(mock.Calls))
+	}
+
+	call := mock.Calls[0]
+	if call.Method != "RunInDir" {
+		t.Errorf("call.Method = %q, want 'RunInDir'", call.Method)
+	}
+	if call.Dir != "/test/dir" {
+		t.Errorf("call.Dir = %q, want '/test/dir'", call.Dir)
+	}
+	if len(call.Env) != 1 || call.Env[0] != "VAR=value" {
+		t.Errorf("call.Env = %v, want [VAR=value]", call.Env)
+	}
+	if call.Name != "podman-compose" {
+		t.Errorf("call.Name = %q, want 'podman-compose'", call.Name)
+	}
+}
+
+// TestMockProcessManager_RunStreaming verifies mock RunStreaming behavior.
+//
+// # Description
+//
+// Tests that MockProcessManager correctly delegates to RunStreamingFunc
+// and records the call.
+//
+// # Inputs
+//
+//   - dir: /test/dir
+//   - writer: strings.Builder
+//
+// # Outputs
+//
+//   - Call recorded with correct dir
+//   - Writer receives output
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - RunStreamingFunc is set
+func TestMockProcessManager_RunStreaming(t *testing.T) {
+	mock := &MockProcessManager{
+		RunStreamingFunc: func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
+			_, _ = w.Write([]byte("mock streaming output"))
+			return nil
+		},
+	}
+
+	ctx := context.Background()
+	var buf strings.Builder
+	err := mock.RunStreaming(ctx, "/test/dir", &buf, "podman-compose", "logs", "-f")
+
+	if err != nil {
+		t.Fatalf("RunStreaming() unexpected error: %v", err)
+	}
+	if buf.String() != "mock streaming output" {
+		t.Errorf("RunStreaming() output = %q, want 'mock streaming output'", buf.String())
+	}
+
+	// Verify call was recorded
+	if len(mock.Calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(mock.Calls))
+	}
+
+	call := mock.Calls[0]
+	if call.Method != "RunStreaming" {
+		t.Errorf("call.Method = %q, want 'RunStreaming'", call.Method)
+	}
+	if call.Dir != "/test/dir" {
+		t.Errorf("call.Dir = %q, want '/test/dir'", call.Dir)
 	}
 }
 
