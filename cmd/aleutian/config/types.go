@@ -296,7 +296,7 @@ type SecretsConfig struct {
 //
 //   - time.Duration: The timeout duration
 func (c *SecretsConfig) GetTimeout() time.Duration {
-	if c.Timeout <= 0 {
+	if c == nil || c.Timeout <= 0 {
 		return 10 * time.Second
 	}
 	return c.Timeout
@@ -313,7 +313,7 @@ func (c *SecretsConfig) GetTimeout() time.Duration {
 //
 //   - string: The vault name
 func (c *SecretsConfig) GetOnePasswordVault() string {
-	if c.OnePasswordVault == "" {
+	if c == nil || c.OnePasswordVault == "" {
 		return "Aleutian"
 	}
 	return c.OnePasswordVault
@@ -330,7 +330,7 @@ func (c *SecretsConfig) GetOnePasswordVault() string {
 //
 //   - string: The Vault path prefix
 func (c *SecretsConfig) GetVaultPath() string {
-	if c.VaultPath == "" {
+	if c == nil || c.VaultPath == "" {
 		return "secret/data/aleutian"
 	}
 	return c.VaultPath
