@@ -201,11 +201,139 @@ type MachineConfig struct {
 //
 // # Description
 //
-// Determines whether secrets are read from environment variables
-// or from the system keychain (macOS) / secret store.
+// Configures secret management with support for multiple backends.
+// Backends are tried in priority order until a secret is found.
+//
+// # Backend Priority Order
+//
+//  1. HashiCorp Vault (if VaultAddress is set) - Enterprise/production
+//  2. 1Password CLI (if Use1Password is true) - Cross-platform, recommended
+//  3. macOS Keychain (if UseKeychain is true) - macOS only, built-in
+//  4. Linux libsecret (if UseLibsecret is true) - Linux only, GNOME/KDE
+//  5. Environment variables (if UseEnv is true) - Fallback, CI/Docker
+//
+// # Auto-Detection
+//
+// By default, backends are auto-detected based on platform and available
+// CLI tools. Explicit configuration overrides auto-detection.
+//
+// # Example YAML
+//
+//	secrets:
+//	  use_env: true            # Fallback for CI/Docker
+//	  use_keychain: true       # macOS (auto-detected)
+//	  use_1password: true      # Cross-platform (auto-detected if `op` in PATH)
+//	  onepassword_vault: "Aleutian"
+//	  timeout: 10s
+//	  required:
+//	    - ANTHROPIC_API_KEY
+//
+// # Limitations
+//
+// Vault support is planned for Phase 6B and is not yet implemented.
 type SecretsConfig struct {
 	// UseEnv enables reading secrets from environment variables.
+	// This is the fallback backend, always checked last.
+	// Recommended: true (for CI/CD and Docker compatibility).
 	UseEnv bool `yaml:"use_env"`
+
+	// UseKeychain enables reading secrets from macOS Keychain.
+	// Ignored on non-macOS platforms.
+	// The Keychain is accessed via: security find-generic-password
+	// Recommended: true on macOS (auto-detected).
+	UseKeychain bool `yaml:"use_keychain,omitempty"`
+
+	// Use1Password enables reading secrets from 1Password CLI.
+	// Requires: 1Password CLI (`op`) installed and authenticated.
+	// Works on: macOS, Linux, Windows.
+	// Access pattern: op read "op://Vault/ItemName/password"
+	// Recommended: true for teams using 1Password (auto-detected if `op` in PATH).
+	Use1Password bool `yaml:"use_1password,omitempty"`
+
+	// OnePasswordVault is the 1Password vault name for Aleutian secrets.
+	// Default: "Aleutian"
+	OnePasswordVault string `yaml:"onepassword_vault,omitempty"`
+
+	// UseLibsecret enables reading secrets from Linux Secret Service.
+	// Works with GNOME Keyring, KDE Wallet, and other providers.
+	// Requires: libsecret installed, secret-tool CLI available.
+	// Access pattern: secret-tool lookup service aleutian key SECRET_NAME
+	// Recommended: true on Linux desktops (auto-detected if `secret-tool` in PATH).
+	UseLibsecret bool `yaml:"use_libsecret,omitempty"`
+
+	// VaultAddress is the HashiCorp Vault server address.
+	// If set, enables Vault backend (highest priority).
+	// Example: "https://vault.example.com:8200"
+	// NOTE: Vault support is planned for Phase 6B.
+	VaultAddress string `yaml:"vault_address,omitempty"`
+
+	// VaultPath is the path prefix for secrets in Vault.
+	// Default: "secret/data/aleutian"
+	VaultPath string `yaml:"vault_path,omitempty"`
+
+	// Timeout is the maximum time to wait for CLI backends.
+	// Default: 10 seconds (allows time for biometric prompts).
+	// Set to 0 to use the default timeout.
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+
+	// Required lists secrets that must be present for startup.
+	// If any are missing, initialization fails with clear error.
+	Required []string `yaml:"required,omitempty"`
+
+	// Redact lists additional secret names to redact from logs.
+	// Well-known secrets (ANTHROPIC_API_KEY, etc.) are always redacted.
+	Redact []string `yaml:"redact,omitempty"`
+}
+
+// GetTimeout returns the configured timeout or the default (10 seconds).
+//
+// # Description
+//
+// Returns the timeout duration for CLI backend operations.
+// Uses 10 seconds as default to allow time for biometric prompts.
+//
+// # Outputs
+//
+//   - time.Duration: The timeout duration
+func (c *SecretsConfig) GetTimeout() time.Duration {
+	if c.Timeout <= 0 {
+		return 10 * time.Second
+	}
+	return c.Timeout
+}
+
+// GetOnePasswordVault returns the 1Password vault name or default.
+//
+// # Description
+//
+// Returns the vault name for 1Password lookups.
+// Uses "Aleutian" as the default vault name.
+//
+// # Outputs
+//
+//   - string: The vault name
+func (c *SecretsConfig) GetOnePasswordVault() string {
+	if c.OnePasswordVault == "" {
+		return "Aleutian"
+	}
+	return c.OnePasswordVault
+}
+
+// GetVaultPath returns the Vault path prefix or default.
+//
+// # Description
+//
+// Returns the path prefix for HashiCorp Vault secret lookups.
+// Uses "secret/data/aleutian" as the default path.
+//
+// # Outputs
+//
+//   - string: The Vault path prefix
+func (c *SecretsConfig) GetVaultPath() string {
+	if c.VaultPath == "" {
+		return "secret/data/aleutian"
+	}
+	return c.VaultPath
 }
 
 // FeatureConfig toggles optional system features.
