@@ -2185,6 +2185,8 @@ func (e *DefaultComposeExecutor) isContainerNotRunningError(result *ComposeResul
 // # Description
 //
 // Combines current process environment with additional variables.
+// User-provided variables override existing environment variables
+// with the same key to ensure deterministic behavior.
 //
 // # Inputs
 //
@@ -2200,17 +2202,31 @@ func (e *DefaultComposeExecutor) isContainerNotRunningError(result *ComposeResul
 //
 // # Limitations
 //
-//   - Does not deduplicate if same key appears in both
+//   - Inherits all process environment variables
 //
 // # Assumptions
 //
-//   - os.Environ() returns valid environment
+//   - os.Environ() returns valid environment in KEY=VALUE format
 func (e *DefaultComposeExecutor) buildCommandEnvironment(env map[string]string) []string {
-	cmdEnv := os.Environ()
-	for k, v := range env {
-		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", k, v))
+	// Build map from current environment for deduplication
+	envMap := make(map[string]string)
+	for _, e := range os.Environ() {
+		if idx := strings.Index(e, "="); idx > 0 {
+			envMap[e[:idx]] = e[idx+1:]
+		}
 	}
-	return cmdEnv
+
+	// Override with user-provided values
+	for k, v := range env {
+		envMap[k] = v
+	}
+
+	// Convert back to slice
+	result := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		result = append(result, fmt.Sprintf("%s=%s", k, v))
+	}
+	return result
 }
 
 // resolveTimeout returns the timeout to use, applying default if zero.

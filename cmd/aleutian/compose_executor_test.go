@@ -1792,6 +1792,86 @@ func TestDefaultComposeExecutor_IsSensitiveEnvVar(t *testing.T) {
 	}
 }
 
+// TestDefaultComposeExecutor_BuildCommandEnvironment tests environment building.
+//
+// # Description
+//
+// Verifies that buildCommandEnvironment correctly combines process environment
+// with user-provided values, and that user values override existing keys.
+//
+// # Inputs
+//
+//   - Map of environment variables to add/override
+//
+// # Outputs
+//
+//   - Combined environment with user values taking precedence
+//
+// # Example
+//
+//	go test -run TestDefaultComposeExecutor_BuildCommandEnvironment
+//
+// # Limitations
+//
+//   - Cannot fully isolate from actual process environment
+//
+// # Assumptions
+//
+//   - PATH exists in process environment for testing override
+func TestDefaultComposeExecutor_BuildCommandEnvironment(t *testing.T) {
+	cfg := createTestComposeConfig("/test/stack")
+	mockProc := &MockProcessManager{}
+	executor := createTestComposeExecutor(cfg, mockProc, nil)
+
+	t.Run("adds new variables", func(t *testing.T) {
+		result := executor.buildCommandEnvironment(map[string]string{
+			"TEST_VAR_UNIQUE_12345": "test_value",
+		})
+
+		found := false
+		for _, e := range result {
+			if e == "TEST_VAR_UNIQUE_12345=test_value" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("expected TEST_VAR_UNIQUE_12345=test_value in environment")
+		}
+	})
+
+	t.Run("overrides existing variables", func(t *testing.T) {
+		// PATH is almost certainly in the environment
+		result := executor.buildCommandEnvironment(map[string]string{
+			"PATH": "/custom/override/path",
+		})
+
+		pathCount := 0
+		var pathValue string
+		for _, e := range result {
+			if strings.HasPrefix(e, "PATH=") {
+				pathCount++
+				pathValue = e
+			}
+		}
+		if pathCount != 1 {
+			t.Errorf("expected exactly 1 PATH entry, got %d", pathCount)
+		}
+		if pathValue != "PATH=/custom/override/path" {
+			t.Errorf("expected PATH to be overridden, got: %s", pathValue)
+		}
+	})
+
+	t.Run("handles nil env map", func(t *testing.T) {
+		result := executor.buildCommandEnvironment(nil)
+
+		// Should still include process environment
+		if len(result) == 0 {
+			t.Error("expected non-empty environment")
+		}
+	})
+}
+
 // TestDefaultComposeExecutor_ParseLines tests line parsing.
 //
 // # Description
