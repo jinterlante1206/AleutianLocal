@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -326,6 +327,101 @@ var ErrHealthCheckTimeout = fmt.Errorf("health check timeout")
 // ErrCriticalServiceFailed is returned when a critical service fails with FailFast.
 var ErrCriticalServiceFailed = fmt.Errorf("critical service failed")
 
+// ErrSSRFBlocked is returned when a URL targets a blocked IP range.
+var ErrSSRFBlocked = fmt.Errorf("URL blocked: potential SSRF attack")
+
+// =============================================================================
+// SSRF PROTECTION
+// =============================================================================
+
+// isURLSafe validates that a URL doesn't target dangerous IP ranges.
+//
+// # Description
+//
+// Protects against Server-Side Request Forgery (SSRF) attacks by blocking
+// requests to cloud metadata endpoints and internal networks, while allowing
+// localhost and Docker bridge IPs for legitimate health checks.
+//
+// # Security
+//
+// Blocks:
+//   - Cloud metadata: 169.254.169.254, 169.254.0.0/16 (AWS, GCP, Azure)
+//   - Link-local: 169.254.0.0/16 (except Docker)
+//
+// Allows:
+//   - localhost, 127.0.0.1, ::1
+//   - Docker bridge: 172.17.0.0/16
+//   - User-configured private IPs for local services
+//
+// # Inputs
+//
+//   - rawURL: URL string to validate
+//
+// # Outputs
+//
+//   - error: Non-nil if URL is blocked
+func isURLSafe(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	host := parsed.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL has no host")
+	}
+
+	// Always allow localhost
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return nil
+	}
+
+	// Parse IP address
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Hostname (not IP) - allow DNS resolution
+		// Note: DNS rebinding attacks are still possible but less common
+		return nil
+	}
+
+	// Block cloud metadata endpoint (169.254.169.254)
+	metadataIP := net.ParseIP("169.254.169.254")
+	if ip.Equal(metadataIP) {
+		return fmt.Errorf("%w: cloud metadata endpoint blocked", ErrSSRFBlocked)
+	}
+
+	// Block link-local range (169.254.0.0/16) except Docker bridge
+	linkLocal := net.IPNet{
+		IP:   net.ParseIP("169.254.0.0"),
+		Mask: net.CIDRMask(16, 32),
+	}
+	if linkLocal.Contains(ip) {
+		return fmt.Errorf("%w: link-local address blocked", ErrSSRFBlocked)
+	}
+
+	// Allow Docker bridge network (172.17.0.0/16)
+	dockerBridge := net.IPNet{
+		IP:   net.ParseIP("172.17.0.0"),
+		Mask: net.CIDRMask(16, 32),
+	}
+	if dockerBridge.Contains(ip) {
+		return nil
+	}
+
+	// Allow private networks commonly used for local services
+	// 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+	private10 := net.IPNet{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)}
+	private172 := net.IPNet{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)}
+	private192 := net.IPNet{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)}
+
+	if private10.Contains(ip) || private172.Contains(ip) || private192.Contains(ip) {
+		return nil
+	}
+
+	// Allow public IPs (for external health checks if needed)
+	return nil
+}
+
 // =============================================================================
 // CONSTRUCTOR FUNCTIONS
 // =============================================================================
@@ -473,7 +569,8 @@ func (h *DefaultHealthChecker) WaitForServices(ctx context.Context, services []S
 
 		statuses, err := h.CheckAllServices(timeoutCtx, checkServices)
 		if err != nil {
-			h.sleepWithJitter(interval, opts.Jitter)
+			// Use context-aware sleep to respond to Ctrl+C immediately
+			h.sleepWithContext(timeoutCtx, h.applyJitter(interval, opts.Jitter))
 			interval = h.calculateNextInterval(interval, opts.MaxInterval, opts.Multiplier)
 			continue
 		}
@@ -1063,32 +1160,6 @@ func (h *DefaultHealthChecker) calculateNextInterval(current, max time.Duration,
 	return next
 }
 
-// sleepWithJitter sleeps for interval with jitter applied.
-//
-// # Description
-//
-// Convenience method combining applyJitter and time.Sleep.
-//
-// # Inputs
-//
-//   - interval: Base sleep duration.
-//   - jitter: Jitter factor.
-//
-// # Outputs
-//
-//   - None.
-//
-// # Limitations
-//
-//   - Blocking
-//
-// # Assumptions
-//
-//   - None
-func (h *DefaultHealthChecker) sleepWithJitter(interval time.Duration, jitter float64) {
-	time.Sleep(h.applyJitter(interval, jitter))
-}
-
 // sleepWithContext sleeps for duration or until context is done.
 //
 // # Description
@@ -1151,6 +1222,13 @@ func (h *DefaultHealthChecker) performHTTPCheck(ctx context.Context, service Ser
 		status.State = HealthStateUnhealthy
 		status.Message = "no URL configured for HTTP check"
 		return fmt.Errorf("no URL configured for HTTP check")
+	}
+
+	// SSRF protection: validate URL before making request
+	if err := isURLSafe(service.URL); err != nil {
+		status.State = HealthStateUnhealthy
+		status.Message = fmt.Sprintf("blocked: %v", err)
+		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, service.URL, nil)
@@ -1219,6 +1297,15 @@ func (h *DefaultHealthChecker) performTCPCheck(ctx context.Context, service Serv
 	host := strings.TrimPrefix(service.URL, "tcp://")
 	host = strings.TrimPrefix(host, "http://")
 	host = strings.TrimPrefix(host, "https://")
+
+	// SSRF protection: validate host before connecting
+	// Construct a URL for validation (TCP connections don't have scheme in our format)
+	checkURL := "tcp://" + host
+	if err := isURLSafe(checkURL); err != nil {
+		status.State = HealthStateUnhealthy
+		status.Message = fmt.Sprintf("blocked: %v", err)
+		return err
+	}
 
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", host)

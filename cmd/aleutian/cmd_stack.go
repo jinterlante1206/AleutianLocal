@@ -12,6 +12,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -680,47 +681,111 @@ func hasForeignWorkloads() (bool, []string, error) {
 	return true, names, nil
 }
 
+// waitForServicesReady waits for all critical services to become healthy.
+//
+// # Description
+//
+// Uses the HealthChecker interface with exponential backoff to intelligently
+// wait for services during stack startup. This replaces the naive fixed-delay
+// implementation with smarter retry logic that prevents Heisenbug conditions.
+//
+// # Outputs
+//
+//   - error: Non-nil if services fail to become healthy within timeout
+//
+// # Examples
+//
+//	if err := waitForServicesReady(); err != nil {
+//	    log.Printf("Services not ready: %v", err)
+//	}
+//
+// # Limitations
+//
+//   - Only checks services that have running containers
+//   - Uses default 60-second timeout
+//
+// # Assumptions
+//
+//   - Containers are already started via podman-compose
+//   - Network is accessible on localhost
 func waitForServicesReady() error {
-	timeout := 60 * time.Second
-	deadline := time.Now().Add(timeout)
+	// Create HealthChecker with production dependencies
+	proc := NewDefaultProcessManager()
+	checker := NewDefaultHealthChecker(proc, DefaultHealthCheckerConfig())
 
-	// Build list of services to check based on what's actually running
-	criticalServices := []struct {
-		name          string
-		url           string
-		containerName string // Container name to check if it's running
-	}{
-		{"Orchestrator", fmt.Sprintf("%s/health", getOrchestratorBaseURL()), "aleutian-go-orchestrator"},
-		{"Data Fetcher", "http://localhost:12001/health", "aleutian-data-fetcher"},
-		{"Weaviate", "http://localhost:8080/v1/.well-known/ready", "weaviate-db"},
+	// Build service definitions for critical services
+	services := []ServiceDefinition{
+		{
+			ID:             GenerateID(),
+			Name:           "Orchestrator",
+			URL:            fmt.Sprintf("%s/health", getOrchestratorBaseURL()),
+			ContainerName:  "aleutian-go-orchestrator",
+			CheckType:      HealthCheckHTTP,
+			Critical:       true,
+			Timeout:        10 * time.Second,
+			ExpectedStatus: 200,
+			Version:        HealthCheckVersion,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		},
+		{
+			ID:             GenerateID(),
+			Name:           "Data Fetcher",
+			URL:            "http://localhost:12001/health",
+			ContainerName:  "aleutian-data-fetcher",
+			CheckType:      HealthCheckHTTP,
+			Critical:       true,
+			Timeout:        10 * time.Second,
+			ExpectedStatus: 200,
+			Version:        HealthCheckVersion,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		},
+		{
+			ID:             GenerateID(),
+			Name:           "Weaviate",
+			URL:            "http://localhost:8080/v1/.well-known/ready",
+			ContainerName:  "weaviate-db",
+			CheckType:      HealthCheckHTTP,
+			Critical:       true,
+			Timeout:        10 * time.Second,
+			ExpectedStatus: 200,
+			Version:        HealthCheckVersion,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		},
 	}
 
-	for _, svc := range criticalServices {
-		// Check if the container is actually running before waiting for it
-		checkCmd := exec.Command("podman", "ps", "--filter", fmt.Sprintf("name=%s", svc.containerName), "--format", "{{.Names}}")
-		out, err := checkCmd.Output()
-		if err != nil || strings.TrimSpace(string(out)) == "" {
-			// Container not running, skip this health check
-			continue
-		}
+	// Use default wait options with exponential backoff
+	opts := DefaultWaitOptions()
+	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	defer cancel()
 
-		fmt.Printf("   Checking %s... ", svc.name)
-		for time.Now().Before(deadline) {
-			resp, err := http.Get(svc.url)
-			if err == nil && resp.StatusCode == 200 {
-				resp.Body.Close()
-				fmt.Println("✓")
-				break
-			}
-			if resp != nil {
-				resp.Body.Close()
-			}
-			time.Sleep(2 * time.Second)
-			if time.Now().After(deadline) {
-				return fmt.Errorf("%s did not become ready", svc.name)
-			}
+	// Wait for all services with intelligent retry logic
+	result, err := checker.WaitForServices(ctx, services, opts)
+	if err != nil {
+		return err
+	}
+
+	// Print individual service statuses
+	for _, status := range result.Services {
+		if status.State == HealthStateHealthy {
+			fmt.Printf("   Checking %s... ✓ (%.1fs)\n",
+				status.Name,
+				status.Latency.Seconds())
+		} else if status.State == HealthStateSkipped {
+			fmt.Printf("   Checking %s... - (skipped)\n", status.Name)
+		} else {
+			fmt.Printf("   Checking %s... ✗ (%s)\n",
+				status.Name,
+				status.Message)
 		}
 	}
+
+	if !result.Success {
+		return fmt.Errorf("some services failed health checks")
+	}
+
 	return nil
 }
 
