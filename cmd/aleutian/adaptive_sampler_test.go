@@ -434,12 +434,14 @@ func TestRateLimitedSampler(t *testing.T) {
 func TestAdaptiveSampler_Stop(t *testing.T) {
 	sampler := NewAdaptiveSampler(DefaultSamplingConfig())
 
-	// Stop should not panic
+	// First stop should not panic
 	sampler.Stop()
 
-	// Double stop should not panic
-	// (channel is already closed, so this tests the behavior)
-	// Note: In real code, you shouldn't call Stop twice
+	// Double stop should not panic (tests idempotency via sync.Once)
+	sampler.Stop()
+
+	// Third stop should also not panic (confirms sync.Once is working)
+	sampler.Stop()
 }
 
 func TestAdaptiveSampler_InterfaceCompliance(t *testing.T) {

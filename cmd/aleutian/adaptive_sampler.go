@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -177,7 +178,8 @@ func DefaultSamplingConfig() SamplingConfig {
 //	// Record latency after request:
 //	sampler.RecordLatency(time.Since(start))
 type DefaultAdaptiveSampler struct {
-	config SamplingConfig
+	config   SamplingConfig
+	configMu sync.RWMutex // Protects config field access
 
 	// Current state
 	currentRate    atomic.Value // float64
@@ -195,13 +197,10 @@ type DefaultAdaptiveSampler struct {
 	forceEnabled atomic.Bool
 	forceUntil   atomic.Value // time.Time
 
-	// Random source
-	randMu    sync.Mutex
-	randState uint64
-
 	// Adjustment goroutine
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once // Ensures Stop() is idempotent
+	wg       sync.WaitGroup
 }
 
 // NewAdaptiveSampler creates a new adaptive sampler.
@@ -252,7 +251,6 @@ func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
 		config:    config,
 		latencies: make([]time.Duration, bufferSize),
 		stopCh:    make(chan struct{}),
-		randState: uint64(time.Now().UnixNano()),
 	}
 
 	s.currentRate.Store(config.BaseSamplingRate)
@@ -284,7 +282,8 @@ func (s *DefaultAdaptiveSampler) ShouldSample() bool {
 			s.totalSampled.Add(1)
 			return true
 		}
-		s.forceEnabled.Store(false)
+		// Atomically disable if it's still enabled (prevents race condition)
+		s.forceEnabled.CompareAndSwap(true, false)
 	}
 
 	rate := s.currentRate.Load().(float64)
@@ -299,8 +298,8 @@ func (s *DefaultAdaptiveSampler) ShouldSample() bool {
 		return true
 	}
 
-	// Probabilistic sampling
-	if s.fastRandom() < rate {
+	// Probabilistic sampling using math/rand/v2 (concurrent-safe)
+	if rand.Float64() < rate {
 		s.totalSampled.Add(1)
 		return true
 	}
@@ -314,7 +313,8 @@ func (s *DefaultAdaptiveSampler) ShouldSample() bool {
 // # Description
 //
 // Same as ShouldSample but also stores the decision in context for
-// consistent sampling of related operations.
+// consistent sampling of related operations. If a decision was already
+// made (stored in context), it returns that decision without double-counting.
 //
 // # Inputs
 //
@@ -325,16 +325,13 @@ func (s *DefaultAdaptiveSampler) ShouldSample() bool {
 //   - context.Context: Context with sampling decision
 //   - bool: True if item should be sampled
 func (s *DefaultAdaptiveSampler) ShouldSampleContext(ctx context.Context) (context.Context, bool) {
-	// Check if already decided
+	// Check if already decided - DO NOT increment counters here,
+	// as they were already incremented on the initial call.
 	if sampled, ok := ctx.Value(samplingContextKey{}).(bool); ok {
-		if sampled {
-			s.totalSampled.Add(1)
-		} else {
-			s.totalDropped.Add(1)
-		}
 		return ctx, sampled
 	}
 
+	// First decision - ShouldSample handles counter increments
 	sampled := s.ShouldSample()
 	return context.WithValue(ctx, samplingContextKey{}, sampled), sampled
 }
@@ -377,12 +374,15 @@ func (s *DefaultAdaptiveSampler) GetSamplingRate() float64 {
 // # Description
 //
 // Updates the base rate. The actual rate may still be adjusted
-// based on load.
+// based on load. Thread-safe: uses mutex to protect config access.
 //
 // # Inputs
 //
 //   - rate: New base rate (0.0-1.0)
 func (s *DefaultAdaptiveSampler) SetBaseSamplingRate(rate float64) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+
 	if rate < s.config.MinSamplingRate {
 		rate = s.config.MinSamplingRate
 	}
@@ -434,8 +434,11 @@ func (s *DefaultAdaptiveSampler) ForceEnable(duration time.Duration) {
 // # Description
 //
 // Stops the adjustment loop. Should be called on shutdown.
+// Idempotent: safe to call multiple times without panic.
 func (s *DefaultAdaptiveSampler) Stop() {
-	close(s.stopCh)
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 	s.wg.Wait()
 }
 
@@ -457,6 +460,7 @@ func (s *DefaultAdaptiveSampler) adjustLoop() {
 }
 
 // adjustRate calculates and applies a new sampling rate.
+// Thread-safe: reads config under RLock to prevent data races with SetBaseSamplingRate.
 func (s *DefaultAdaptiveSampler) adjustRate() {
 	avgLatency := s.calculateAverageLatency()
 
@@ -465,10 +469,16 @@ func (s *DefaultAdaptiveSampler) adjustRate() {
 		return
 	}
 
+	// Read config values under lock to prevent data race
+	s.configMu.RLock()
+	threshold := s.config.LatencyThreshold
+	baseRate := s.config.BaseSamplingRate
+	minRate := s.config.MinSamplingRate
+	maxRate := s.config.MaxSamplingRate
+	s.configMu.RUnlock()
+
 	currentRate := s.currentRate.Load().(float64)
 	newRate := currentRate
-
-	threshold := s.config.LatencyThreshold
 
 	if avgLatency > threshold {
 		// High latency - reduce sampling
@@ -481,18 +491,18 @@ func (s *DefaultAdaptiveSampler) adjustRate() {
 		// Low latency - increase sampling (slowly)
 		newRate = currentRate * 1.1
 
-		if newRate >= s.config.BaseSamplingRate {
+		if newRate >= baseRate {
 			s.isThrottled.Store(false)
 			s.throttleReason.Store("")
 		}
 	}
 
 	// Apply bounds
-	if newRate < s.config.MinSamplingRate {
-		newRate = s.config.MinSamplingRate
+	if newRate < minRate {
+		newRate = minRate
 	}
-	if newRate > s.config.MaxSamplingRate {
-		newRate = s.config.MaxSamplingRate
+	if newRate > maxRate {
+		newRate = maxRate
 	}
 
 	s.currentRate.Store(newRate)
@@ -518,20 +528,6 @@ func (s *DefaultAdaptiveSampler) calculateAverageLatency() time.Duration {
 	}
 
 	return total / time.Duration(count)
-}
-
-// fastRandom returns a random float64 in [0, 1).
-// Uses xorshift for speed (no lock contention).
-func (s *DefaultAdaptiveSampler) fastRandom() float64 {
-	s.randMu.Lock()
-	x := s.randState
-	x ^= x << 13
-	x ^= x >> 7
-	x ^= x << 17
-	s.randState = x
-	s.randMu.Unlock()
-
-	return float64(x%1000000) / 1000000.0
 }
 
 // Compile-time interface check
