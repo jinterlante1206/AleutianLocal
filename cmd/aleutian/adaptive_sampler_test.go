@@ -68,6 +68,35 @@ func TestNewAdaptiveSampler_ClampsInvalidRates(t *testing.T) {
 	}
 }
 
+func TestNewAdaptiveSampler_EnforcesLogicalBounds(t *testing.T) {
+	// Test that BaseSamplingRate is clamped to [MinSamplingRate, MaxSamplingRate]
+	// Case 1: Base rate below minimum
+	sampler1 := NewAdaptiveSampler(SamplingConfig{
+		BaseSamplingRate: 0.05, // Below min
+		MinSamplingRate:  0.1,
+		MaxSamplingRate:  0.9,
+	})
+	defer sampler1.Stop()
+
+	rate1 := sampler1.GetSamplingRate()
+	if rate1 < 0.1 {
+		t.Errorf("Base rate should be clamped to min (0.1), got %v", rate1)
+	}
+
+	// Case 2: Base rate above maximum
+	sampler2 := NewAdaptiveSampler(SamplingConfig{
+		BaseSamplingRate: 0.95, // Above max
+		MinSamplingRate:  0.1,
+		MaxSamplingRate:  0.8,
+	})
+	defer sampler2.Stop()
+
+	rate2 := sampler2.GetSamplingRate()
+	if rate2 > 0.8 {
+		t.Errorf("Base rate should be clamped to max (0.8), got %v", rate2)
+	}
+}
+
 func TestAdaptiveSampler_ShouldSample_Rate100(t *testing.T) {
 	sampler := NewAdaptiveSampler(SamplingConfig{
 		BaseSamplingRate: 1.0, // 100%
@@ -306,6 +335,48 @@ func TestAdaptiveSampler_AdaptiveThrottling(t *testing.T) {
 	}
 }
 
+func TestAdaptiveSampler_IsThrottled_ClearsOnRecovery(t *testing.T) {
+	// Use a small buffer size via short LatencyWindow to make testing easier
+	sampler := NewAdaptiveSampler(SamplingConfig{
+		BaseSamplingRate:   0.5,
+		MinSamplingRate:    0.01,
+		MaxSamplingRate:    1.0,
+		LatencyThreshold:   50 * time.Millisecond,
+		AdjustmentInterval: 10 * time.Millisecond, // Fast for testing
+		LatencyWindow:      100 * time.Millisecond,
+	})
+	defer sampler.Stop()
+
+	// Record high latencies to trigger throttling
+	// Buffer size is ~1000 (100ms/10ms * 100), so fill it completely
+	for i := 0; i < 1000; i++ {
+		sampler.RecordLatency(200 * time.Millisecond)
+	}
+
+	// Wait for adjustment
+	time.Sleep(50 * time.Millisecond)
+
+	stats := sampler.Stats()
+	if !stats.IsThrottled {
+		t.Error("Should be throttled with high latency")
+	}
+
+	// Now record normal latencies (below threshold)
+	// Fill the entire buffer to flush out all high latencies
+	for i := 0; i < 1000; i++ {
+		sampler.RecordLatency(40 * time.Millisecond) // Below threshold (50ms)
+	}
+
+	// Wait for adjustment
+	time.Sleep(50 * time.Millisecond)
+
+	// isThrottled should now be false because latency is below threshold
+	stats = sampler.Stats()
+	if stats.IsThrottled {
+		t.Error("Should NOT be throttled when latency is below threshold")
+	}
+}
+
 func TestAdaptiveSampler_ConcurrentAccess(t *testing.T) {
 	sampler := NewAdaptiveSampler(SamplingConfig{
 		BaseSamplingRate: 0.5,
@@ -435,13 +506,13 @@ func TestRateLimitedSampler(t *testing.T) {
 
 	// First 5 should succeed
 	for i := 0; i < 5; i++ {
-		if !sampler.ShouldSample() {
+		if !sampler() {
 			t.Errorf("Sample %d should succeed", i)
 		}
 	}
 
 	// 6th should fail
-	if sampler.ShouldSample() {
+	if sampler() {
 		t.Error("Sample 6 should fail (rate limited)")
 	}
 
@@ -449,7 +520,7 @@ func TestRateLimitedSampler(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// Should work again
-	if !sampler.ShouldSample() {
+	if !sampler() {
 		t.Error("Sample in new window should succeed")
 	}
 }

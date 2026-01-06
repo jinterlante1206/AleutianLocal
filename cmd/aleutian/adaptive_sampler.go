@@ -108,10 +108,6 @@ type SamplingConfig struct {
 	// AdjustmentInterval is how often to recalculate rate.
 	// Default: 10 seconds
 	AdjustmentInterval time.Duration
-
-	// ErrorsAlwaysSample ensures errors are always sampled.
-	// Default: true
-	ErrorsAlwaysSample bool
 }
 
 // DefaultSamplingConfig returns sensible defaults.
@@ -132,7 +128,6 @@ func DefaultSamplingConfig() SamplingConfig {
 		LatencyThreshold:   100 * time.Millisecond,
 		LatencyWindow:      time.Minute,
 		AdjustmentInterval: 10 * time.Second,
-		ErrorsAlwaysSample: true,
 	}
 }
 
@@ -236,6 +231,15 @@ func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
 	}
 	if config.AdjustmentInterval <= 0 {
 		config.AdjustmentInterval = 10 * time.Second
+	}
+
+	// Ensure logical consistency: MinSamplingRate <= BaseSamplingRate <= MaxSamplingRate
+	// This prevents configurations where the base rate is unreachable.
+	if config.BaseSamplingRate < config.MinSamplingRate {
+		config.BaseSamplingRate = config.MinSamplingRate
+	}
+	if config.BaseSamplingRate > config.MaxSamplingRate {
+		config.BaseSamplingRate = config.MaxSamplingRate
 	}
 
 	// Calculate buffer size based on expected samples
@@ -496,6 +500,17 @@ func (s *DefaultAdaptiveSampler) adjustRate() {
 	maxRate := s.config.MaxSamplingRate
 	s.configMu.RUnlock()
 
+	// Determine throttled state based on current latency (independent of rate).
+	// This ensures isThrottled accurately reflects whether latency exceeds threshold,
+	// preventing the flag from getting stuck when latency is in the middle range.
+	if avgLatency > threshold {
+		s.isThrottled.Store(true)
+		s.throttleReason.Store("latency exceeded threshold")
+	} else {
+		s.isThrottled.Store(false)
+		s.throttleReason.Store("")
+	}
+
 	currentRate := s.currentRate.Load().(float64)
 	newRate := currentRate
 
@@ -503,9 +518,6 @@ func (s *DefaultAdaptiveSampler) adjustRate() {
 		// High latency - reduce sampling
 		ratio := float64(threshold) / float64(avgLatency)
 		newRate = currentRate * ratio
-
-		s.isThrottled.Store(true)
-		s.throttleReason.Store("latency exceeded threshold")
 	} else if avgLatency < threshold/2 {
 		// Low latency - increase sampling towards base rate.
 		// Uses proportional recovery (25% of remaining distance) instead of
@@ -513,12 +525,8 @@ func (s *DefaultAdaptiveSampler) adjustRate() {
 		// Example: If currentRate=0.01 and baseRate=0.1, this recovers much
 		// faster than currentRate * 1.1 would.
 		newRate = currentRate + (baseRate-currentRate)*0.25
-
-		if newRate >= baseRate {
-			s.isThrottled.Store(false)
-			s.throttleReason.Store("")
-		}
 	}
+	// Note: When threshold/2 <= avgLatency <= threshold, rate stays unchanged.
 
 	// Apply bounds
 	if newRate < minRate {
@@ -603,6 +611,7 @@ func HeadSampler(n int) func() bool {
 // # Description
 //
 // Samples at most N items per second, regardless of base rate.
+// Returns a function for consistency with HeadSampler API.
 //
 // # Inputs
 //
@@ -610,24 +619,25 @@ func HeadSampler(n int) func() bool {
 //
 // # Outputs
 //
-//   - *RateLimitedSamplerImpl: Rate-limited sampler
-func RateLimitedSampler(perSecond int) *RateLimitedSamplerImpl {
-	return &RateLimitedSamplerImpl{
+//   - func() bool: Function that returns true if under rate limit
+func RateLimitedSampler(perSecond int) func() bool {
+	impl := &rateLimitedSamplerImpl{
 		maxPerSecond: perSecond,
 		windowStart:  time.Now(),
 	}
+	return impl.shouldSample
 }
 
-// RateLimitedSamplerImpl implements rate-limited sampling.
-type RateLimitedSamplerImpl struct {
+// rateLimitedSamplerImpl implements rate-limited sampling (internal).
+type rateLimitedSamplerImpl struct {
 	maxPerSecond int
 	windowStart  time.Time
 	count        int
 	mu           sync.Mutex
 }
 
-// ShouldSample returns true if under rate limit.
-func (r *RateLimitedSamplerImpl) ShouldSample() bool {
+// shouldSample returns true if under rate limit.
+func (r *rateLimitedSamplerImpl) shouldSample() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
