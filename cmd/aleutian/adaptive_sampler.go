@@ -218,14 +218,14 @@ type DefaultAdaptiveSampler struct {
 //
 //   - *DefaultAdaptiveSampler: New sampler
 func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
-	// Apply defaults
-	if config.BaseSamplingRate <= 0 {
+	// Apply defaults and validate bounds [0.0, 1.0]
+	if config.BaseSamplingRate <= 0 || config.BaseSamplingRate > 1.0 {
 		config.BaseSamplingRate = 0.1
 	}
-	if config.MinSamplingRate <= 0 {
+	if config.MinSamplingRate <= 0 || config.MinSamplingRate > 1.0 {
 		config.MinSamplingRate = 0.01
 	}
-	if config.MaxSamplingRate <= 0 {
+	if config.MaxSamplingRate <= 0 || config.MaxSamplingRate > 1.0 {
 		config.MaxSamplingRate = 1.0
 	}
 	if config.LatencyThreshold <= 0 {
@@ -278,6 +278,10 @@ func (s *DefaultAdaptiveSampler) ShouldSample() bool {
 	// Force enabled?
 	if s.forceEnabled.Load() {
 		until := s.forceUntil.Load().(time.Time)
+		// Note: A minor TOCTOU race exists here. The 'until' time could expire
+		// between this check and the return. This is an accepted trade-off to
+		// avoid locking on the hot path. Impact is minimal (one extra sample
+		// may occur just after the window expires).
 		if time.Now().Before(until) {
 			s.totalSampled.Add(1)
 			return true
@@ -346,6 +350,14 @@ type samplingContextKey struct{}
 // Records latency for use in adaptive rate adjustment. Uses a ring
 // buffer to maintain a rolling window of measurements.
 //
+// # Performance Note
+//
+// The latencyMu mutex serializes all latency recordings. On systems with
+// very high request rates and many cores, this could become a contention
+// point. If profiling reveals this as a bottleneck, consider using a
+// buffered channel with a single consumer goroutine, or sharded mutexes.
+// For most use cases (< 100k req/s), the current implementation is adequate.
+//
 // # Inputs
 //
 //   - latency: The measured latency
@@ -376,6 +388,12 @@ func (s *DefaultAdaptiveSampler) GetSamplingRate() float64 {
 // Updates the base rate. The actual rate may still be adjusted
 // based on load. Thread-safe: uses mutex to protect config access.
 //
+// Note: This does NOT immediately update currentRate. The background
+// adjustLoop is the single source of truth for currentRate and will
+// pick up the new BaseSamplingRate on its next tick. This prevents
+// a race condition where adjustRate could overwrite the user's setting
+// with a value calculated from stale data.
+//
 // # Inputs
 //
 //   - rate: New base rate (0.0-1.0)
@@ -390,7 +408,8 @@ func (s *DefaultAdaptiveSampler) SetBaseSamplingRate(rate float64) {
 		rate = s.config.MaxSamplingRate
 	}
 	s.config.BaseSamplingRate = rate
-	s.currentRate.Store(rate)
+	// Note: Do NOT call s.currentRate.Store(rate) here.
+	// The adjustLoop goroutine is the single source of truth for currentRate.
 }
 
 // Stats returns current sampler statistics.
@@ -488,8 +507,12 @@ func (s *DefaultAdaptiveSampler) adjustRate() {
 		s.isThrottled.Store(true)
 		s.throttleReason.Store("latency exceeded threshold")
 	} else if avgLatency < threshold/2 {
-		// Low latency - increase sampling (slowly)
-		newRate = currentRate * 1.1
+		// Low latency - increase sampling towards base rate.
+		// Uses proportional recovery (25% of remaining distance) instead of
+		// simple multiplier for faster adaptation to spiky workloads.
+		// Example: If currentRate=0.01 and baseRate=0.1, this recovers much
+		// faster than currentRate * 1.1 would.
+		newRate = currentRate + (baseRate-currentRate)*0.25
 
 		if newRate >= baseRate {
 			s.isThrottled.Store(false)
