@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // -----------------------------------------------------------------------------
@@ -352,11 +353,22 @@ func (pm *DefaultProcessManager) RunWithInput(ctx context.Context, name string, 
 }
 
 // Start launches a background process and returns immediately.
+//
+// The process is started in a new session (Setsid: true) which:
+//   - Creates a new process group with the child as the leader
+//   - Prevents zombie processes by ensuring child processes are properly reaped
+//   - Allows the parent to terminate without leaving orphaned children
+//
+// Note: On process termination, use syscall.Kill(-pid, signal) with a negative
+// PID to kill the entire process group.
 func (pm *DefaultProcessManager) Start(ctx context.Context, name string, args ...string) (int, error) {
 	cmd := exec.Command(name, args...)
 
-	// Detach from parent process group
-	// Note: Process will continue running after parent exits
+	// Create a new session to prevent zombie processes
+	// Setsid: true puts the child in its own process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true,
+	}
 
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("failed to start %s: %w", name, err)

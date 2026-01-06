@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,20 @@ var (
 
 	// ErrInvalidConfig is returned when ComposeConfig is invalid.
 	ErrInvalidConfig = errors.New("invalid compose configuration")
+
+	// ErrInvalidEnvVar is returned when an environment variable key is invalid.
+	// This prevents config injection attacks through malformed env var names.
+	ErrInvalidEnvVar = errors.New("invalid environment variable")
 )
+
+// envVarKeyRegex validates environment variable key names.
+// Keys must:
+//   - Start with a letter or underscore
+//   - Contain only alphanumeric characters and underscores
+//   - Not be empty
+//
+// This prevents shell metacharacter injection and other config attacks.
+var envVarKeyRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // =============================================================================
 // Interface Definition
@@ -820,6 +834,11 @@ func applyComposeConfigDefaults(cfg *ComposeConfig) {
 //   - Compose files exist at configured paths
 //   - Required secrets are pre-created
 func (e *DefaultComposeExecutor) Up(ctx context.Context, opts UpOptions) (*ComposeResult, error) {
+	// Validate env vars before proceeding to prevent config injection
+	if err := e.validateEnvVars(opts.Env); err != nil {
+		return nil, err
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -1227,6 +1246,10 @@ func (e *DefaultComposeExecutor) ForceCleanup(ctx context.Context) (*CleanupResu
 //   - Container has the required commands available
 func (e *DefaultComposeExecutor) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error) {
 	if err := e.validateExecOptions(opts); err != nil {
+		return nil, err
+	}
+	// Validate env vars before proceeding to prevent config injection
+	if err := e.validateEnvVars(opts.Env); err != nil {
 		return nil, err
 	}
 
@@ -2442,6 +2465,45 @@ func (e *DefaultComposeExecutor) isSensitiveEnvVar(name string) bool {
 		strings.Contains(upper, "KEY") ||
 		strings.Contains(upper, "PASSWORD") ||
 		strings.Contains(upper, "CREDENTIAL")
+}
+
+// validateEnvVars validates all environment variable keys in the map.
+//
+// # Description
+//
+// Ensures all environment variable keys match the allowed pattern
+// (alphanumeric and underscore, starting with letter or underscore).
+// This prevents config injection attacks through malformed env var names.
+//
+// # Inputs
+//
+//   - env: Environment variables map to validate
+//
+// # Outputs
+//
+//   - error: ErrInvalidEnvVar with details if any key is invalid
+//
+// # Example
+//
+//	if err := e.validateEnvVars(opts.Env); err != nil {
+//	    return nil, err
+//	}
+//
+// # Limitations
+//
+//   - Does not validate values, only keys
+//   - May reject unconventional but valid POSIX names
+//
+// # Assumptions
+//
+//   - Standard POSIX env var naming conventions are desired
+func (e *DefaultComposeExecutor) validateEnvVars(env map[string]string) error {
+	for key := range env {
+		if !envVarKeyRegex.MatchString(key) {
+			return fmt.Errorf("%w: key %q contains invalid characters (must match [a-zA-Z_][a-zA-Z0-9_]*)", ErrInvalidEnvVar, key)
+		}
+	}
+	return nil
 }
 
 // =============================================================================
