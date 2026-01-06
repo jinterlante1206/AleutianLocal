@@ -258,6 +258,11 @@ type IntelligentHealthReport struct {
 	// Duration is how long the analysis took.
 	Duration time.Duration
 
+	// TraceID is the OpenTelemetry trace ID for correlation.
+	// Enables "Support Ticket Revolution" - users can report trace ID
+	// and support can view the entire analysis in Jaeger.
+	TraceID string
+
 	// CreatedAt is when this report was created.
 	CreatedAt time.Time
 }

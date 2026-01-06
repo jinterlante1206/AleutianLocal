@@ -366,4 +366,7 @@ func init() {
 	policyCmd.AddCommand(verifyPolicyCmd)
 	policyCmd.AddCommand(dumpPolicyCmd)
 	policyCmd.AddCommand(testPolicyCmd)
+
+	// Health Intelligence (Phase 9B)
+	rootCmd.AddCommand(healthCmd)
 }
