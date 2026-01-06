@@ -108,6 +108,11 @@ type SamplingConfig struct {
 	// AdjustmentInterval is how often to recalculate rate.
 	// Default: 10 seconds
 	AdjustmentInterval time.Duration
+
+	// LatencyBufferSize is the number of latency samples to store in the ring buffer.
+	// A larger buffer provides more stable averages but uses more memory.
+	// Default: 1024
+	LatencyBufferSize int
 }
 
 // DefaultSamplingConfig returns sensible defaults.
@@ -128,6 +133,7 @@ func DefaultSamplingConfig() SamplingConfig {
 		LatencyThreshold:   100 * time.Millisecond,
 		LatencyWindow:      time.Minute,
 		AdjustmentInterval: 10 * time.Second,
+		LatencyBufferSize:  1024,
 	}
 }
 
@@ -188,9 +194,13 @@ type DefaultAdaptiveSampler struct {
 	latencyIndex int
 	latencyMu    sync.Mutex
 
-	// Force enable
-	forceEnabled atomic.Bool
-	forceUntil   atomic.Value // time.Time
+	// Force enable - protected by forceMu to ensure atomic updates of both fields.
+	// Using a mutex instead of separate atomics prevents a TOCTOU race where
+	// a new ForceEnable call could be immediately disabled by a concurrent
+	// expiry check that read the old (expired) forceUntil value.
+	forceMu      sync.RWMutex
+	forceEnabled bool
+	forceUntil   time.Time
 
 	// Adjustment goroutine
 	stopCh   chan struct{}
@@ -242,14 +252,11 @@ func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
 		config.BaseSamplingRate = config.MaxSamplingRate
 	}
 
-	// Calculate buffer size based on expected samples
-	bufferSize := int(config.LatencyWindow / config.AdjustmentInterval * 100)
-	if bufferSize < 100 {
-		bufferSize = 100
+	// Validate latency buffer size
+	if config.LatencyBufferSize <= 0 {
+		config.LatencyBufferSize = 1024
 	}
-	if bufferSize > 10000 {
-		bufferSize = 10000
-	}
+	bufferSize := config.LatencyBufferSize
 
 	s := &DefaultAdaptiveSampler{
 		config:    config,
@@ -259,7 +266,7 @@ func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
 
 	s.currentRate.Store(config.BaseSamplingRate)
 	s.throttleReason.Store("")
-	s.forceUntil.Store(time.Time{})
+	// forceEnabled and forceUntil are zero-valued (false and time.Time{})
 
 	// Start adjustment goroutine
 	s.wg.Add(1)
@@ -279,19 +286,26 @@ func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
 //
 //   - bool: True if item should be sampled
 func (s *DefaultAdaptiveSampler) ShouldSample() bool {
-	// Force enabled?
-	if s.forceEnabled.Load() {
-		until := s.forceUntil.Load().(time.Time)
-		// Note: A minor TOCTOU race exists here. The 'until' time could expire
-		// between this check and the return. This is an accepted trade-off to
-		// avoid locking on the hot path. Impact is minimal (one extra sample
-		// may occur just after the window expires).
+	// Check force-enable state under read lock
+	s.forceMu.RLock()
+	enabled := s.forceEnabled
+	until := s.forceUntil
+	s.forceMu.RUnlock()
+
+	if enabled {
 		if time.Now().Before(until) {
 			s.totalSampled.Add(1)
 			return true
 		}
-		// Atomically disable if it's still enabled (prevents race condition)
-		s.forceEnabled.CompareAndSwap(true, false)
+
+		// Time expired, try to disable with write lock.
+		// Must re-check condition after acquiring lock in case another
+		// goroutine just called ForceEnable with a new duration.
+		s.forceMu.Lock()
+		if s.forceEnabled && time.Now().After(s.forceUntil) {
+			s.forceEnabled = false
+		}
+		s.forceMu.Unlock()
 	}
 
 	rate := s.currentRate.Load().(float64)
@@ -426,6 +440,10 @@ func (s *DefaultAdaptiveSampler) SetBaseSamplingRate(rate float64) {
 //
 //   - SamplerStats: Current statistics
 func (s *DefaultAdaptiveSampler) Stats() SamplerStats {
+	s.forceMu.RLock()
+	forceEnabled := s.forceEnabled
+	s.forceMu.RUnlock()
+
 	return SamplerStats{
 		TotalSampled:   s.totalSampled.Load(),
 		TotalDropped:   s.totalDropped.Load(),
@@ -433,7 +451,7 @@ func (s *DefaultAdaptiveSampler) Stats() SamplerStats {
 		AverageLatency: s.calculateAverageLatency(),
 		IsThrottled:    s.isThrottled.Load(),
 		ThrottleReason: s.throttleReason.Load().(string),
-		ForceEnabled:   s.forceEnabled.Load(),
+		ForceEnabled:   forceEnabled,
 	}
 }
 
@@ -442,14 +460,17 @@ func (s *DefaultAdaptiveSampler) Stats() SamplerStats {
 // # Description
 //
 // Forces 100% sampling for a specified duration. Useful for
-// debugging specific issues.
+// debugging specific issues. Thread-safe: uses mutex to ensure
+// both forceEnabled and forceUntil are updated atomically.
 //
 // # Inputs
 //
 //   - duration: How long to force 100% sampling
 func (s *DefaultAdaptiveSampler) ForceEnable(duration time.Duration) {
-	s.forceUntil.Store(time.Now().Add(duration))
-	s.forceEnabled.Store(true)
+	s.forceMu.Lock()
+	defer s.forceMu.Unlock()
+	s.forceUntil = time.Now().Add(duration)
+	s.forceEnabled = true
 }
 
 // Stop stops the sampler's background goroutine.
@@ -593,12 +614,20 @@ func AlwaysSampleError(sampler AdaptiveSampler, isError bool) bool {
 //
 // # Inputs
 //
-//   - n: Number of items to sample
+//   - n: Number of items to sample (must be > 0)
 //
 // # Outputs
 //
 //   - func(): Function that returns true for first N calls
+//
+// # Input Validation
+//
+// If n <= 0, returns a sampler that never samples.
 func HeadSampler(n int) func() bool {
+	if n <= 0 {
+		// Return a sampler that never samples for non-positive N
+		return func() bool { return false }
+	}
 	var count int32
 	return func() bool {
 		current := atomic.AddInt32(&count, 1)
@@ -615,12 +644,20 @@ func HeadSampler(n int) func() bool {
 //
 // # Inputs
 //
-//   - perSecond: Maximum samples per second
+//   - perSecond: Maximum samples per second (must be > 0)
 //
 // # Outputs
 //
 //   - func() bool: Function that returns true if under rate limit
+//
+// # Input Validation
+//
+// If perSecond <= 0, returns a sampler that never samples.
 func RateLimitedSampler(perSecond int) func() bool {
+	if perSecond <= 0 {
+		// Return a sampler that never samples for non-positive rates
+		return func() bool { return false }
+	}
 	impl := &rateLimitedSamplerImpl{
 		maxPerSecond: perSecond,
 		windowStart:  time.Now(),

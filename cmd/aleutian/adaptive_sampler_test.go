@@ -567,6 +567,92 @@ func TestSamplerStats_Fields(t *testing.T) {
 	}
 }
 
+func TestHeadSampler_InvalidInput(t *testing.T) {
+	// n = 0 should never sample
+	sampler0 := HeadSampler(0)
+	for i := 0; i < 10; i++ {
+		if sampler0() {
+			t.Error("HeadSampler(0) should never sample")
+		}
+	}
+
+	// n = -1 should never sample
+	samplerNeg := HeadSampler(-1)
+	for i := 0; i < 10; i++ {
+		if samplerNeg() {
+			t.Error("HeadSampler(-1) should never sample")
+		}
+	}
+}
+
+func TestRateLimitedSampler_InvalidInput(t *testing.T) {
+	// perSecond = 0 should never sample
+	sampler0 := RateLimitedSampler(0)
+	for i := 0; i < 10; i++ {
+		if sampler0() {
+			t.Error("RateLimitedSampler(0) should never sample")
+		}
+	}
+
+	// perSecond = -1 should never sample
+	samplerNeg := RateLimitedSampler(-1)
+	for i := 0; i < 10; i++ {
+		if samplerNeg() {
+			t.Error("RateLimitedSampler(-1) should never sample")
+		}
+	}
+}
+
+func TestAdaptiveSampler_ForceEnable_ConcurrentRace(t *testing.T) {
+	// Test that ForceEnable doesn't get prematurely disabled by concurrent expiry checks
+	sampler := NewAdaptiveSampler(SamplingConfig{
+		BaseSamplingRate: 0.0, // 0% - won't sample without force
+		MinSamplingRate:  0.0,
+	})
+	defer sampler.Stop()
+
+	// Force enable for a very short time (will expire almost immediately)
+	sampler.ForceEnable(1 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // Let it expire
+
+	// Call ShouldSample to trigger expiry cleanup
+	sampler.ShouldSample()
+
+	// Now force enable for longer
+	sampler.ForceEnable(100 * time.Millisecond)
+
+	// The force-enable should still be active (not disabled by stale expiry check)
+	stats := sampler.Stats()
+	if !stats.ForceEnabled {
+		t.Error("ForceEnabled should be true after re-enabling")
+	}
+
+	// Should sample because force is enabled
+	if !sampler.ShouldSample() {
+		t.Error("Should sample when force enabled")
+	}
+}
+
+func TestAdaptiveSampler_LatencyBufferSize(t *testing.T) {
+	// Test that LatencyBufferSize is respected
+	sampler := NewAdaptiveSampler(SamplingConfig{
+		BaseSamplingRate:  0.5,
+		LatencyBufferSize: 50, // Small buffer for testing
+	})
+	defer sampler.Stop()
+
+	// Record more than buffer size latencies
+	for i := 0; i < 100; i++ {
+		sampler.RecordLatency(time.Duration(i) * time.Millisecond)
+	}
+
+	// Should not panic and stats should work
+	stats := sampler.Stats()
+	if stats.AverageLatency == 0 {
+		t.Error("AverageLatency should be calculated")
+	}
+}
+
 func BenchmarkAdaptiveSampler_ShouldSample(b *testing.B) {
 	sampler := NewAdaptiveSampler(SamplingConfig{
 		BaseSamplingRate: 0.5,
