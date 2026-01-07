@@ -35,6 +35,308 @@ import (
 // Interfaces
 // =============================================================================
 
+// -----------------------------------------------------------------------------
+// Enterprise Extension Points
+// -----------------------------------------------------------------------------
+//
+// The following interfaces are designed for enterprise deployments requiring
+// enhanced security, compliance, and audit capabilities. Implementations are
+// NOT included in the open-source release.
+//
+// Extension interfaces:
+//   - KeyedHashComputer: HMAC-based verification with key management
+//   - SignatureVerifier: Digital signature verification (RSA, ECDSA)
+//   - TimestampAuthority: RFC 3161 trusted timestamping
+//   - HSMProvider: Hardware Security Module integration
+//   - AuditLogger: Compliance audit trail logging
+//   - VerificationAuthorizer: Access control for verification operations
+//
+// To implement enterprise features, create implementations of these interfaces
+// and inject them via constructor functions.
+// -----------------------------------------------------------------------------
+
+// KeyedHashComputer computes keyed hashes (HMAC) for enhanced security.
+//
+// # Description
+//
+// Enterprise extension for HMAC-based verification. Unlike simple SHA-256,
+// HMAC requires a secret key, providing authentication in addition to
+// integrity verification.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Enterprise Use Cases
+//
+//   - Multi-tenant environments requiring tenant-specific keys
+//   - Regulatory compliance requiring keyed verification (FIPS 140-2)
+//   - Non-repudiation with organizational keys
+type KeyedHashComputer interface {
+	// ComputeHMAC computes a keyed hash for content.
+	//
+	// # Inputs
+	//
+	//   - keyID: Identifier for the key to use (for key rotation)
+	//   - content: Content to hash
+	//
+	// # Outputs
+	//
+	//   - string: Hex-encoded HMAC
+	//   - error: Non-nil if key not found or HSM unavailable
+	ComputeHMAC(keyID string, content string) (string, error)
+
+	// VerifyHMAC verifies a keyed hash.
+	//
+	// # Inputs
+	//
+	//   - keyID: Identifier for the key used
+	//   - content: Original content
+	//   - expectedHMAC: HMAC to verify against
+	//
+	// # Outputs
+	//
+	//   - bool: True if HMAC matches
+	//   - error: Non-nil if verification could not be performed
+	VerifyHMAC(keyID string, content string, expectedHMAC string) (bool, error)
+}
+
+// SignatureVerifier verifies digital signatures on content.
+//
+// # Description
+//
+// Enterprise extension for cryptographic signature verification.
+// Supports RSA, ECDSA, and Ed25519 signatures for non-repudiation.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Enterprise Use Cases
+//
+//   - Legal non-repudiation requirements
+//   - Regulatory compliance (eIDAS, ESIGN)
+//   - Multi-party verification
+type SignatureVerifier interface {
+	// VerifySignature verifies a digital signature.
+	//
+	// # Inputs
+	//
+	//   - content: Content that was signed
+	//   - signature: Base64-encoded signature
+	//   - signerID: Identifier for the signer's public key
+	//
+	// # Outputs
+	//
+	//   - bool: True if signature is valid
+	//   - error: Non-nil if verification could not be performed
+	VerifySignature(content string, signature string, signerID string) (bool, error)
+}
+
+// TimestampAuthority provides trusted timestamping services.
+//
+// # Description
+//
+// Enterprise extension for RFC 3161 trusted timestamps.
+// Proves that content existed at a specific point in time.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Enterprise Use Cases
+//
+//   - Legal evidence timestamping
+//   - Regulatory compliance (MiFID II, SOX)
+//   - Audit trail integrity
+type TimestampAuthority interface {
+	// GetTimestamp requests a trusted timestamp for content hash.
+	//
+	// # Inputs
+	//
+	//   - contentHash: Hash of content to timestamp
+	//
+	// # Outputs
+	//
+	//   - TimestampToken: RFC 3161 timestamp token
+	//   - error: Non-nil if TSA unavailable
+	GetTimestamp(contentHash string) (*TimestampToken, error)
+
+	// VerifyTimestamp verifies a timestamp token.
+	//
+	// # Inputs
+	//
+	//   - token: Previously obtained timestamp token
+	//   - contentHash: Hash to verify against
+	//
+	// # Outputs
+	//
+	//   - bool: True if timestamp is valid
+	//   - error: Non-nil if verification failed
+	VerifyTimestamp(token *TimestampToken, contentHash string) (bool, error)
+}
+
+// TimestampToken represents an RFC 3161 timestamp token.
+//
+// # Description
+//
+// Contains the timestamp response from a Timestamp Authority.
+// Used for proving content existed at a specific time.
+type TimestampToken struct {
+	// Token is the DER-encoded timestamp token
+	Token []byte `json:"token"`
+
+	// Timestamp is the time asserted by the TSA
+	Timestamp time.Time `json:"timestamp"`
+
+	// TSAName is the name of the Timestamp Authority
+	TSAName string `json:"tsa_name"`
+
+	// SerialNumber is the unique token serial number
+	SerialNumber string `json:"serial_number"`
+}
+
+// HSMProvider provides Hardware Security Module integration.
+//
+// # Description
+//
+// Enterprise extension for PKCS#11 HSM integration.
+// Keys never leave the HSM, providing highest security level.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Enterprise Use Cases
+//
+//   - FIPS 140-2 Level 3 compliance
+//   - PCI-DSS key management
+//   - Government security requirements
+type HSMProvider interface {
+	// SignWithHSM signs content using an HSM-stored key.
+	//
+	// # Inputs
+	//
+	//   - keyLabel: Label of the key in HSM
+	//   - content: Content to sign
+	//
+	// # Outputs
+	//
+	//   - []byte: Signature bytes
+	//   - error: Non-nil if HSM operation failed
+	SignWithHSM(keyLabel string, content []byte) ([]byte, error)
+
+	// VerifyWithHSM verifies a signature using HSM.
+	//
+	// # Inputs
+	//
+	//   - keyLabel: Label of the public key in HSM
+	//   - content: Original content
+	//   - signature: Signature to verify
+	//
+	// # Outputs
+	//
+	//   - bool: True if signature valid
+	//   - error: Non-nil if HSM operation failed
+	VerifyWithHSM(keyLabel string, content []byte, signature []byte) (bool, error)
+}
+
+// AuditLogger logs verification events for compliance.
+//
+// # Description
+//
+// Enterprise extension for compliance audit logging.
+// All verification attempts are logged with full context.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Enterprise Use Cases
+//
+//   - SOC 2 audit requirements
+//   - GDPR access logging
+//   - HIPAA audit trails
+type AuditLogger interface {
+	// LogVerificationAttempt logs a verification attempt.
+	//
+	// # Inputs
+	//
+	//   - event: Verification event details
+	//
+	// # Outputs
+	//
+	//   - error: Non-nil if logging failed (should not block verification)
+	LogVerificationAttempt(event *VerificationAuditEvent) error
+}
+
+// VerificationAuditEvent contains details for audit logging.
+//
+// # Description
+//
+// Captures all relevant information about a verification attempt
+// for compliance audit trails.
+type VerificationAuditEvent struct {
+	// SessionID being verified
+	SessionID string `json:"session_id"`
+
+	// UserID who requested verification (from auth context)
+	UserID string `json:"user_id"`
+
+	// TenantID for multi-tenant deployments
+	TenantID string `json:"tenant_id"`
+
+	// Timestamp of verification attempt
+	Timestamp time.Time `json:"timestamp"`
+
+	// Success indicates if verification passed
+	Success bool `json:"success"`
+
+	// FailureReason if verification failed
+	FailureReason string `json:"failure_reason,omitempty"`
+
+	// IPAddress of requester
+	IPAddress string `json:"ip_address"`
+
+	// RequestID for correlation
+	RequestID string `json:"request_id"`
+}
+
+// VerificationAuthorizer checks authorization for verification operations.
+//
+// # Description
+//
+// Enterprise extension for access control on verification.
+// Ensures users can only verify sessions they have access to.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Enterprise Use Cases
+//
+//   - Multi-tenant session isolation
+//   - Role-based access control
+//   - Data sovereignty compliance
+type VerificationAuthorizer interface {
+	// CanVerify checks if a user can verify a session.
+	//
+	// # Inputs
+	//
+	//   - userID: User requesting verification
+	//   - sessionID: Session to verify
+	//
+	// # Outputs
+	//
+	//   - bool: True if authorized
+	//   - error: Non-nil if authorization check failed
+	CanVerify(userID string, sessionID string) (bool, error)
+}
+
+// -----------------------------------------------------------------------------
+// Core Interfaces (Open Source)
+// -----------------------------------------------------------------------------
+
 // ChainVerifier verifies the integrity of a hash chain.
 //
 // # Description
