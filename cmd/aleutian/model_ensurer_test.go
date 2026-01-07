@@ -35,6 +35,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -526,25 +527,24 @@ func TestEnsureModels_NetworkFailure_OfflineMode(t *testing.T) {
 // EnsureModels Tests - Disk Space
 // -----------------------------------------------------------------------------
 
-// TestEnsureModels_DiskSpaceInsufficient verifies disk space check.
+// TestEnsureModels_DiskSpaceInsufficient verifies physical disk space check.
 //
 // # Description
 //
-// Tests that when disk space is insufficient, an error is returned.
+// Tests that when PHYSICAL disk space is insufficient, an error is returned.
+// Configured limit exceeded is now a soft warning (not a hard fail).
 func TestEnsureModels_DiskSpaceInsufficient(t *testing.T) {
 	mockChecker := &MockSystemChecker{
-		networkError: nil,
-		diskError: &CheckError{
-			Type:    CheckErrorDiskSpaceLow,
-			Message: "Not enough space",
-		},
+		networkError:       nil,
+		availableDiskSpace: 1 * GB, // Only 1GB available - not enough for 10GB model
+		modelStoragePath:   "/tmp/test-models",
 	}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
 			"test-embed": false, // Needs pulling
 		},
 		sizeMap: map[string]int64{
-			"test-embed": 10 * GB,
+			"test-embed": 10 * GB, // Requires 10GB but only 1GB available
 		},
 	}
 
@@ -554,15 +554,59 @@ func TestEnsureModels_DiskSpaceInsufficient(t *testing.T) {
 	result, err := ensurer.EnsureModels(ctx)
 
 	if err == nil {
-		t.Fatal("Expected error for insufficient disk space")
+		t.Fatal("Expected error for insufficient physical disk space")
 	}
 
 	if result != nil {
 		t.Error("Expected nil result on fatal error")
 	}
 
-	if !errors.Is(err, err) { // Just verify error exists
-		t.Error("Expected disk space error")
+	if !strings.Contains(err.Error(), "insufficient physical disk space") {
+		t.Errorf("Expected 'insufficient physical disk space' error, got: %v", err)
+	}
+}
+
+// TestEnsureModels_DiskLimitExceeded_WarnsButProceeds verifies configured limit is soft.
+//
+// # Description
+//
+// Tests that when configured disk limit would be exceeded but physical space
+// is available, the operation proceeds with a warning (not an error).
+func TestEnsureModels_DiskLimitExceeded_WarnsButProceeds(t *testing.T) {
+	mockChecker := &MockSystemChecker{
+		networkError:       nil,
+		availableDiskSpace: 200 * GB, // Plenty of physical space
+		modelStoragePath:   "/tmp/test-models",
+	}
+	mockManager := &MockOllamaModelManager{
+		hasModelMap: map[string]bool{
+			"test-embed": false, // Needs pulling
+		},
+		sizeMap: map[string]int64{
+			"test-embed": 500 * 1024 * 1024, // 500MB
+		},
+	}
+
+	// Configure with 50GB limit but mock shows 100GB current usage
+	cfg := newTestConfig()
+	cfg.DiskLimitGB = 50 // 50GB limit
+
+	ensurer := NewDefaultModelEnsurerWithDeps(mockChecker, mockManager, cfg)
+	ctx := context.Background()
+
+	result, err := ensurer.EnsureModels(ctx)
+
+	if err != nil {
+		t.Fatalf("Expected no error when physical space is available: %v", err)
+	}
+
+	if result == nil {
+		t.Fatal("Expected result when proceeding with warning")
+	}
+
+	// Should proceed (CanProceed = true)
+	if !result.CanProceed {
+		t.Error("Expected CanProceed=true when physical space is available")
 	}
 }
 

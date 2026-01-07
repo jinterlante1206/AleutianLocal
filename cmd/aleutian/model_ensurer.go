@@ -102,6 +102,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -598,11 +600,17 @@ func (e *DefaultModelEnsurer) EnsureModels(ctx context.Context) (*ModelEnsureRes
 	}
 
 	// Step 3: Pre-flight checks
-	canPull, offlineMode, err := e.performPreflightChecks(ctx, needsPull)
+	canPull, offlineMode, diskWarning, err := e.performPreflightChecks(ctx, needsPull)
 	if err != nil {
 		return nil, err
 	}
 	result.OfflineMode = offlineMode
+
+	// Add disk limit warning if present (soft warning - we still proceed)
+	if diskWarning != "" {
+		result.Warnings = append(result.Warnings, diskWarning)
+		slog.Warn("Disk limit exceeded but proceeding", "warning", diskWarning)
+	}
 
 	// Step 4: Handle case where we cannot pull
 	if !canPull {
@@ -865,24 +873,25 @@ func (e *DefaultModelEnsurer) getModelSize(ctx context.Context, modelName string
 //
 //   - canPull: True if pulling should proceed
 //   - offlineMode: True if operating without network
-//   - error: Non-nil for fatal errors (disk full, etc.)
-func (e *DefaultModelEnsurer) performPreflightChecks(ctx context.Context, modelsToPull []RequiredModel) (canPull bool, offlineMode bool, err error) {
+//   - diskWarning: Non-empty if disk limit exceeded (soft warning)
+//   - error: Non-nil for fatal errors (physical disk full, etc.)
+func (e *DefaultModelEnsurer) performPreflightChecks(ctx context.Context, modelsToPull []RequiredModel) (canPull bool, offlineMode bool, diskWarning string, err error) {
 	networkOK := e.checkNetwork(ctx)
 
 	if !networkOK {
 		canOperate := e.checkOfflineCapability(modelsToPull)
 		if canOperate {
-			return false, true, nil
+			return false, true, "", nil
 		}
-		return false, false, fmt.Errorf("network unavailable and required models not cached locally")
+		return false, false, "", fmt.Errorf("network unavailable and required models not cached locally")
 	}
 
-	err = e.checkDiskSpace(ctx, modelsToPull)
+	diskWarning, err = e.checkDiskSpace(ctx, modelsToPull)
 	if err != nil {
-		return false, false, err
+		return false, false, "", err
 	}
 
-	return true, false, nil
+	return true, false, diskWarning, nil
 }
 
 // checkNetwork verifies network connectivity.
@@ -936,7 +945,9 @@ func (e *DefaultModelEnsurer) checkOfflineCapability(models []RequiredModel) boo
 // # Description
 //
 // Calculates the total required disk space for all models to pull
-// and verifies that sufficient space is available.
+// and verifies that sufficient space is available. Differentiates between:
+//   - Physical disk space insufficient: hard fail
+//   - Configured limit exceeded: soft warning (returns warning string, proceeds)
 //
 // # Inputs
 //
@@ -945,18 +956,88 @@ func (e *DefaultModelEnsurer) checkOfflineCapability(models []RequiredModel) boo
 //
 // # Outputs
 //
-//   - error: Non-nil if disk space is insufficient
-func (e *DefaultModelEnsurer) checkDiskSpace(ctx context.Context, models []RequiredModel) error {
-	totalSize := e.calculateTotalSize(ctx, models)
-
-	err := e.systemChecker.CheckDiskSpace(totalSize, e.diskLimitBytes)
-	if err != nil {
-		if checkErr, ok := err.(*CheckError); ok {
-			return fmt.Errorf("insufficient disk space: %s", checkErr.FullError())
-		}
-		return fmt.Errorf("insufficient disk space: %w", err)
+//   - warning: Non-empty if configured limit exceeded but physical space OK
+//   - error: Non-nil only if physical disk space is insufficient
+func (e *DefaultModelEnsurer) checkDiskSpace(ctx context.Context, models []RequiredModel) (warning string, err error) {
+	if len(models) == 0 {
+		return "", nil
 	}
-	return nil
+
+	totalSize := e.calculateTotalSize(ctx, models)
+	if totalSize <= 0 {
+		return "", nil
+	}
+
+	// Check physical disk space first (hard fail)
+	available, err := e.systemChecker.GetAvailableDiskSpace()
+	if err != nil {
+		// Can't determine space - proceed with warning
+		return "Could not verify disk space availability", nil
+	}
+
+	if available < totalSize {
+		return "", fmt.Errorf("insufficient physical disk space: need %s, have %s available",
+			formatBytesForHumans(totalSize), formatBytesForHumans(available))
+	}
+
+	// Check configured limit (soft warning only - don't block)
+	if e.diskLimitBytes > 0 {
+		currentUsage, _ := e.systemChecker.GetAvailableDiskSpace()
+		// Get actual usage from directory size
+		storagePath := e.systemChecker.GetModelStoragePath()
+		if storagePath != "" {
+			if usage, err := getDirectorySizeHelper(storagePath); err == nil {
+				currentUsage = usage
+			}
+		}
+
+		if currentUsage+totalSize > e.diskLimitBytes {
+			warning = fmt.Sprintf(
+				"Download will exceed configured limit (%s): current usage %s + download %s > limit %s. "+
+					"Proceeding anyway - adjust model_management.disk_limit_gb if needed.",
+				formatBytesForHumans(e.diskLimitBytes),
+				formatBytesForHumans(currentUsage),
+				formatBytesForHumans(totalSize),
+				formatBytesForHumans(e.diskLimitBytes),
+			)
+		}
+	}
+
+	return warning, nil
+}
+
+// formatBytesForHumans formats bytes as human-readable string.
+func formatBytesForHumans(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d bytes", bytes)
+	}
+}
+
+// getDirectorySizeHelper calculates directory size (helper to avoid import cycle).
+func getDirectorySizeHelper(path string) (int64, error) {
+	var size int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip errors
+		}
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
 }
 
 // calculateTotalSize sums the size of all models to download.

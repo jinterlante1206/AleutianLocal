@@ -435,6 +435,17 @@ func runStart(cmd *cobra.Command, args []string) {
 
 	if cfg.ModelBackend.Type == "ollama" {
 		ensureOllamaRunning()
+
+		// Model verification using ModelEnsurer (Phase 11)
+		skipModelCheck, _ := cmd.Flags().GetBool("skip-model-check")
+		if !skipModelCheck {
+			if err := ensureRequiredModels(context.Background(), cfg); err != nil {
+				log.Printf("⚠️  Warning: Model verification issue: %v", err)
+				log.Println("   Use --skip-model-check to bypass model verification")
+			}
+		} else {
+			fmt.Println("⏭️  Skipping model verification (--skip-model-check)")
+		}
 	} else {
 		fmt.Println("Running in Cloud/Remote mode. Skipping local AI infrastructure.")
 	}
@@ -641,6 +652,102 @@ func runStart(cmd *cobra.Command, args []string) {
 	fmt.Println("\nLocal Aleutian appliance started.")
 	fmt.Printf("Orchestrator available at %s\n", getOrchestratorBaseURL())
 	fmt.Println("Check 'podman ps' for exposed host ports.")
+}
+
+// ensureRequiredModels verifies that required AI models are available.
+//
+// # Description
+//
+// Creates a ModelEnsurer configured from the global config and ensures
+// embedding and LLM models are available locally or can be pulled.
+// This integrates the Phase 11 ModelEnsurer system.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation
+//   - cfg: AleutianConfig with model backend settings
+//
+// # Outputs
+//
+//   - error: Non-nil if model verification fails
+//
+// # Examples
+//
+//	if err := ensureRequiredModels(ctx, cfg); err != nil {
+//	    log.Printf("Warning: %v", err)
+//	}
+//
+// # Limitations
+//
+//   - Requires Ollama to be running at the configured URL
+//   - Network required for pulling missing models
+//
+// # Assumptions
+//
+//   - ensureOllamaRunning() has been called
+//   - Config has valid ModelBackend settings
+func ensureRequiredModels(ctx context.Context, cfg config.AleutianConfig) error {
+	fmt.Println("--- Checking Required Models ---")
+
+	// Build ModelEnsurerConfig from AleutianConfig
+	// Note: EmbeddingModel/LLMModel are in cfg.ModelBackend.Ollama
+	ensurerCfg := ModelEnsurerConfig{
+		EmbeddingModel: cfg.ModelBackend.Ollama.EmbeddingModel,
+		LLMModel:       cfg.ModelBackend.Ollama.LLMModel,
+		OllamaBaseURL:  cfg.ModelBackend.Ollama.BaseURL,
+		BackendType:    cfg.ModelBackend.Type,
+		DiskLimitGB:    cfg.ModelManagement.DiskLimitGB,
+	}
+
+	// Apply defaults if not set
+	if ensurerCfg.EmbeddingModel == "" {
+		ensurerCfg.EmbeddingModel = DefaultEmbeddingModel
+	}
+	if ensurerCfg.LLMModel == "" && ensurerCfg.BackendType == "ollama" {
+		ensurerCfg.LLMModel = DefaultLLMModel
+	}
+	if ensurerCfg.OllamaBaseURL == "" {
+		ensurerCfg.OllamaBaseURL = config.DefaultOllamaHostURL
+	}
+
+	ensurer := NewDefaultModelEnsurer(ensurerCfg)
+
+	// Set up progress callback for TTY-friendly output
+	// PullProgressCallback signature: func(status string, completed, total int64)
+	ensurer.SetProgressCallback(func(status string, completed, total int64) {
+		if total > 0 {
+			percent := float64(completed) / float64(total) * 100
+			fmt.Printf("\r📥 %s: %.1f%%", status, percent)
+		} else {
+			fmt.Printf("\r📥 %s...", status)
+		}
+		if completed == total && total > 0 {
+			fmt.Printf("\n")
+		}
+	})
+
+	result, err := ensurer.EnsureModels(ctx)
+	if err != nil {
+		return fmt.Errorf("model verification failed: %w", err)
+	}
+
+	// Log warnings
+	for _, warning := range result.Warnings {
+		fmt.Printf("⚠️  %s\n", warning)
+	}
+
+	// Log pulled models
+	for _, pulled := range result.ModelsPulled {
+		fmt.Printf("📥 Downloaded: %s\n", pulled)
+	}
+
+	if !result.CanProceed {
+		return fmt.Errorf("required models unavailable")
+	}
+
+	fmt.Println("✅ All required models verified")
+	fmt.Println("--------------------------------")
+	return nil
 }
 
 func ensureOllamaRunning() {
