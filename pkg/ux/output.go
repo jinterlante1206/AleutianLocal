@@ -102,15 +102,19 @@ var Styles = struct {
 type Icon string
 
 const (
-	IconSuccess Icon = "✓"
-	IconWarning Icon = "⚠"
-	IconError   Icon = "✗"
-	IconPending Icon = "○"
-	IconArrow   Icon = "→"
-	IconBullet  Icon = "•"
-	IconAnchor  Icon = "⚓"
-	IconShip    Icon = "⛵"
-	IconWave    Icon = "〰"
+	IconSuccess  Icon = "✓"
+	IconWarning  Icon = "⚠"
+	IconError    Icon = "✗"
+	IconPending  Icon = "○"
+	IconArrow    Icon = "→"
+	IconBullet   Icon = "•"
+	IconAnchor   Icon = "⚓"
+	IconShip     Icon = "⛵"
+	IconWave     Icon = "〰"
+	IconChat     Icon = "💬"
+	IconInfo     Icon = "ℹ"
+	IconDocument Icon = "📄"
+	IconTime     Icon = "⏱"
 )
 
 // Render returns the icon with appropriate styling

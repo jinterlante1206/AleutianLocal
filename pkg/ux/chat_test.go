@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // =============================================================================
@@ -356,6 +357,123 @@ func TestChatUI_SessionEnd_EmptySessionID(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Goodbye") {
 		t.Errorf("expected goodbye message, got %q", output)
+	}
+}
+
+// =============================================================================
+// SessionEndRich Tests
+// =============================================================================
+
+func TestChatUI_SessionEndRich_MachineMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMachine)
+
+	stats := &SessionStats{
+		MessageCount: 5,
+		TotalTokens:  1234,
+		Duration:     2 * time.Minute,
+	}
+	ui.SessionEndRich("sess-123", stats)
+
+	output := buf.String()
+	if !strings.Contains(output, "CHAT_END:") {
+		t.Errorf("expected CHAT_END prefix, got %q", output)
+	}
+	if !strings.Contains(output, "session=sess-123") {
+		t.Errorf("expected session ID, got %q", output)
+	}
+	if !strings.Contains(output, "messages=5") {
+		t.Errorf("expected message count, got %q", output)
+	}
+	if !strings.Contains(output, "tokens=1234") {
+		t.Errorf("expected token count, got %q", output)
+	}
+}
+
+func TestChatUI_SessionEndRich_MinimalMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMinimal)
+
+	stats := &SessionStats{
+		MessageCount: 3,
+		TotalTokens:  500,
+		Duration:     30 * time.Second,
+	}
+	ui.SessionEndRich("sess-456", stats)
+
+	output := buf.String()
+	if !strings.Contains(output, "Session: sess-456") {
+		t.Errorf("expected session ID, got %q", output)
+	}
+	if !strings.Contains(output, "Messages: 3") {
+		t.Errorf("expected message count, got %q", output)
+	}
+	if !strings.Contains(output, "Tokens: 500") {
+		t.Errorf("expected token count, got %q", output)
+	}
+	if !strings.Contains(output, "Goodbye") {
+		t.Errorf("expected goodbye, got %q", output)
+	}
+}
+
+func TestChatUI_SessionEndRich_NilStatsFallback(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMinimal)
+
+	ui.SessionEndRich("sess-789", nil)
+
+	output := buf.String()
+	// Should fall back to simple SessionEnd behavior
+	if !strings.Contains(output, "Goodbye") {
+		t.Errorf("expected goodbye message, got %q", output)
+	}
+}
+
+func TestSessionStats_Fields(t *testing.T) {
+	stats := SessionStats{
+		MessageCount:         10,
+		TotalTokens:          5000,
+		ThinkingTokens:       500,
+		SourcesUsed:          3,
+		Duration:             5 * time.Minute,
+		FirstResponseLatency: 200 * time.Millisecond,
+		AverageResponseTime:  2 * time.Second,
+	}
+
+	if stats.MessageCount != 10 {
+		t.Errorf("expected MessageCount 10, got %d", stats.MessageCount)
+	}
+	if stats.TotalTokens != 5000 {
+		t.Errorf("expected TotalTokens 5000, got %d", stats.TotalTokens)
+	}
+	if stats.ThinkingTokens != 500 {
+		t.Errorf("expected ThinkingTokens 500, got %d", stats.ThinkingTokens)
+	}
+	if stats.SourcesUsed != 3 {
+		t.Errorf("expected SourcesUsed 3, got %d", stats.SourcesUsed)
+	}
+	if stats.Duration != 5*time.Minute {
+		t.Errorf("expected Duration 5m, got %v", stats.Duration)
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		input    time.Duration
+		expected string
+	}{
+		{500 * time.Millisecond, "500ms"},
+		{5 * time.Second, "5.0s"},
+		{90 * time.Second, "1m 30s"},
+		{2 * time.Minute, "2m"},
+		{65 * time.Minute, "1h 5m"},
+	}
+
+	for _, tt := range tests {
+		result := formatDuration(tt.input)
+		if result != tt.expected {
+			t.Errorf("formatDuration(%v) = %q, want %q", tt.input, result, tt.expected)
+		}
 	}
 }
 
