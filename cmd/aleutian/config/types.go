@@ -156,6 +156,10 @@ type AleutianConfig struct {
 	// Forecast configures the optional timeseries forecast module.
 	Forecast ForecastConfig `yaml:"forecast"`
 
+	// ModelManagement configures model downloads, verification, and governance.
+	// Includes version pinning, auto-selection, fallback chains, and audit logging.
+	ModelManagement ModelManagementConfig `yaml:"model_management"`
+
 	// Profiles defines custom optimization profiles.
 	// These extend the built-in profiles (low, standard, performance, ultra).
 	Profiles []ProfileConfig `yaml:"profiles,omitempty"`
@@ -478,6 +482,263 @@ func (c *OllamaConfig) GetBaseURL() string {
 }
 
 // -----------------------------------------------------------------------------
+// Model Management Configuration
+// -----------------------------------------------------------------------------
+
+// ModelManagementConfig contains model storage and verification settings.
+//
+// # Description
+//
+// Configuration for controlling model downloads, storage limits,
+// verification behavior, and advanced features like version pinning,
+// auto-selection, and fallback chains.
+//
+// # YAML Example
+//
+//	model_management:
+//	  disk_limit_gb: 100
+//	  verify_on_start: true
+//	  allowed_models:
+//	    - nomic-embed-text-v2-moe
+//	    - llama3:8b
+//	  version_pinning:
+//	    enabled: true
+//	  fallback_chains:
+//	    llm:
+//	      primary: "llama3:8b"
+//	      fallbacks: ["phi3:mini", "tinyllama"]
+type ModelManagementConfig struct {
+	// DiskLimitGB is maximum disk space for model storage.
+	// Set to 0 for no limit.
+	// Default: 50
+	DiskLimitGB int64 `yaml:"disk_limit_gb"`
+
+	// AllowedModels restricts which models can be downloaded.
+	// Empty slice means all models are allowed.
+	// Enterprise feature for governance.
+	AllowedModels []string `yaml:"allowed_models,omitempty"`
+
+	// VerifyOnStart controls whether models are checked on stack start.
+	// Default: true
+	VerifyOnStart bool `yaml:"verify_on_start"`
+
+	// OfflineModeAllowed permits operation without network.
+	// When true, missing models generate warnings not errors.
+	// Default: true
+	OfflineModeAllowed bool `yaml:"offline_mode_allowed"`
+
+	// VersionPinning configures model version locking.
+	VersionPinning VersionPinningConfig `yaml:"version_pinning,omitempty"`
+
+	// Integrity configures model integrity verification.
+	Integrity IntegrityConfig `yaml:"integrity,omitempty"`
+
+	// Parallel configures parallel download behavior.
+	Parallel ParallelDownloadConfig `yaml:"parallel,omitempty"`
+
+	// AutoSelection configures automatic model selection.
+	AutoSelection AutoSelectionConfig `yaml:"auto_selection,omitempty"`
+
+	// FallbackChains defines ordered fallback lists for model categories.
+	FallbackChains map[string]FallbackChain `yaml:"fallback_chains,omitempty"`
+
+	// SizeEstimation configures download size warnings.
+	SizeEstimation SizeEstimationConfig `yaml:"size_estimation,omitempty"`
+
+	// Audit configures compliance audit logging.
+	Audit AuditLoggingConfig `yaml:"audit,omitempty"`
+}
+
+// VersionPinningConfig configures model version locking.
+//
+// # Description
+//
+// Enables locking models to specific SHA-256 digests for reproducible
+// deployments and security compliance.
+type VersionPinningConfig struct {
+	// Enabled toggles version pinning.
+	// Default: false
+	Enabled bool `yaml:"enabled"`
+
+	// Models maps model categories to pinned versions.
+	// Keys: "embedding", "llm", etc.
+	Models map[string]PinnedModel `yaml:"models,omitempty"`
+}
+
+// PinnedModel represents a model locked to a specific version.
+type PinnedModel struct {
+	// Name is the model identifier.
+	Name string `yaml:"name"`
+
+	// Digest is the required SHA-256 hash.
+	// If set, download will fail if digest doesn't match.
+	// Format: "sha256:abc123..."
+	Digest string `yaml:"digest,omitempty"`
+
+	// AllowUpgrade permits newer versions if pinned version unavailable.
+	AllowUpgrade bool `yaml:"allow_upgrade"`
+}
+
+// IntegrityConfig configures model integrity verification.
+type IntegrityConfig struct {
+	// VerifyAfterDownload enables SHA-256 verification after pull.
+	// Default: true
+	VerifyAfterDownload bool `yaml:"verify_after_download"`
+
+	// VerifyOnStartup enables verification on stack start.
+	// Default: true
+	VerifyOnStartup bool `yaml:"verify_on_startup"`
+
+	// FailOnMismatch fails startup if verification fails.
+	// Default: true
+	FailOnMismatch bool `yaml:"fail_on_mismatch"`
+}
+
+// ParallelDownloadConfig configures concurrent model downloads.
+type ParallelDownloadConfig struct {
+	// Enabled toggles parallel downloads.
+	// Default: true
+	Enabled bool `yaml:"enabled"`
+
+	// MaxConcurrent limits simultaneous downloads.
+	// Default: 3
+	MaxConcurrent int `yaml:"max_concurrent"`
+
+	// BandwidthLimitMbps limits download speed (0 = unlimited).
+	// Default: 0
+	BandwidthLimitMbps int `yaml:"bandwidth_limit_mbps"`
+}
+
+// AutoSelectionConfig configures automatic model selection based on hardware.
+type AutoSelectionConfig struct {
+	// Enabled toggles auto-selection.
+	// Default: true
+	Enabled bool `yaml:"enabled"`
+
+	// PreferQuantized favors quantized models over full precision.
+	// Default: true
+	PreferQuantized bool `yaml:"prefer_quantized"`
+
+	// MinContextWindow requires minimum context window size.
+	// Default: 4096
+	MinContextWindow int `yaml:"min_context_window"`
+
+	// ExplicitLLM overrides auto-selection for LLM.
+	ExplicitLLM string `yaml:"explicit_llm,omitempty"`
+
+	// ExplicitEmbedding overrides auto-selection for embeddings.
+	ExplicitEmbedding string `yaml:"explicit_embedding,omitempty"`
+}
+
+// FallbackChain defines an ordered list of models to try.
+type FallbackChain struct {
+	// Primary is the preferred model.
+	Primary string `yaml:"primary"`
+
+	// Fallbacks are tried in order if primary fails.
+	Fallbacks []string `yaml:"fallbacks,omitempty"`
+}
+
+// Models returns all models in the chain (primary + fallbacks).
+func (c *FallbackChain) Models() []string {
+	if c == nil || c.Primary == "" {
+		return nil
+	}
+	result := make([]string, 0, 1+len(c.Fallbacks))
+	result = append(result, c.Primary)
+	result = append(result, c.Fallbacks...)
+	return result
+}
+
+// SizeEstimationConfig configures download size warnings.
+type SizeEstimationConfig struct {
+	// Enabled toggles size estimation.
+	// Default: true
+	Enabled bool `yaml:"enabled"`
+
+	// WarnThresholdGB warns before large downloads.
+	// Default: 10
+	WarnThresholdGB int `yaml:"warn_threshold_gb"`
+
+	// RequireConfirmationGB requires user confirmation for huge downloads.
+	// Default: 50
+	RequireConfirmationGB int `yaml:"require_confirmation_gb"`
+}
+
+// AuditLoggingConfig configures compliance audit logging.
+type AuditLoggingConfig struct {
+	// Enabled toggles audit logging.
+	// Default: true
+	Enabled bool `yaml:"enabled"`
+
+	// LogPulls records model download attempts.
+	// Default: true
+	LogPulls bool `yaml:"log_pulls"`
+
+	// LogVerifications records integrity checks.
+	// Default: true
+	LogVerifications bool `yaml:"log_verifications"`
+
+	// LogBlocks records blocked model requests.
+	// Default: true
+	LogBlocks bool `yaml:"log_blocks"`
+
+	// IncludeHostname adds hostname to audit events.
+	// Default: true
+	IncludeHostname bool `yaml:"include_hostname"`
+
+	// IncludeUser adds username to audit events.
+	// Default: true
+	IncludeUser bool `yaml:"include_user"`
+}
+
+// DefaultModelManagementConfig returns sensible defaults.
+//
+// # Description
+//
+// Creates a ModelManagementConfig with production-ready defaults
+// that enable verification, auto-selection, and parallel downloads.
+//
+// # Outputs
+//
+//   - ModelManagementConfig: Configuration with default values
+func DefaultModelManagementConfig() ModelManagementConfig {
+	return ModelManagementConfig{
+		DiskLimitGB:        50,
+		AllowedModels:      nil, // All allowed
+		VerifyOnStart:      true,
+		OfflineModeAllowed: true,
+		Integrity: IntegrityConfig{
+			VerifyAfterDownload: true,
+			VerifyOnStartup:     true,
+			FailOnMismatch:      true,
+		},
+		Parallel: ParallelDownloadConfig{
+			Enabled:       true,
+			MaxConcurrent: 3,
+		},
+		AutoSelection: AutoSelectionConfig{
+			Enabled:          true,
+			PreferQuantized:  true,
+			MinContextWindow: 4096,
+		},
+		SizeEstimation: SizeEstimationConfig{
+			Enabled:               true,
+			WarnThresholdGB:       10,
+			RequireConfirmationGB: 50,
+		},
+		Audit: AuditLoggingConfig{
+			Enabled:          true,
+			LogPulls:         true,
+			LogVerifications: true,
+			LogBlocks:        true,
+			IncludeHostname:  true,
+			IncludeUser:      true,
+		},
+	}
+}
+
+// -----------------------------------------------------------------------------
 // Forecast Configuration
 // -----------------------------------------------------------------------------
 
@@ -756,6 +1017,7 @@ func DefaultConfig() AleutianConfig {
 			Enabled: true,
 			Mode:    ForecastModeStandalone,
 		},
-		Profiles: []ProfileConfig{},
+		ModelManagement: DefaultModelManagementConfig(),
+		Profiles:        []ProfileConfig{},
 	}
 }
