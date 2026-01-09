@@ -131,6 +131,19 @@ func GetConversationSchema() *models.Class {
 				IndexFilterable: indexFilterable,
 			},
 			{
+				Name:            "turn_number",
+				DataType:        []string{"int"},
+				Description:     "The sequential turn number within the session (1-indexed).",
+				IndexFilterable: indexFilterable,
+			},
+			{
+				Name:            "turn_hash",
+				DataType:        []string{"text"},
+				Description:     "SHA-256 hash of turn content for integrity verification.",
+				IndexFilterable: indexFilterable,
+				Tokenization:    "field",
+			},
+			{
 				Name:            "inSession",
 				DataType:        []string{"Session"},
 				Description:     "A direct graph link to the parent Session object.",

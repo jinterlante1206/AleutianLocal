@@ -374,3 +374,324 @@ func TestProfileConfig_Fields(t *testing.T) {
 		t.Errorf("MinRAM_MB = %d, want %d", profile.MinRAM_MB, 65536)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Enterprise Config Validation Tests
+// -----------------------------------------------------------------------------
+
+// TestHMACConfig_ValidAlgorithms verifies valid HMAC algorithms are accepted.
+func TestHMACConfig_ValidAlgorithms(t *testing.T) {
+	validAlgorithms := []string{"sha256", "sha384", "sha512"}
+
+	for _, algo := range validAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := HMACConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for algorithm %q returned error: %v", algo, err)
+			}
+		})
+	}
+}
+
+// TestHMACConfig_InvalidAlgorithm verifies invalid HMAC algorithms are rejected.
+func TestHMACConfig_InvalidAlgorithm(t *testing.T) {
+	invalidAlgorithms := []string{"sha1", "md5", "sha128", "invalid", "SHA256"}
+
+	for _, algo := range invalidAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := HMACConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for algorithm %q should return error", algo)
+			}
+			// Verify it's a ValidationError
+			if _, ok := err.(*ValidationError); !ok {
+				t.Errorf("Expected ValidationError, got %T", err)
+			}
+		})
+	}
+}
+
+// TestHMACConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestHMACConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := HMACConfig{
+		Enabled:   false,
+		Algorithm: "invalid-algo",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestHMACConfig_EmptyAlgorithmUsesDefault verifies empty algorithm is valid.
+func TestHMACConfig_EmptyAlgorithmUsesDefault(t *testing.T) {
+	cfg := HMACConfig{
+		Enabled:   true,
+		Algorithm: "", // Will use default sha256
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should accept empty algorithm (uses default), got: %v", err)
+	}
+}
+
+// TestHSMConfig_ValidProviders verifies valid HSM providers are accepted.
+func TestHSMConfig_ValidProviders(t *testing.T) {
+	validProviders := []string{"pkcs11", "aws_cloudhsm", "azure_hsm", "thales_luna"}
+
+	for _, provider := range validProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := HSMConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for provider %q returned error: %v", provider, err)
+			}
+		})
+	}
+}
+
+// TestHSMConfig_InvalidProvider verifies invalid HSM providers are rejected.
+func TestHSMConfig_InvalidProvider(t *testing.T) {
+	invalidProviders := []string{"random_provider", "hsm", "yubihsm", "Invalid"}
+
+	for _, provider := range invalidProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := HSMConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for provider %q should return error", provider)
+			}
+			// Verify it's a ValidationError
+			if _, ok := err.(*ValidationError); !ok {
+				t.Errorf("Expected ValidationError, got %T", err)
+			}
+		})
+	}
+}
+
+// TestHSMConfig_EmptyProviderWhenEnabled verifies empty provider is rejected.
+func TestHSMConfig_EmptyProviderWhenEnabled(t *testing.T) {
+	cfg := HSMConfig{
+		Enabled:  true,
+		Provider: "",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Validate() should reject empty provider when enabled")
+	}
+	valErr, ok := err.(*ValidationError)
+	if !ok {
+		t.Errorf("Expected ValidationError, got %T", err)
+	}
+	if valErr.Field != "hsm.provider" {
+		t.Errorf("Expected field 'hsm.provider', got %q", valErr.Field)
+	}
+}
+
+// TestHSMConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestHSMConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := HSMConfig{
+		Enabled:  false,
+		Provider: "invalid-provider",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestTSAConfig_ValidProviders verifies valid TSA providers are accepted.
+func TestTSAConfig_ValidProviders(t *testing.T) {
+	validProviders := []string{"digicert", "globalsign", "sectigo", "freetsa"}
+
+	for _, provider := range validProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := TSAConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for provider %q returned error: %v", provider, err)
+			}
+		})
+	}
+}
+
+// TestTSAConfig_CustomProviderRequiresURL verifies custom provider requires URL.
+func TestTSAConfig_CustomProviderRequiresURL(t *testing.T) {
+	// Custom without URL should fail
+	cfg := TSAConfig{
+		Enabled:  true,
+		Provider: "custom",
+		URL:      "",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Validate() should reject custom provider without URL")
+	}
+	valErr, ok := err.(*ValidationError)
+	if !ok {
+		t.Errorf("Expected ValidationError, got %T", err)
+	}
+	if valErr.Field != "tsa.url" {
+		t.Errorf("Expected field 'tsa.url', got %q", valErr.Field)
+	}
+}
+
+// TestTSAConfig_CustomProviderWithURL verifies custom provider with URL is valid.
+func TestTSAConfig_CustomProviderWithURL(t *testing.T) {
+	cfg := TSAConfig{
+		Enabled:  true,
+		Provider: "custom",
+		URL:      "https://tsa.example.com/timestamp",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() for custom provider with URL returned error: %v", err)
+	}
+}
+
+// TestTSAConfig_InvalidProvider verifies invalid TSA providers are rejected.
+func TestTSAConfig_InvalidProvider(t *testing.T) {
+	invalidProviders := []string{"random_tsa", "verisign", "comodo", "Invalid"}
+
+	for _, provider := range invalidProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := TSAConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for provider %q should return error", provider)
+			}
+		})
+	}
+}
+
+// TestTSAConfig_EmptyProviderWhenEnabled verifies empty provider is rejected.
+func TestTSAConfig_EmptyProviderWhenEnabled(t *testing.T) {
+	cfg := TSAConfig{
+		Enabled:  true,
+		Provider: "",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Validate() should reject empty provider when enabled")
+	}
+	valErr, ok := err.(*ValidationError)
+	if !ok {
+		t.Errorf("Expected ValidationError, got %T", err)
+	}
+	if valErr.Field != "tsa.provider" {
+		t.Errorf("Expected field 'tsa.provider', got %q", valErr.Field)
+	}
+}
+
+// TestTSAConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestTSAConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := TSAConfig{
+		Enabled:  false,
+		Provider: "invalid-provider",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestSignatureConfig_ValidAlgorithms verifies valid signature algorithms are accepted.
+func TestSignatureConfig_ValidAlgorithms(t *testing.T) {
+	validAlgorithms := []string{"rsa2048", "rsa4096", "ecdsa_p256", "ecdsa_p384", "ed25519"}
+
+	for _, algo := range validAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := SignatureConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for algorithm %q returned error: %v", algo, err)
+			}
+		})
+	}
+}
+
+// TestSignatureConfig_InvalidAlgorithm verifies invalid signature algorithms are rejected.
+func TestSignatureConfig_InvalidAlgorithm(t *testing.T) {
+	invalidAlgorithms := []string{"rsa1024", "dsa", "ecdsa_p521", "Invalid", "RSA2048"}
+
+	for _, algo := range invalidAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := SignatureConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for algorithm %q should return error", algo)
+			}
+			// Verify it's a ValidationError
+			if _, ok := err.(*ValidationError); !ok {
+				t.Errorf("Expected ValidationError, got %T", err)
+			}
+		})
+	}
+}
+
+// TestSignatureConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestSignatureConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := SignatureConfig{
+		Enabled:   false,
+		Algorithm: "invalid-algo",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestSignatureConfig_EmptyAlgorithmUsesDefault verifies empty algorithm is valid.
+func TestSignatureConfig_EmptyAlgorithmUsesDefault(t *testing.T) {
+	cfg := SignatureConfig{
+		Enabled:   true,
+		Algorithm: "", // Will use default ecdsa_p256
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should accept empty algorithm (uses default), got: %v", err)
+	}
+}
+
+// TestValidationError_Error verifies error message formatting.
+func TestValidationError_Error(t *testing.T) {
+	err := &ValidationError{
+		Field:   "test.field",
+		Value:   "bad-value",
+		Message: "is not valid",
+	}
+
+	expected := "config validation error: test.field (bad-value): is not valid"
+	if err.Error() != expected {
+		t.Errorf("Error() = %q, want %q", err.Error(), expected)
+	}
+}
+
+// TestValidationError_EmptyValue verifies error message with empty value.
+func TestValidationError_EmptyValue(t *testing.T) {
+	err := &ValidationError{
+		Field:   "test.field",
+		Value:   "",
+		Message: "is required",
+	}
+
+	expected := "config validation error: test.field (): is required"
+	if err.Error() != expected {
+		t.Errorf("Error() = %q, want %q", err.Error(), expected)
+	}
+}

@@ -66,6 +66,139 @@ const (
 )
 
 // -----------------------------------------------------------------------------
+// Hardware Profile Definitions (Single Source of Truth)
+// -----------------------------------------------------------------------------
+
+// HardwareProfile defines a complete hardware-to-model mapping.
+//
+// # Description
+//
+// This struct captures all settings for a given hardware tier.
+// All model selections and thresholds are defined here to avoid
+// magic strings scattered across the codebase.
+//
+// # Fields
+//
+//   - Name: Profile identifier (low, standard, performance, ultra)
+//   - Description: Human-readable description
+//   - OllamaModel: The LLM model to use
+//   - MaxTokens: Context window size
+//   - RerankerModel: Model for RAG reranking
+//   - WeaviateQueryLimit: Default vector search limit
+//   - RerankFinalK: Number of results after reranking
+//   - MinRAM_MB: Minimum RAM threshold (inclusive)
+//   - MaxRAM_MB: Maximum RAM threshold (exclusive, 0 = unlimited)
+type HardwareProfile struct {
+	Name               string
+	Description        string
+	OllamaModel        string
+	MaxTokens          int
+	RerankerModel      string
+	WeaviateQueryLimit int
+	RerankFinalK       int
+	MinRAM_MB          int
+	MaxRAM_MB          int
+}
+
+// BuiltInHardwareProfiles defines the default hardware-to-model mappings.
+//
+// # Description
+//
+// These profiles are the SINGLE SOURCE OF TRUTH for model selection.
+// Any code that needs model names or RAM thresholds should reference
+// these profiles rather than hardcoding strings.
+//
+// # Profiles
+//
+//   - Low (< 16GB): gemma3:4b - Basic local inference
+//   - Standard (16-32GB): qwen3:14b - Balanced performance
+//   - Performance (32-128GB): gpt-oss:20b - Enhanced context with thinking
+//   - Ultra (128GB+): gpt-oss:120b - Enterprise grade with thinking
+//
+// # Example
+//
+//	profile := config.BuiltInHardwareProfiles["standard"]
+//	fmt.Println(profile.OllamaModel) // "qwen3:14b"
+var BuiltInHardwareProfiles = map[string]HardwareProfile{
+	"low": {
+		Name:               "low",
+		Description:        "Low (< 16GB) - Basic local inference",
+		OllamaModel:        "gemma3:4b",
+		MaxTokens:          2048,
+		RerankerModel:      "cross-encoder/ms-marco-TinyBERT-L-2-v2",
+		WeaviateQueryLimit: 5,
+		RerankFinalK:       5,
+		MinRAM_MB:          0,
+		MaxRAM_MB:          16384,
+	},
+	"standard": {
+		Name:               "standard",
+		Description:        "Standard (16-32GB) - Balanced performance",
+		OllamaModel:        "qwen3:14b",
+		MaxTokens:          4096,
+		RerankerModel:      "cross-encoder/ms-marco-MiniLM-L-6-v2",
+		WeaviateQueryLimit: 5,
+		RerankFinalK:       5,
+		MinRAM_MB:          16384,
+		MaxRAM_MB:          32768,
+	},
+	"performance": {
+		Name:               "performance",
+		Description:        "Performance (32-128GB) - Enhanced context with thinking",
+		OllamaModel:        "gpt-oss:20b",
+		MaxTokens:          8192,
+		RerankerModel:      "cross-encoder/ms-marco-MiniLM-L-6-v2",
+		WeaviateQueryLimit: 5,
+		RerankFinalK:       10,
+		MinRAM_MB:          32768,
+		MaxRAM_MB:          131072,
+	},
+	"ultra": {
+		Name:               "ultra",
+		Description:        "Ultra (128GB+) - Enterprise grade with thinking",
+		OllamaModel:        "gpt-oss:120b",
+		MaxTokens:          32768,
+		RerankerModel:      "cross-encoder/ms-marco-MiniLM-L-6-v2",
+		WeaviateQueryLimit: 5,
+		RerankFinalK:       10,
+		MinRAM_MB:          131072,
+		MaxRAM_MB:          0, // Unlimited
+	},
+}
+
+// HardwareProfileOrder defines the order for RAM-based profile selection.
+// Profiles are checked in this order (highest RAM first).
+var HardwareProfileOrder = []string{"ultra", "performance", "standard", "low"}
+
+// GetProfileForRAM returns the appropriate profile name for a given RAM amount.
+//
+// # Description
+//
+// Selects the best profile based on available system memory.
+// Profiles are checked from highest to lowest RAM requirements.
+//
+// # Inputs
+//
+//   - ramMB: Available RAM in megabytes
+//
+// # Outputs
+//
+//   - string: Profile name (low, standard, performance, ultra)
+//
+// # Example
+//
+//	profile := config.GetProfileForRAM(65536) // returns "performance"
+func GetProfileForRAM(ramMB int) string {
+	for _, name := range HardwareProfileOrder {
+		profile := BuiltInHardwareProfiles[name]
+		if ramMB >= profile.MinRAM_MB && (profile.MaxRAM_MB == 0 || ramMB < profile.MaxRAM_MB) {
+			return name
+		}
+	}
+	return "low" // fallback
+}
+
+// -----------------------------------------------------------------------------
 // Enums
 // -----------------------------------------------------------------------------
 
@@ -159,6 +292,10 @@ type AleutianConfig struct {
 	// ModelManagement configures model downloads, verification, and governance.
 	// Includes version pinning, auto-selection, fallback chains, and audit logging.
 	ModelManagement ModelManagementConfig `yaml:"model_management"`
+
+	// SessionIntegrity configures conversation integrity verification.
+	// Includes hash chain verification and enterprise compliance features.
+	SessionIntegrity SessionIntegrityConfig `yaml:"session_integrity"`
 
 	// Profiles defines custom optimization profiles.
 	// These extend the built-in profiles (low, standard, performance, ultra).
@@ -692,6 +829,562 @@ type AuditLoggingConfig struct {
 	IncludeUser bool `yaml:"include_user"`
 }
 
+// -----------------------------------------------------------------------------
+// Session Integrity & Verification Configuration
+// -----------------------------------------------------------------------------
+
+// SessionIntegrityConfig configures conversation integrity verification.
+//
+// # Description
+//
+// Controls the hash chain verification features for chat sessions.
+// The hash chain provides tamper-evident logging similar to blockchain.
+//
+// # YAML Example
+//
+//	session_integrity:
+//	  enabled: true
+//	  verification_mode: full
+//	  enterprise:
+//	    hmac:
+//	      enabled: true
+//	      key_provider: vault
+//	    tsa:
+//	      enabled: true
+//	      provider: digicert
+//	    hsm:
+//	      enabled: false
+//	    audit:
+//	      enabled: true
+//	      siem_endpoint: "https://siem.example.com/events"
+type SessionIntegrityConfig struct {
+	// Enabled toggles session integrity verification.
+	// Default: true
+	Enabled bool `yaml:"enabled"`
+
+	// VerificationMode controls verification depth.
+	// Options: "quick" (PrevHash links only), "full" (recompute all hashes)
+	// Default: "quick"
+	VerificationMode string `yaml:"verification_mode"`
+
+	// AutoVerifyOnEnd automatically verifies chain when session ends.
+	// Default: true
+	AutoVerifyOnEnd bool `yaml:"auto_verify_on_end"`
+
+	// ShowHashInSummary displays integrity info in session summary.
+	// Default: true
+	ShowHashInSummary bool `yaml:"show_hash_in_summary"`
+
+	// Enterprise contains enterprise extension configuration.
+	// These features require enterprise license.
+	Enterprise EnterpriseIntegrityConfig `yaml:"enterprise,omitempty"`
+}
+
+// EnterpriseIntegrityConfig contains enterprise-only integrity features.
+//
+// # Description
+//
+// Configuration for enterprise extensions including HMAC, digital signatures,
+// trusted timestamping, HSM integration, and compliance audit logging.
+//
+// # Thread Safety
+//
+// Configuration is read-only after initialization.
+type EnterpriseIntegrityConfig struct {
+	// HMAC configures keyed hash verification.
+	HMAC HMACConfig `yaml:"hmac,omitempty"`
+
+	// Signatures configures digital signature verification.
+	Signatures SignatureConfig `yaml:"signatures,omitempty"`
+
+	// TSA configures RFC 3161 trusted timestamping.
+	TSA TSAConfig `yaml:"tsa,omitempty"`
+
+	// HSM configures hardware security module integration.
+	HSM HSMConfig `yaml:"hsm,omitempty"`
+
+	// Audit configures compliance audit logging.
+	Audit VerificationAuditConfig `yaml:"audit,omitempty"`
+
+	// Authorization configures access control for verification.
+	Authorization AuthorizationConfig `yaml:"authorization,omitempty"`
+
+	// RateLimiting configures request rate limits.
+	RateLimiting RateLimitConfig `yaml:"rate_limiting,omitempty"`
+
+	// Caching configures verification result caching.
+	Caching VerificationCacheConfig `yaml:"caching,omitempty"`
+
+	// Scheduling configures periodic verification.
+	Scheduling VerificationScheduleConfig `yaml:"scheduling,omitempty"`
+
+	// Alerting configures failure alerts.
+	Alerting VerificationAlertConfig `yaml:"alerting,omitempty"`
+}
+
+// HMACConfig configures HMAC-based keyed verification.
+//
+// # Description
+//
+// HMAC provides authentication in addition to integrity, proving
+// who created the hash. Required for multi-tenant security.
+type HMACConfig struct {
+	// Enabled toggles HMAC verification.
+	Enabled bool `yaml:"enabled"`
+
+	// KeyProvider specifies where keys are stored.
+	// Options: "vault", "aws_kms", "azure_keyvault", "gcp_kms", "env"
+	KeyProvider string `yaml:"key_provider"`
+
+	// KeyID is the identifier for the current active key.
+	KeyID string `yaml:"key_id,omitempty"`
+
+	// VaultPath is the path to keys in HashiCorp Vault.
+	VaultPath string `yaml:"vault_path,omitempty"`
+
+	// Algorithm specifies the HMAC algorithm.
+	// Options: "sha256", "sha384", "sha512"
+	// Default: "sha256"
+	Algorithm string `yaml:"algorithm,omitempty"`
+}
+
+// SignatureConfig configures digital signature verification.
+//
+// # Description
+//
+// Digital signatures provide legal non-repudiation for compliance
+// with eIDAS, ESIGN Act, and 21 CFR Part 11.
+type SignatureConfig struct {
+	// Enabled toggles signature verification.
+	Enabled bool `yaml:"enabled"`
+
+	// Algorithm specifies the signature algorithm.
+	// Options: "rsa2048", "rsa4096", "ecdsa_p256", "ecdsa_p384", "ed25519"
+	// Default: "ecdsa_p256"
+	Algorithm string `yaml:"algorithm,omitempty"`
+
+	// CertStorePath is the path to certificate store.
+	CertStorePath string `yaml:"cert_store_path,omitempty"`
+
+	// OCSPEnabled toggles certificate revocation checking.
+	OCSPEnabled bool `yaml:"ocsp_enabled"`
+}
+
+// TSAConfig configures RFC 3161 trusted timestamping.
+//
+// # Description
+//
+// Trusted timestamps prove content existed at a specific time,
+// required for MiFID II, SOX, and legal evidence.
+type TSAConfig struct {
+	// Enabled toggles trusted timestamping.
+	Enabled bool `yaml:"enabled"`
+
+	// Provider specifies the TSA provider.
+	// Options: "digicert", "globalsign", "sectigo", "freetsa", "custom"
+	Provider string `yaml:"provider"`
+
+	// URL is the TSA endpoint (for custom provider).
+	URL string `yaml:"url,omitempty"`
+
+	// CertPath is the path to TSA certificate for verification.
+	CertPath string `yaml:"cert_path,omitempty"`
+
+	// Timeout is the maximum time for TSA requests.
+	// Default: 30s
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+}
+
+// HSMConfig configures hardware security module integration.
+//
+// # Description
+//
+// HSM integration provides highest security level where keys
+// never leave tamper-resistant hardware. Required for FIPS 140-2
+// Level 3, PCI-DSS, and government requirements.
+type HSMConfig struct {
+	// Enabled toggles HSM usage.
+	Enabled bool `yaml:"enabled"`
+
+	// Provider specifies the HSM vendor/interface.
+	// Options: "pkcs11", "aws_cloudhsm", "azure_hsm", "thales_luna"
+	Provider string `yaml:"provider"`
+
+	// LibraryPath is the path to PKCS#11 library.
+	LibraryPath string `yaml:"library_path,omitempty"`
+
+	// SlotID is the HSM slot identifier.
+	SlotID int `yaml:"slot_id,omitempty"`
+
+	// KeyLabel is the label of the signing key in HSM.
+	KeyLabel string `yaml:"key_label,omitempty"`
+
+	// PIN is the HSM PIN (should use secrets manager).
+	// Use "env:HSM_PIN" or "vault:secret/hsm/pin" syntax.
+	PIN string `yaml:"pin,omitempty"`
+}
+
+// ValidHMACAlgorithms lists acceptable HMAC algorithms.
+// SHA-1 is explicitly excluded due to security concerns.
+var ValidHMACAlgorithms = map[string]bool{
+	"sha256": true,
+	"sha384": true,
+	"sha512": true,
+}
+
+// Validate checks that the HMACConfig has valid settings.
+//
+// # Description
+//
+// Validates that the algorithm is one of the supported values.
+// Returns an error if the configuration is invalid.
+//
+// # Outputs
+//
+//   - error: nil if valid, descriptive error otherwise
+func (c *HMACConfig) Validate() error {
+	if !c.Enabled {
+		return nil // No validation needed when disabled
+	}
+	// Default to sha256 if not specified
+	if c.Algorithm == "" {
+		return nil // Will use default
+	}
+	if !ValidHMACAlgorithms[c.Algorithm] {
+		return &ValidationError{
+			Field:   "hmac.algorithm",
+			Value:   c.Algorithm,
+			Message: "must be one of: sha256, sha384, sha512",
+		}
+	}
+	return nil
+}
+
+// ValidHSMProviders lists acceptable HSM provider types.
+var ValidHSMProviders = map[string]bool{
+	"pkcs11":       true,
+	"aws_cloudhsm": true,
+	"azure_hsm":    true,
+	"thales_luna":  true,
+}
+
+// Validate checks that the HSMConfig has valid settings.
+//
+// # Description
+//
+// Validates that the provider is one of the supported values.
+// Returns an error if the configuration is invalid.
+//
+// # Outputs
+//
+//   - error: nil if valid, descriptive error otherwise
+func (c *HSMConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Provider == "" {
+		return &ValidationError{
+			Field:   "hsm.provider",
+			Value:   "",
+			Message: "required when HSM is enabled",
+		}
+	}
+	if !ValidHSMProviders[c.Provider] {
+		return &ValidationError{
+			Field:   "hsm.provider",
+			Value:   c.Provider,
+			Message: "must be one of: pkcs11, aws_cloudhsm, azure_hsm, thales_luna",
+		}
+	}
+	return nil
+}
+
+// ValidTSAProviders lists acceptable TSA provider types.
+var ValidTSAProviders = map[string]bool{
+	"digicert":   true,
+	"globalsign": true,
+	"sectigo":    true,
+	"freetsa":    true,
+	"custom":     true,
+}
+
+// Validate checks that the TSAConfig has valid settings.
+//
+// # Description
+//
+// Validates that the provider is one of the supported values.
+// When provider is "custom", a URL must be specified.
+// Returns an error if the configuration is invalid.
+//
+// # Outputs
+//
+//   - error: nil if valid, descriptive error otherwise
+func (c *TSAConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Provider == "" {
+		return &ValidationError{
+			Field:   "tsa.provider",
+			Value:   "",
+			Message: "required when TSA is enabled",
+		}
+	}
+	if !ValidTSAProviders[c.Provider] {
+		return &ValidationError{
+			Field:   "tsa.provider",
+			Value:   c.Provider,
+			Message: "must be one of: digicert, globalsign, sectigo, freetsa, custom",
+		}
+	}
+	if c.Provider == "custom" && c.URL == "" {
+		return &ValidationError{
+			Field:   "tsa.url",
+			Value:   "",
+			Message: "required when provider is 'custom'",
+		}
+	}
+	return nil
+}
+
+// ValidSignatureAlgorithms lists acceptable signature algorithms.
+var ValidSignatureAlgorithms = map[string]bool{
+	"rsa2048":    true,
+	"rsa4096":    true,
+	"ecdsa_p256": true,
+	"ecdsa_p384": true,
+	"ed25519":    true,
+}
+
+// Validate checks that the SignatureConfig has valid settings.
+//
+// # Description
+//
+// Validates that the algorithm is one of the supported values.
+// Returns an error if the configuration is invalid.
+//
+// # Outputs
+//
+//   - error: nil if valid, descriptive error otherwise
+func (c *SignatureConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	// Default to ecdsa_p256 if not specified
+	if c.Algorithm == "" {
+		return nil
+	}
+	if !ValidSignatureAlgorithms[c.Algorithm] {
+		return &ValidationError{
+			Field:   "signatures.algorithm",
+			Value:   c.Algorithm,
+			Message: "must be one of: rsa2048, rsa4096, ecdsa_p256, ecdsa_p384, ed25519",
+		}
+	}
+	return nil
+}
+
+// ValidationError represents a configuration validation failure.
+//
+// # Description
+//
+// Provides structured error information for configuration validation
+// failures, including the field name, invalid value, and error message.
+type ValidationError struct {
+	Field   string
+	Value   string
+	Message string
+}
+
+// Error implements the error interface.
+func (e *ValidationError) Error() string {
+	return "config validation error: " + e.Field + " (" + e.Value + "): " + e.Message
+}
+
+// VerificationAuditConfig configures compliance audit logging.
+//
+// # Description
+//
+// All verification attempts are logged for compliance with
+// SOC 2, HIPAA, GDPR, and PCI-DSS audit requirements.
+type VerificationAuditConfig struct {
+	// Enabled toggles audit logging.
+	Enabled bool `yaml:"enabled"`
+
+	// Destination specifies where audit logs are sent.
+	// Options: "siem", "s3", "gcs", "file", "syslog"
+	Destination string `yaml:"destination"`
+
+	// SIEMEndpoint is the SIEM webhook URL.
+	SIEMEndpoint string `yaml:"siem_endpoint,omitempty"`
+
+	// S3Bucket is the S3 bucket for audit logs.
+	S3Bucket string `yaml:"s3_bucket,omitempty"`
+
+	// GCSBucket is the GCS bucket for audit logs.
+	GCSBucket string `yaml:"gcs_bucket,omitempty"`
+
+	// FilePath is the local file path for audit logs.
+	FilePath string `yaml:"file_path,omitempty"`
+
+	// RetentionDays is how long to retain audit logs.
+	// Default: 2555 (7 years for financial compliance)
+	RetentionDays int `yaml:"retention_days,omitempty"`
+
+	// SignLogs enables signing audit log entries.
+	SignLogs bool `yaml:"sign_logs"`
+}
+
+// AuthorizationConfig configures access control for verification.
+//
+// # Description
+//
+// Controls who can verify which sessions for multi-tenant
+// security and compliance requirements.
+type AuthorizationConfig struct {
+	// Enabled toggles authorization checks.
+	Enabled bool `yaml:"enabled"`
+
+	// Provider specifies the policy engine.
+	// Options: "opa", "casbin", "internal"
+	Provider string `yaml:"provider"`
+
+	// OPAEndpoint is the OPA server URL.
+	OPAEndpoint string `yaml:"opa_endpoint,omitempty"`
+
+	// PolicyPath is the policy document path.
+	PolicyPath string `yaml:"policy_path,omitempty"`
+}
+
+// RateLimitConfig configures verification request rate limiting.
+type RateLimitConfig struct {
+	// Enabled toggles rate limiting.
+	Enabled bool `yaml:"enabled"`
+
+	// RequestsPerMinute per user.
+	// Default: 60
+	RequestsPerMinute int `yaml:"requests_per_minute,omitempty"`
+
+	// RequestsPerHour per tenant.
+	// Default: 1000
+	RequestsPerHour int `yaml:"requests_per_hour,omitempty"`
+
+	// BurstSize allows short bursts above limit.
+	// Default: 10
+	BurstSize int `yaml:"burst_size,omitempty"`
+}
+
+// VerificationCacheConfig configures caching of verification results.
+type VerificationCacheConfig struct {
+	// Enabled toggles result caching.
+	Enabled bool `yaml:"enabled"`
+
+	// Backend specifies cache implementation.
+	// Options: "redis", "memcached", "memory"
+	Backend string `yaml:"backend"`
+
+	// RedisURL is the Redis connection string.
+	RedisURL string `yaml:"redis_url,omitempty"`
+
+	// TTL is cache entry lifetime.
+	// Default: 5m
+	TTL time.Duration `yaml:"ttl,omitempty"`
+}
+
+// VerificationScheduleConfig configures periodic background verification.
+type VerificationScheduleConfig struct {
+	// Enabled toggles scheduled verification.
+	Enabled bool `yaml:"enabled"`
+
+	// DefaultInterval is how often to verify sessions.
+	// Default: 24h
+	DefaultInterval time.Duration `yaml:"default_interval,omitempty"`
+
+	// PrioritySessionInterval for high-priority sessions.
+	// Default: 1h
+	PrioritySessionInterval time.Duration `yaml:"priority_session_interval,omitempty"`
+
+	// MaxConcurrent limits parallel verifications.
+	// Default: 10
+	MaxConcurrent int `yaml:"max_concurrent,omitempty"`
+}
+
+// VerificationAlertConfig configures failure alerting.
+type VerificationAlertConfig struct {
+	// Enabled toggles alerting.
+	Enabled bool `yaml:"enabled"`
+
+	// Destinations lists alert channels.
+	// Options: "pagerduty", "slack", "email", "webhook"
+	Destinations []string `yaml:"destinations,omitempty"`
+
+	// PagerDutyKey is the PagerDuty integration key.
+	PagerDutyKey string `yaml:"pagerduty_key,omitempty"`
+
+	// SlackWebhook is the Slack incoming webhook URL.
+	SlackWebhook string `yaml:"slack_webhook,omitempty"`
+
+	// EmailRecipients for email alerts.
+	EmailRecipients []string `yaml:"email_recipients,omitempty"`
+
+	// WebhookURL for custom alert webhook.
+	WebhookURL string `yaml:"webhook_url,omitempty"`
+
+	// ThrottleMinutes prevents alert spam.
+	// Default: 15
+	ThrottleMinutes int `yaml:"throttle_minutes,omitempty"`
+}
+
+// DefaultSessionIntegrityConfig returns sensible defaults.
+//
+// # Description
+//
+// Creates a SessionIntegrityConfig with open-source defaults.
+// Enterprise features are disabled by default.
+//
+// # Outputs
+//
+//   - SessionIntegrityConfig: Configuration with default values
+func DefaultSessionIntegrityConfig() SessionIntegrityConfig {
+	return SessionIntegrityConfig{
+		Enabled:           true,
+		VerificationMode:  "quick",
+		AutoVerifyOnEnd:   true,
+		ShowHashInSummary: true,
+		Enterprise: EnterpriseIntegrityConfig{
+			HMAC:       HMACConfig{Enabled: false},
+			Signatures: SignatureConfig{Enabled: false},
+			TSA:        TSAConfig{Enabled: false},
+			HSM:        HSMConfig{Enabled: false},
+			Audit: VerificationAuditConfig{
+				Enabled:       false,
+				RetentionDays: 2555,
+			},
+			Authorization: AuthorizationConfig{Enabled: false},
+			RateLimiting: RateLimitConfig{
+				Enabled:           false,
+				RequestsPerMinute: 60,
+				RequestsPerHour:   1000,
+				BurstSize:         10,
+			},
+			Caching: VerificationCacheConfig{
+				Enabled: false,
+				TTL:     5 * time.Minute,
+			},
+			Scheduling: VerificationScheduleConfig{
+				Enabled:                 false,
+				DefaultInterval:         24 * time.Hour,
+				PrioritySessionInterval: 1 * time.Hour,
+				MaxConcurrent:           10,
+			},
+			Alerting: VerificationAlertConfig{
+				Enabled:         false,
+				ThrottleMinutes: 15,
+			},
+		},
+	}
+}
+
 // DefaultModelManagementConfig returns sensible defaults.
 //
 // # Description
@@ -1017,7 +1710,8 @@ func DefaultConfig() AleutianConfig {
 			Enabled: true,
 			Mode:    ForecastModeStandalone,
 		},
-		ModelManagement: DefaultModelManagementConfig(),
-		Profiles:        []ProfileConfig{},
+		ModelManagement:  DefaultModelManagementConfig(),
+		SessionIntegrity: DefaultSessionIntegrityConfig(),
+		Profiles:         []ProfileConfig{},
 	}
 }

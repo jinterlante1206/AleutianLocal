@@ -36,33 +36,21 @@ var alpineImagePulled bool // Optimization: Cache the pull status across retries
 func calculateOptimizedEnv(totalRAM_MB int) map[string]string {
 	env := make(map[string]string)
 	fmt.Printf("Optimization Engine: Detected %d MB Compute Memory (VRAM)\n", totalRAM_MB)
-	const (
-		LOW_RAM  = 16384
-		MID_RAM  = 32768
-		HIGH_RAM = 65536
-	)
-	env["OLLAMA_MODEL"] = "gemma3:4b"
-	env["LLM_DEFAULT_MAX_TOKENS"] = "2048"
-	env["RERANKER_MODEL"] = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
-	env["WEAVIATE_QUERY_DEFAULTS_LIMIT"] = "5"
 
-	if totalRAM_MB >= LOW_RAM && totalRAM_MB < MID_RAM {
-		fmt.Println("    -> Profile: Standard (16GB to 32GB of VRAM)")
-		env["OLLAMA_MODEL"] = "gemma3:12b"
-		env["LLM_DEFAULT_MAX_TOKENS"] = "4096"
-		env["RERANKER_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-	} else if totalRAM_MB >= MID_RAM && totalRAM_MB < HIGH_RAM {
-		fmt.Println("   -> Profile: Performance (32GB+)")
-		env["LLM_DEFAULT_MAX_TOKENS"] = "8192" // Larger context
-		env["OLLAMA_MODEL"] = "gpt-oss:20b"
-		env["RERANKER_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-		env["RERANK_FINAL_K"] = "10" // Re-rank more results
-	} else if totalRAM_MB >= HIGH_RAM {
-		fmt.Println("   -> Profile: Ultra (64GB+)")
-		env["OLLAMA_MODEL"] = "llama3:70b" // Enterprise grade
-		env["RERANKER_MODEL"] = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-		env["LLM_DEFAULT_MAX_TOKENS"] = "32768" // Massive context
+	// Use centralized config for profile selection
+	profileName := config.GetProfileForRAM(totalRAM_MB)
+	profile := config.BuiltInHardwareProfiles[profileName]
+
+	fmt.Printf("   -> Profile: %s\n", profile.Description)
+
+	env["OLLAMA_MODEL"] = profile.OllamaModel
+	env["LLM_DEFAULT_MAX_TOKENS"] = strconv.Itoa(profile.MaxTokens)
+	env["RERANKER_MODEL"] = profile.RerankerModel
+	env["WEAVIATE_QUERY_DEFAULTS_LIMIT"] = strconv.Itoa(profile.WeaviateQueryLimit)
+	if profile.RerankFinalK > 0 {
+		env["RERANK_FINAL_K"] = strconv.Itoa(profile.RerankFinalK)
 	}
+
 	return env
 }
 

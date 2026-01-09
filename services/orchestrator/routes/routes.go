@@ -64,7 +64,8 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 	chatHandler := handlers.NewChatHandler(globalLLMClient, policyEngine, chatRAGService)
 
 	// Create StreamingChatHandler for SSE streaming endpoints
-	streamingHandler := handlers.NewStreamingChatHandler(globalLLMClient, policyEngine, chatRAGService)
+	// Pass Weaviate client for session history loading on resume
+	streamingHandler := handlers.NewStreamingChatHandler(globalLLMClient, policyEngine, chatRAGService, client)
 
 	// API version 1 group
 	v1 := router.Group("/v1")
@@ -96,6 +97,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 				sessions.GET("/:sessionId/history", handlers.GetSessionHistory(client))
 				sessions.GET("/:sessionId/documents", handlers.GetSessionDocuments(client))
 				sessions.DELETE("/:sessionId", handlers.DeleteSessions(client))
+				sessions.POST("/:sessionId/verify", handlers.VerifySession(client))
 			}
 
 			// Weaviate administration routes

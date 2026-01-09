@@ -1075,6 +1075,190 @@ func runDeleteSession(cmd *cobra.Command, args []string) {
 	fmt.Printf("Successfully deleted session: %s\n", sessionId)
 }
 
+// VerifySessionResponse represents the verification result from the orchestrator.
+//
+// # Description
+//
+// Contains the result of hash chain verification for a session.
+// Mirrors the API response from POST /v1/sessions/:sessionId/verify.
+//
+// # Fields
+//
+//   - SessionID: The session that was verified
+//   - Verified: Whether the integrity check passed
+//   - TurnCount: Number of conversation turns verified
+//   - ChainHash: Hash of all turn content combined
+//   - VerifiedAt: Timestamp when verification was performed
+//   - TurnHashes: Hash of each individual Q&A turn
+//   - ErrorDetails: If verification failed, details about the failure
+type VerifySessionResponse struct {
+	SessionID    string         `json:"session_id"`
+	Verified     bool           `json:"verified"`
+	TurnCount    int            `json:"turn_count"`
+	ChainHash    string         `json:"chain_hash,omitempty"`
+	VerifiedAt   int64          `json:"verified_at"`
+	TurnHashes   map[int]string `json:"turn_hashes,omitempty"`
+	ErrorDetails string         `json:"error_details,omitempty"`
+}
+
+// runVerifySession verifies the integrity of a session's hash chain.
+//
+// # Description
+//
+// Calls the orchestrator's verify endpoint to check that a session's
+// conversation history has not been tampered with. The verification
+// checks the cryptographic hash chain linking each turn.
+//
+// # Inputs
+//
+//   - args[0]: Session ID to verify
+//
+// # Flags
+//
+//   - --full: Perform full verification (recompute all hashes from content)
+//   - --json: Output result as JSON for scripting
+//
+// # Outputs
+//
+// Prints verification result to stdout. Exit code 0 if verified,
+// exit code 1 if verification failed or tampered.
+//
+// # Examples
+//
+//	aleutian session verify sess-abc123
+//	aleutian session verify sess-abc123 --full
+//	aleutian session verify sess-abc123 --json
+//
+// # Limitations
+//
+//   - Requires orchestrator to be running
+//   - Only verifies data currently in Weaviate
+func runVerifySession(cmd *cobra.Command, args []string) {
+	baseURL := getOrchestratorBaseURL()
+	sessionID := args[0]
+
+	fullVerify, _ := cmd.Flags().GetBool("full")
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+
+	// Build URL with optional query params
+	orchestratorURL := fmt.Sprintf("%s/v1/sessions/%s/verify", baseURL, sessionID)
+	if fullVerify {
+		orchestratorURL += "?mode=full"
+	}
+
+	// Make POST request
+	req, err := http.NewRequest(http.MethodPost, orchestratorURL, nil)
+	if err != nil {
+		if jsonOutput {
+			fmt.Printf(`{"error": "failed to create request: %s"}`, err.Error())
+		} else {
+			log.Fatalf("Failed to create verify request: %v", err)
+		}
+		os.Exit(1)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if jsonOutput {
+			fmt.Printf(`{"error": "failed to connect to orchestrator: %s"}`, err.Error())
+		} else {
+			log.Fatalf("Failed to connect to orchestrator: %v", err)
+		}
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	// Parse response
+	var result VerifySessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if jsonOutput {
+			fmt.Printf(`{"error": "failed to parse response: %s"}`, err.Error())
+		} else {
+			log.Fatalf("Failed to parse verification response: %v", err)
+		}
+		os.Exit(1)
+	}
+
+	// Handle JSON output mode
+	if jsonOutput {
+		output, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(output))
+		if !result.Verified {
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Human-readable output using UX personality
+	personality := ux.GetPersonality().Level
+
+	if result.Verified {
+		switch personality {
+		case ux.PersonalityFull:
+			fmt.Println()
+			fmt.Println(ux.Styles.Success.Render("╔══════════════════════════════════════════════════════════════╗"))
+			fmt.Println(ux.Styles.Success.Render("║           INTEGRITY VERIFICATION SUCCESSFUL                  ║"))
+			fmt.Println(ux.Styles.Success.Render("╚══════════════════════════════════════════════════════════════╝"))
+			fmt.Println()
+			fmt.Printf("  Session:    %s\n", result.SessionID)
+			fmt.Printf("  Status:     %s\n", ux.Styles.Success.Render("✓ VERIFIED"))
+			fmt.Printf("  Turns:      %d conversation turns verified\n", result.TurnCount)
+			if result.ChainHash != "" {
+				fmt.Printf("  Chain Hash: %s...%s\n", result.ChainHash[:8], result.ChainHash[len(result.ChainHash)-4:])
+			}
+			fmt.Printf("  Verified:   %s\n", time.UnixMilli(result.VerifiedAt).Format(time.RFC3339))
+			fmt.Println()
+			fmt.Println(ux.Styles.Muted.Render("  The hash chain is intact. No tampering detected."))
+			fmt.Println()
+
+		case ux.PersonalityStandard:
+			fmt.Printf("✓ Session %s verified (%d turns)\n", result.SessionID, result.TurnCount)
+			if result.ChainHash != "" {
+				fmt.Printf("  Chain: %s...%s\n", result.ChainHash[:8], result.ChainHash[len(result.ChainHash)-4:])
+			}
+
+		case ux.PersonalityMinimal:
+			fmt.Printf("VERIFIED: %s (%d turns)\n", result.SessionID, result.TurnCount)
+
+		case ux.PersonalityMachine:
+			fmt.Printf("verified=true session_id=%s turn_count=%d chain_hash=%s\n",
+				result.SessionID, result.TurnCount, result.ChainHash)
+		}
+	} else {
+		switch personality {
+		case ux.PersonalityFull:
+			fmt.Println()
+			fmt.Println(ux.Styles.Error.Render("╔══════════════════════════════════════════════════════════════╗"))
+			fmt.Println(ux.Styles.Error.Render("║           INTEGRITY VERIFICATION FAILED                      ║"))
+			fmt.Println(ux.Styles.Error.Render("╚══════════════════════════════════════════════════════════════╝"))
+			fmt.Println()
+			fmt.Printf("  Session:    %s\n", result.SessionID)
+			fmt.Printf("  Status:     %s\n", ux.Styles.Error.Render("✗ FAILED"))
+			if result.ErrorDetails != "" {
+				fmt.Printf("  Error:      %s\n", ux.Styles.Error.Render(result.ErrorDetails))
+			}
+			fmt.Println()
+			fmt.Println(ux.Styles.Warning.Render("  ⚠ WARNING: The hash chain may have been tampered with."))
+			fmt.Println(ux.Styles.Warning.Render("  Please investigate this session's history."))
+			fmt.Println()
+
+		case ux.PersonalityStandard:
+			fmt.Printf("✗ Session %s FAILED verification\n", result.SessionID)
+			if result.ErrorDetails != "" {
+				fmt.Printf("  Error: %s\n", result.ErrorDetails)
+			}
+
+		case ux.PersonalityMinimal:
+			fmt.Printf("FAILED: %s\n", result.SessionID)
+
+		case ux.PersonalityMachine:
+			fmt.Printf("verified=false session_id=%s error=%s\n",
+				result.SessionID, result.ErrorDetails)
+		}
+		os.Exit(1)
+	}
+}
+
 // runListSessions lists all active chat sessions from the orchestrator.
 //
 // # Outputs

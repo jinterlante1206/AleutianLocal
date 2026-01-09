@@ -20,9 +20,9 @@ and user-defined custom profiles.
 Built-in profiles match hardware to optimal model configurations:
 
   - Low (< 16GB): gemma3:4b, 2048 tokens - Basic local inference
-  - Standard (16-32GB): gemma3:12b, 4096 tokens - Balanced performance
-  - Performance (32-64GB): gpt-oss:20b, 8192 tokens - Enhanced context
-  - Ultra (64GB+): llama3:70b, 32768 tokens - Enterprise grade
+  - Standard (16-32GB): qwen3:14b, 4096 tokens - Balanced performance
+  - Performance (32-128GB): gpt-oss:20b, 8192 tokens - Enhanced context with thinking
+  - Ultra (128GB+): gpt-oss:120b, 32768 tokens - Enterprise grade with thinking
 
 # Hardware Detection
 
@@ -393,65 +393,25 @@ type ProfileInfo struct {
 // Built-in Profiles
 // -----------------------------------------------------------------------------
 
-// builtInProfiles defines the standard profile tiers.
-var builtInProfiles = map[string]*ProfileInfo{
-	"low": {
-		Name:               "low",
-		Description:        "Basic (< 16GB) - Minimal resource usage",
-		OllamaModel:        "gemma3:4b",
-		MaxTokens:          2048,
-		RerankerModel:      "cross-encoder/ms-marco-TinyBERT-L-2-v2",
-		WeaviateQueryLimit: 5,
-		RerankFinalK:       5,
-		MinRAM_MB:          0,
-		MaxRAM_MB:          16384,
-	},
-	"standard": {
-		Name:               "standard",
-		Description:        "Standard (16-32GB) - Balanced performance",
-		OllamaModel:        "gemma3:12b",
-		MaxTokens:          4096,
-		RerankerModel:      "cross-encoder/ms-marco-MiniLM-L-6-v2",
-		WeaviateQueryLimit: 5,
-		RerankFinalK:       5,
-		MinRAM_MB:          16384,
-		MaxRAM_MB:          32768,
-	},
-	"performance": {
-		Name:               "performance",
-		Description:        "Performance (32-64GB) - Enhanced context",
-		OllamaModel:        "gpt-oss:20b",
-		MaxTokens:          8192,
-		RerankerModel:      "cross-encoder/ms-marco-MiniLM-L-6-v2",
-		WeaviateQueryLimit: 5,
-		RerankFinalK:       10,
-		MinRAM_MB:          32768,
-		MaxRAM_MB:          65536,
-	},
-	"ultra": {
-		Name:               "ultra",
-		Description:        "Ultra (64GB+) - Enterprise grade",
-		OllamaModel:        "llama3:70b",
-		MaxTokens:          32768,
-		RerankerModel:      "cross-encoder/ms-marco-MiniLM-L-6-v2",
-		WeaviateQueryLimit: 5,
-		RerankFinalK:       10,
-		MinRAM_MB:          65536,
-		MaxRAM_MB:          0, // Unlimited
-	},
-}
-
-// profileRAMThresholds maps RAM thresholds to profile names for auto-detection.
-var profileRAMThresholds = []struct {
-	minRAM  int
-	maxRAM  int
-	profile string
-}{
-	{65536, 0, "ultra"},           // 64GB+
-	{32768, 65536, "performance"}, // 32-64GB
-	{16384, 32768, "standard"},    // 16-32GB
-	{0, 16384, "low"},             // < 16GB
-}
+// builtInProfiles is populated from config.BuiltInHardwareProfiles.
+// This ensures a single source of truth for model definitions.
+var builtInProfiles = func() map[string]*ProfileInfo {
+	profiles := make(map[string]*ProfileInfo)
+	for name, hp := range config.BuiltInHardwareProfiles {
+		profiles[name] = &ProfileInfo{
+			Name:               hp.Name,
+			Description:        hp.Description,
+			OllamaModel:        hp.OllamaModel,
+			MaxTokens:          hp.MaxTokens,
+			RerankerModel:      hp.RerankerModel,
+			WeaviateQueryLimit: hp.WeaviateQueryLimit,
+			RerankFinalK:       hp.RerankFinalK,
+			MinRAM_MB:          hp.MinRAM_MB,
+			MaxRAM_MB:          hp.MaxRAM_MB,
+		}
+	}
+	return profiles
+}()
 
 // -----------------------------------------------------------------------------
 // DefaultProfileResolver Implementation
@@ -722,12 +682,7 @@ func (r *DefaultProfileResolver) GetProfileInfo(name string) (*ProfileInfo, bool
 //
 //   - Thresholds are sorted descending
 func (r *DefaultProfileResolver) selectProfileForRAM(ramMB int) string {
-	for _, threshold := range profileRAMThresholds {
-		if ramMB >= threshold.minRAM && (threshold.maxRAM == 0 || ramMB < threshold.maxRAM) {
-			return threshold.profile
-		}
-	}
-	return "low" // Default fallback
+	return config.GetProfileForRAM(ramMB)
 }
 
 // profileToEnv converts a profile to environment variables.

@@ -166,7 +166,8 @@ The `aleutian` CLI is your primary interface for interacting with the AleutianLo
 | `aleutian stack logs [service]` | Stream container logs |
 | `aleutian stack destroy` | **DANGER:** Remove all containers and data |
 | `aleutian ask "question"` | RAG-powered Q&A against your documents |
-| `aleutian chat` | Interactive chat session (use `--thinking` for Claude) |
+| `aleutian chat` | Interactive chat session (use `--thinking` for Claude/Ollama) |
+| `aleutian chat --resume <id>` | Resume a previous session with full context |
 | `aleutian trace "query"` | Autonomous code analysis agent |
 | `aleutian populate vectordb <path>` | Ingest documents with security scanning |
 | `aleutian timeseries fetch <tickers>` | Fetch historical market data |
@@ -175,6 +176,7 @@ The `aleutian` CLI is your primary interface for interacting with the AleutianLo
 | `aleutian evaluate export <run_id>` | Export results to CSV |
 | `aleutian weaviate summary` | Show vector DB stats |
 | `aleutian session list` | List conversation sessions |
+| `aleutian session verify <id>` | Verify session integrity hash chain |
 | `aleutian policy verify` | Verify embedded DLP rules |
 | `aleutian convert <model>` | Convert HuggingFace model to GGUF |
 | `aleutian pull <model>` | Download model to local cache |
@@ -246,10 +248,60 @@ Start a stateful chat session with the configured LLM.
 
 * `aleutian chat`
 * **Flags:**
-    * `--resume <session_id>`: Resume a conversation using a specific session ID.
-    * `--thinking`: Enables "Extended Thinking" (requires Claude 3.7+ backend) for complex reasoning tasks. When enabled, the LLM can use a "thinking" phase before responding.
+    * `--resume <session_id>`: Resume a conversation using a specific session ID. Loads conversation history from Weaviate so the LLM has full context.
+    * `--thinking`: Enables "Extended Thinking" (requires Claude 3.7+ backend or thinking-enabled Ollama models like gpt-oss, DeepSeek-R1) for complex reasoning tasks.
     * `--budget <tokens>`: Token budget for thinking (default: 2048). Higher values allow more complex reasoning but increase latency and cost.
+    * `--no-rag`: Skip RAG retrieval and chat directly with the LLM.
 * **Example:** `aleutian chat --thinking --budget 4096`
+
+#### Streaming Features (New in v0.3.5)
+
+Aleutian now supports **token-by-token streaming** for all backends:
+
+| Backend | Streaming Support | Thinking Support |
+|---------|-------------------|------------------|
+| Ollama | ✓ Full NDJSON streaming | ✓ gpt-oss, DeepSeek-R1 |
+| Anthropic | ✓ SSE streaming | ✓ Claude 3.7+ |
+| OpenAI | ✓ SSE streaming | ✗ |
+
+**Thinking Model Display**: When using thinking-enabled models, the reasoning process is displayed in real-time (collapsible in full personality mode).
+
+#### Session End Summary
+
+When you exit a chat session (Ctrl+C or `exit`), a comprehensive summary is displayed:
+
+```
+═══════════════════════════════════════════════════════════════
+                         SESSION SUMMARY
+═══════════════════════════════════════════════════════════════
+
+Session ID: c55ce14f-759c-5888-b59c-759cc55ce14f
+
+STATISTICS
+  💬  Messages Exchanged:     5
+  ℹ️   Tokens Generated:       2341
+  📄  Sources Referenced:     3
+  ⏱️   Session Duration:       4m 12s
+
+WEAVIATE STORAGE
+  📦  Session Record:         Created (class: Session)
+  💾  Conversation Turns:     5 stored (class: Conversation)
+  🗂️   Document Chunks:        3 indexed (class: Document)
+
+QUERY YOUR DATA (REST API)
+  curl http://localhost:12210/v1/sessions/<session_id>/history
+  curl -X POST http://localhost:12210/v1/sessions/<session_id>/verify
+
+CONTINUE LATER
+  ./aleutian chat --resume c55ce14f-759c-5888-b59c-759cc55ce14f
+═══════════════════════════════════════════════════════════════
+```
+
+**Personality Modes**: Set `ALEUTIAN_PERSONALITY` environment variable to control output verbosity:
+- `full` (default): Rich formatting with boxes, icons, and full details
+- `standard`: Colors and icons, moderate detail
+- `minimal`: Icons only, compact output
+- `machine`: Plain text for scripting (key=value format)
 
 ---
 
@@ -295,6 +347,18 @@ Interact with session metadata stored in Weaviate.
 
 * `aleutian session list`: Show all session IDs and their LLM-generated summaries.
 * `aleutian session delete <session_id>`: Delete a specific session and all associated conversation turns from the database.
+* `aleutian session verify <session_id>`: Verify the cryptographic integrity of a session's hash chain.
+    * **Hash Chain Verification:** Each conversation turn is cryptographically hashed and linked to the previous turn, creating a tamper-evident audit log (similar to blockchain).
+    * **Flags:**
+        * `--full`: Perform full verification (recompute all hashes from content, not just check links)
+        * `--json`: Output result as JSON for scripting/automation
+    * **Exit Codes:** 0 = verified, 1 = tampered/failed
+    * **Examples:**
+        ```bash
+        aleutian session verify sess-abc123
+        aleutian session verify sess-abc123 --full
+        aleutian session verify sess-abc123 --json | jq '.verified'
+        ```
 
 ---
 
@@ -664,11 +728,102 @@ Security in Aleutian is not an afterthought; it is the architectural boundary. T
 
 ---
 
+### Session Integrity & Hash Chain Verification
+
+Aleutian implements blockchain-style cryptographic integrity for all conversation sessions, providing tamper-evident audit logging for enterprise compliance.
+
+#### How It Works
+
+Every conversation is protected by a cryptographic hash chain:
+
+1. **Per-Event Hashing**: Each streaming event (token, thinking, source) receives a SHA-256 hash of its content
+2. **Chain Linking**: Each event's `PrevHash` links to the previous event's hash
+3. **Tamper Detection**: Any modification breaks the chain (hash mismatch)
+4. **Session Summary**: Chain integrity is displayed at session end
+
+```
+Event 1: Hash("Hello") → abc123
+Event 2: Hash("World" + "abc123") → def456
+Event 3: Hash("!" + "def456") → ghi789
+Final Chain Hash: ghi789
+```
+
+#### Verification Commands
+
+```bash
+# CLI verification
+aleutian session verify <session_id>
+aleutian session verify <session_id> --full --json
+
+# REST API verification
+curl -X POST http://localhost:12210/v1/sessions/<session_id>/verify
+```
+
+#### Session Summary Display
+
+When a chat session ends, the summary includes integrity information:
+
+```
+───────────────────────────────────────────────────────────────
+INTEGRITY & HASH CHAIN
+───────────────────────────────────────────────────────────────
+
+  🔐  Chain Verification:      ✓ PASSED (47 events verified)
+  🔗  Chain Length:            47 events
+
+  Final Chain Hash:
+    a3f2c8d9e1b4f7a6c5d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
+
+  Turn Hashes:
+    Turn 1 (Q&A):  abc123def456...
+    Turn 2 (Q&A):  def456abc789...
+```
+
+#### Enterprise Extension Interfaces
+
+For enterprise deployments requiring regulatory compliance, Aleutian provides pluggable interfaces:
+
+| Interface | Purpose | Compliance |
+|-----------|---------|------------|
+| `KeyedHashComputer` | HMAC with enterprise key management | SOC 2, HIPAA |
+| `SignatureVerifier` | RSA/ECDSA/Ed25519 digital signatures | eIDAS, 21 CFR Part 11 |
+| `TimestampAuthority` | RFC 3161 trusted timestamps | MiFID II, SOX |
+| `HSMProvider` | PKCS#11 hardware security module | FIPS 140-2, PCI-DSS |
+| `AuditLogger` | Compliance audit trail to SIEM | GDPR, HIPAA |
+| `VerificationAuthorizer` | Multi-tenant access control | SOC 2 |
+
+#### Configuration (`~/.aleutian/aleutian.yaml`)
+
+```yaml
+session_integrity:
+  enabled: true
+  verification_mode: quick   # quick (links only) or full (recompute hashes)
+  auto_verify_on_end: true
+  show_hash_in_summary: true
+
+  # Enterprise features (require license)
+  enterprise:
+    hmac:
+      enabled: false
+      key_provider: vault  # vault, aws_kms, azure_keyvault
+    tsa:
+      enabled: false
+      provider: digicert   # RFC 3161 timestamp authority
+    audit:
+      enabled: false
+      destination: siem
+      retention_days: 2555  # 7 years
+```
+
+See `docs/designs/completed/enterprise_integrity_extensions.md` for full documentation.
+
+---
+
 ### Model Integration (Backend Agnostic)
 
 Aleutian abstracts the LLM provider through a standardized `LLMClient` Go interface. This allows you to hot-swap intelligence backends in `podman-compose.override.yml` purely via environment variables.
 
-* **Local (Ollama):** The default "Air-Gapped" mode. The CLI's "Optimization Engine" automatically selects models (e.g., `phi4` for low RAM, `qwen2.5-coder` for standard, `llama3:70b` for Ultra) and configures the `OLLAMA_BASE_URL`.
+* **Local (Ollama):** The default "Air-Gapped" mode. The CLI's "Optimization Engine" automatically selects models (e.g., `gemma3:4b` for low RAM, `qwen3:14b` for standard, `gpt-oss:20b` for performance, `gpt-oss:120b` for Ultra) and configures the `OLLAMA_BASE_URL`.
 * **Anthropic (Cloud):** Set `LLM_BACKEND_TYPE="anthropic"` and provide `anthropic_api_key`. This backend enables **"Extended Thinking"**, allowing the use of Claude 3.7 Sonnet with high token budgets for complex architectural analysis.
 * **OpenAI (Cloud):** Set `LLM_BACKEND_TYPE="openai"`. Supports `gpt-4o`, `gpt-4-turbo`, and `o1-mini`.
 * **Hugging Face / TGI:** For users running custom fine-tunes on centralized GPU servers, the `hf_transformers` backend allows direct connection.

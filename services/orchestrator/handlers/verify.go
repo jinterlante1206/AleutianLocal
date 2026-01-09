@@ -284,6 +284,63 @@ type VerificationAlertSender interface {
 	SendAlert(sessionID string, result *VerifySessionResponse, severity string) error
 }
 
+// VerificationAuthorizer checks authorization for verification operations.
+//
+// # Description
+//
+// Enterprise extension for access control on verification requests.
+// Ensures users can only verify sessions they have access to.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Enterprise Use Cases
+//
+//   - Multi-tenant session isolation
+//   - Role-based access control (RBAC)
+//   - Data sovereignty compliance
+//   - Audit trail for access attempts
+type VerificationAuthorizer interface {
+	// CanVerify checks if a user can verify a session.
+	//
+	// # Description
+	//
+	// Performs authorization check to determine if the given user
+	// has permission to verify the specified session.
+	//
+	// # Inputs
+	//
+	//   - userID: User requesting verification
+	//   - sessionID: Session to verify
+	//
+	// # Outputs
+	//
+	//   - bool: True if user is authorized to verify
+	//   - error: Non-nil if authorization check failed
+	//
+	// # Examples
+	//
+	//	allowed, err := authorizer.CanVerify("user-123", "sess-456")
+	//	if err != nil {
+	//	    return nil, fmt.Errorf("auth check failed: %w", err)
+	//	}
+	//	if !allowed {
+	//	    return nil, errors.New("not authorized")
+	//	}
+	//
+	// # Limitations
+	//
+	//   - Does not cache authorization decisions
+	//   - Network call to policy engine may add latency
+	//
+	// # Assumptions
+	//
+	//   - userID and sessionID are valid identifiers
+	//   - Policy engine is available and configured
+	CanVerify(userID string, sessionID string) (bool, error)
+}
+
 // -----------------------------------------------------------------------------
 // Core Interfaces (Open Source)
 // -----------------------------------------------------------------------------
@@ -436,6 +493,257 @@ func NewWeaviateSessionVerifier(client *weaviate.Client) SessionVerifier {
 	return &weaviateSessionVerifier{
 		client: client,
 	}
+}
+
+// =============================================================================
+// Enterprise Verifier Factory
+// =============================================================================
+
+// EnterpriseVerifierOptions contains dependencies for enterprise verification.
+//
+// # Description
+//
+// Configuration and dependencies needed to create an enterprise-enabled
+// session verifier. Pass nil values for features you don't want to enable.
+//
+// # Fields
+//
+//   - WeaviateClient: Required - Weaviate client for session data
+//   - PolicyEngine: Optional - Privacy policy engine for data classification
+//   - KeyedHashComputer: Optional - HMAC verification (enterprise)
+//   - SignatureVerifier: Optional - Digital signatures (enterprise)
+//   - TimestampAuthority: Optional - RFC 3161 timestamps (enterprise)
+//   - HSMProvider: Optional - Hardware security module (enterprise)
+//   - AuditLogger: Optional - Compliance audit logging (enterprise)
+//   - Authorizer: Optional - Access control (enterprise)
+//   - RateLimiter: Optional - Rate limiting (enterprise)
+//   - Cache: Optional - Result caching (enterprise)
+//   - BatchVerifier: Optional - Bulk verification (enterprise)
+//   - Scheduler: Optional - Periodic verification (enterprise)
+//   - AlertSender: Optional - Failure alerting (enterprise)
+type EnterpriseVerifierOptions struct {
+	// WeaviateClient is required for session data access.
+	WeaviateClient *weaviate.Client
+
+	// PolicyEngine for data classification and privacy scanning.
+	// If nil, privacy scanning is disabled.
+	PolicyEngine interface {
+		ClassifyContent(content string) (string, error)
+	}
+
+	// --- Enterprise Cryptographic Extensions ---
+
+	// KeyedHashComputer for HMAC-based verification.
+	KeyedHashComputer interface {
+		ComputeHMAC(keyID string, content string) (string, error)
+		VerifyHMAC(keyID string, content string, expectedHMAC string) (bool, error)
+	}
+
+	// SignatureVerifier for digital signature verification.
+	SignatureVerifier interface {
+		VerifySignature(content string, signature string, signerID string) (bool, error)
+	}
+
+	// TimestampAuthority for RFC 3161 trusted timestamps.
+	TimestampAuthority interface {
+		GetTimestamp(contentHash string) (interface{}, error)
+		VerifyTimestamp(token interface{}, contentHash string) (bool, error)
+	}
+
+	// HSMProvider for hardware security module operations.
+	HSMProvider interface {
+		SignWithHSM(keyLabel string, content []byte) ([]byte, error)
+		VerifyWithHSM(keyLabel string, content []byte, signature []byte) (bool, error)
+	}
+
+	// --- Enterprise Operational Extensions ---
+
+	// AuditLogger for compliance audit trails.
+	AuditLogger interface {
+		LogVerificationAttempt(event interface{}) error
+	}
+
+	// Authorizer for access control.
+	Authorizer VerificationAuthorizer
+
+	// RateLimiter for request throttling.
+	RateLimiter VerificationRateLimiter
+
+	// Cache for verification result caching.
+	Cache VerificationCache
+
+	// BatchVerifier for bulk operations.
+	BatchVerifier BatchVerifier
+
+	// Scheduler for periodic verification.
+	Scheduler VerificationScheduler
+
+	// AlertSender for failure notifications.
+	AlertSender VerificationAlertSender
+}
+
+// enterpriseSessionVerifier wraps the base verifier with enterprise features.
+type enterpriseSessionVerifier struct {
+	base         SessionVerifier
+	opts         *EnterpriseVerifierOptions
+	policyEngine interface {
+		ClassifyContent(content string) (string, error)
+	}
+}
+
+// NewEnterpriseSessionVerifier creates a verifier with enterprise extensions.
+//
+// # Description
+//
+// Factory function that creates a session verifier with optional enterprise
+// features based on provided options. Features are automatically enabled
+// when their corresponding dependencies are provided.
+//
+// # Inputs
+//
+//   - opts: Enterprise verifier options with dependencies
+//
+// # Outputs
+//
+//   - SessionVerifier: Enterprise-enabled verifier
+//
+// # Examples
+//
+//	opts := &EnterpriseVerifierOptions{
+//	    WeaviateClient: weaviateClient,
+//	    PolicyEngine:   policyEngine,
+//	    AuditLogger:    auditLogger,
+//	}
+//	verifier := NewEnterpriseSessionVerifier(opts)
+//
+// # Limitations
+//
+//   - WeaviateClient is required, panics if nil
+//
+// # Assumptions
+//
+//   - Optional dependencies are nil-safe
+func NewEnterpriseSessionVerifier(opts *EnterpriseVerifierOptions) SessionVerifier {
+	if opts == nil || opts.WeaviateClient == nil {
+		panic("NewEnterpriseSessionVerifier: WeaviateClient is required")
+	}
+
+	baseVerifier := NewWeaviateSessionVerifier(opts.WeaviateClient)
+
+	return &enterpriseSessionVerifier{
+		base:         baseVerifier,
+		opts:         opts,
+		policyEngine: opts.PolicyEngine,
+	}
+}
+
+// VerifySession implements SessionVerifier with enterprise enhancements.
+//
+// # Description
+//
+// Performs session verification with optional enterprise features:
+//  1. Rate limiting check (if RateLimiter provided)
+//  2. Authorization check (if Authorizer provided)
+//  3. Cache lookup (if Cache provided)
+//  4. Base verification
+//  5. Audit logging (if AuditLogger provided)
+//  6. Alert on failure (if AlertSender provided)
+//  7. Cache result (if Cache provided)
+//
+// # Inputs
+//
+//   - c: Gin context containing auth headers
+//   - sessionID: Session to verify
+//
+// # Outputs
+//
+//   - *VerifySessionResponse: Verification results
+//   - error: Non-nil if verification failed
+func (v *enterpriseSessionVerifier) VerifySession(c *gin.Context, sessionID string) (*VerifySessionResponse, error) {
+	startTime := time.Now()
+	userID := c.GetHeader("X-User-ID")
+	tenantID := c.GetHeader("X-Tenant-ID")
+
+	// Rate limiting
+	if v.opts.RateLimiter != nil {
+		allowed, waitTime := v.opts.RateLimiter.AllowVerification(userID, tenantID)
+		if !allowed {
+			return &VerifySessionResponse{
+				SessionID:    sessionID,
+				Verified:     false,
+				ErrorDetails: fmt.Sprintf("rate limited, retry after %v", waitTime),
+			}, nil
+		}
+	}
+
+	// Authorization
+	if v.opts.Authorizer != nil {
+		allowed, err := v.opts.Authorizer.CanVerify(userID, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("authorization check failed: %w", err)
+		}
+		if !allowed {
+			return &VerifySessionResponse{
+				SessionID:    sessionID,
+				Verified:     false,
+				ErrorDetails: "not authorized to verify this session",
+			}, nil
+		}
+	}
+
+	// Cache lookup
+	if v.opts.Cache != nil {
+		if cached, found := v.opts.Cache.Get(sessionID, ""); found {
+			slog.Debug("Cache hit for verification", "sessionId", sessionID)
+			return cached, nil
+		}
+	}
+
+	// Perform base verification
+	result, err := v.base.VerifySession(c, sessionID)
+	if err != nil {
+		// Audit failure
+		if v.opts.AuditLogger != nil {
+			_ = v.opts.AuditLogger.LogVerificationAttempt(map[string]interface{}{
+				"session_id":     sessionID,
+				"user_id":        userID,
+				"tenant_id":      tenantID,
+				"success":        false,
+				"failure_reason": err.Error(),
+				"duration_ms":    time.Since(startTime).Milliseconds(),
+			})
+		}
+		return nil, err
+	}
+
+	// Audit success
+	if v.opts.AuditLogger != nil {
+		_ = v.opts.AuditLogger.LogVerificationAttempt(map[string]interface{}{
+			"session_id":  sessionID,
+			"user_id":     userID,
+			"tenant_id":   tenantID,
+			"success":     result.Verified,
+			"turn_count":  result.TurnCount,
+			"chain_hash":  result.ChainHash,
+			"duration_ms": time.Since(startTime).Milliseconds(),
+		})
+	}
+
+	// Alert on failure
+	if v.opts.AlertSender != nil && !result.Verified {
+		severity := "warning"
+		if result.ErrorDetails != "" {
+			severity = "critical"
+		}
+		_ = v.opts.AlertSender.SendAlert(sessionID, result, severity)
+	}
+
+	// Cache result
+	if v.opts.Cache != nil && result.Verified {
+		v.opts.Cache.Set(sessionID, result, 5*time.Minute)
+	}
+
+	return result, nil
 }
 
 // =============================================================================
