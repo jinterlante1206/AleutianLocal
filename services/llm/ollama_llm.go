@@ -383,14 +383,19 @@ func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
 		return "", fmt.Errorf("failed to send the request to %s: %v", chatURL, err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		span.RecordError(readErr)
+		span.SetStatus(codes.Error, readErr.Error())
+		return "", fmt.Errorf("failed to read response body: %v", readErr)
+	}
 	if resp.StatusCode != http.StatusOK {
+		httpErr := fmt.Errorf("ollama chat failed with status %d: %s", resp.StatusCode, string(respBody))
 		slog.Error("Ollama chat returned an error", "status_code", resp.StatusCode,
 			"response", string(respBody))
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return "", fmt.Errorf("ollama chat failed with status %d: %s", resp.StatusCode,
-			string(respBody))
+		span.RecordError(httpErr)
+		span.SetStatus(codes.Error, httpErr.Error())
+		return "", httpErr
 	}
 	var ollamaResp ollamaChatResponse
 	if err = json.Unmarshal(respBody, &ollamaResp); err != nil {

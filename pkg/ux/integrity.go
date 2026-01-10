@@ -26,10 +26,19 @@ package ux
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"time"
 )
+
+// secureHashEqual performs constant-time comparison of two hash strings.
+// This prevents timing attacks where an attacker could determine how many
+// leading characters of a hash are correct by measuring response times.
+func secureHashEqual(a, b string) bool {
+	// subtle.ConstantTimeCompare returns 1 if equal, 0 if not
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
 
 // =============================================================================
 // Interfaces
@@ -364,7 +373,7 @@ type ChainVerifier interface {
 	//
 	// # Examples
 	//
-	//   verifier := NewQuickChainVerifier()
+	//   verifier := NewFullChainVerifier(hashComputer)
 	//   result := verifier.Verify(events)
 	//   if !result.Valid {
 	//       log.Warn("chain broken", "error", result.ErrorMessage)
@@ -536,22 +545,6 @@ type ChainVerificationResult struct {
 	ErrorMessage      string `json:"error_message,omitempty"`
 }
 
-// quickChainVerifier verifies chains by checking PrevHash links only.
-//
-// # Description
-//
-// Fast verification that only checks PrevHash chain consistency.
-// Does NOT recompute hashes from content.
-//
-// # Fields
-//
-// None. Stateless implementation.
-//
-// # Thread Safety
-//
-// Thread-safe. No shared state.
-type quickChainVerifier struct{}
-
 // fullChainVerifier verifies chains by recomputing all hashes.
 //
 // # Description
@@ -647,7 +640,7 @@ func NewIntegrityInfo(result *StreamResult, verified bool) *IntegrityInfo {
 //
 // # Examples
 //
-//	verifier := NewQuickChainVerifier()
+//	verifier := NewFullChainVerifier(hashComputer)
 //	verification := verifier.Verify(events)
 //	info := NewIntegrityInfoFromVerification(verification)
 //
@@ -668,33 +661,6 @@ func NewIntegrityInfoFromVerification(verification *ChainVerificationResult) *In
 		TurnHashes:        make(map[int]string),
 		SourceHashes:      make(map[string]string),
 	}
-}
-
-// NewQuickChainVerifier creates a verifier that checks PrevHash links only.
-//
-// # Description
-//
-// Creates a fast verifier that only checks chain link consistency.
-// Use when you trust the stored hashes and just need to verify links.
-//
-// # Outputs
-//
-//   - ChainVerifier: Quick verification implementation
-//
-// # Examples
-//
-//	verifier := NewQuickChainVerifier()
-//	result := verifier.Verify(events)
-//
-// # Limitations
-//
-//   - Does not detect content modification if Hash field is also modified
-//
-// # Assumptions
-//
-//   - Event Hash fields were computed correctly at creation time
-func NewQuickChainVerifier() ChainVerifier {
-	return &quickChainVerifier{}
 }
 
 // NewFullChainVerifier creates a verifier that recomputes all hashes.
@@ -932,87 +898,6 @@ func (i *IntegrityInfo) GetSourceHash(sourceName string) (string, bool) {
 }
 
 // =============================================================================
-// quickChainVerifier Methods
-// =============================================================================
-
-// Verify checks the chain by verifying PrevHash links only.
-//
-// # Description
-//
-// Walks through the events and verifies that each event's PrevHash
-// matches the previous event's Hash. Does NOT recompute hashes.
-//
-// # Inputs
-//
-//   - events: Ordered list of stream events from the session
-//
-// # Outputs
-//
-//   - *ChainVerificationResult: Detailed verification results
-//
-// # Examples
-//
-//	verifier := NewQuickChainVerifier()
-//	events := []StreamEvent{
-//	    {Hash: "abc", PrevHash: ""},
-//	    {Hash: "def", PrevHash: "abc"},
-//	}
-//	result := verifier.Verify(events)
-//	// result.Valid == true
-//
-// # Limitations
-//
-//   - Does not detect content modification if Hash is also modified
-//   - Trusts that Hash fields were computed correctly
-//
-// # Assumptions
-//
-//   - Events are in chronological order
-//   - First event has empty PrevHash
-func (v *quickChainVerifier) Verify(events []StreamEvent) *ChainVerificationResult {
-	result := &ChainVerificationResult{
-		Valid:             true,
-		ChainLength:       len(events),
-		InvalidEventIndex: -1,
-	}
-
-	if len(events) == 0 {
-		return result
-	}
-
-	// First event should have empty PrevHash
-	if events[0].PrevHash != "" {
-		result.Valid = false
-		result.InvalidEventIndex = 0
-		result.ExpectedHash = ""
-		result.ActualHash = events[0].PrevHash
-		result.ErrorMessage = "first event should have empty PrevHash"
-		return result
-	}
-
-	// Walk the chain verifying PrevHash links
-	for i := 1; i < len(events); i++ {
-		expectedPrevHash := events[i-1].Hash
-		actualPrevHash := events[i].PrevHash
-
-		if actualPrevHash != expectedPrevHash {
-			result.Valid = false
-			result.InvalidEventIndex = i
-			result.ExpectedHash = expectedPrevHash
-			result.ActualHash = actualPrevHash
-			result.ErrorMessage = fmt.Sprintf(
-				"chain broken at event %d: expected PrevHash %s, got %s",
-				i, truncateHash(expectedPrevHash), truncateHash(actualPrevHash),
-			)
-			return result
-		}
-	}
-
-	result.FinalHash = events[len(events)-1].Hash
-	return result
-}
-
-// =============================================================================
 // fullChainVerifier Methods
 // =============================================================================
 
@@ -1076,8 +961,8 @@ func (v *fullChainVerifier) Verify(events []StreamEvent) *ChainVerificationResul
 	// Walk the chain verifying both hash computation and chain links
 	prevHash := ""
 	for i, event := range events {
-		// Verify PrevHash links correctly
-		if event.PrevHash != prevHash {
+		// Verify PrevHash links correctly (constant-time comparison to prevent timing attacks)
+		if !secureHashEqual(event.PrevHash, prevHash) {
 			result.Valid = false
 			result.InvalidEventIndex = i
 			result.ExpectedHash = prevHash
@@ -1093,7 +978,8 @@ func (v *fullChainVerifier) Verify(events []StreamEvent) *ChainVerificationResul
 		computedHash := v.hashComputer.ComputeEventHash(
 			event.Content, event.CreatedAt, event.PrevHash,
 		)
-		if computedHash != event.Hash {
+		// Constant-time comparison to prevent timing attacks
+		if !secureHashEqual(computedHash, event.Hash) {
 			result.Valid = false
 			result.InvalidEventIndex = i
 			result.ExpectedHash = computedHash
@@ -1147,7 +1033,9 @@ func (v *fullChainVerifier) Verify(events []StreamEvent) *ChainVerificationResul
 //
 //   - Inputs are valid strings/integers
 func (c *sha256HashComputer) ComputeEventHash(content string, createdAt int64, prevHash string) string {
-	data := fmt.Sprintf("%s%d%s", content, createdAt, prevHash)
+	// Use null byte delimiter to prevent collision attacks where different inputs
+	// produce the same concatenated string (e.g., "abc"+123 vs "abc1"+23)
+	data := fmt.Sprintf("%s\x00%d\x00%s", content, createdAt, prevHash)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
 }
