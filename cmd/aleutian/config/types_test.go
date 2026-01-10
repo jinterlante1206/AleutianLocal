@@ -695,3 +695,239 @@ func TestValidationError_EmptyValue(t *testing.T) {
 		t.Errorf("Error() = %q, want %q", err.Error(), expected)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// GetProfileForRAM Tests
+// -----------------------------------------------------------------------------
+
+// TestGetProfileForRAM verifies RAM-based profile selection.
+func TestGetProfileForRAM(t *testing.T) {
+	tests := []struct {
+		name     string
+		ramMB    int
+		expected string
+	}{
+		{"very low RAM returns low", 4096, "low"},
+		{"8GB returns low", 8192, "low"},
+		{"16GB returns standard", 16384, "standard"},
+		{"32GB returns performance", 32768, "performance"},
+		{"64GB returns performance", 65536, "performance"},
+		{"128GB returns ultra", 131072, "ultra"},
+		{"zero RAM returns low", 0, "low"},
+		{"negative RAM returns low", -1000, "low"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetProfileForRAM(tt.ramMB)
+			if result != tt.expected {
+				t.Errorf("GetProfileForRAM(%d) = %q, want %q", tt.ramMB, result, tt.expected)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// SecretsConfig Tests
+// -----------------------------------------------------------------------------
+
+// TestSecretsConfig_GetTimeout verifies timeout default and custom values.
+func TestSecretsConfig_GetTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *SecretsConfig
+		expected time.Duration
+	}{
+		{
+			name:     "nil config returns default",
+			config:   nil,
+			expected: 10 * time.Second,
+		},
+		{
+			name:     "zero timeout returns default",
+			config:   &SecretsConfig{Timeout: 0},
+			expected: 10 * time.Second,
+		},
+		{
+			name:     "negative timeout returns default",
+			config:   &SecretsConfig{Timeout: -5 * time.Second},
+			expected: 10 * time.Second,
+		},
+		{
+			name:     "positive timeout returns configured value",
+			config:   &SecretsConfig{Timeout: 30 * time.Second},
+			expected: 30 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetTimeout()
+			if result != tt.expected {
+				t.Errorf("GetTimeout() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestSecretsConfig_GetOnePasswordVault verifies vault name default and custom values.
+func TestSecretsConfig_GetOnePasswordVault(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *SecretsConfig
+		expected string
+	}{
+		{
+			name:     "nil config returns default",
+			config:   nil,
+			expected: "Aleutian",
+		},
+		{
+			name:     "empty vault returns default",
+			config:   &SecretsConfig{OnePasswordVault: ""},
+			expected: "Aleutian",
+		},
+		{
+			name:     "custom vault returns configured value",
+			config:   &SecretsConfig{OnePasswordVault: "MyVault"},
+			expected: "MyVault",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetOnePasswordVault()
+			if result != tt.expected {
+				t.Errorf("GetOnePasswordVault() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestSecretsConfig_GetVaultPath verifies Vault path default and custom values.
+func TestSecretsConfig_GetVaultPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *SecretsConfig
+		expected string
+	}{
+		{
+			name:     "nil config returns default",
+			config:   nil,
+			expected: "secret/data/aleutian",
+		},
+		{
+			name:     "empty path returns default",
+			config:   &SecretsConfig{VaultPath: ""},
+			expected: "secret/data/aleutian",
+		},
+		{
+			name:     "custom path returns configured value",
+			config:   &SecretsConfig{VaultPath: "secret/data/custom"},
+			expected: "secret/data/custom",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetVaultPath()
+			if result != tt.expected {
+				t.Errorf("GetVaultPath() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// FallbackChain Tests
+// -----------------------------------------------------------------------------
+
+// TestFallbackChain_Models verifies model list generation.
+func TestFallbackChain_Models(t *testing.T) {
+	tests := []struct {
+		name     string
+		chain    *FallbackChain
+		expected []string
+	}{
+		{
+			name:     "nil chain returns nil",
+			chain:    nil,
+			expected: nil,
+		},
+		{
+			name:     "empty primary returns nil",
+			chain:    &FallbackChain{Primary: ""},
+			expected: nil,
+		},
+		{
+			name:     "primary only returns single model",
+			chain:    &FallbackChain{Primary: "gpt-4"},
+			expected: []string{"gpt-4"},
+		},
+		{
+			name: "primary with fallbacks returns all",
+			chain: &FallbackChain{
+				Primary:   "gpt-4",
+				Fallbacks: []string{"gpt-3.5", "llama3"},
+			},
+			expected: []string{"gpt-4", "gpt-3.5", "llama3"},
+		},
+		{
+			name: "primary with empty fallbacks",
+			chain: &FallbackChain{
+				Primary:   "gpt-4",
+				Fallbacks: []string{},
+			},
+			expected: []string{"gpt-4"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.chain.Models()
+			if len(result) != len(tt.expected) {
+				t.Fatalf("Models() returned %d items, want %d", len(result), len(tt.expected))
+			}
+			for i, model := range result {
+				if model != tt.expected[i] {
+					t.Errorf("Models()[%d] = %q, want %q", i, model, tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Hardware Profile Tests
+// -----------------------------------------------------------------------------
+
+// TestBuiltInHardwareProfiles verifies built-in profiles exist.
+func TestBuiltInHardwareProfiles(t *testing.T) {
+	expectedProfiles := []string{"low", "standard", "performance", "ultra"}
+
+	for _, name := range expectedProfiles {
+		t.Run(name, func(t *testing.T) {
+			profile, exists := BuiltInHardwareProfiles[name]
+			if !exists {
+				t.Fatalf("Profile %q not found", name)
+			}
+			if profile.Name != name {
+				t.Errorf("Profile name = %q, want %q", profile.Name, name)
+			}
+		})
+	}
+}
+
+// TestHardwareProfileOrder verifies profile order is defined.
+func TestHardwareProfileOrder(t *testing.T) {
+	if len(HardwareProfileOrder) == 0 {
+		t.Error("HardwareProfileOrder should not be empty")
+	}
+
+	// Verify all profiles in order exist
+	for _, name := range HardwareProfileOrder {
+		if _, exists := BuiltInHardwareProfiles[name]; !exists {
+			t.Errorf("Profile %q in order but not in BuiltInHardwareProfiles", name)
+		}
+	}
+}

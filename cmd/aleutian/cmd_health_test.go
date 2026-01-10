@@ -38,7 +38,7 @@ func TestVisibleLength(t *testing.T) {
 		{
 			name:     "text with multiple colors",
 			input:    "\033[31mRed\033[0m \033[32mGreen\033[0m",
-			expected: 10, // "Red Green"
+			expected: 9, // "Red Green" = 3 + 1 + 5 = 9
 		},
 		{
 			name:     "empty string",

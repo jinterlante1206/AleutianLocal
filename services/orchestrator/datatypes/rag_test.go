@@ -866,3 +866,191 @@ func TestSourceInfo_Fields(t *testing.T) {
 	assert.Equal(t, 0.15, source.Distance)
 	assert.Equal(t, 0.85, source.Score)
 }
+
+// =============================================================================
+// NewSourceInfo() and Builder Methods Tests
+// =============================================================================
+
+// TestNewSourceInfo_CreatesSourceWithFields verifies that NewSourceInfo
+// properly creates a SourceInfo with auto-generated ID and timestamp.
+func TestNewSourceInfo_CreatesSourceWithFields(t *testing.T) {
+	sources := []string{
+		"auth.go",
+		"services/api/handler.go",
+		"docs/README.md",
+		"/absolute/path/file.txt",
+		"https://example.com/docs",
+		"",
+	}
+
+	for _, source := range sources {
+		t.Run(source, func(t *testing.T) {
+			beforeTime := time.Now().UnixMilli()
+			info := NewSourceInfo(source)
+			afterTime := time.Now().UnixMilli()
+
+			assert.NotEmpty(t, info.Id, "Id should be generated")
+			assert.GreaterOrEqual(t, info.CreatedAt, beforeTime)
+			assert.LessOrEqual(t, info.CreatedAt, afterTime)
+			assert.Equal(t, source, info.Source, "Source should match input")
+			assert.Zero(t, info.Score, "Score should be zero by default")
+			assert.Zero(t, info.Distance, "Distance should be zero by default")
+		})
+	}
+}
+
+// TestSourceInfo_WithScore verifies the WithScore builder method.
+func TestSourceInfo_WithScore(t *testing.T) {
+	tests := []struct {
+		name  string
+		score float64
+	}{
+		{"high score", 0.95},
+		{"low score", 0.15},
+		{"perfect score", 1.0},
+		{"zero score", 0.0},
+		{"negative score", -0.5},
+		{"very small score", 0.0001},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := NewSourceInfo("test.go").WithScore(tt.score)
+
+			assert.Equal(t, tt.score, info.Score)
+			assert.Equal(t, "test.go", info.Source, "Source should be preserved")
+			assert.NotEmpty(t, info.Id, "Id should be preserved")
+		})
+	}
+}
+
+// TestSourceInfo_WithDistance verifies the WithDistance builder method.
+func TestSourceInfo_WithDistance(t *testing.T) {
+	tests := []struct {
+		name     string
+		distance float64
+	}{
+		{"small distance", 0.123},
+		{"large distance", 1.5},
+		{"zero distance", 0.0},
+		{"very small distance", 0.00001},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := NewSourceInfo("doc.md").WithDistance(tt.distance)
+
+			assert.Equal(t, tt.distance, info.Distance)
+			assert.Equal(t, "doc.md", info.Source)
+			assert.NotEmpty(t, info.Id)
+		})
+	}
+}
+
+// TestSourceInfo_MethodChaining verifies that builder methods can be chained.
+func TestSourceInfo_MethodChaining(t *testing.T) {
+	info := NewSourceInfo("auth.go").WithScore(0.95).WithDistance(0.123)
+
+	assert.Equal(t, "auth.go", info.Source)
+	assert.Equal(t, 0.95, info.Score)
+	assert.Equal(t, 0.123, info.Distance)
+	assert.NotEmpty(t, info.Id)
+	assert.NotZero(t, info.CreatedAt)
+}
+
+// TestSourceInfo_BuilderReturnsPointer verifies that builder methods return
+// a pointer to the same SourceInfo for proper chaining.
+func TestSourceInfo_BuilderReturnsPointer(t *testing.T) {
+	original := NewSourceInfo("test.go")
+	withScore := original.WithScore(0.9)
+	assert.Same(t, original, withScore, "WithScore should return same pointer")
+
+	withDistance := original.WithDistance(0.1)
+	assert.Same(t, original, withDistance, "WithDistance should return same pointer")
+}
+
+// TestNewSourceInfo_GeneratesUniqueIds verifies that multiple calls
+// generate unique IDs.
+func TestNewSourceInfo_GeneratesUniqueIds(t *testing.T) {
+	ids := make(map[string]bool)
+	numSources := 100
+
+	for i := 0; i < numSources; i++ {
+		info := NewSourceInfo("test.go")
+		if ids[info.Id] {
+			t.Fatalf("duplicate ID generated: %s", info.Id)
+		}
+		ids[info.Id] = true
+		time.Sleep(time.Microsecond)
+	}
+
+	assert.Equal(t, numSources, len(ids))
+}
+
+// =============================================================================
+// NewHistoryTurn() Tests
+// =============================================================================
+
+// TestNewHistoryTurn_CreatesWithFields verifies that NewHistoryTurn
+// properly creates a HistoryTurn with auto-generated ID and timestamp.
+func TestNewHistoryTurn_CreatesWithFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		question string
+		answer   string
+	}{
+		{"normal QA", "What is OAuth?", "OAuth is an authorization framework..."},
+		{"empty answer", "How?", ""},
+		{"empty question", "", "The answer is..."},
+		{"both empty", "", ""},
+		{"unicode content", "你好?", "世界"},
+		{"long content", string(make([]byte, 10000)), string(make([]byte, 10000))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beforeTime := time.Now().UnixMilli()
+			turn := NewHistoryTurn(tt.question, tt.answer)
+			afterTime := time.Now().UnixMilli()
+
+			assert.NotEmpty(t, turn.Id, "Id should be generated")
+			assert.GreaterOrEqual(t, turn.CreatedAt, beforeTime)
+			assert.LessOrEqual(t, turn.CreatedAt, afterTime)
+			assert.Equal(t, tt.question, turn.Question)
+			assert.Equal(t, tt.answer, turn.Answer)
+		})
+	}
+}
+
+// TestNewHistoryTurn_GeneratesUniqueIds verifies that multiple calls
+// generate unique IDs.
+func TestNewHistoryTurn_GeneratesUniqueIds(t *testing.T) {
+	ids := make(map[string]bool)
+	numTurns := 100
+
+	for i := 0; i < numTurns; i++ {
+		turn := NewHistoryTurn("question", "answer")
+		if ids[turn.Id] {
+			t.Fatalf("duplicate ID generated: %s", turn.Id)
+		}
+		ids[turn.Id] = true
+		time.Sleep(time.Microsecond)
+	}
+
+	assert.Equal(t, numTurns, len(ids))
+}
+
+// TestHistoryTurn_Fields verifies that HistoryTurn struct fields work correctly.
+func TestHistoryTurn_Fields(t *testing.T) {
+	turn := &HistoryTurn{
+		Id:        "turn-123",
+		CreatedAt: 1704067200000,
+		Question:  "What is authentication?",
+		Answer:    "Authentication verifies identity...",
+	}
+
+	assert.Equal(t, "turn-123", turn.Id)
+	assert.Equal(t, int64(1704067200000), turn.CreatedAt)
+	assert.Equal(t, "What is authentication?", turn.Question)
+	assert.Equal(t, "Authentication verifies identity...", turn.Answer)
+}
