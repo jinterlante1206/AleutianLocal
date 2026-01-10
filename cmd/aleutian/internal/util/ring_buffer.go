@@ -1,9 +1,20 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package util
 
 import (
 	"sync"
 	"sync/atomic"
 )
+
+// =============================================================================
+// Ring Buffer Interface
+// =============================================================================
 
 // RingBufferable defines the interface for bounded ring buffer operations.
 //
@@ -17,6 +28,22 @@ import (
 // # Thread Safety
 //
 // Implementations must be safe for concurrent use from multiple goroutines.
+//
+// # Example
+//
+//	var buffer RingBufferable[string] = NewRingBuffer[string](100)
+//	buffer.Push("log line")
+//	items := buffer.Drain()
+//
+// # Limitations
+//
+//   - Implementations may have varying performance characteristics
+//   - No blocking operations; drops silently when full
+//
+// # Assumptions
+//
+//   - Items can be copied by value
+//   - Dropping old items is acceptable
 type RingBufferable[T any] interface {
 	// Push adds an item to the buffer. Returns true if an item was dropped.
 	Push(item T) bool
@@ -52,6 +79,10 @@ type RingBufferable[T any] interface {
 	Clear()
 }
 
+// =============================================================================
+// Ring Buffer Struct
+// =============================================================================
+
 // RingBuffer is a thread-safe, fixed-size circular buffer.
 //
 // # Description
@@ -79,18 +110,6 @@ type RingBufferable[T any] interface {
 // RingBuffer is safe for concurrent use from multiple goroutines.
 // All operations are protected by a mutex.
 //
-// # Limitations
-//
-//   - Fixed capacity (cannot grow)
-//   - Drops oldest items when full (no backpressure signal)
-//   - Memory is pre-allocated for full capacity
-//
-// # Assumptions
-//
-//   - Capacity is known and fixed at creation time
-//   - Dropping old items is acceptable
-//   - Items can be copied (stored by value)
-//
 // # Example
 //
 //	buffer := NewRingBuffer[string](100)
@@ -105,6 +124,18 @@ type RingBufferable[T any] interface {
 //	for _, item := range items {
 //	    process(item)
 //	}
+//
+// # Limitations
+//
+//   - Fixed capacity (cannot grow)
+//   - Drops oldest items when full (no backpressure signal)
+//   - Memory is pre-allocated for full capacity
+//
+// # Assumptions
+//
+//   - Capacity is known and fixed at creation time
+//   - Dropping old items is acceptable
+//   - Items can be copied (stored by value)
 type RingBuffer[T any] struct {
 	buffer   []T
 	head     int
@@ -115,12 +146,20 @@ type RingBuffer[T any] struct {
 	mu       sync.Mutex
 }
 
+// Compile-time interface satisfaction check
+var _ RingBufferable[int] = (*RingBuffer[int])(nil)
+
+// =============================================================================
+// Constructor Functions
+// =============================================================================
+
 // NewRingBuffer creates a new ring buffer with the specified capacity.
 //
 // # Description
 //
 // Creates a ring buffer that can hold up to `capacity` items.
-// The buffer is initially empty.
+// The buffer is initially empty. Memory is pre-allocated for
+// the full capacity to avoid runtime allocations during Push.
 //
 // # Inputs
 //
@@ -130,10 +169,6 @@ type RingBuffer[T any] struct {
 //
 //   - *RingBuffer[T]: New empty ring buffer
 //
-// # Panics
-//
-// Panics if capacity <= 0.
-//
 // # Example
 //
 //	// Create buffer for 1000 metric points
@@ -141,6 +176,19 @@ type RingBuffer[T any] struct {
 //
 //	// Create buffer for log lines
 //	logs := NewRingBuffer[string](500)
+//
+// # Limitations
+//
+//   - Capacity cannot be changed after creation
+//   - Memory is allocated immediately, not lazily
+//
+// # Assumptions
+//
+//   - Caller provides positive capacity
+//
+// # Panics
+//
+// Panics if capacity <= 0.
 func NewRingBuffer[T any](capacity int) *RingBuffer[T] {
 	if capacity <= 0 {
 		panic("ring buffer capacity must be positive")
@@ -151,6 +199,10 @@ func NewRingBuffer[T any](capacity int) *RingBuffer[T] {
 		capacity: capacity,
 	}
 }
+
+// =============================================================================
+// RingBuffer Methods
+// =============================================================================
 
 // Push adds an item to the buffer.
 //
@@ -174,6 +226,15 @@ func NewRingBuffer[T any](capacity int) *RingBuffer[T] {
 //	        log.Printf("WARNING: Dropped %d items", buffer.DroppedCount())
 //	    }
 //	}
+//
+// # Limitations
+//
+//   - Cannot block; always succeeds immediately
+//   - Dropped items cannot be recovered
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) Push(item T) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -201,6 +262,11 @@ func (r *RingBuffer[T]) Push(item T) bool {
 //
 // Removes the oldest item from the buffer and returns it.
 // Returns the zero value and false if the buffer is empty.
+// Clears the internal reference to allow GC of the removed item.
+//
+// # Inputs
+//
+//   - None (receiver only)
 //
 // # Outputs
 //
@@ -216,6 +282,14 @@ func (r *RingBuffer[T]) Push(item T) bool {
 //	    }
 //	    process(item)
 //	}
+//
+// # Limitations
+//
+//   - Cannot block; returns immediately if empty
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) Pop() (T, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -241,6 +315,10 @@ func (r *RingBuffer[T]) Pop() (T, bool) {
 // Returns a copy of the oldest item without modifying the buffer.
 // Useful for inspection without consumption.
 //
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
 //   - T: The oldest item (or zero value if empty)
@@ -251,6 +329,14 @@ func (r *RingBuffer[T]) Pop() (T, bool) {
 //	if oldest, ok := buffer.Peek(); ok {
 //	    fmt.Printf("Next item will be: %v\n", oldest)
 //	}
+//
+// # Limitations
+//
+//   - Returns a copy, not a reference to the stored item
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) Peek() (T, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -269,6 +355,7 @@ func (r *RingBuffer[T]) Peek() (T, bool) {
 //
 // Removes and returns the oldest n items from the buffer.
 // Returns fewer items if the buffer contains less than n items.
+// Returns nil if n <= 0 or buffer is empty.
 //
 // # Inputs
 //
@@ -285,6 +372,14 @@ func (r *RingBuffer[T]) Peek() (T, bool) {
 //	if len(batch) > 0 {
 //	    writeToDisk(batch)
 //	}
+//
+// # Limitations
+//
+//   - Returns nil (not empty slice) when nothing to return
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) PopN(n int) []T {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -316,11 +411,16 @@ func (r *RingBuffer[T]) PopN(n int) []T {
 // # Description
 //
 // Removes all items from the buffer and returns them.
-// The buffer is empty after this call.
+// The buffer is empty after this call. Returns nil if
+// the buffer is already empty.
+//
+// # Inputs
+//
+//   - None (receiver only)
 //
 // # Outputs
 //
-//   - []T: All items (oldest first)
+//   - []T: All items (oldest first), or nil if empty
 //
 // # Example
 //
@@ -329,6 +429,14 @@ func (r *RingBuffer[T]) PopN(n int) []T {
 //	for _, item := range items {
 //	    flush(item)
 //	}
+//
+// # Limitations
+//
+//   - Does not reset DroppedCount (use Clear for full reset)
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) Drain() []T {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -355,10 +463,30 @@ func (r *RingBuffer[T]) Drain() []T {
 // # Description
 //
 // Returns the number of items currently in the buffer.
+// This is a point-in-time snapshot and may change immediately
+// after returning in concurrent scenarios.
+//
+// # Inputs
+//
+//   - None (receiver only)
 //
 // # Outputs
 //
-//   - int: Current item count
+//   - int: Current item count (0 to Capacity)
+//
+// # Example
+//
+//	if buffer.Size() > buffer.Capacity()/2 {
+//	    log.Println("Buffer over 50% full")
+//	}
+//
+// # Limitations
+//
+//   - Value may be stale in concurrent scenarios
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) Size() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -370,10 +498,27 @@ func (r *RingBuffer[T]) Size() int {
 // # Description
 //
 // Returns the maximum number of items the buffer can hold.
+// This value is immutable after creation.
+//
+// # Inputs
+//
+//   - None (receiver only)
 //
 // # Outputs
 //
 //   - int: Maximum capacity
+//
+// # Example
+//
+//	fmt.Printf("Buffer can hold %d items\n", buffer.Capacity())
+//
+// # Limitations
+//
+//   - Cannot be changed after creation
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) Capacity() int {
 	return r.capacity // Immutable, no lock needed
 }
@@ -385,9 +530,27 @@ func (r *RingBuffer[T]) Capacity() int {
 // Returns whether the buffer is completely full. The next Push
 // will cause an item to be dropped.
 //
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
-//   - bool: true if full
+//   - bool: true if Size equals Capacity
+//
+// # Example
+//
+//	if buffer.IsFull() {
+//	    log.Println("Buffer is full, consider increasing capacity")
+//	}
+//
+// # Limitations
+//
+//   - May be stale in concurrent scenarios
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) IsFull() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -400,9 +563,27 @@ func (r *RingBuffer[T]) IsFull() bool {
 //
 // Returns whether the buffer contains no items.
 //
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
-//   - bool: true if empty
+//   - bool: true if Size is zero
+//
+// # Example
+//
+//	if buffer.IsEmpty() {
+//	    log.Println("No items to process")
+//	}
+//
+// # Limitations
+//
+//   - May be stale in concurrent scenarios
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) IsEmpty() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -414,17 +595,30 @@ func (r *RingBuffer[T]) IsEmpty() bool {
 // # Description
 //
 // Returns the total number of items that have been dropped since
-// the buffer was created (or since Clear was called).
+// the buffer was created (or since Clear was called). Uses atomic
+// operations for lock-free reading.
+//
+// # Inputs
+//
+//   - None (receiver only)
 //
 // # Outputs
 //
-//   - int64: Total dropped count
+//   - int64: Total dropped count (never negative)
 //
 // # Example
 //
 //	if buffer.DroppedCount() > 0 {
 //	    log.Printf("WARNING: %d items dropped", buffer.DroppedCount())
 //	}
+//
+// # Limitations
+//
+//   - Counter can overflow (after 9 quintillion drops)
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) DroppedCount() int64 {
 	return atomic.LoadInt64(&r.dropped)
 }
@@ -434,7 +628,30 @@ func (r *RingBuffer[T]) DroppedCount() int64 {
 // # Description
 //
 // Removes all items from the buffer and resets the dropped count
-// to zero. The capacity remains unchanged.
+// to zero. The capacity remains unchanged. All internal references
+// are cleared to allow GC.
+//
+// # Inputs
+//
+//   - None (receiver only)
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	buffer.Clear()
+//	// buffer.Size() == 0
+//	// buffer.DroppedCount() == 0
+//
+// # Limitations
+//
+//   - Cannot recover cleared items
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -455,11 +672,16 @@ func (r *RingBuffer[T]) Clear() {
 // # Description
 //
 // Returns a snapshot of all items in the buffer. The buffer
-// is not modified. Items are returned oldest-first.
+// is not modified. Items are returned oldest-first. Returns
+// nil if buffer is empty.
+//
+// # Inputs
+//
+//   - None (receiver only)
 //
 // # Outputs
 //
-//   - []T: Copy of all items
+//   - []T: Copy of all items, or nil if empty
 //
 // # Example
 //
@@ -468,6 +690,15 @@ func (r *RingBuffer[T]) Clear() {
 //	for i, item := range items {
 //	    fmt.Printf("[%d] %v\n", i, item)
 //	}
+//
+// # Limitations
+//
+//   - Allocates new slice every call
+//   - Snapshot may be stale immediately after returning
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (r *RingBuffer[T]) ToSlice() []T {
 	r.mu.Lock()
 	defer r.mu.Unlock()

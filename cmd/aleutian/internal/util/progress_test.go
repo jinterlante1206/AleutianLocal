@@ -1,4 +1,11 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package util
 
 import (
 	"bytes"
@@ -9,6 +16,11 @@ import (
 	"time"
 )
 
+// =============================================================================
+// DefaultSpinnerConfig Tests
+// =============================================================================
+
+// TestDefaultSpinnerConfig verifies default values.
 func TestDefaultSpinnerConfig(t *testing.T) {
 	config := DefaultSpinnerConfig()
 
@@ -26,6 +38,11 @@ func TestDefaultSpinnerConfig(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// NewSpinner Tests
+// =============================================================================
+
+// TestNewSpinner verifies spinner creation.
 func TestNewSpinner(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -64,6 +81,11 @@ func TestNewSpinner(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Start/Stop Tests
+// =============================================================================
+
+// TestSpinner_StartStop verifies basic lifecycle.
 func TestSpinner_StartStop(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -99,6 +121,7 @@ func TestSpinner_StartStop(t *testing.T) {
 	}
 }
 
+// TestSpinner_DoubleStart verifies idempotent start.
 func TestSpinner_DoubleStart(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -118,6 +141,7 @@ func TestSpinner_DoubleStart(t *testing.T) {
 	spinner.Stop()
 }
 
+// TestSpinner_DoubleStop verifies safe double stop.
 func TestSpinner_DoubleStop(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -137,6 +161,11 @@ func TestSpinner_DoubleStop(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// SetMessage Tests
+// =============================================================================
+
+// TestSpinner_SetMessage verifies message update.
 func TestSpinner_SetMessage(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -163,6 +192,11 @@ func TestSpinner_SetMessage(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// StopSuccess Tests
+// =============================================================================
+
+// TestSpinner_StopSuccess verifies success output.
 func TestSpinner_StopSuccess(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -185,6 +219,7 @@ func TestSpinner_StopSuccess(t *testing.T) {
 	}
 }
 
+// TestSpinner_StopSuccess_DefaultMessage verifies default success message.
 func TestSpinner_StopSuccess_DefaultMessage(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -205,6 +240,11 @@ func TestSpinner_StopSuccess_DefaultMessage(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// StopFailure Tests
+// =============================================================================
+
+// TestSpinner_StopFailure verifies failure output.
 func TestSpinner_StopFailure(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -227,6 +267,7 @@ func TestSpinner_StopFailure(t *testing.T) {
 	}
 }
 
+// TestSpinner_StopFailure_DefaultMessage verifies default failure message.
 func TestSpinner_StopFailure_DefaultMessage(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -247,6 +288,11 @@ func TestSpinner_StopFailure_DefaultMessage(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Custom Frames Tests
+// =============================================================================
+
+// TestSpinner_CustomFrames verifies custom animation frames.
 func TestSpinner_CustomFrames(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{
@@ -271,14 +317,12 @@ func TestSpinner_CustomFrames(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// SpinWhile Tests
+// =============================================================================
+
+// TestSpinWhile_Success verifies success path.
 func TestSpinWhile_Success(t *testing.T) {
-	buf := &bytes.Buffer{}
-
-	// Temporarily redirect spinner output
-	origConfig := DefaultSpinnerConfig()
-	origConfig.Writer = buf
-	origConfig.HideCursor = false
-
 	var executed bool
 	err := SpinWhile("Testing...", func() error {
 		executed = true
@@ -294,6 +338,7 @@ func TestSpinWhile_Success(t *testing.T) {
 	}
 }
 
+// TestSpinWhile_Failure verifies failure path.
 func TestSpinWhile_Failure(t *testing.T) {
 	expectedErr := errors.New("test error")
 
@@ -307,6 +352,11 @@ func TestSpinWhile_Failure(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// SpinWhileContext Tests
+// =============================================================================
+
+// TestSpinWhileContext_Success verifies success with context.
 func TestSpinWhileContext_Success(t *testing.T) {
 	ctx := context.Background()
 
@@ -325,10 +375,11 @@ func TestSpinWhileContext_Success(t *testing.T) {
 	}
 }
 
+// TestSpinWhileContext_Cancelled verifies cancellation handling.
 func TestSpinWhileContext_Cancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Cancel immediately
+	// Cancel shortly after start
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
@@ -344,6 +395,7 @@ func TestSpinWhileContext_Cancelled(t *testing.T) {
 	}
 }
 
+// TestSpinWhileContext_Timeout verifies timeout handling.
 func TestSpinWhileContext_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -358,10 +410,20 @@ func TestSpinWhileContext_Timeout(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Interface Compliance Tests
+// =============================================================================
+
+// TestSpinner_InterfaceCompliance verifies interface satisfaction.
 func TestSpinner_InterfaceCompliance(t *testing.T) {
 	var _ ProgressIndicator = (*Spinner)(nil)
 }
 
+// =============================================================================
+// Edge Case Tests
+// =============================================================================
+
+// TestSpinner_StopNotRunning verifies safe stop when not running.
 func TestSpinner_StopNotRunning(t *testing.T) {
 	buf := &bytes.Buffer{}
 	spinner := NewSpinner(SpinnerConfig{

@@ -1,10 +1,22 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package util
 
 import (
 	"sync"
 	"testing"
 )
 
+// =============================================================================
+// Constructor Tests
+// =============================================================================
+
+// TestNewRingBuffer verifies initial state of new buffer.
 func TestNewRingBuffer(t *testing.T) {
 	buffer := NewRingBuffer[int](10)
 
@@ -25,6 +37,7 @@ func TestNewRingBuffer(t *testing.T) {
 	}
 }
 
+// TestNewRingBuffer_PanicsOnZeroCapacity verifies panic on zero capacity.
 func TestNewRingBuffer_PanicsOnZeroCapacity(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -34,6 +47,7 @@ func TestNewRingBuffer_PanicsOnZeroCapacity(t *testing.T) {
 	NewRingBuffer[int](0)
 }
 
+// TestNewRingBuffer_PanicsOnNegativeCapacity verifies panic on negative capacity.
 func TestNewRingBuffer_PanicsOnNegativeCapacity(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -43,6 +57,11 @@ func TestNewRingBuffer_PanicsOnNegativeCapacity(t *testing.T) {
 	NewRingBuffer[int](-1)
 }
 
+// =============================================================================
+// Push Tests
+// =============================================================================
+
+// TestRingBuffer_Push verifies push behavior and overflow detection.
 func TestRingBuffer_Push(t *testing.T) {
 	buffer := NewRingBuffer[int](3)
 
@@ -72,6 +91,11 @@ func TestRingBuffer_Push(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Pop Tests
+// =============================================================================
+
+// TestRingBuffer_Pop verifies FIFO order and empty handling.
 func TestRingBuffer_Pop(t *testing.T) {
 	buffer := NewRingBuffer[int](5)
 
@@ -112,6 +136,11 @@ func TestRingBuffer_Pop(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Peek Tests
+// =============================================================================
+
+// TestRingBuffer_Peek verifies peek without modification.
 func TestRingBuffer_Peek(t *testing.T) {
 	buffer := NewRingBuffer[string](3)
 
@@ -145,6 +174,11 @@ func TestRingBuffer_Peek(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// PopN Tests
+// =============================================================================
+
+// TestRingBuffer_PopN verifies batch pop behavior.
 func TestRingBuffer_PopN(t *testing.T) {
 	buffer := NewRingBuffer[int](10)
 
@@ -183,6 +217,7 @@ func TestRingBuffer_PopN(t *testing.T) {
 	}
 }
 
+// TestRingBuffer_PopN_EdgeCases verifies edge cases for PopN.
 func TestRingBuffer_PopN_EdgeCases(t *testing.T) {
 	buffer := NewRingBuffer[int](5)
 	buffer.Push(1)
@@ -204,6 +239,11 @@ func TestRingBuffer_PopN_EdgeCases(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Drain Tests
+// =============================================================================
+
+// TestRingBuffer_Drain verifies drain empties buffer.
 func TestRingBuffer_Drain(t *testing.T) {
 	buffer := NewRingBuffer[int](5)
 
@@ -235,6 +275,11 @@ func TestRingBuffer_Drain(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Clear Tests
+// =============================================================================
+
+// TestRingBuffer_Clear verifies full reset.
 func TestRingBuffer_Clear(t *testing.T) {
 	buffer := NewRingBuffer[int](5)
 
@@ -259,6 +304,11 @@ func TestRingBuffer_Clear(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// ToSlice Tests
+// =============================================================================
+
+// TestRingBuffer_ToSlice verifies non-destructive copy.
 func TestRingBuffer_ToSlice(t *testing.T) {
 	buffer := NewRingBuffer[int](5)
 
@@ -291,6 +341,11 @@ func TestRingBuffer_ToSlice(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Wraparound Tests
+// =============================================================================
+
+// TestRingBuffer_Wraparound verifies circular behavior.
 func TestRingBuffer_Wraparound(t *testing.T) {
 	buffer := NewRingBuffer[int](3)
 
@@ -321,6 +376,11 @@ func TestRingBuffer_Wraparound(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// DroppedCount Tests
+// =============================================================================
+
+// TestRingBuffer_DroppedCount verifies drop counting.
 func TestRingBuffer_DroppedCount(t *testing.T) {
 	buffer := NewRingBuffer[int](3)
 
@@ -344,6 +404,11 @@ func TestRingBuffer_DroppedCount(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Concurrency Tests
+// =============================================================================
+
+// TestRingBuffer_ConcurrentAccess verifies thread safety.
 func TestRingBuffer_ConcurrentAccess(t *testing.T) {
 	buffer := NewRingBuffer[int](100)
 
@@ -383,6 +448,11 @@ func TestRingBuffer_ConcurrentAccess(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Generic Types Tests
+// =============================================================================
+
+// TestRingBuffer_GenericTypes verifies various type parameters.
 func TestRingBuffer_GenericTypes(t *testing.T) {
 	// Test with strings
 	stringBuffer := NewRingBuffer[string](2)
@@ -416,6 +486,11 @@ func TestRingBuffer_GenericTypes(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// IsEmpty/IsFull Tests
+// =============================================================================
+
+// TestRingBuffer_IsEmpty_IsFull verifies state predicates.
 func TestRingBuffer_IsEmpty_IsFull(t *testing.T) {
 	buffer := NewRingBuffer[int](3)
 
@@ -448,6 +523,20 @@ func TestRingBuffer_IsEmpty_IsFull(t *testing.T) {
 		t.Error("Buffer with 2/3 items should not be full")
 	}
 }
+
+// =============================================================================
+// Interface Satisfaction Tests
+// =============================================================================
+
+// TestRingBuffer_ImplementsInterface verifies interface satisfaction.
+func TestRingBuffer_ImplementsInterface(t *testing.T) {
+	var _ RingBufferable[int] = (*RingBuffer[int])(nil)
+	var _ RingBufferable[string] = (*RingBuffer[string])(nil)
+}
+
+// =============================================================================
+// Benchmark Tests
+// =============================================================================
 
 func BenchmarkRingBuffer_Push(b *testing.B) {
 	buffer := NewRingBuffer[int](1000)

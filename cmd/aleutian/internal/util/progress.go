@@ -1,4 +1,11 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package util
 
 import (
 	"context"
@@ -8,6 +15,10 @@ import (
 	"sync"
 	"time"
 )
+
+// =============================================================================
+// Progress Indicator Interface
+// =============================================================================
 
 // ProgressIndicator defines the interface for progress feedback.
 //
@@ -19,6 +30,22 @@ import (
 // # Thread Safety
 //
 // Implementations must be safe for concurrent use from multiple goroutines.
+//
+// # Example
+//
+//	var indicator ProgressIndicator = NewSpinner(DefaultSpinnerConfig())
+//	indicator.Start()
+//	defer indicator.Stop()
+//
+// # Limitations
+//
+//   - Implementations may vary in display capabilities
+//   - Some implementations may not work without TTY
+//
+// # Assumptions
+//
+//   - Start() can be called before Stop()
+//   - SetMessage() can be called at any time
 type ProgressIndicator interface {
 	// Start begins the progress indication.
 	Start()
@@ -33,11 +60,16 @@ type ProgressIndicator interface {
 	IsRunning() bool
 }
 
+// =============================================================================
+// Spinner Configuration
+// =============================================================================
+
 // SpinnerConfig configures spinner behavior.
 //
 // # Description
 //
 // Controls the spinner's appearance, speed, and output destination.
+// All fields have sensible defaults that can be overridden.
 //
 // # Example
 //
@@ -46,6 +78,11 @@ type ProgressIndicator interface {
 //	    Interval: 100 * time.Millisecond,
 //	    Writer:   os.Stderr,
 //	}
+//
+// # Limitations
+//
+//   - Custom Frames must contain at least one element
+//   - Writer must support ANSI escape codes for full functionality
 type SpinnerConfig struct {
 	// Message is the text displayed next to the spinner.
 	Message string
@@ -77,16 +114,38 @@ type SpinnerConfig struct {
 	FailureMessage string
 }
 
+// =============================================================================
+// Constructor Functions
+// =============================================================================
+
 // DefaultSpinnerConfig returns sensible defaults.
 //
 // # Description
 //
 // Returns a configuration with Braille dot animation, 100ms interval,
-// writing to stderr.
+// writing to stderr. Suitable for most CLI use cases.
+//
+// # Inputs
+//
+//   - None
 //
 // # Outputs
 //
 //   - SpinnerConfig: Configuration with default values
+//
+// # Example
+//
+//	config := DefaultSpinnerConfig()
+//	config.Message = "Custom message..."
+//	spinner := NewSpinner(config)
+//
+// # Limitations
+//
+//   - Braille characters may not display on all terminals
+//
+// # Assumptions
+//
+//   - os.Stderr is available for writing
 func DefaultSpinnerConfig() SpinnerConfig {
 	return SpinnerConfig{
 		Message:     "Working...",
@@ -97,6 +156,10 @@ func DefaultSpinnerConfig() SpinnerConfig {
 		ClearOnStop: true,
 	}
 }
+
+// =============================================================================
+// Spinner Struct
+// =============================================================================
 
 // Spinner provides animated progress feedback for CLI operations.
 //
@@ -118,17 +181,6 @@ func DefaultSpinnerConfig() SpinnerConfig {
 // Spinner is safe for concurrent use. Start/Stop can be called from
 // different goroutines.
 //
-// # Limitations
-//
-//   - Requires TTY-compatible terminal for proper display
-//   - ANSI escape codes may not work on all terminals
-//   - Concurrent writes to same Writer may cause garbled output
-//
-// # Assumptions
-//
-//   - Terminal supports ANSI escape codes
-//   - Only one spinner writes to Writer at a time
-//
 // # Example
 //
 //	spinner := NewSpinner(SpinnerConfig{Message: "Starting services..."})
@@ -139,6 +191,17 @@ func DefaultSpinnerConfig() SpinnerConfig {
 //
 //	spinner.SetMessage("Waiting for health checks...")
 //	// ... more work
+//
+// # Limitations
+//
+//   - Requires TTY-compatible terminal for proper display
+//   - ANSI escape codes may not work on all terminals
+//   - Concurrent writes to same Writer may cause garbled output
+//
+// # Assumptions
+//
+//   - Terminal supports ANSI escape codes
+//   - Only one spinner writes to Writer at a time
 type Spinner struct {
 	config  SpinnerConfig
 	frame   int
@@ -148,12 +211,16 @@ type Spinner struct {
 	mu      sync.Mutex
 }
 
+// Compile-time interface check
+var _ ProgressIndicator = (*Spinner)(nil)
+
 // NewSpinner creates a new spinner with the given configuration.
 //
 // # Description
 //
 // Creates a spinner ready to be started. The spinner will not display
-// anything until Start() is called.
+// anything until Start() is called. Zero values in config are replaced
+// with sensible defaults.
 //
 // # Inputs
 //
@@ -169,6 +236,14 @@ type Spinner struct {
 //	    Message: "Downloading model...",
 //	    Frames:  []string{"|", "/", "-", "\\"},
 //	})
+//
+// # Limitations
+//
+//   - Does not validate Writer supports ANSI codes
+//
+// # Assumptions
+//
+//   - Caller will call Start() when ready
 func NewSpinner(config SpinnerConfig) *Spinner {
 	if config.Interval <= 0 {
 		config.Interval = 100 * time.Millisecond
@@ -185,17 +260,38 @@ func NewSpinner(config SpinnerConfig) *Spinner {
 	}
 }
 
+// =============================================================================
+// Spinner Methods
+// =============================================================================
+
 // Start begins the spinner animation.
 //
 // # Description
 //
 // Starts the background goroutine that animates the spinner.
 // Safe to call multiple times (subsequent calls are no-ops).
+// Hides the cursor if HideCursor is enabled.
+//
+// # Inputs
+//
+//   - None (receiver only)
+//
+// # Outputs
+//
+//   - None
 //
 // # Example
 //
 //	spinner.Start()
 //	defer spinner.Stop()
+//
+// # Limitations
+//
+//   - Creates a goroutine that must be cleaned up with Stop()
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Spinner) Start() {
 	s.mu.Lock()
 	if s.running {
@@ -220,11 +316,28 @@ func (s *Spinner) Start() {
 // # Description
 //
 // Stops the spinner and optionally clears the line. Blocks until
-// the spinner goroutine has fully stopped.
+// the spinner goroutine has fully stopped. Safe to call multiple
+// times (subsequent calls are no-ops). Restores cursor if it was hidden.
+//
+// # Inputs
+//
+//   - None (receiver only)
+//
+// # Outputs
+//
+//   - None
 //
 // # Example
 //
 //	spinner.Stop()
+//
+// # Limitations
+//
+//   - Blocks until background goroutine exits
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Spinner) Stop() {
 	s.mu.Lock()
 	if !s.running {
@@ -253,11 +366,27 @@ func (s *Spinner) Stop() {
 // # Description
 //
 // Stops the spinner and displays a success indicator with the
-// configured or provided message.
+// configured or provided message. Shows a checkmark (✓) prefix.
 //
 // # Inputs
 //
 //   - message: Optional message (uses SuccessMessage if empty)
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	spinner.StopSuccess("Upload complete!")
+//
+// # Limitations
+//
+//   - Requires terminal to display ✓ character
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Spinner) StopSuccess(message string) {
 	s.mu.Lock()
 	if !s.running {
@@ -290,11 +419,27 @@ func (s *Spinner) StopSuccess(message string) {
 // # Description
 //
 // Stops the spinner and displays a failure indicator with the
-// configured or provided message.
+// configured or provided message. Shows an X mark (✗) prefix.
 //
 // # Inputs
 //
 //   - message: Optional message (uses FailureMessage if empty)
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	spinner.StopFailure("Connection timed out")
+//
+// # Limitations
+//
+//   - Requires terminal to display ✗ character
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Spinner) StopFailure(message string) {
 	s.mu.Lock()
 	if !s.running {
@@ -327,15 +472,27 @@ func (s *Spinner) StopFailure(message string) {
 // # Description
 //
 // Changes the message shown next to the spinner. Safe to call
-// while the spinner is running.
+// while the spinner is running. Thread-safe.
 //
 // # Inputs
 //
 //   - message: New message to display
 //
+// # Outputs
+//
+//   - None
+//
 // # Example
 //
 //	spinner.SetMessage("Downloading... 50%")
+//
+// # Limitations
+//
+//   - Long messages may wrap on narrow terminals
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Spinner) SetMessage(message string) {
 	s.mu.Lock()
 	s.config.Message = message
@@ -344,9 +501,32 @@ func (s *Spinner) SetMessage(message string) {
 
 // IsRunning returns whether the spinner is active.
 //
+// # Description
+//
+// Returns whether the spinner is currently animating.
+// Thread-safe snapshot; value may change immediately after return.
+//
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
 //   - bool: true if spinner is running
+//
+// # Example
+//
+//	if spinner.IsRunning() {
+//	    spinner.Stop()
+//	}
+//
+// # Limitations
+//
+//   - Result is a point-in-time snapshot
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Spinner) IsRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -386,6 +566,10 @@ func (s *Spinner) clearLine() {
 	fmt.Fprint(s.config.Writer, "\r\033[K")
 }
 
+// =============================================================================
+// Convenience Functions
+// =============================================================================
+
 // SpinWhile runs a function with a spinner showing progress.
 //
 // # Description
@@ -408,6 +592,15 @@ func (s *Spinner) clearLine() {
 //	err := SpinWhile("Starting services...", func() error {
 //	    return startAllServices()
 //	})
+//
+// # Limitations
+//
+//   - Cannot update message during execution
+//   - Uses default spinner configuration
+//
+// # Assumptions
+//
+//   - fn is not nil
 func SpinWhile(message string, fn func() error) error {
 	spinner := NewSpinner(SpinnerConfig{Message: message})
 	spinner.Start()
@@ -428,6 +621,8 @@ func SpinWhile(message string, fn func() error) error {
 // # Description
 //
 // Like SpinWhile but stops the spinner if the context is cancelled.
+// The function runs in a separate goroutine and may be abandoned
+// if context is cancelled.
 //
 // # Inputs
 //
@@ -447,6 +642,15 @@ func SpinWhile(message string, fn func() error) error {
 //	err := SpinWhileContext(ctx, "Waiting for health...", func() error {
 //	    return waitForHealth(ctx)
 //	})
+//
+// # Limitations
+//
+//   - fn continues running even if context is cancelled
+//   - fn should check ctx.Done() for proper cancellation
+//
+// # Assumptions
+//
+//   - ctx and fn are not nil
 func SpinWhileContext(ctx context.Context, message string, fn func() error) error {
 	spinner := NewSpinner(SpinnerConfig{Message: message})
 	spinner.Start()
@@ -471,6 +675,3 @@ func SpinWhileContext(ctx context.Context, message string, fn func() error) erro
 		return ctx.Err()
 	}
 }
-
-// Compile-time interface check
-var _ ProgressIndicator = (*Spinner)(nil)
