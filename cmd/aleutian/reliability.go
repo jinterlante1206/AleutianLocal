@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
 )
 
 // ReliabilityOrchestrator defines the interface for coordinating reliability subsystems.
@@ -105,7 +107,7 @@ type ReliabilityOrchestrator interface {
 	GetDriftReport() DriftReport
 
 	// CreateSaga creates a new saga for multi-step operations.
-	CreateSaga() SagaExecutor
+	CreateSaga() util.SagaExecutor
 
 	// HealthCheck performs a comprehensive reliability health check.
 	HealthCheck() ReliabilityHealthCheck
@@ -927,7 +929,7 @@ func (rm *ReliabilityManager) GetDriftReport() DriftReport {
 // # Example
 //
 //	saga := manager.CreateSaga()
-//	saga.AddStep(SagaStep{
+//	saga.AddStep(util.SagaStep{
 //	    Name: "create_container",
 //	    Execute: createContainer,
 //	    Compensate: removeContainer,
@@ -935,8 +937,8 @@ func (rm *ReliabilityManager) GetDriftReport() DriftReport {
 //	if err := saga.Execute(ctx); err != nil {
 //	    // Compensation already ran
 //	}
-func (rm *ReliabilityManager) CreateSaga() SagaExecutor {
-	return NewSaga(DefaultSagaConfig())
+func (rm *ReliabilityManager) CreateSaga() util.SagaExecutor {
+	return util.NewSaga(util.DefaultSagaConfig())
 }
 
 // HealthCheck performs a comprehensive reliability health check.
