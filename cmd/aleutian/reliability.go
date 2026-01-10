@@ -8,7 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/resilience"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/sampling"
 )
 
 // ReliabilityOrchestrator defines the interface for coordinating reliability subsystems.
@@ -107,7 +108,7 @@ type ReliabilityOrchestrator interface {
 	GetDriftReport() DriftReport
 
 	// CreateSaga creates a new saga for multi-step operations.
-	CreateSaga() util.SagaExecutor
+	CreateSaga() resilience.SagaExecutor
 
 	// HealthCheck performs a comprehensive reliability health check.
 	HealthCheck() ReliabilityHealthCheck
@@ -275,9 +276,9 @@ type ReliabilityManager struct {
 	// Subsystems
 	processLock      *ProcessLock
 	goroutineTracker *GoroutineTracker
-	sampler          *DefaultAdaptiveSampler
+	sampler          *sampling.DefaultAdaptiveSampler
 	metricsSchema    *DefaultMetricsSchema
-	backupManager    *DefaultBackupManager
+	backupManager    *resilience.DefaultBackupManager
 	retention        *DefaultRetentionEnforcer
 	imageValidator   *DefaultImagePinValidator
 	stateAuditor     *DefaultStateAuditor
@@ -423,7 +424,7 @@ func (rm *ReliabilityManager) initializeSubsystems() error {
 	})
 
 	// Adaptive sampler
-	rm.sampler = NewAdaptiveSampler(SamplingConfig{
+	rm.sampler = sampling.NewAdaptiveSampler(sampling.Config{
 		BaseSamplingRate: rm.config.SamplingRate,
 		MinSamplingRate:  0.01,
 		MaxSamplingRate:  1.0,
@@ -434,7 +435,7 @@ func (rm *ReliabilityManager) initializeSubsystems() error {
 	rm.metricsSchema = NewMetricsSchema(DefaultMetricsSchemaConfig())
 
 	// Backup manager
-	rm.backupManager = NewBackupManager(BackupConfig{
+	rm.backupManager = resilience.NewBackupManager(resilience.BackupConfig{
 		BackupDir:  rm.config.BackupDir,
 		MaxBackups: 10,
 	})
@@ -929,7 +930,7 @@ func (rm *ReliabilityManager) GetDriftReport() DriftReport {
 // # Example
 //
 //	saga := manager.CreateSaga()
-//	saga.AddStep(util.SagaStep{
+//	saga.AddStep(resilience.SagaStep{
 //	    Name: "create_container",
 //	    Execute: createContainer,
 //	    Compensate: removeContainer,
@@ -937,8 +938,8 @@ func (rm *ReliabilityManager) GetDriftReport() DriftReport {
 //	if err := saga.Execute(ctx); err != nil {
 //	    // Compensation already ran
 //	}
-func (rm *ReliabilityManager) CreateSaga() util.SagaExecutor {
-	return util.NewSaga(util.DefaultSagaConfig())
+func (rm *ReliabilityManager) CreateSaga() resilience.SagaExecutor {
+	return resilience.NewSaga(resilience.DefaultSagaConfig())
 }
 
 // HealthCheck performs a comprehensive reliability health check.

@@ -1,4 +1,4 @@
-package main
+package resilience
 
 import (
 	"fmt"
@@ -500,7 +500,7 @@ func (m *DefaultBackupManager) originalPathFromBackup(backupPath string) string 
 // Compile-time interface check
 var _ BackupManager = (*DefaultBackupManager)(nil)
 
-// BackupBeforeOverwrite is a convenience function using default config.
+// BackupBeforeOverwriteFunc is a convenience function using default config.
 //
 // # Description
 //
@@ -518,12 +518,12 @@ var _ BackupManager = (*DefaultBackupManager)(nil)
 //
 // # Example
 //
-//	backupPath, err := BackupBeforeOverwrite("/path/to/config")
+//	backupPath, err := BackupBeforeOverwriteFunc("/path/to/config")
 //	if err != nil {
 //	    return err
 //	}
 //	// Proceed with destructive operation
-func BackupBeforeOverwrite(path string) (string, error) {
+func BackupBeforeOverwriteFunc(path string) (string, error) {
 	mgr := NewBackupManager(DefaultBackupConfig())
 	return mgr.BackupBeforeOverwrite(path)
 }

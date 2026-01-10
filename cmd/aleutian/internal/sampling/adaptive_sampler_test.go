@@ -1,4 +1,11 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package sampling
 
 import (
 	"context"
@@ -7,8 +14,12 @@ import (
 	"time"
 )
 
-func TestDefaultSamplingConfig(t *testing.T) {
-	config := DefaultSamplingConfig()
+// =============================================================================
+// DefaultConfig Tests
+// =============================================================================
+
+func TestDefaultConfig(t *testing.T) {
+	config := DefaultConfig()
 
 	if config.BaseSamplingRate <= 0 || config.BaseSamplingRate > 1 {
 		t.Error("BaseSamplingRate should be between 0 and 1")
@@ -24,8 +35,12 @@ func TestDefaultSamplingConfig(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// NewAdaptiveSampler Tests
+// =============================================================================
+
 func TestNewAdaptiveSampler(t *testing.T) {
-	sampler := NewAdaptiveSampler(DefaultSamplingConfig())
+	sampler := NewAdaptiveSampler(DefaultConfig())
 	defer sampler.Stop()
 
 	if sampler == nil {
@@ -34,7 +49,7 @@ func TestNewAdaptiveSampler(t *testing.T) {
 }
 
 func TestNewAdaptiveSampler_DefaultsZeroConfig(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		// All zero values
 	})
 	defer sampler.Stop()
@@ -51,7 +66,7 @@ func TestNewAdaptiveSampler_DefaultsZeroConfig(t *testing.T) {
 
 func TestNewAdaptiveSampler_ClampsInvalidRates(t *testing.T) {
 	// Test that rates > 1.0 are clamped to defaults
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 10.0,  // Invalid: 1000%
 		MinSamplingRate:  5.0,   // Invalid: 500%
 		MaxSamplingRate:  100.0, // Invalid: 10000%
@@ -71,7 +86,7 @@ func TestNewAdaptiveSampler_ClampsInvalidRates(t *testing.T) {
 func TestNewAdaptiveSampler_EnforcesLogicalBounds(t *testing.T) {
 	// Test that BaseSamplingRate is clamped to [MinSamplingRate, MaxSamplingRate]
 	// Case 1: Base rate below minimum
-	sampler1 := NewAdaptiveSampler(SamplingConfig{
+	sampler1 := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.05, // Below min
 		MinSamplingRate:  0.1,
 		MaxSamplingRate:  0.9,
@@ -84,7 +99,7 @@ func TestNewAdaptiveSampler_EnforcesLogicalBounds(t *testing.T) {
 	}
 
 	// Case 2: Base rate above maximum
-	sampler2 := NewAdaptiveSampler(SamplingConfig{
+	sampler2 := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.95, // Above max
 		MinSamplingRate:  0.1,
 		MaxSamplingRate:  0.8,
@@ -97,8 +112,12 @@ func TestNewAdaptiveSampler_EnforcesLogicalBounds(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// ShouldSample Tests
+// =============================================================================
+
 func TestAdaptiveSampler_ShouldSample_Rate100(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 1.0, // 100%
 		MinSamplingRate:  0.01,
 		MaxSamplingRate:  1.0,
@@ -115,7 +134,7 @@ func TestAdaptiveSampler_ShouldSample_Rate100(t *testing.T) {
 
 func TestAdaptiveSampler_ShouldSample_Rate0(t *testing.T) {
 	// Use a very low min rate to allow setting to 0
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.0,  // 0%
 		MinSamplingRate:  -1.0, // Allow 0 (will be clamped to 0 not negative)
 		MaxSamplingRate:  1.0,
@@ -134,7 +153,7 @@ func TestAdaptiveSampler_ShouldSample_Rate0(t *testing.T) {
 }
 
 func TestAdaptiveSampler_ShouldSample_Probabilistic(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.5, // 50%
 		MinSamplingRate:  0.01,
 		MaxSamplingRate:  1.0,
@@ -156,8 +175,12 @@ func TestAdaptiveSampler_ShouldSample_Probabilistic(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// ShouldSampleContext Tests
+// =============================================================================
+
 func TestAdaptiveSampler_ShouldSampleContext(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 1.0, // 100%
 	})
 	defer sampler.Stop()
@@ -177,8 +200,12 @@ func TestAdaptiveSampler_ShouldSampleContext(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// RecordLatency Tests
+// =============================================================================
+
 func TestAdaptiveSampler_RecordLatency(t *testing.T) {
-	sampler := NewAdaptiveSampler(DefaultSamplingConfig())
+	sampler := NewAdaptiveSampler(DefaultConfig())
 	defer sampler.Stop()
 
 	// Record some latencies
@@ -200,8 +227,12 @@ func TestAdaptiveSampler_RecordLatency(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// GetSamplingRate Tests
+// =============================================================================
+
 func TestAdaptiveSampler_GetSamplingRate(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.25,
 	})
 	defer sampler.Stop()
@@ -212,8 +243,12 @@ func TestAdaptiveSampler_GetSamplingRate(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// SetBaseSamplingRate Tests
+// =============================================================================
+
 func TestAdaptiveSampler_SetBaseSamplingRate(t *testing.T) {
-	sampler := NewAdaptiveSampler(DefaultSamplingConfig())
+	sampler := NewAdaptiveSampler(DefaultConfig())
 	defer sampler.Stop()
 
 	sampler.SetBaseSamplingRate(0.75)
@@ -232,7 +267,7 @@ func TestAdaptiveSampler_SetBaseSamplingRate_Bounds(t *testing.T) {
 	// Note: SetBaseSamplingRate no longer immediately updates currentRate.
 	// The adjustLoop is the single source of truth for currentRate.
 	// This test verifies that SetBaseSamplingRate doesn't panic with out-of-bounds values.
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		MinSamplingRate: 0.1,
 		MaxSamplingRate: 0.9,
 	})
@@ -248,8 +283,12 @@ func TestAdaptiveSampler_SetBaseSamplingRate_Bounds(t *testing.T) {
 	_ = sampler.ShouldSample()
 }
 
+// =============================================================================
+// Stats Tests
+// =============================================================================
+
 func TestAdaptiveSampler_Stats(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 1.0, // 100%
 	})
 	defer sampler.Stop()
@@ -272,8 +311,37 @@ func TestAdaptiveSampler_Stats(t *testing.T) {
 	}
 }
 
+func TestSamplerStats_Fields(t *testing.T) {
+	sampler := NewAdaptiveSampler(Config{
+		BaseSamplingRate: 0.5,
+	})
+	defer sampler.Stop()
+
+	// Force some state
+	sampler.ForceEnable(time.Minute)
+
+	stats := sampler.Stats()
+
+	// Check all fields are accessible
+	_ = stats.TotalSampled
+	_ = stats.TotalDropped
+	_ = stats.CurrentRate
+	_ = stats.AverageLatency
+	_ = stats.IsThrottled
+	_ = stats.ThrottleReason
+	_ = stats.ForceEnabled
+
+	if !stats.ForceEnabled {
+		t.Error("ForceEnabled should be true")
+	}
+}
+
+// =============================================================================
+// ForceEnable Tests
+// =============================================================================
+
 func TestAdaptiveSampler_ForceEnable(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.0, // 0% - would never sample
 		MinSamplingRate:  0.0,
 	})
@@ -305,8 +373,42 @@ func TestAdaptiveSampler_ForceEnable(t *testing.T) {
 	}
 }
 
+func TestAdaptiveSampler_ForceEnable_ConcurrentRace(t *testing.T) {
+	// Test that ForceEnable doesn't get prematurely disabled by concurrent expiry checks
+	sampler := NewAdaptiveSampler(Config{
+		BaseSamplingRate: 0.0, // 0% - won't sample without force
+		MinSamplingRate:  0.0,
+	})
+	defer sampler.Stop()
+
+	// Force enable for a very short time (will expire almost immediately)
+	sampler.ForceEnable(1 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // Let it expire
+
+	// Call ShouldSample to trigger expiry cleanup
+	sampler.ShouldSample()
+
+	// Now force enable for longer
+	sampler.ForceEnable(100 * time.Millisecond)
+
+	// The force-enable should still be active (not disabled by stale expiry check)
+	stats := sampler.Stats()
+	if !stats.ForceEnabled {
+		t.Error("ForceEnabled should be true after re-enabling")
+	}
+
+	// Should sample because force is enabled
+	if !sampler.ShouldSample() {
+		t.Error("Should sample when force enabled")
+	}
+}
+
+// =============================================================================
+// Adaptive Throttling Tests
+// =============================================================================
+
 func TestAdaptiveSampler_AdaptiveThrottling(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate:   0.5,
 		MinSamplingRate:    0.01,
 		MaxSamplingRate:    1.0,
@@ -337,7 +439,7 @@ func TestAdaptiveSampler_AdaptiveThrottling(t *testing.T) {
 
 func TestAdaptiveSampler_IsThrottled_ClearsOnRecovery(t *testing.T) {
 	// Use a small buffer size via short LatencyWindow to make testing easier
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate:   0.5,
 		MinSamplingRate:    0.01,
 		MaxSamplingRate:    1.0,
@@ -377,8 +479,53 @@ func TestAdaptiveSampler_IsThrottled_ClearsOnRecovery(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// LatencyBufferSize Tests
+// =============================================================================
+
+func TestAdaptiveSampler_LatencyBufferSize(t *testing.T) {
+	// Test that LatencyBufferSize is respected
+	sampler := NewAdaptiveSampler(Config{
+		BaseSamplingRate:  0.5,
+		LatencyBufferSize: 50, // Small buffer for testing
+	})
+	defer sampler.Stop()
+
+	// Record more than buffer size latencies
+	for i := 0; i < 100; i++ {
+		sampler.RecordLatency(time.Duration(i) * time.Millisecond)
+	}
+
+	// Should not panic and stats should work
+	stats := sampler.Stats()
+	if stats.AverageLatency == 0 {
+		t.Error("AverageLatency should be calculated")
+	}
+}
+
+// =============================================================================
+// Stop Tests
+// =============================================================================
+
+func TestAdaptiveSampler_Stop(t *testing.T) {
+	sampler := NewAdaptiveSampler(DefaultConfig())
+
+	// First stop should not panic
+	sampler.Stop()
+
+	// Double stop should not panic (tests idempotency via sync.Once)
+	sampler.Stop()
+
+	// Third stop should also not panic (confirms sync.Once is working)
+	sampler.Stop()
+}
+
+// =============================================================================
+// Concurrency Tests
+// =============================================================================
+
 func TestAdaptiveSampler_ConcurrentAccess(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.5,
 	})
 	defer sampler.Stop()
@@ -430,8 +577,20 @@ func TestAdaptiveSampler_ConcurrentAccess(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Interface Compliance Tests
+// =============================================================================
+
+func TestAdaptiveSampler_InterfaceCompliance(t *testing.T) {
+	var _ AdaptiveSampler = (*DefaultAdaptiveSampler)(nil)
+}
+
+// =============================================================================
+// AlwaysSampleError Tests
+// =============================================================================
+
 func TestAlwaysSampleError(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.0, // 0% - would never sample
 		MinSamplingRate:  0.0,
 	})
@@ -445,6 +604,10 @@ func TestAlwaysSampleError(t *testing.T) {
 	// Non-errors use sampler (0% rate = no sampling)
 	// Note: Can't reliably test this since sampler rate is 0
 }
+
+// =============================================================================
+// HeadSampler Tests
+// =============================================================================
 
 func TestHeadSampler(t *testing.T) {
 	sampler := HeadSampler(3)
@@ -501,6 +664,28 @@ func TestHeadSampler_Concurrent(t *testing.T) {
 	}
 }
 
+func TestHeadSampler_InvalidInput(t *testing.T) {
+	// n = 0 should never sample
+	sampler0 := HeadSampler(0)
+	for i := 0; i < 10; i++ {
+		if sampler0() {
+			t.Error("HeadSampler(0) should never sample")
+		}
+	}
+
+	// n = -1 should never sample
+	samplerNeg := HeadSampler(-1)
+	for i := 0; i < 10; i++ {
+		if samplerNeg() {
+			t.Error("HeadSampler(-1) should never sample")
+		}
+	}
+}
+
+// =============================================================================
+// RateLimitedSampler Tests
+// =============================================================================
+
 func TestRateLimitedSampler(t *testing.T) {
 	sampler := RateLimitedSampler(5) // 5 per second
 
@@ -525,66 +710,6 @@ func TestRateLimitedSampler(t *testing.T) {
 	}
 }
 
-func TestAdaptiveSampler_Stop(t *testing.T) {
-	sampler := NewAdaptiveSampler(DefaultSamplingConfig())
-
-	// First stop should not panic
-	sampler.Stop()
-
-	// Double stop should not panic (tests idempotency via sync.Once)
-	sampler.Stop()
-
-	// Third stop should also not panic (confirms sync.Once is working)
-	sampler.Stop()
-}
-
-func TestAdaptiveSampler_InterfaceCompliance(t *testing.T) {
-	var _ AdaptiveSampler = (*DefaultAdaptiveSampler)(nil)
-}
-
-func TestSamplerStats_Fields(t *testing.T) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
-		BaseSamplingRate: 0.5,
-	})
-	defer sampler.Stop()
-
-	// Force some state
-	sampler.ForceEnable(time.Minute)
-
-	stats := sampler.Stats()
-
-	// Check all fields are accessible
-	_ = stats.TotalSampled
-	_ = stats.TotalDropped
-	_ = stats.CurrentRate
-	_ = stats.AverageLatency
-	_ = stats.IsThrottled
-	_ = stats.ThrottleReason
-	_ = stats.ForceEnabled
-
-	if !stats.ForceEnabled {
-		t.Error("ForceEnabled should be true")
-	}
-}
-
-func TestHeadSampler_InvalidInput(t *testing.T) {
-	// n = 0 should never sample
-	sampler0 := HeadSampler(0)
-	for i := 0; i < 10; i++ {
-		if sampler0() {
-			t.Error("HeadSampler(0) should never sample")
-		}
-	}
-
-	// n = -1 should never sample
-	samplerNeg := HeadSampler(-1)
-	for i := 0; i < 10; i++ {
-		if samplerNeg() {
-			t.Error("HeadSampler(-1) should never sample")
-		}
-	}
-}
-
 func TestRateLimitedSampler_InvalidInput(t *testing.T) {
 	// perSecond = 0 should never sample
 	sampler0 := RateLimitedSampler(0)
@@ -603,58 +728,12 @@ func TestRateLimitedSampler_InvalidInput(t *testing.T) {
 	}
 }
 
-func TestAdaptiveSampler_ForceEnable_ConcurrentRace(t *testing.T) {
-	// Test that ForceEnable doesn't get prematurely disabled by concurrent expiry checks
-	sampler := NewAdaptiveSampler(SamplingConfig{
-		BaseSamplingRate: 0.0, // 0% - won't sample without force
-		MinSamplingRate:  0.0,
-	})
-	defer sampler.Stop()
-
-	// Force enable for a very short time (will expire almost immediately)
-	sampler.ForceEnable(1 * time.Millisecond)
-	time.Sleep(10 * time.Millisecond) // Let it expire
-
-	// Call ShouldSample to trigger expiry cleanup
-	sampler.ShouldSample()
-
-	// Now force enable for longer
-	sampler.ForceEnable(100 * time.Millisecond)
-
-	// The force-enable should still be active (not disabled by stale expiry check)
-	stats := sampler.Stats()
-	if !stats.ForceEnabled {
-		t.Error("ForceEnabled should be true after re-enabling")
-	}
-
-	// Should sample because force is enabled
-	if !sampler.ShouldSample() {
-		t.Error("Should sample when force enabled")
-	}
-}
-
-func TestAdaptiveSampler_LatencyBufferSize(t *testing.T) {
-	// Test that LatencyBufferSize is respected
-	sampler := NewAdaptiveSampler(SamplingConfig{
-		BaseSamplingRate:  0.5,
-		LatencyBufferSize: 50, // Small buffer for testing
-	})
-	defer sampler.Stop()
-
-	// Record more than buffer size latencies
-	for i := 0; i < 100; i++ {
-		sampler.RecordLatency(time.Duration(i) * time.Millisecond)
-	}
-
-	// Should not panic and stats should work
-	stats := sampler.Stats()
-	if stats.AverageLatency == 0 {
-		t.Error("AverageLatency should be calculated")
-	}
-}
+// =============================================================================
+// Benchmark Tests
+// =============================================================================
 
 func BenchmarkAdaptiveSampler_ShouldSample(b *testing.B) {
-	sampler := NewAdaptiveSampler(SamplingConfig{
+	sampler := NewAdaptiveSampler(Config{
 		BaseSamplingRate: 0.5,
 	})
 	defer sampler.Stop()
@@ -666,7 +745,7 @@ func BenchmarkAdaptiveSampler_ShouldSample(b *testing.B) {
 }
 
 func BenchmarkAdaptiveSampler_RecordLatency(b *testing.B) {
-	sampler := NewAdaptiveSampler(DefaultSamplingConfig())
+	sampler := NewAdaptiveSampler(DefaultConfig())
 	defer sampler.Stop()
 
 	latency := 50 * time.Millisecond

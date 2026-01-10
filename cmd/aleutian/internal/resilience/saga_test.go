@@ -5,7 +5,7 @@
 // (at your option) any later version.
 // See the LICENSE.txt file for the full license text.
 
-package util
+package resilience
 
 import (
 	"context"

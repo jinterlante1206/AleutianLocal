@@ -1,4 +1,11 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package resilience
 
 import (
 	"os"
@@ -7,6 +14,10 @@ import (
 	"testing"
 	"time"
 )
+
+// =============================================================================
+// DefaultBackupConfig Tests
+// =============================================================================
 
 func TestDefaultBackupConfig(t *testing.T) {
 	config := DefaultBackupConfig()
@@ -21,6 +32,10 @@ func TestDefaultBackupConfig(t *testing.T) {
 		t.Error("TimeFormat should have default value")
 	}
 }
+
+// =============================================================================
+// NewBackupManager Tests
+// =============================================================================
 
 func TestNewBackupManager(t *testing.T) {
 	tests := []struct {
@@ -56,6 +71,10 @@ func TestNewBackupManager(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// BackupBeforeOverwrite Tests
+// =============================================================================
 
 func TestBackupManager_BackupBeforeOverwrite_NonExistent(t *testing.T) {
 	mgr := NewBackupManager(DefaultBackupConfig())
@@ -158,6 +177,10 @@ func TestBackupManager_BackupBeforeOverwrite_Directory(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// ListBackups Tests
+// =============================================================================
+
 func TestBackupManager_ListBackups(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -224,6 +247,10 @@ func TestBackupManager_ListBackups_NoBackups(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// RestoreBackup Tests
+// =============================================================================
+
 func TestBackupManager_RestoreBackup(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -274,6 +301,10 @@ func TestBackupManager_RestoreBackup(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// CleanOldBackups Tests
+// =============================================================================
+
 func TestBackupManager_CleanOldBackups(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -309,6 +340,10 @@ func TestBackupManager_CleanOldBackups(t *testing.T) {
 		t.Errorf("CleanOldBackups removed %d, want 1", removed)
 	}
 }
+
+// =============================================================================
+// Backup Rotation Tests
+// =============================================================================
 
 func TestBackupManager_BackupRotation(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -346,6 +381,10 @@ func TestBackupManager_BackupRotation(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Backup Path Format Tests
+// =============================================================================
+
 func TestBackupManager_BackupPath_Format(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "config.yaml")
@@ -372,6 +411,10 @@ func TestBackupManager_BackupPath_Format(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Convenience Function Tests
+// =============================================================================
+
 func TestBackupBeforeOverwrite_Convenience(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -380,15 +423,19 @@ func TestBackupBeforeOverwrite_Convenience(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	backupPath, err := BackupBeforeOverwrite(testFile)
+	backupPath, err := BackupBeforeOverwriteFunc(testFile)
 	if err != nil {
-		t.Fatalf("BackupBeforeOverwrite failed: %v", err)
+		t.Fatalf("BackupBeforeOverwriteFunc failed: %v", err)
 	}
 
 	if backupPath == "" {
-		t.Error("BackupBeforeOverwrite returned empty path")
+		t.Error("BackupBeforeOverwriteFunc returned empty path")
 	}
 }
+
+// =============================================================================
+// Interface Compliance Tests
+// =============================================================================
 
 func TestBackupManager_InterfaceCompliance(t *testing.T) {
 	var _ BackupManager = (*DefaultBackupManager)(nil)
