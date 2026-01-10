@@ -135,6 +135,12 @@ func (p *sseParser) ParseLine(line string) (*StreamEvent, error) {
 		return nil, nil
 	}
 
+	// Event type lines start with "event:" - skip them (metadata, not content)
+	// The actual content is in the following "data:" line
+	if strings.HasPrefix(line, "event:") {
+		return nil, nil
+	}
+
 	// Data lines start with "data: "
 	if strings.HasPrefix(line, "data: ") {
 		jsonData := strings.TrimPrefix(line, "data: ")

@@ -12,18 +12,26 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/observability"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate/graphql"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -38,6 +46,10 @@ const (
 	// heartbeatInterval is the interval for sending keepalive pings.
 	// Set to 15s to stay well under typical LB timeouts (60s for ALB/Nginx).
 	heartbeatInterval = 15 * time.Second
+
+	// maxHistoryTurns limits the number of conversation turns loaded for session resume.
+	// This prevents context window overflow for long conversations.
+	maxHistoryTurns = 20
 )
 
 // =============================================================================
@@ -74,6 +86,70 @@ const (
 //
 //   - Called in token order.
 type StreamCallback = llm.StreamCallback
+
+// =============================================================================
+// Session History Types
+// =============================================================================
+
+// ConversationTurn represents a single Q&A exchange in a session.
+//
+// # Description
+//
+// A ConversationTurn captures one user question and the assistant's response.
+// Used for loading session history to provide context to the LLM when
+// resuming a conversation.
+//
+// # Fields
+//
+//   - Question: The user's input message
+//   - Answer: The assistant's response
+//   - Timestamp: When the turn occurred (Unix milliseconds, for ordering)
+//
+// # Examples
+//
+//	turn := ConversationTurn{
+//	    Question:  "What is OAuth?",
+//	    Answer:    "OAuth is an authorization framework...",
+//	    Timestamp: 1704067200000,
+//	}
+//
+// # Limitations
+//
+//   - Does not include sources or metadata from RAG responses
+//
+// # Assumptions
+//
+//   - Timestamp is in Unix milliseconds (matches Weaviate schema)
+type ConversationTurn struct {
+	Question  string `json:"question"`
+	Answer    string `json:"answer"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// WeaviateConversationResponse represents the typed GraphQL response from Weaviate.
+//
+// # Description
+//
+// This struct provides compile-time type safety for parsing Weaviate's
+// GraphQL response format when querying the Conversation class.
+//
+// # Fields
+//
+//   - Get: Contains the query results
+//   - Get.Conversation: Array of conversation turns
+//
+// # Limitations
+//
+//   - Specific to Conversation class queries
+//
+// # Assumptions
+//
+//   - Response follows standard Weaviate GraphQL format
+type WeaviateConversationResponse struct {
+	Get struct {
+		Conversation []ConversationTurn `json:"Conversation"`
+	} `json:"Get"`
+}
 
 // =============================================================================
 // Interface Definition
@@ -206,10 +282,11 @@ type StreamingChatHandler interface {
 //   - Dependencies are non-nil and properly configured
 //   - LLM client supports streaming
 type streamingChatHandler struct {
-	llmClient    llm.LLMClient
-	policyEngine *policy_engine.PolicyEngine
-	ragService   *services.ChatRAGService
-	tracer       trace.Tracer
+	llmClient      llm.LLMClient
+	policyEngine   *policy_engine.PolicyEngine
+	ragService     *services.ChatRAGService
+	weaviateClient *weaviate.Client
+	tracer         trace.Tracer
 }
 
 // =============================================================================
@@ -230,6 +307,8 @@ type streamingChatHandler struct {
 //     Must implement ChatStream method for streaming to work.
 //   - policyEngine: Policy scanner. Must not be nil.
 //   - ragService: RAG chat service. May be nil if RAG is not used.
+//   - weaviateClient: Weaviate client for session history. May be nil if
+//     session resume is not needed.
 //
 // # Outputs
 //
@@ -237,13 +316,14 @@ type streamingChatHandler struct {
 //
 // # Examples
 //
-//	handler := handlers.NewStreamingChatHandler(llmClient, policyEngine, ragService)
+//	handler := handlers.NewStreamingChatHandler(llmClient, policyEngine, ragService, weaviateClient)
 //	router.POST("/v1/chat/direct/stream", handler.HandleDirectChatStream)
 //	router.POST("/v1/chat/rag/stream", handler.HandleChatRAGStream)
 //
 // # Limitations
 //
 //   - Panics on nil llmClient or policyEngine
+//   - Session resume requires weaviateClient to be non-nil
 //
 // # Assumptions
 //
@@ -253,6 +333,7 @@ func NewStreamingChatHandler(
 	llmClient llm.LLMClient,
 	policyEngine *policy_engine.PolicyEngine,
 	ragService *services.ChatRAGService,
+	weaviateClient *weaviate.Client,
 ) StreamingChatHandler {
 	if llmClient == nil {
 		panic("NewStreamingChatHandler: llmClient must not be nil")
@@ -262,10 +343,11 @@ func NewStreamingChatHandler(
 	}
 
 	return &streamingChatHandler{
-		llmClient:    llmClient,
-		policyEngine: policyEngine,
-		ragService:   ragService,
-		tracer:       otel.Tracer("aleutian.orchestrator.handlers.chat_streaming"),
+		llmClient:      llmClient,
+		policyEngine:   policyEngine,
+		ragService:     ragService,
+		weaviateClient: weaviateClient,
+		tracer:         otel.Tracer("aleutian.orchestrator.handlers.chat_streaming"),
 	}
 }
 
@@ -468,6 +550,8 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 
 	// Step 7: Stream tokens from LLM
 	// Inbound content (LLM → user) is allowed and logged via hash chain
+	// Note: Direct chat doesn't persist turns (no session context).
+	// Use HandleChatRAGStream for session-based persistence.
 	params := llm.GenerationParams{
 		EnableThinking:  req.EnableThinking,
 		BudgetTokens:    req.BudgetTokens,
@@ -476,7 +560,7 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 
 	var tokenCount int32
 	firstTokenTime := time.Time{}
-	streamErr := h.streamFromLLMWithMetrics(ctx, req.RequestID, req.Messages, params, sseWriter, endpoint, &tokenCount, &firstTokenTime)
+	streamErr := h.streamFromLLMWithMetrics(ctx, req.RequestID, req.Messages, params, sseWriter, endpoint, &tokenCount, &firstTokenTime, nil)
 
 	// Stop heartbeat
 	close(heartbeatDone)
@@ -690,6 +774,22 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 		return
 	}
 
+	// Step 2.5: Load session history for session resume
+	// This enables conversation continuity when resuming a session
+	var sessionHistory []ConversationTurn
+	if req.SessionId != "" {
+		var historyErr error
+		sessionHistory, historyErr = h.loadSessionHistory(ctx, req.SessionId)
+		if historyErr != nil {
+			// Log warning but continue - don't fail the request
+			slog.Warn("failed to load session history, continuing without history",
+				"session_id", req.SessionId,
+				"error", historyErr,
+			)
+		}
+		span.SetAttributes(attribute.Int("session.history_turns", len(sessionHistory)))
+	}
+
 	// Step 3: Set SSE headers and create writer
 	SetSSEHeaders(c.Writer)
 	sseWriter, err := NewSSEWriter(c.Writer)
@@ -767,14 +867,30 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 		return
 	}
 
-	// Step 10: Build messages with RAG context and stream
+	// Step 10: Build messages with RAG context and session history, then stream
 	// Inbound content (LLM → user) is allowed and logged via hash chain
-	messages := h.buildRAGMessages(ragCtx, req.Message)
+	messages := h.buildRAGMessagesWithHistory(ragCtx, req.Message, sessionHistory)
 	params := llm.GenerationParams{}
+
+	// Step 10.5: Create secure token accumulator for turn persistence
+	// Tokens are accumulated in mlocked memory with incremental hashing
+	accumulator, accErr := NewSecureTokenAccumulator()
+	if accErr != nil {
+		// Log warning but continue without persistence
+		slog.Warn("failed to create token accumulator, turn will not be persisted",
+			"requestId", req.Id,
+			"error", accErr,
+		)
+	}
+	defer func() {
+		if accumulator != nil {
+			accumulator.Destroy()
+		}
+	}()
 
 	var tokenCount int32
 	firstTokenTime := time.Time{}
-	streamErr := h.streamFromLLMWithMetrics(ctx, req.Id, messages, params, sseWriter, endpoint, &tokenCount, &firstTokenTime)
+	streamErr := h.streamFromLLMWithMetrics(ctx, req.Id, messages, params, sseWriter, endpoint, &tokenCount, &firstTokenTime, accumulator)
 
 	// Stop heartbeat
 	close(heartbeatDone)
@@ -815,11 +931,78 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 
 	span.SetAttributes(attribute.Int("stream.token_count", int(tokenCount)))
 
-	// Step 11: Emit done event with session ID
+	// Step 10.6: Persist conversation turn with hash chain
+	// This enables session verify to show turn counts and verify integrity
 	sessionID := req.SessionId
 	if sessionID == "" {
 		sessionID = req.Id
 	}
+
+	if accumulator != nil {
+		// Finalize accumulator to get answer and hash
+		answer, turnHash, finalizeErr := accumulator.Finalize()
+		if finalizeErr != nil {
+			slog.Warn("failed to finalize accumulator, turn will not be persisted",
+				"requestId", req.Id,
+				"sessionId", sessionID,
+				"error", finalizeErr,
+			)
+		} else if answer != "" {
+			// Audit answer for PII before persistence
+			shouldBlock, piiFindings := h.auditAnswerForPII(sessionID, answer)
+			span.SetAttributes(attribute.Int("pii.findings_count", len(piiFindings)))
+
+			if shouldBlock {
+				slog.Warn("turn persistence blocked due to PII in answer",
+					"requestId", req.Id,
+					"sessionId", sessionID,
+					"findingsCount", len(piiFindings),
+				)
+			} else {
+				// Get current turn count to determine next turn number
+				currentTurnCount, countErr := h.getTurnCount(ctx, sessionID)
+				if countErr != nil {
+					slog.Warn("failed to get turn count, using turn number 1",
+						"requestId", req.Id,
+						"sessionId", sessionID,
+						"error", countErr,
+					)
+					currentTurnCount = 0
+				}
+				turnNumber := currentTurnCount + 1
+
+				// Persist the conversation turn
+				persistErr := h.persistConversationTurn(
+					ctx,
+					sessionID,
+					turnNumber,
+					req.Message, // The user's question
+					answer,
+					turnHash,
+				)
+				if persistErr != nil {
+					slog.Error("failed to persist conversation turn",
+						"requestId", req.Id,
+						"sessionId", sessionID,
+						"turnNumber", turnNumber,
+						"error", persistErr,
+					)
+				} else {
+					span.SetAttributes(
+						attribute.Int("turn.number", turnNumber),
+						attribute.String("turn.hash", turnHash[:16]+"..."), // Truncate for logging
+					)
+					slog.Info("conversation turn persisted successfully",
+						"requestId", req.Id,
+						"sessionId", sessionID,
+						"turnNumber", turnNumber,
+					)
+				}
+			}
+		}
+	}
+
+	// Step 11: Emit done event with session ID
 	if err := sseWriter.WriteDone(sessionID); err != nil {
 		span.RecordError(err)
 		slog.Error("Failed to write done event",
@@ -903,6 +1086,7 @@ func (h *streamingChatHandler) runHeartbeat(
 //
 // Enhanced version of streamFromLLM that tracks token count and time to first token.
 // Also includes explicit context cancellation checks for cost control.
+// Optionally accumulates tokens into a secure buffer for persistence.
 //
 // # Inputs
 //
@@ -914,23 +1098,38 @@ func (h *streamingChatHandler) runHeartbeat(
 //   - endpoint: Endpoint name for metrics.
 //   - tokenCount: Pointer to atomic counter for tokens.
 //   - firstTokenTime: Pointer to time of first token (set once).
+//   - accumulator: Optional token accumulator for secure storage (may be nil).
 //
 // # Outputs
 //
 //   - error: Non-nil if streaming failed.
 //
+// # Examples
+//
+//	// Without accumulator
+//	err := h.streamFromLLMWithMetrics(ctx, reqID, msgs, params, writer, endpoint, &count, &time, nil)
+//
+//	// With accumulator for persistence
+//	acc, _ := NewSecureTokenAccumulator()
+//	defer acc.Destroy()
+//	err := h.streamFromLLMWithMetrics(ctx, reqID, msgs, params, writer, endpoint, &count, &time, acc)
+//	answer, hash, _ := acc.Finalize()
+//
 // # Security
 //
-// LLM output is streamed to user and logged via hash chain. This allows
-// async review for compliance while not blocking the streaming experience.
+// LLM output is streamed to user and optionally accumulated in mlocked memory.
+// Hash is computed incrementally as tokens arrive for integrity verification.
+// This allows async review for compliance while not blocking the streaming experience.
 //
 // # Limitations
 //
 //   - Requires LLM client to implement ChatStream.
+//   - Accumulator overflow causes token write failure but streaming continues.
 //
 // # Assumptions
 //
 //   - Writer is ready for events.
+//   - Accumulator, if provided, is ready for writes.
 func (h *streamingChatHandler) streamFromLLMWithMetrics(
 	ctx context.Context,
 	requestID string,
@@ -940,6 +1139,7 @@ func (h *streamingChatHandler) streamFromLLMWithMetrics(
 	endpoint observability.Endpoint,
 	tokenCount *int32,
 	firstTokenTime *time.Time,
+	accumulator TokenAccumulator,
 ) error {
 	callback := func(event llm.StreamEvent) error {
 		// Explicit context cancellation check (cost control)
@@ -957,6 +1157,19 @@ func (h *streamingChatHandler) streamFromLLMWithMetrics(
 				*firstTokenTime = time.Now()
 			}
 			atomic.AddInt32(tokenCount, 1)
+
+			// Accumulate token if accumulator provided (for turn persistence)
+			if accumulator != nil {
+				if err := accumulator.Write(event.Content); err != nil {
+					// Log but don't fail streaming - still want user to see response
+					slog.Warn("failed to accumulate token for persistence",
+						"requestId", requestID,
+						"error", err,
+						"accumulatorId", accumulator.ID(),
+					)
+				}
+			}
+
 			return writer.WriteToken(event.Content)
 
 		case llm.StreamEventThinking:
@@ -1107,6 +1320,103 @@ func (h *streamingChatHandler) auditRAGContextForPII(requestID string, ragContex
 	}
 }
 
+// auditAnswerForPII scans the LLM answer for PII before persistence.
+//
+// # Description
+//
+// Scans the accumulated LLM answer for PII using the policy engine.
+// The behavior depends on the PII scan mode configuration:
+//   - "audit" (default): Log findings but allow persistence
+//   - "block": Log findings and return true to block persistence
+//
+// # Inputs
+//
+//   - sessionID: Session ID for log correlation.
+//   - answer: The complete LLM response to scan.
+//
+// # Outputs
+//
+//   - bool: True if persistence should be blocked (only in "block" mode).
+//   - []policy_engine.ScanFinding: PII findings (empty if none).
+//
+// # Examples
+//
+//	shouldBlock, findings := h.auditAnswerForPII("sess-123", answer)
+//	if shouldBlock {
+//	    slog.Warn("Blocking persistence due to PII in answer")
+//	    return
+//	}
+//
+// # Limitations
+//
+//   - Scanning is best-effort; may miss some PII patterns.
+//
+// # Assumptions
+//
+//   - Policy engine is available.
+//   - ALEUTIAN_PII_SCAN_MODE is "audit" or "block" (defaults to "audit").
+func (h *streamingChatHandler) auditAnswerForPII(
+	sessionID string,
+	answer string,
+) (shouldBlock bool, findings []policy_engine.ScanFinding) {
+	findings = h.policyEngine.ScanFileContent(answer)
+
+	if len(findings) == 0 {
+		return false, nil
+	}
+
+	piiScanMode := h.getPIIScanMode()
+
+	slog.Warn("AUDIT: LLM answer contains potential PII",
+		"session_id", sessionID,
+		"findings_count", len(findings),
+		"findings_types", extractFindingTypes(findings),
+		"pii_scan_mode", piiScanMode,
+	)
+
+	if piiScanMode == "block" {
+		slog.Warn("BLOCKING persistence due to PII in answer",
+			"session_id", sessionID,
+		)
+		return true, findings
+	}
+
+	return false, findings
+}
+
+// getPIIScanMode returns the configured PII scan mode.
+//
+// # Description
+//
+// Reads the ALEUTIAN_PII_SCAN_MODE environment variable to determine
+// how to handle PII detected in LLM answers.
+//
+// # Outputs
+//
+//   - string: "audit" (default) or "block"
+//
+// # Examples
+//
+//	mode := h.getPIIScanMode()
+//	if mode == "block" {
+//	    // Don't persist answers with PII
+//	}
+//
+// # Limitations
+//
+//   - Only supports "audit" and "block" modes.
+//
+// # Assumptions
+//
+//   - Environment variable may not be set (defaults to "audit").
+func (h *streamingChatHandler) getPIIScanMode() string {
+	mode := os.Getenv("ALEUTIAN_PII_SCAN_MODE")
+	if mode == "block" {
+		return "block"
+	}
+	return "audit"
+}
+
 // extractFindingTypes extracts the classification names from policy findings for logging.
 //
 // # Description
@@ -1248,6 +1558,607 @@ Context:
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userMessage},
 	}
+}
+
+// =============================================================================
+// Session History Methods
+// =============================================================================
+
+// loadSessionHistory fetches conversation history from Weaviate for session resume.
+//
+// # Description
+//
+// When a session_id is provided, this method retrieves all previous
+// conversation turns from Weaviate in chronological order. This enables
+// the LLM to have context from the previous conversation when resuming.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and tracing.
+//   - sessionID: The session to load history for.
+//
+// # Outputs
+//
+//   - []ConversationTurn: Ordered history (oldest first), up to maxHistoryTurns.
+//   - error: Non-nil if Weaviate query failed.
+//
+// # Examples
+//
+//	history, err := h.loadSessionHistory(ctx, "sess-abc123")
+//	if err != nil {
+//	    slog.Warn("failed to load history", "error", err)
+//	}
+//	// history contains previous Q&A pairs
+//
+// # Limitations
+//
+//   - Returns empty slice (not error) if session doesn't exist.
+//   - History is limited to maxHistoryTurns most recent turns.
+//   - Requires weaviateClient to be non-nil.
+//
+// # Assumptions
+//
+//   - Session ID is a valid string (validation done by caller).
+//   - Weaviate Conversation class has question, answer, timestamp fields.
+func (h *streamingChatHandler) loadSessionHistory(
+	ctx context.Context,
+	sessionID string,
+) ([]ConversationTurn, error) {
+	ctx, span := h.tracer.Start(ctx, "streamingChatHandler.loadSessionHistory")
+	defer span.End()
+
+	span.SetAttributes(attribute.String("session_id", sessionID))
+
+	// Check if Weaviate client is available
+	if h.weaviateClient == nil {
+		slog.Debug("Weaviate client not available, skipping history load")
+		return nil, nil
+	}
+
+	// Check for empty session ID
+	if sessionID == "" {
+		return nil, nil
+	}
+
+	slog.Debug("loading session history",
+		"session_id", sessionID,
+		"max_turns", maxHistoryTurns,
+	)
+
+	// Define fields to retrieve
+	fields := []graphql.Field{
+		{Name: "question"},
+		{Name: "answer"},
+		{Name: "timestamp"},
+	}
+
+	// Create filter for session_id
+	whereFilter := filters.Where().
+		WithPath([]string{"session_id"}).
+		WithOperator(filters.Equal).
+		WithValueString(sessionID)
+
+	// Sort by timestamp ascending (oldest first)
+	sortBy := graphql.Sort{
+		Path:  []string{"timestamp"},
+		Order: graphql.Asc,
+	}
+
+	// Execute query with limit
+	result, err := h.weaviateClient.GraphQL().Get().
+		WithClassName("Conversation").
+		WithWhere(whereFilter).
+		WithSort(sortBy).
+		WithLimit(maxHistoryTurns).
+		WithFields(fields...).
+		Do(ctx)
+
+	if err != nil {
+		span.RecordError(err)
+		slog.Error("failed to query Weaviate for session history",
+			"session_id", sessionID,
+			"error", err,
+		)
+		return nil, fmt.Errorf("query session history: %w", err)
+	}
+
+	// Parse response using typed struct
+	// Marshal to JSON and unmarshal to typed struct for compile-time safety
+	jsonBytes, err := json.Marshal(result.Data)
+	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("marshal weaviate response: %w", err)
+	}
+
+	var typedResponse WeaviateConversationResponse
+	if err := json.Unmarshal(jsonBytes, &typedResponse); err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("unmarshal weaviate response: %w", err)
+	}
+
+	history := h.filterValidTurns(typedResponse.Get.Conversation)
+
+	span.SetAttributes(attribute.Int("turns_loaded", len(history)))
+	slog.Info("session history loaded",
+		"session_id", sessionID,
+		"turns_loaded", len(history),
+	)
+
+	return history, nil
+}
+
+// filterValidTurns filters conversation turns to only those with both question and answer.
+//
+// # Description
+//
+// Filters the parsed conversation turns to ensure only complete turns
+// (those with both a question and an answer) are included in the history.
+//
+// # Inputs
+//
+//   - turns: Parsed conversation turns from Weaviate.
+//
+// # Outputs
+//
+//   - []ConversationTurn: Filtered turns with non-empty question and answer.
+//
+// # Limitations
+//
+//   - Drops turns missing either question or answer.
+//
+// # Assumptions
+//
+//   - Input turns are already typed from JSON unmarshaling.
+func (h *streamingChatHandler) filterValidTurns(turns []ConversationTurn) []ConversationTurn {
+	validTurns := make([]ConversationTurn, 0, len(turns))
+
+	for _, turn := range turns {
+		if turn.Question != "" && turn.Answer != "" {
+			validTurns = append(validTurns, turn)
+		}
+	}
+
+	return validTurns
+}
+
+// buildRAGMessagesWithHistory constructs LLM messages including conversation history.
+//
+// # Description
+//
+// Builds the message array with:
+//  1. System prompt with RAG context
+//  2. Previous conversation turns (alternating user/assistant)
+//  3. Current user message
+//
+// This enables the LLM to maintain conversation continuity when resuming
+// a session.
+//
+// # Inputs
+//
+//   - ragContext: Retrieved document context from RAG pipeline.
+//   - userMessage: Current user question.
+//   - history: Previous conversation turns (may be empty).
+//
+// # Outputs
+//
+//   - []datatypes.Message: Messages ready for LLM, including history.
+//
+// # Examples
+//
+//	messages := h.buildRAGMessagesWithHistory(
+//	    "OAuth is an authorization framework...",
+//	    "How does it compare to SAML?",
+//	    []ConversationTurn{{Question: "What is OAuth?", Answer: "OAuth is..."}},
+//	)
+//	// messages includes system prompt, history, and current question
+//
+// # Limitations
+//
+//   - System prompt is hardcoded.
+//   - History is included in linear order (no summarization).
+//
+// # Assumptions
+//
+//   - History is already ordered chronologically.
+//   - History length is within acceptable limits for context window.
+func (h *streamingChatHandler) buildRAGMessagesWithHistory(
+	ragContext string,
+	userMessage string,
+	history []ConversationTurn,
+) []datatypes.Message {
+	systemPrompt := `You are a helpful assistant. Use the following context to answer the user's question.
+If the context doesn't contain relevant information, say so and provide what help you can.
+
+Context:
+` + ragContext
+
+	// Calculate capacity: system + (history * 2) + current user
+	capacity := 1 + len(history)*2 + 1
+	messages := make([]datatypes.Message, 0, capacity)
+
+	// Add system message
+	messages = append(messages, datatypes.Message{
+		Role:    "system",
+		Content: systemPrompt,
+	})
+
+	// Add conversation history
+	for _, turn := range history {
+		messages = append(messages,
+			datatypes.Message{Role: "user", Content: turn.Question},
+			datatypes.Message{Role: "assistant", Content: turn.Answer},
+		)
+	}
+
+	// Add current user message
+	messages = append(messages, datatypes.Message{
+		Role:    "user",
+		Content: userMessage,
+	})
+
+	return messages
+}
+
+// =============================================================================
+// Turn Persistence Methods
+// =============================================================================
+
+// persistConversationTurn saves a Q&A turn to Weaviate with hash chain integrity.
+//
+// # Description
+//
+// Persists a completed conversation turn to the Weaviate Conversation class.
+// The turn includes:
+//   - Session ID and turn number for ordering
+//   - Question (user message) and answer (LLM response)
+//   - Timestamp of when the turn was created
+//   - Turn hash for integrity verification
+//
+// The turn UUID is generated from a hash of the content (session_id + turn_number +
+// question + answer) to ensure idempotency - retrying the same turn creates the
+// same UUID, preventing duplicates.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and tracing.
+//   - sessionID: UUID of the session this turn belongs to.
+//   - turnNumber: Sequential turn number (1-indexed).
+//   - question: The user's input message.
+//   - answer: The complete LLM response.
+//   - turnHash: SHA-256 hash of the answer for integrity verification.
+//
+// # Outputs
+//
+//   - error: Non-nil if persistence failed.
+//
+// # Examples
+//
+//	err := h.persistConversationTurn(ctx, "sess-123", 1, "What is OAuth?", "OAuth is...", "abc123...")
+//	if err != nil {
+//	    slog.Error("Failed to persist turn", "error", err)
+//	    // Note: Request should still succeed - user got their answer
+//	}
+//
+// # Limitations
+//
+//   - Requires weaviateClient to be non-nil.
+//   - Does not block on failure - user experience takes priority.
+//
+// # Assumptions
+//
+//   - Weaviate schema has been initialized with Conversation class.
+//   - Session object exists or will be created separately.
+func (h *streamingChatHandler) persistConversationTurn(
+	ctx context.Context,
+	sessionID string,
+	turnNumber int,
+	question string,
+	answer string,
+	turnHash string,
+) error {
+	_, span := tracer.Start(ctx, "streamingChatHandler.persistConversationTurn")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("session_id", sessionID),
+		attribute.Int("turn_number", turnNumber),
+	)
+
+	if h.weaviateClient == nil {
+		return fmt.Errorf("weaviate client not available")
+	}
+
+	turnUUID := h.generateTurnUUID(sessionID, turnNumber, question, answer)
+	timestamp := time.Now().UnixMilli()
+
+	properties := h.buildTurnProperties(sessionID, turnNumber, question, answer, turnHash, timestamp)
+
+	err := h.createConversationObject(ctx, turnUUID, properties)
+	if err != nil {
+		span.RecordError(err)
+		return fmt.Errorf("create conversation object: %w", err)
+	}
+
+	h.logTurnPersistence(sessionID, turnNumber, turnUUID, turnHash, timestamp)
+	span.SetAttributes(attribute.String("turn_uuid", turnUUID))
+
+	return nil
+}
+
+// generateTurnUUID creates a deterministic UUID for a turn based on content.
+//
+// # Description
+//
+// Generates a UUID from a SHA-256 hash of the turn content. This ensures:
+//   - Same content always produces the same UUID (idempotency)
+//   - Retrying a failed persist won't create duplicates
+//   - UUID is deterministically reproducible
+//
+// # Inputs
+//
+//   - sessionID: Session UUID.
+//   - turnNumber: Turn number within session.
+//   - question: User's question.
+//   - answer: LLM's answer.
+//
+// # Outputs
+//
+//   - string: UUID string derived from content hash.
+//
+// # Examples
+//
+//	uuid := h.generateTurnUUID("sess-123", 1, "Hello", "Hi there!")
+//
+// # Limitations
+//
+//   - UUID is content-dependent; changing any field changes the UUID.
+//
+// # Assumptions
+//
+//   - Inputs are non-empty strings (empty strings will still work).
+func (h *streamingChatHandler) generateTurnUUID(
+	sessionID string,
+	turnNumber int,
+	question string,
+	answer string,
+) string {
+	content := fmt.Sprintf("%s|%d|%s|%s", sessionID, turnNumber, question, answer)
+	hash := sha256.Sum256([]byte(content))
+	turnUUID, _ := uuid.FromBytes(hash[:16])
+	return turnUUID.String()
+}
+
+// buildTurnProperties constructs the properties map for the Conversation object.
+//
+// # Description
+//
+// Builds a map of all properties for the Weaviate Conversation object.
+//
+// # Inputs
+//
+//   - sessionID: Session UUID.
+//   - turnNumber: Turn number (1-indexed).
+//   - question: User's question.
+//   - answer: LLM's answer.
+//   - turnHash: SHA-256 hash of answer.
+//   - timestamp: Unix milliseconds timestamp.
+//
+// # Outputs
+//
+//   - map[string]interface{}: Properties for Weaviate object.
+//
+// # Limitations
+//
+//   - Does not include inSession reference (TODO: add beacon).
+//
+// # Assumptions
+//
+//   - All inputs are valid.
+func (h *streamingChatHandler) buildTurnProperties(
+	sessionID string,
+	turnNumber int,
+	question string,
+	answer string,
+	turnHash string,
+	timestamp int64,
+) map[string]interface{} {
+	return map[string]interface{}{
+		"session_id":  sessionID,
+		"turn_number": turnNumber,
+		"question":    question,
+		"answer":      answer,
+		"turn_hash":   turnHash,
+		"timestamp":   timestamp,
+	}
+}
+
+// createConversationObject creates the Conversation object in Weaviate.
+//
+// # Description
+//
+// Performs the actual Weaviate API call to create the object.
+//
+// # Inputs
+//
+//   - ctx: Context for the request.
+//   - turnUUID: UUID for the new object.
+//   - properties: Object properties.
+//
+// # Outputs
+//
+//   - error: Non-nil if creation failed.
+//
+// # Limitations
+//
+//   - Weaviate must be available.
+//
+// # Assumptions
+//
+//   - Schema exists with Conversation class.
+func (h *streamingChatHandler) createConversationObject(
+	ctx context.Context,
+	turnUUID string,
+	properties map[string]interface{},
+) error {
+	_, err := h.weaviateClient.Data().Creator().
+		WithClassName("Conversation").
+		WithID(turnUUID).
+		WithProperties(properties).
+		Do(ctx)
+	return err
+}
+
+// logTurnPersistence logs successful turn persistence.
+//
+// # Description
+//
+// Logs the turn persistence with relevant details for debugging and audit.
+//
+// # Inputs
+//
+//   - sessionID: Session UUID.
+//   - turnNumber: Turn number.
+//   - turnUUID: Generated turn UUID.
+//   - turnHash: Turn hash (truncated for logging).
+//   - timestamp: Creation timestamp.
+//
+// # Outputs
+//
+// None.
+//
+// # Limitations
+//
+//   - Hash is truncated to 16 characters for logging.
+//
+// # Assumptions
+//
+//   - Called only after successful persistence.
+func (h *streamingChatHandler) logTurnPersistence(
+	sessionID string,
+	turnNumber int,
+	turnUUID string,
+	turnHash string,
+	timestamp int64,
+) {
+	hashPreview := turnHash
+	if len(hashPreview) > 16 {
+		hashPreview = hashPreview[:16] + "..."
+	}
+
+	slog.Info("Persisted conversation turn",
+		"session_id", sessionID,
+		"turn_number", turnNumber,
+		"turn_uuid", turnUUID,
+		"turn_hash", hashPreview,
+		"timestamp", timestamp,
+	)
+}
+
+// getTurnCount returns the current number of turns in a session.
+//
+// # Description
+//
+// Queries Weaviate to count existing conversation turns for a session.
+// Used to determine the next turn number when persisting.
+//
+// # Inputs
+//
+//   - ctx: Context for the request.
+//   - sessionID: Session to count turns for.
+//
+// # Outputs
+//
+//   - int: Number of existing turns (0 if none or error).
+//   - error: Non-nil if query failed.
+//
+// # Examples
+//
+//	count, err := h.getTurnCount(ctx, "sess-123")
+//	nextTurn := count + 1
+//
+// # Limitations
+//
+//   - Returns 0 on error (caller should handle).
+//
+// # Assumptions
+//
+//   - Weaviate is available.
+func (h *streamingChatHandler) getTurnCount(ctx context.Context, sessionID string) (int, error) {
+	if h.weaviateClient == nil {
+		return 0, fmt.Errorf("weaviate client not available")
+	}
+
+	whereFilter := filters.Where().
+		WithPath([]string{"session_id"}).
+		WithOperator(filters.Equal).
+		WithValueString(sessionID)
+
+	result, err := h.weaviateClient.GraphQL().Aggregate().
+		WithClassName("Conversation").
+		WithWhere(whereFilter).
+		WithFields(graphql.Field{
+			Name: "meta",
+			Fields: []graphql.Field{
+				{Name: "count"},
+			},
+		}).
+		Do(ctx)
+
+	if err != nil {
+		return 0, fmt.Errorf("aggregate query failed: %w", err)
+	}
+
+	return h.parseTurnCount(result.Data)
+}
+
+// parseTurnCount extracts the count from an aggregate query result.
+//
+// # Description
+//
+// Parses the Weaviate aggregate response to extract the turn count.
+//
+// # Inputs
+//
+//   - data: Raw response data from Weaviate.
+//
+// # Outputs
+//
+//   - int: Turn count (0 if not found or parse error).
+//   - error: Non-nil if parsing failed.
+//
+// # Limitations
+//
+//   - Expects specific Weaviate aggregate response structure.
+//
+// # Assumptions
+//
+//   - Response follows standard aggregate format.
+func (h *streamingChatHandler) parseTurnCount(data interface{}) (int, error) {
+	// Marshal and unmarshal for type safety
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return 0, fmt.Errorf("marshal aggregate response: %w", err)
+	}
+
+	var response struct {
+		Aggregate struct {
+			Conversation []struct {
+				Meta struct {
+					Count float64 `json:"count"`
+				} `json:"meta"`
+			} `json:"Conversation"`
+		} `json:"Aggregate"`
+	}
+
+	if err := json.Unmarshal(jsonBytes, &response); err != nil {
+		return 0, fmt.Errorf("unmarshal aggregate response: %w", err)
+	}
+
+	if len(response.Aggregate.Conversation) == 0 {
+		return 0, nil
+	}
+
+	return int(response.Aggregate.Conversation[0].Meta.Count), nil
 }
 
 // =============================================================================

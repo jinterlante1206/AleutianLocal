@@ -14,6 +14,7 @@ import (
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
+	"github.com/influxdata/influxdb-client-go/v2/api/query"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
 	"github.com/stretchr/testify/assert"
@@ -261,14 +262,14 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func getFloat(r *influxdb2.FluxRecord, key string) float64 {
+func getFloat(r *query.FluxRecord, key string) float64 {
 	if v, ok := r.ValueByKey(key).(float64); ok {
 		return v
 	}
 	return 0.0
 }
 
-func getString(r *influxdb2.FluxRecord, key string) string {
+func getString(r *query.FluxRecord, key string) string {
 	if v, ok := r.ValueByKey(key).(string); ok {
 		return v
 	}

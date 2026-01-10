@@ -1043,6 +1043,11 @@ func (m *DefaultModelManager) attemptEnsureOnce(ctx context.Context, model strin
 		return m.handleExistingModel(ctx, model, info, opts)
 	}
 
+	// Propagate retryable network errors so retry logic can handle them
+	if err != nil && isRetryableError(err) {
+		return ModelResult{}, err
+	}
+
 	return m.handleMissingModel(ctx, model, opts)
 }
 

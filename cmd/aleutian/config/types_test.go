@@ -374,3 +374,560 @@ func TestProfileConfig_Fields(t *testing.T) {
 		t.Errorf("MinRAM_MB = %d, want %d", profile.MinRAM_MB, 65536)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Enterprise Config Validation Tests
+// -----------------------------------------------------------------------------
+
+// TestHMACConfig_ValidAlgorithms verifies valid HMAC algorithms are accepted.
+func TestHMACConfig_ValidAlgorithms(t *testing.T) {
+	validAlgorithms := []string{"sha256", "sha384", "sha512"}
+
+	for _, algo := range validAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := HMACConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for algorithm %q returned error: %v", algo, err)
+			}
+		})
+	}
+}
+
+// TestHMACConfig_InvalidAlgorithm verifies invalid HMAC algorithms are rejected.
+func TestHMACConfig_InvalidAlgorithm(t *testing.T) {
+	invalidAlgorithms := []string{"sha1", "md5", "sha128", "invalid", "SHA256"}
+
+	for _, algo := range invalidAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := HMACConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for algorithm %q should return error", algo)
+			}
+			// Verify it's a ValidationError
+			if _, ok := err.(*ValidationError); !ok {
+				t.Errorf("Expected ValidationError, got %T", err)
+			}
+		})
+	}
+}
+
+// TestHMACConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestHMACConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := HMACConfig{
+		Enabled:   false,
+		Algorithm: "invalid-algo",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestHMACConfig_EmptyAlgorithmUsesDefault verifies empty algorithm is valid.
+func TestHMACConfig_EmptyAlgorithmUsesDefault(t *testing.T) {
+	cfg := HMACConfig{
+		Enabled:   true,
+		Algorithm: "", // Will use default sha256
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should accept empty algorithm (uses default), got: %v", err)
+	}
+}
+
+// TestHSMConfig_ValidProviders verifies valid HSM providers are accepted.
+func TestHSMConfig_ValidProviders(t *testing.T) {
+	validProviders := []string{"pkcs11", "aws_cloudhsm", "azure_hsm", "thales_luna"}
+
+	for _, provider := range validProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := HSMConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for provider %q returned error: %v", provider, err)
+			}
+		})
+	}
+}
+
+// TestHSMConfig_InvalidProvider verifies invalid HSM providers are rejected.
+func TestHSMConfig_InvalidProvider(t *testing.T) {
+	invalidProviders := []string{"random_provider", "hsm", "yubihsm", "Invalid"}
+
+	for _, provider := range invalidProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := HSMConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for provider %q should return error", provider)
+			}
+			// Verify it's a ValidationError
+			if _, ok := err.(*ValidationError); !ok {
+				t.Errorf("Expected ValidationError, got %T", err)
+			}
+		})
+	}
+}
+
+// TestHSMConfig_EmptyProviderWhenEnabled verifies empty provider is rejected.
+func TestHSMConfig_EmptyProviderWhenEnabled(t *testing.T) {
+	cfg := HSMConfig{
+		Enabled:  true,
+		Provider: "",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Validate() should reject empty provider when enabled")
+	}
+	valErr, ok := err.(*ValidationError)
+	if !ok {
+		t.Errorf("Expected ValidationError, got %T", err)
+	}
+	if valErr.Field != "hsm.provider" {
+		t.Errorf("Expected field 'hsm.provider', got %q", valErr.Field)
+	}
+}
+
+// TestHSMConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestHSMConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := HSMConfig{
+		Enabled:  false,
+		Provider: "invalid-provider",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestTSAConfig_ValidProviders verifies valid TSA providers are accepted.
+func TestTSAConfig_ValidProviders(t *testing.T) {
+	validProviders := []string{"digicert", "globalsign", "sectigo", "freetsa"}
+
+	for _, provider := range validProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := TSAConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for provider %q returned error: %v", provider, err)
+			}
+		})
+	}
+}
+
+// TestTSAConfig_CustomProviderRequiresURL verifies custom provider requires URL.
+func TestTSAConfig_CustomProviderRequiresURL(t *testing.T) {
+	// Custom without URL should fail
+	cfg := TSAConfig{
+		Enabled:  true,
+		Provider: "custom",
+		URL:      "",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Validate() should reject custom provider without URL")
+	}
+	valErr, ok := err.(*ValidationError)
+	if !ok {
+		t.Errorf("Expected ValidationError, got %T", err)
+	}
+	if valErr.Field != "tsa.url" {
+		t.Errorf("Expected field 'tsa.url', got %q", valErr.Field)
+	}
+}
+
+// TestTSAConfig_CustomProviderWithURL verifies custom provider with URL is valid.
+func TestTSAConfig_CustomProviderWithURL(t *testing.T) {
+	cfg := TSAConfig{
+		Enabled:  true,
+		Provider: "custom",
+		URL:      "https://tsa.example.com/timestamp",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() for custom provider with URL returned error: %v", err)
+	}
+}
+
+// TestTSAConfig_InvalidProvider verifies invalid TSA providers are rejected.
+func TestTSAConfig_InvalidProvider(t *testing.T) {
+	invalidProviders := []string{"random_tsa", "verisign", "comodo", "Invalid"}
+
+	for _, provider := range invalidProviders {
+		t.Run(provider, func(t *testing.T) {
+			cfg := TSAConfig{
+				Enabled:  true,
+				Provider: provider,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for provider %q should return error", provider)
+			}
+		})
+	}
+}
+
+// TestTSAConfig_EmptyProviderWhenEnabled verifies empty provider is rejected.
+func TestTSAConfig_EmptyProviderWhenEnabled(t *testing.T) {
+	cfg := TSAConfig{
+		Enabled:  true,
+		Provider: "",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Validate() should reject empty provider when enabled")
+	}
+	valErr, ok := err.(*ValidationError)
+	if !ok {
+		t.Errorf("Expected ValidationError, got %T", err)
+	}
+	if valErr.Field != "tsa.provider" {
+		t.Errorf("Expected field 'tsa.provider', got %q", valErr.Field)
+	}
+}
+
+// TestTSAConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestTSAConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := TSAConfig{
+		Enabled:  false,
+		Provider: "invalid-provider",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestSignatureConfig_ValidAlgorithms verifies valid signature algorithms are accepted.
+func TestSignatureConfig_ValidAlgorithms(t *testing.T) {
+	validAlgorithms := []string{"rsa2048", "rsa4096", "ecdsa_p256", "ecdsa_p384", "ed25519"}
+
+	for _, algo := range validAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := SignatureConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() for algorithm %q returned error: %v", algo, err)
+			}
+		})
+	}
+}
+
+// TestSignatureConfig_InvalidAlgorithm verifies invalid signature algorithms are rejected.
+func TestSignatureConfig_InvalidAlgorithm(t *testing.T) {
+	invalidAlgorithms := []string{"rsa1024", "dsa", "ecdsa_p521", "Invalid", "RSA2048"}
+
+	for _, algo := range invalidAlgorithms {
+		t.Run(algo, func(t *testing.T) {
+			cfg := SignatureConfig{
+				Enabled:   true,
+				Algorithm: algo,
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Errorf("Validate() for algorithm %q should return error", algo)
+			}
+			// Verify it's a ValidationError
+			if _, ok := err.(*ValidationError); !ok {
+				t.Errorf("Expected ValidationError, got %T", err)
+			}
+		})
+	}
+}
+
+// TestSignatureConfig_DisabledSkipsValidation verifies disabled config is always valid.
+func TestSignatureConfig_DisabledSkipsValidation(t *testing.T) {
+	cfg := SignatureConfig{
+		Enabled:   false,
+		Algorithm: "invalid-algo",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should skip validation when disabled, got: %v", err)
+	}
+}
+
+// TestSignatureConfig_EmptyAlgorithmUsesDefault verifies empty algorithm is valid.
+func TestSignatureConfig_EmptyAlgorithmUsesDefault(t *testing.T) {
+	cfg := SignatureConfig{
+		Enabled:   true,
+		Algorithm: "", // Will use default ecdsa_p256
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should accept empty algorithm (uses default), got: %v", err)
+	}
+}
+
+// TestValidationError_Error verifies error message formatting.
+func TestValidationError_Error(t *testing.T) {
+	err := &ValidationError{
+		Field:   "test.field",
+		Value:   "bad-value",
+		Message: "is not valid",
+	}
+
+	expected := "config validation error: test.field (bad-value): is not valid"
+	if err.Error() != expected {
+		t.Errorf("Error() = %q, want %q", err.Error(), expected)
+	}
+}
+
+// TestValidationError_EmptyValue verifies error message with empty value.
+func TestValidationError_EmptyValue(t *testing.T) {
+	err := &ValidationError{
+		Field:   "test.field",
+		Value:   "",
+		Message: "is required",
+	}
+
+	expected := "config validation error: test.field (): is required"
+	if err.Error() != expected {
+		t.Errorf("Error() = %q, want %q", err.Error(), expected)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// GetProfileForRAM Tests
+// -----------------------------------------------------------------------------
+
+// TestGetProfileForRAM verifies RAM-based profile selection.
+func TestGetProfileForRAM(t *testing.T) {
+	tests := []struct {
+		name     string
+		ramMB    int
+		expected string
+	}{
+		{"very low RAM returns low", 4096, "low"},
+		{"8GB returns low", 8192, "low"},
+		{"16GB returns standard", 16384, "standard"},
+		{"32GB returns performance", 32768, "performance"},
+		{"64GB returns performance", 65536, "performance"},
+		{"128GB returns ultra", 131072, "ultra"},
+		{"zero RAM returns low", 0, "low"},
+		{"negative RAM returns low", -1000, "low"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetProfileForRAM(tt.ramMB)
+			if result != tt.expected {
+				t.Errorf("GetProfileForRAM(%d) = %q, want %q", tt.ramMB, result, tt.expected)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// SecretsConfig Tests
+// -----------------------------------------------------------------------------
+
+// TestSecretsConfig_GetTimeout verifies timeout default and custom values.
+func TestSecretsConfig_GetTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *SecretsConfig
+		expected time.Duration
+	}{
+		{
+			name:     "nil config returns default",
+			config:   nil,
+			expected: 10 * time.Second,
+		},
+		{
+			name:     "zero timeout returns default",
+			config:   &SecretsConfig{Timeout: 0},
+			expected: 10 * time.Second,
+		},
+		{
+			name:     "negative timeout returns default",
+			config:   &SecretsConfig{Timeout: -5 * time.Second},
+			expected: 10 * time.Second,
+		},
+		{
+			name:     "positive timeout returns configured value",
+			config:   &SecretsConfig{Timeout: 30 * time.Second},
+			expected: 30 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetTimeout()
+			if result != tt.expected {
+				t.Errorf("GetTimeout() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestSecretsConfig_GetOnePasswordVault verifies vault name default and custom values.
+func TestSecretsConfig_GetOnePasswordVault(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *SecretsConfig
+		expected string
+	}{
+		{
+			name:     "nil config returns default",
+			config:   nil,
+			expected: "Aleutian",
+		},
+		{
+			name:     "empty vault returns default",
+			config:   &SecretsConfig{OnePasswordVault: ""},
+			expected: "Aleutian",
+		},
+		{
+			name:     "custom vault returns configured value",
+			config:   &SecretsConfig{OnePasswordVault: "MyVault"},
+			expected: "MyVault",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetOnePasswordVault()
+			if result != tt.expected {
+				t.Errorf("GetOnePasswordVault() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestSecretsConfig_GetVaultPath verifies Vault path default and custom values.
+func TestSecretsConfig_GetVaultPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *SecretsConfig
+		expected string
+	}{
+		{
+			name:     "nil config returns default",
+			config:   nil,
+			expected: "secret/data/aleutian",
+		},
+		{
+			name:     "empty path returns default",
+			config:   &SecretsConfig{VaultPath: ""},
+			expected: "secret/data/aleutian",
+		},
+		{
+			name:     "custom path returns configured value",
+			config:   &SecretsConfig{VaultPath: "secret/data/custom"},
+			expected: "secret/data/custom",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.config.GetVaultPath()
+			if result != tt.expected {
+				t.Errorf("GetVaultPath() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// FallbackChain Tests
+// -----------------------------------------------------------------------------
+
+// TestFallbackChain_Models verifies model list generation.
+func TestFallbackChain_Models(t *testing.T) {
+	tests := []struct {
+		name     string
+		chain    *FallbackChain
+		expected []string
+	}{
+		{
+			name:     "nil chain returns nil",
+			chain:    nil,
+			expected: nil,
+		},
+		{
+			name:     "empty primary returns nil",
+			chain:    &FallbackChain{Primary: ""},
+			expected: nil,
+		},
+		{
+			name:     "primary only returns single model",
+			chain:    &FallbackChain{Primary: "gpt-4"},
+			expected: []string{"gpt-4"},
+		},
+		{
+			name: "primary with fallbacks returns all",
+			chain: &FallbackChain{
+				Primary:   "gpt-4",
+				Fallbacks: []string{"gpt-3.5", "llama3"},
+			},
+			expected: []string{"gpt-4", "gpt-3.5", "llama3"},
+		},
+		{
+			name: "primary with empty fallbacks",
+			chain: &FallbackChain{
+				Primary:   "gpt-4",
+				Fallbacks: []string{},
+			},
+			expected: []string{"gpt-4"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.chain.Models()
+			if len(result) != len(tt.expected) {
+				t.Fatalf("Models() returned %d items, want %d", len(result), len(tt.expected))
+			}
+			for i, model := range result {
+				if model != tt.expected[i] {
+					t.Errorf("Models()[%d] = %q, want %q", i, model, tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Hardware Profile Tests
+// -----------------------------------------------------------------------------
+
+// TestBuiltInHardwareProfiles verifies built-in profiles exist.
+func TestBuiltInHardwareProfiles(t *testing.T) {
+	expectedProfiles := []string{"low", "standard", "performance", "ultra"}
+
+	for _, name := range expectedProfiles {
+		t.Run(name, func(t *testing.T) {
+			profile, exists := BuiltInHardwareProfiles[name]
+			if !exists {
+				t.Fatalf("Profile %q not found", name)
+			}
+			if profile.Name != name {
+				t.Errorf("Profile name = %q, want %q", profile.Name, name)
+			}
+		})
+	}
+}
+
+// TestHardwareProfileOrder verifies profile order is defined.
+func TestHardwareProfileOrder(t *testing.T) {
+	if len(HardwareProfileOrder) == 0 {
+		t.Error("HardwareProfileOrder should not be empty")
+	}
+
+	// Verify all profiles in order exist
+	for _, name := range HardwareProfileOrder {
+		if _, exists := BuiltInHardwareProfiles[name]; !exists {
+			t.Errorf("Profile %q in order but not in BuiltInHardwareProfiles", name)
+		}
+	}
+}

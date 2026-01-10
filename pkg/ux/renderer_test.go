@@ -555,3 +555,345 @@ func TestTerminalStreamRenderer_FullFlow_MachineMode(t *testing.T) {
 		t.Errorf("expected 2 sources, got %d", len(result.Sources))
 	}
 }
+
+// =============================================================================
+// Full Personality Mode Tests (Terminal Renderer)
+// =============================================================================
+
+func TestTerminalStreamRenderer_OnStatus_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	// Status should start a spinner
+	renderer.OnStatus(ctx, "Searching...")
+	renderer.OnStatus(ctx, "Processing...")
+	renderer.OnDone(ctx, "")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.TotalEvents < 2 {
+		t.Errorf("expected at least 2 events, got %d", result.TotalEvents)
+	}
+}
+
+func TestTerminalStreamRenderer_OnToken_FullMode_StopsSpinner(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	// Start a spinner with status
+	renderer.OnStatus(ctx, "Thinking...")
+	// First token should stop the spinner
+	renderer.OnToken(ctx, "Hello")
+	renderer.OnDone(ctx, "")
+	renderer.Finalize()
+
+	output := buf.String()
+	if !strings.Contains(output, "Hello") {
+		t.Errorf("expected token in output, got %q", output)
+	}
+}
+
+func TestTerminalStreamRenderer_OnThinking_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	renderer.OnThinking(ctx, "Let me think about this...")
+	renderer.OnToken(ctx, "The answer is 42.")
+	renderer.OnDone(ctx, "")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.Thinking != "Let me think about this..." {
+		t.Errorf("unexpected Thinking: %q", result.Thinking)
+	}
+}
+
+func TestTerminalStreamRenderer_OnThinking_StopsSpinner(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	// Start a spinner
+	renderer.OnStatus(ctx, "Processing...")
+	// Thinking should stop the spinner
+	renderer.OnThinking(ctx, "Analyzing...")
+	renderer.OnDone(ctx, "")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.ThinkingTokens != 1 {
+		t.Errorf("expected ThinkingTokens 1, got %d", result.ThinkingTokens)
+	}
+}
+
+func TestTerminalStreamRenderer_OnSources_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	sources := []SourceInfo{
+		{Source: "document.pdf", Score: 0.92},
+		{Source: "notes.md", Distance: 0.15},
+	}
+	renderer.OnSources(ctx, sources)
+	renderer.OnToken(ctx, "Based on the sources...")
+	renderer.OnDone(ctx, "sess-full")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if len(result.Sources) != 2 {
+		t.Errorf("expected 2 sources, got %d", len(result.Sources))
+	}
+}
+
+func TestTerminalStreamRenderer_OnSources_StopsSpinner(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	// Start a spinner
+	renderer.OnStatus(ctx, "Searching...")
+	// Sources should stop the spinner
+	renderer.OnSources(ctx, []SourceInfo{{Source: "doc.pdf"}})
+	renderer.OnDone(ctx, "")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if len(result.Sources) != 1 {
+		t.Errorf("expected 1 source, got %d", len(result.Sources))
+	}
+}
+
+func TestTerminalStreamRenderer_OnDone_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	renderer.OnToken(ctx, "Answer")
+	renderer.OnDone(ctx, "sess-full-test")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.SessionID != "sess-full-test" {
+		t.Errorf("expected SessionID 'sess-full-test', got %q", result.SessionID)
+	}
+}
+
+func TestTerminalStreamRenderer_OnError_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	renderer.OnStatus(ctx, "Working...")
+	renderer.OnError(ctx, errors.New("something went wrong"))
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.Error != "something went wrong" {
+		t.Errorf("expected Error 'something went wrong', got %q", result.Error)
+	}
+}
+
+func TestTerminalStreamRenderer_OnError_MinimalMode(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityMinimal)
+	ctx := context.Background()
+
+	renderer.OnError(ctx, errors.New("error message"))
+	renderer.Finalize()
+
+	output := buf.String()
+	if !strings.Contains(output, "error message") {
+		t.Errorf("expected error message in output, got %q", output)
+	}
+}
+
+func TestTerminalStreamRenderer_FullFlow_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	// Simulate a typical RAG streaming response in full mode
+	renderer.OnStatus(ctx, "Searching knowledge base...")
+	renderer.OnSources(ctx, []SourceInfo{
+		{Source: "architecture.pdf", Score: 0.95},
+	})
+	renderer.OnStatus(ctx, "Generating response...")
+	renderer.OnThinking(ctx, "Let me analyze...")
+	renderer.OnToken(ctx, "The answer ")
+	renderer.OnToken(ctx, "is 42.")
+	renderer.OnDone(ctx, "sess-test")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.Answer != "The answer is 42." {
+		t.Errorf("unexpected Answer: %q", result.Answer)
+	}
+	if result.Thinking != "Let me analyze..." {
+		t.Errorf("unexpected Thinking: %q", result.Thinking)
+	}
+}
+
+// =============================================================================
+// Edge Cases and Error Handling
+// =============================================================================
+
+func TestTerminalStreamRenderer_OnDone_StopsSpinner(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	renderer.OnStatus(ctx, "Working...")
+	// OnDone should clean up the spinner
+	renderer.OnDone(ctx, "")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.CompletedAt == 0 {
+		t.Error("expected CompletedAt to be set")
+	}
+}
+
+func TestTerminalStreamRenderer_IgnoresAfterFinalized(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityFull)
+	ctx := context.Background()
+
+	renderer.OnToken(ctx, "first")
+	renderer.Finalize()
+
+	// These should be ignored
+	renderer.OnStatus(ctx, "should be ignored")
+	renderer.OnThinking(ctx, "ignored thinking")
+	renderer.OnSources(ctx, []SourceInfo{{Source: "ignored.pdf"}})
+	renderer.OnError(ctx, errors.New("ignored error"))
+
+	result := renderer.Result()
+	if result.Answer != "first" {
+		t.Errorf("expected Answer 'first', got %q", result.Answer)
+	}
+}
+
+func TestTerminalStreamRenderer_OnSources_WithNoScoreOrDistance(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityMachine)
+	ctx := context.Background()
+
+	sources := []SourceInfo{{Source: "plain.txt"}}
+	renderer.OnSources(ctx, sources)
+	renderer.OnDone(ctx, "")
+
+	output := buf.String()
+	if !strings.Contains(output, "SOURCE: plain.txt\n") {
+		t.Errorf("expected SOURCE without metric, got %q", output)
+	}
+}
+
+func TestTerminalStreamRenderer_NilWriter(t *testing.T) {
+	// Should not panic with nil writer (uses os.Stdout internally)
+	renderer := NewTerminalStreamRenderer(nil, PersonalityMachine)
+	ctx := context.Background()
+
+	renderer.OnToken(ctx, "test")
+	renderer.OnDone(ctx, "")
+	renderer.Finalize()
+
+	result := renderer.Result()
+	if result.Answer != "test" {
+		t.Errorf("expected Answer 'test', got %q", result.Answer)
+	}
+}
+
+// =============================================================================
+// MachineStreamRenderer Full Workflow
+// =============================================================================
+
+func TestMachineStreamRenderer_PrintsAllBuffered(t *testing.T) {
+	var buf bytes.Buffer
+	renderer := NewTerminalStreamRenderer(&buf, PersonalityMachine)
+	ctx := context.Background()
+
+	renderer.OnThinking(ctx, "thinking content")
+	renderer.OnToken(ctx, "answer content")
+	renderer.OnSources(ctx, []SourceInfo{{Source: "src.pdf", Score: 0.5}})
+	renderer.OnDone(ctx, "sess-machine")
+
+	output := buf.String()
+	if !strings.Contains(output, "THINKING: thinking content") {
+		t.Errorf("expected THINKING in output, got %q", output)
+	}
+	if !strings.Contains(output, "ANSWER: answer content") {
+		t.Errorf("expected ANSWER in output, got %q", output)
+	}
+	if !strings.Contains(output, "SOURCE: src.pdf score=0.5000") {
+		t.Errorf("expected SOURCE in output, got %q", output)
+	}
+	if !strings.Contains(output, "SESSION: sess-machine") {
+		t.Errorf("expected SESSION in output, got %q", output)
+	}
+}
+
+// =============================================================================
+// RenderStreamToResult Tests
+// =============================================================================
+
+func TestRenderStreamToResult_BasicFlow(t *testing.T) {
+	stream := strings.NewReader(`data: {"type":"status","message":"Working..."}
+data: {"type":"token","content":"Hello "}
+data: {"type":"token","content":"world"}
+data: {"type":"done","session_id":"sess-render"}
+`)
+
+	reader := NewSSEStreamReader(NewSSEParser())
+	ctx := context.Background()
+
+	result, err := RenderStreamToResult(ctx, reader, stream)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Answer != "Hello world" {
+		t.Errorf("expected Answer 'Hello world', got %q", result.Answer)
+	}
+	if result.SessionID != "sess-render" {
+		t.Errorf("expected SessionID 'sess-render', got %q", result.SessionID)
+	}
+}
+
+func TestRenderStreamToResult_WithSources(t *testing.T) {
+	stream := strings.NewReader(`data: {"type":"sources","sources":[{"source":"doc.pdf","score":0.9}]}
+data: {"type":"token","content":"Answer"}
+data: {"type":"done"}
+`)
+
+	reader := NewSSEStreamReader(NewSSEParser())
+	ctx := context.Background()
+
+	result, err := RenderStreamToResult(ctx, reader, stream)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Sources) != 1 {
+		t.Errorf("expected 1 source, got %d", len(result.Sources))
+	}
+}
+
+func TestRenderStreamToResult_EmptyStream(t *testing.T) {
+	stream := strings.NewReader("")
+
+	reader := NewSSEStreamReader(NewSSEParser())
+	ctx := context.Background()
+
+	result, err := RenderStreamToResult(ctx, reader, stream)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Answer != "" {
+		t.Errorf("expected empty Answer, got %q", result.Answer)
+	}
+}

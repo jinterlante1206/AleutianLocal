@@ -199,6 +199,32 @@ func TestSSEParser_ParseLine_Comment(t *testing.T) {
 	}
 }
 
+func TestSSEParser_ParseLine_EventTypeLine(t *testing.T) {
+	parser := NewSSEParser()
+
+	// SSE event type lines (e.g., "event: token") should be skipped
+	// The actual content is in the following "data:" line
+	testCases := []string{
+		"event: token",
+		"event: done",
+		"event: error",
+		"event: sources",
+		"event: status",
+		"event:token", // No space after colon
+	}
+
+	for _, line := range testCases {
+		event, err := parser.ParseLine(line)
+
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", line, err)
+		}
+		if event != nil {
+			t.Errorf("expected nil event for event type line %q, got %+v", line, event)
+		}
+	}
+}
+
 // -----------------------------------------------------------------------------
 // ParseLine Tests - Raw Token Lines
 // -----------------------------------------------------------------------------

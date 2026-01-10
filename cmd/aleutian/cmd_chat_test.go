@@ -82,18 +82,14 @@ func TestClientSideToolsSecurity(t *testing.T) {
 			}
 
 			if tt.wantError {
-				if !contains(result, "Access Denied") {
+				if !strings.Contains(result, "Access Denied") {
 					t.Errorf("Expected 'Access Denied' for input '%s', got: '%s'", tt.input, result)
 				}
 			} else {
-				if contains(result, "Access Denied") {
+				if strings.Contains(result, "Access Denied") {
 					t.Errorf("Expected allowed access for input '%s', got Blocked: '%s'", tt.input, result)
 				}
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
 }

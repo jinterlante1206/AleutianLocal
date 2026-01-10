@@ -134,6 +134,25 @@ var (
 		Short: "Delete a specific conversation session",
 		Run:   runDeleteSession, // Defined in cmd_data.go
 	}
+	verifySessionCmd = &cobra.Command{
+		Use:   "verify [session_id]",
+		Short: "Verify the integrity of a conversation session's hash chain",
+		Long: `Verifies that a session's conversation history has not been tampered with
+by checking the cryptographic hash chain. Each turn in the conversation
+is hashed and linked to the previous turn, creating a tamper-evident log.
+
+The verification checks:
+  - Each turn's content hash matches its stored hash
+  - The chain links (PrevHash) are unbroken
+  - The final chain hash matches expected value
+
+Examples:
+  aleutian session verify sess-abc123
+  aleutian session verify sess-abc123 --full
+  aleutian session verify sess-abc123 --json`,
+		Args: cobra.ExactArgs(1),
+		Run:  runVerifySession, // Defined in cmd_data.go
+	}
 
 	// --- Chat ---
 	chatCmd = &cobra.Command{
@@ -318,6 +337,9 @@ func init() {
 	rootCmd.AddCommand(sessionCmd)
 	sessionCmd.AddCommand(listSessionsCmd)
 	sessionCmd.AddCommand(deleteSessionCmd)
+	sessionCmd.AddCommand(verifySessionCmd)
+	verifySessionCmd.Flags().Bool("full", false, "Perform full verification (recompute all hashes)")
+	verifySessionCmd.Flags().Bool("json", false, "Output verification result as JSON")
 
 	// chat command - RAG is default, use --no-rag to disable
 	rootCmd.AddCommand(chatCmd)

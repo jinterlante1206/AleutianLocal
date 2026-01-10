@@ -412,36 +412,24 @@ func TestDefaultProfileResolver_GetProfileInfo_BuiltIn(t *testing.T) {
 	mock := NewMockHardwareDetector()
 	resolver := NewDefaultProfileResolver(mock, nil)
 
-	testCases := []struct {
-		name      string
-		model     string
-		maxTokens int
-		minRAM    int
-		maxRAM    int
-	}{
-		{"low", "gemma3:4b", 2048, 0, 16384},
-		{"standard", "gemma3:12b", 4096, 16384, 32768},
-		{"performance", "gpt-oss:20b", 8192, 32768, 65536},
-		{"ultra", "llama3:70b", 32768, 65536, 0},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			profile, exists := resolver.GetProfileInfo(tc.name)
+	// Test all profiles defined in config.BuiltInHardwareProfiles
+	for name, expected := range config.BuiltInHardwareProfiles {
+		t.Run(name, func(t *testing.T) {
+			profile, exists := resolver.GetProfileInfo(name)
 			if !exists {
-				t.Fatalf("expected %s profile to exist", tc.name)
+				t.Fatalf("expected %s profile to exist", name)
 			}
-			if profile.OllamaModel != tc.model {
-				t.Errorf("expected model %s, got: %s", tc.model, profile.OllamaModel)
+			if profile.OllamaModel != expected.OllamaModel {
+				t.Errorf("expected model %s, got: %s", expected.OllamaModel, profile.OllamaModel)
 			}
-			if profile.MaxTokens != tc.maxTokens {
-				t.Errorf("expected %d tokens, got: %d", tc.maxTokens, profile.MaxTokens)
+			if profile.MaxTokens != expected.MaxTokens {
+				t.Errorf("expected %d tokens, got: %d", expected.MaxTokens, profile.MaxTokens)
 			}
-			if profile.MinRAM_MB != tc.minRAM {
-				t.Errorf("expected min RAM %d, got: %d", tc.minRAM, profile.MinRAM_MB)
+			if profile.MinRAM_MB != expected.MinRAM_MB {
+				t.Errorf("expected min RAM %d, got: %d", expected.MinRAM_MB, profile.MinRAM_MB)
 			}
-			if profile.MaxRAM_MB != tc.maxRAM {
-				t.Errorf("expected max RAM %d, got: %d", tc.maxRAM, profile.MaxRAM_MB)
+			if profile.MaxRAM_MB != expected.MaxRAM_MB {
+				t.Errorf("expected max RAM %d, got: %d", expected.MaxRAM_MB, profile.MaxRAM_MB)
 			}
 		})
 	}
@@ -626,19 +614,19 @@ func TestDefaultProfileResolver_Resolve_NonOllamaBackend(t *testing.T) {
 func TestDefaultProfileResolver_Resolve_AutoDetect(t *testing.T) {
 	t.Parallel()
 
+	// Test various RAM amounts - expected model comes from config
 	testCases := []struct {
-		name          string
-		ramMB         int
-		expectedModel string
+		name  string
+		ramMB int
 	}{
-		{"low_8gb", 8192, "gemma3:4b"},
-		{"low_15gb", 15000, "gemma3:4b"},
-		{"standard_16gb", 16384, "gemma3:12b"},
-		{"standard_24gb", 24576, "gemma3:12b"},
-		{"performance_32gb", 32768, "gpt-oss:20b"},
-		{"performance_48gb", 49152, "gpt-oss:20b"},
-		{"ultra_64gb", 65536, "llama3:70b"},
-		{"ultra_128gb", 131072, "llama3:70b"},
+		{"low_8gb", 8192},
+		{"low_15gb", 15000},
+		{"standard_16gb", 16384},
+		{"standard_24gb", 24576},
+		{"performance_32gb", 32768},
+		{"performance_48gb", 49152},
+		{"performance_64gb", 65536},
+		{"ultra_128gb", 131072},
 	}
 
 	for _, tc := range testCases {
@@ -653,8 +641,13 @@ func TestDefaultProfileResolver_Resolve_AutoDetect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("expected no error, got: %v", err)
 			}
-			if env["OLLAMA_MODEL"] != tc.expectedModel {
-				t.Errorf("expected %s, got: %s", tc.expectedModel, env["OLLAMA_MODEL"])
+
+			// Expected model comes from config - single source of truth
+			profileName := config.GetProfileForRAM(tc.ramMB)
+			expectedModel := config.BuiltInHardwareProfiles[profileName].OllamaModel
+
+			if env["OLLAMA_MODEL"] != expectedModel {
+				t.Errorf("for %d MB RAM, expected %s, got: %s", tc.ramMB, expectedModel, env["OLLAMA_MODEL"])
 			}
 		})
 	}
@@ -841,13 +834,13 @@ func TestSelectProfileForRAM(t *testing.T) {
 		{24576, "standard"},
 		{32767, "standard"},
 
-		// Performance tier: 32768 - 65536
+		// Performance tier: 32768 - 131072
 		{32768, "performance"},
 		{49152, "performance"},
-		{65535, "performance"},
+		{65536, "performance"},
+		{131071, "performance"},
 
-		// Ultra tier: 65536+
-		{65536, "ultra"},
+		// Ultra tier: 131072+
 		{131072, "ultra"},
 		{262144, "ultra"},
 	}

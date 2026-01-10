@@ -53,6 +53,8 @@ import (
 //   - ui: ChatUI for display formatting
 //   - input: InputReader for user input (injectable for testing)
 //   - sessionID: Session ID for resume (empty for new sessions)
+//   - sessionStartTime: When the session started (for duration tracking)
+//   - sessionStats: Accumulated statistics for the session
 //   - closed: Flag to ensure Close() is idempotent
 //   - mu: Mutex protecting closed flag
 //
@@ -73,12 +75,14 @@ import (
 //   - Session ID (if provided) exists on server
 //   - UI is ready for output
 type DirectChatRunner struct {
-	service   *directStreamingChatService // Concrete type for LoadSessionHistory access
-	ui        ux.ChatUI
-	input     InputReader
-	sessionID string
-	closed    bool
-	mu        sync.Mutex
+	service          *directStreamingChatService // Concrete type for LoadSessionHistory access
+	ui               ux.ChatUI
+	input            InputReader
+	sessionID        string
+	sessionStartTime time.Time
+	sessionStats     ux.SessionStats
+	closed           bool
+	mu               sync.Mutex
 }
 
 // NewDirectChatRunner creates a direct chat runner with production dependencies.
@@ -282,6 +286,9 @@ func NewDirectChatRunnerWithDeps(
 //   - Terminal is available for UI output
 //   - Session ID (if provided) exists on server
 func (r *DirectChatRunner) Run(ctx context.Context) error {
+	// Record session start time for duration tracking
+	r.sessionStartTime = time.Now()
+
 	// Load session history if resuming
 	if r.sessionID != "" {
 		if err := r.loadHistory(ctx); err != nil {
@@ -309,7 +316,7 @@ func (r *DirectChatRunner) Run(ctx context.Context) error {
 		if err != nil {
 			if err == io.EOF {
 				// Input exhausted (e.g., piped input ended)
-				r.ui.SessionEnd(r.service.GetSessionID())
+				r.displaySessionEndWithStats()
 				return nil
 			}
 			slog.Error("failed to read input", "error", err)
@@ -323,7 +330,7 @@ func (r *DirectChatRunner) Run(ctx context.Context) error {
 
 		// Check for exit command
 		if isExitCommand(input) {
-			r.ui.SessionEnd(r.service.GetSessionID())
+			r.displaySessionEndWithStats()
 			return nil
 		}
 
@@ -381,6 +388,7 @@ func (r *DirectChatRunner) loadHistory(ctx context.Context) error {
 // rendered in real-time as tokens arrive via the StreamRenderer.
 // No spinner is needed since tokens appear immediately.
 // Unlike RAG mode, direct chat does not display sources.
+// Accumulates statistics from the result for session summary.
 //
 // # Inputs
 //
@@ -401,16 +409,83 @@ func (r *DirectChatRunner) loadHistory(ctx context.Context) error {
 func (r *DirectChatRunner) handleMessage(ctx context.Context, message string) error {
 	// Streaming service renders tokens in real-time via StreamRenderer
 	// No spinner needed - user sees tokens as they arrive
-	_, err := r.service.SendMessage(ctx, message)
+	result, err := r.service.SendMessage(ctx, message)
 	if err != nil {
 		return err
 	}
+
+	// Accumulate session statistics from this exchange
+	r.accumulateStats(result)
 
 	// Response already displayed during streaming
 	// via StreamRenderer.OnToken(), OnDone() callbacks
 	fmt.Println()
 
 	return nil
+}
+
+// accumulateStats updates session statistics from a stream result.
+//
+// # Description
+//
+// Aggregates metrics from a single message exchange into the session
+// totals. Called after each successful message for the session summary.
+// Direct chat does not track sources (no RAG retrieval).
+//
+// # Inputs
+//
+//   - result: Stream result from the message exchange
+//
+// # Outputs
+//
+// None. Updates r.sessionStats in place.
+//
+// # Limitations
+//
+//   - Does not track sources (direct chat has no RAG)
+//
+// # Assumptions
+//
+//   - Result is non-nil (caller validates)
+func (r *DirectChatRunner) accumulateStats(result *ux.StreamResult) {
+	r.sessionStats.MessageCount++
+	r.sessionStats.TotalTokens += result.TotalTokens
+	r.sessionStats.ThinkingTokens += result.ThinkingTokens
+
+	// Track first response latency (only for first message)
+	if r.sessionStats.MessageCount == 1 {
+		r.sessionStats.FirstResponseLatency = result.TimeToFirstToken()
+	}
+}
+
+// displaySessionEndWithStats displays session end with accumulated statistics.
+//
+// # Description
+//
+// Finalizes session statistics and displays the rich session end
+// summary. Calculates session duration from start time.
+//
+// # Inputs
+//
+// None. Uses r.sessionStartTime, r.sessionStats, and service session ID.
+//
+// # Outputs
+//
+// None. Writes to UI.
+//
+// # Limitations
+//
+//   - Duration is approximate (wall clock time)
+//
+// # Assumptions
+//
+//   - Session start time was recorded
+func (r *DirectChatRunner) displaySessionEndWithStats() {
+	// Finalize duration
+	r.sessionStats.Duration = time.Since(r.sessionStartTime)
+
+	// Display rich session end
+	r.ui.SessionEndRich(r.service.GetSessionID(), &r.sessionStats)
 }
 
 // handleShutdown performs graceful shutdown.
@@ -420,7 +495,7 @@ func (r *DirectChatRunner) handleMessage(ctx context.Context, message string) er
 // Called when context is cancelled. Performs cleanup:
 //  1. Logs shutdown initiation
 //  2. Saves conversation state (best effort)
-//  3. Displays session end message
+//  3. Displays session end message with statistics
 //  4. Returns context error
 //
 // # Inputs
@@ -454,9 +529,9 @@ func (r *DirectChatRunner) handleShutdown(ctx context.Context) error {
 		)
 	}
 
-	// Display session end
+	// Display session end with statistics
 	fmt.Println() // New line after interrupted input
-	r.ui.SessionEnd(r.service.GetSessionID())
+	r.displaySessionEndWithStats()
 
 	return ctx.Err()
 }

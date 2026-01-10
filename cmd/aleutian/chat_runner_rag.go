@@ -51,6 +51,9 @@ import (
 //   - input: InputReader for user input (injectable for testing)
 //   - pipeline: RAG pipeline name for display in header
 //   - initialSessionID: Session ID provided at creation (for resume)
+//   - sessionStartTime: When the session started (for duration tracking)
+//   - sessionStats: Accumulated statistics for the session
+//   - uniqueSources: Set of unique source names referenced
 //   - closed: Flag to ensure Close() is idempotent
 //   - mu: Mutex protecting closed flag
 //
@@ -76,6 +79,9 @@ type RAGChatRunner struct {
 	input            InputReader
 	pipeline         string
 	initialSessionID string
+	sessionStartTime time.Time
+	sessionStats     ux.SessionStats
+	uniqueSources    map[string]bool
 	closed           bool
 	mu               sync.Mutex
 }
@@ -152,6 +158,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		input:            input,
 		pipeline:         pipeline,
 		initialSessionID: config.SessionID,
+		uniqueSources:    make(map[string]bool),
 		closed:           false,
 	}
 }
@@ -210,6 +217,7 @@ func NewRAGChatRunnerWithDeps(
 		input:            input,
 		pipeline:         pipeline,
 		initialSessionID: "",
+		uniqueSources:    make(map[string]bool),
 		closed:           false,
 	}
 }
@@ -270,6 +278,9 @@ func NewRAGChatRunnerWithDeps(
 //   - Terminal is available for UI output
 //   - Input source provides newline-terminated lines
 func (r *RAGChatRunner) Run(ctx context.Context) error {
+	// Record session start time for duration tracking
+	r.sessionStartTime = time.Now()
+
 	// Display header
 	r.ui.Header(ux.ChatModeRAG, r.pipeline, r.initialSessionID)
 
@@ -289,7 +300,7 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 		if err != nil {
 			if err == io.EOF {
 				// Input exhausted (e.g., piped input ended)
-				r.ui.SessionEnd(r.service.GetSessionID())
+				r.displaySessionEndWithStats()
 				return nil
 			}
 			slog.Error("failed to read input", "error", err)
@@ -303,7 +314,7 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 
 		// Check for exit command
 		if isExitCommand(input) {
-			r.ui.SessionEnd(r.service.GetSessionID())
+			r.displaySessionEndWithStats()
 			return nil
 		}
 
@@ -327,6 +338,7 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 // Sends the message to the RAG streaming service. The response is
 // rendered in real-time as tokens arrive via the StreamRenderer.
 // No spinner is needed since tokens appear immediately.
+// Accumulates statistics from the result for session summary.
 //
 // # Inputs
 //
@@ -347,16 +359,88 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 func (r *RAGChatRunner) handleMessage(ctx context.Context, message string) error {
 	// Streaming service renders tokens in real-time via StreamRenderer
 	// No spinner needed - user sees tokens as they arrive
-	_, err := r.service.SendMessage(ctx, message)
+	result, err := r.service.SendMessage(ctx, message)
 	if err != nil {
 		return err
 	}
+
+	// Accumulate session statistics from this exchange
+	r.accumulateStats(result)
 
 	// Response and sources already displayed during streaming
 	// via StreamRenderer.OnToken(), OnSources(), OnDone() callbacks
 	fmt.Println()
 
 	return nil
+}
+
+// accumulateStats updates session statistics from a stream result.
+//
+// # Description
+//
+// Aggregates metrics from a single message exchange into the session
+// totals. Called after each successful message for the session summary.
+//
+// # Inputs
+//
+//   - result: Stream result from the message exchange
+//
+// # Outputs
+//
+// None. Updates r.sessionStats and r.uniqueSources in place.
+//
+// # Limitations
+//
+//   - Only tracks unique sources by name (not by full path)
+//
+// # Assumptions
+//
+//   - Result is non-nil (caller validates)
+func (r *RAGChatRunner) accumulateStats(result *ux.StreamResult) {
+	r.sessionStats.MessageCount++
+	r.sessionStats.TotalTokens += result.TotalTokens
+	r.sessionStats.ThinkingTokens += result.ThinkingTokens
+
+	// Track unique sources
+	for _, src := range result.Sources {
+		r.uniqueSources[src.Source] = true
+	}
+	r.sessionStats.SourcesUsed = len(r.uniqueSources)
+
+	// Track first response latency (only for first message)
+	if r.sessionStats.MessageCount == 1 {
+		r.sessionStats.FirstResponseLatency = result.TimeToFirstToken()
+	}
+}
+
+// displaySessionEndWithStats displays session end with accumulated statistics.
+//
+// # Description
+//
+// Finalizes session statistics and displays the rich session end
+// summary. Calculates session duration from start time.
+//
+// # Inputs
+//
+// None. Uses r.sessionStartTime, r.sessionStats, and service session ID.
+//
+// # Outputs
+//
+// None. Writes to UI.
+//
+// # Limitations
+//
+//   - Duration is approximate (wall clock time)
+//
+// # Assumptions
+//
+//   - Session start time was recorded
+func (r *RAGChatRunner) displaySessionEndWithStats() {
+	// Finalize duration
+	r.sessionStats.Duration = time.Since(r.sessionStartTime)
+
+	// Display rich session end
+	r.ui.SessionEndRich(r.service.GetSessionID(), &r.sessionStats)
 }
 
 // handleShutdown performs graceful shutdown.
@@ -366,7 +450,7 @@ func (r *RAGChatRunner) handleMessage(ctx context.Context, message string) error
 // Called when context is cancelled. Performs cleanup:
 //  1. Logs shutdown initiation
 //  2. Saves conversation state (best effort)
-//  3. Displays session end message
+//  3. Displays session end message with statistics
 //  4. Returns context error
 //
 // # Inputs
@@ -400,9 +484,9 @@ func (r *RAGChatRunner) handleShutdown(ctx context.Context) error {
 		)
 	}
 
-	// Display session end
+	// Display session end with statistics
 	fmt.Println() // New line after interrupted input
-	r.ui.SessionEnd(r.service.GetSessionID())
+	r.displaySessionEndWithStats()
 
 	return ctx.Err()
 }
