@@ -50,7 +50,7 @@ type SessionInfo struct {
 //
 // # Description
 //
-// Creates a JSON file with all policy violations and user decisions for
+// Creates a JSON log file containing all policy scan findings for
 // compliance record-keeping. The filename includes a UTC timestamp for
 // easy chronological ordering.
 //
@@ -767,7 +767,7 @@ func (p *IngestPipeline) ingestFiles(ctx context.Context, files []scanResult) (
 				}
 
 				bodyBytes, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if readErr != nil {
 					resultChan <- ingestResult{
 						FilePath: file.FilePath,
@@ -1052,7 +1052,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 //
 //   - Requires orchestrator to be running
 //   - Exits fatally on error
-func runDeleteSession(cmd *cobra.Command, args []string) {
+func runDeleteSession(_ *cobra.Command, args []string) {
 	baseURL := getOrchestratorBaseURL()
 	sessionId := args[0]
 	orchestratorURL := fmt.Sprintf("%s/v1/sessions/%s", baseURL, sessionId)
@@ -1066,7 +1066,7 @@ func runDeleteSession(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Orchestrator returned an error: %s", resp.Status)
@@ -1166,7 +1166,7 @@ func runVerifySession(cmd *cobra.Command, args []string) {
 		}
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Parse response
 	var result VerifySessionResponse
@@ -1333,12 +1333,12 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 
 	// REST API
 	fmt.Println("  REST API:")
-	fmt.Printf("    curl %s/v1/sessions/%s\n", baseURL, sessionID)
+	fmt.Printf("    curl %s/v1/sessions/%s/history\n", baseURL, sessionID)
 	fmt.Println()
 
 	// Weaviate GraphQL Console
 	fmt.Println("  Weaviate GraphQL Console:")
-	fmt.Println("    http://localhost:8081/v1/graphql")
+	fmt.Println("    http://localhost:12127/v1/graphql")
 	fmt.Println()
 
 	// Session Query
@@ -1368,11 +1368,15 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 	fmt.Println(sectionDivider)
 	fmt.Println()
 	fmt.Println("  Find logs:")
-	fmt.Println("    docker logs aleutian-orchestrator-1 2>&1 | grep \"" + sessionID + "\"")
+	fmt.Println("    podman logs aleutian-go-orchestrator 2>&1 | grep \"" + sessionID + "\"")
 	fmt.Println()
 
 	fmt.Println(divider)
 	fmt.Println()
+
+	// Interactive menu for quick actions
+	menu := NewDefaultSessionActionsMenu(os.Stdin, os.Stdout)
+	menu.Show(sessionID, baseURL)
 }
 
 // runListSessions lists all active chat sessions from the orchestrator.
@@ -1385,7 +1389,7 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 //
 //   - Requires orchestrator to be running
 //   - Exits fatally on error
-func runListSessions(cmd *cobra.Command, args []string) {
+func runListSessions(_ *cobra.Command, _ []string) {
 	baseURL := getOrchestratorBaseURL()
 	orchestratorURL := fmt.Sprintf("%s/v1/sessions", baseURL)
 
@@ -1393,7 +1397,7 @@ func runListSessions(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to connect to orchestrator: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Orchestrator returned an error: %s", resp.Status)
@@ -1427,7 +1431,7 @@ func runListSessions(cmd *cobra.Command, args []string) {
 //
 //   - Requires orchestrator to be running
 //   - Backup is stored in orchestrator's configured backup location
-func runWeaviateBackup(cmd *cobra.Command, args []string) {
+func runWeaviateBackup(_ *cobra.Command, args []string) {
 	baseURL := getOrchestratorBaseURL()
 	backupId := args[0]
 	fmt.Printf("Starting Weaviate backup with ID: %s\n", backupId)
@@ -1438,7 +1442,7 @@ func runWeaviateBackup(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send backup request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	fmt.Println("Orchestrator Response:", string(bodyBytes))
 }
@@ -1457,7 +1461,7 @@ func runWeaviateBackup(cmd *cobra.Command, args []string) {
 //
 //   - Requires orchestrator to be running
 //   - Exits fatally on error
-func runWeaviateDeleteDoc(cmd *cobra.Command, args []string) {
+func runWeaviateDeleteDoc(_ *cobra.Command, args []string) {
 	baseURL := getOrchestratorBaseURL()
 	sourceName := args[0]
 	fmt.Printf("Submitting request to delete all chunks for: %s\n", sourceName)
@@ -1473,7 +1477,7 @@ func runWeaviateDeleteDoc(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -1498,7 +1502,7 @@ func runWeaviateDeleteDoc(cmd *cobra.Command, args []string) {
 //
 //   - Requires orchestrator to be running
 //   - Backup must exist in configured backup location
-func runWeaviateRestore(cmd *cobra.Command, args []string) {
+func runWeaviateRestore(_ *cobra.Command, args []string) {
 	baseURL := getOrchestratorBaseURL()
 	backupId := args[0]
 	fmt.Printf("Restoring Weaviate from backup ID: %s\n", backupId)
@@ -1509,7 +1513,7 @@ func runWeaviateRestore(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send restore request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	fmt.Println("Orchestrator Response:", string(bodyBytes))
 }
@@ -1523,7 +1527,7 @@ func runWeaviateRestore(cmd *cobra.Command, args []string) {
 // # Limitations
 //
 //   - Requires orchestrator to be running
-func runWeaviateSummary(cmd *cobra.Command, args []string) {
+func runWeaviateSummary(_ *cobra.Command, _ []string) {
 	baseURL := getOrchestratorBaseURL()
 	fmt.Println("Fetching Weaviate summary...")
 	orchestratorURL := fmt.Sprintf("%s/v1/weaviate/summary", baseURL)
@@ -1531,7 +1535,7 @@ func runWeaviateSummary(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send summary request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	bodyBytes, _ := io.ReadAll(resp.Body)
 
 	var prettyJSON bytes.Buffer
@@ -1557,7 +1561,7 @@ func runWeaviateSummary(cmd *cobra.Command, args []string) {
 //
 //   - Requires orchestrator to be running
 //   - Cannot be undone without a backup
-func runWeaviateWipeout(cmd *cobra.Command, args []string) {
+func runWeaviateWipeout(cmd *cobra.Command, _ []string) {
 	baseURL := getOrchestratorBaseURL()
 	force, _ := cmd.Flags().GetBool("force")
 	if !force {
@@ -1582,7 +1586,7 @@ func runWeaviateWipeout(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send wipe request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	fmt.Println("Orchestrator Response:", string(bodyBytes))
 }
@@ -1592,7 +1596,7 @@ func runWeaviateWipeout(cmd *cobra.Command, args []string) {
 // # Status
 //
 // DISABLED: Temporarily disabled in v0.3.0 pending config migration to aleutian.yaml.
-func runUploadLogs(cmd *cobra.Command, args []string) {
+func runUploadLogs(_ *cobra.Command, _ []string) {
 	fmt.Println("GCS Uploads are temporarily disabled in v0.3.0 pending config migration.")
 }
 
@@ -1601,6 +1605,6 @@ func runUploadLogs(cmd *cobra.Command, args []string) {
 // # Status
 //
 // DISABLED: Temporarily disabled in v0.3.0 pending config migration to aleutian.yaml.
-func runUploadBackups(cmd *cobra.Command, args []string) {
+func runUploadBackups(_ *cobra.Command, _ []string) {
 	fmt.Println("GCS Uploads are temporarily disabled in v0.3.0 pending config migration.")
 }

@@ -44,6 +44,14 @@ var (
 	ErrInvalidEnvVar = errors.New("invalid environment variable")
 )
 
+// Compile-time assertions that sentinel errors satisfy error interface.
+// These are exported for callers to use with errors.Is().
+var (
+	_ error = ErrComposeNotFound
+	_ error = ErrComposeFileMissing
+	_ error = ErrServiceNotFound
+)
+
 // envVarKeyRegex validates environment variable key names.
 // Keys must:
 //   - Start with a letter or underscore
@@ -1618,7 +1626,7 @@ func (e *DefaultComposeExecutor) parseContainerStatus(jsonOutput string) (*Compo
 		State   string   `json:"State"`
 		Status  string   `json:"Status"`
 		Image   string   `json:"Image"`
-		Created string   `json:"Created"`
+		Created any      `json:"Created"` // Can be string or Unix timestamp (number)
 		Ports   []struct {
 			HostIP        string `json:"host_ip"`
 			HostPort      int    `json:"host_port"`

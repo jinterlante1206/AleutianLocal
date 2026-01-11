@@ -52,18 +52,18 @@ type StreamingMockLLMClient struct {
 }
 
 // Chat implements llm.LLMClient.Chat for testing.
-func (m *StreamingMockLLMClient) Chat(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams) (string, error) {
+func (m *StreamingMockLLMClient) Chat(_ context.Context, _ []datatypes.Message, _ llm.GenerationParams) (string, error) {
 	return strings.Join(m.StreamTokens, ""), nil
 }
 
 // Generate implements llm.LLMClient.Generate for testing.
-func (m *StreamingMockLLMClient) Generate(ctx context.Context, prompt string, params llm.GenerationParams) (string, error) {
+func (m *StreamingMockLLMClient) Generate(_ context.Context, _ string, _ llm.GenerationParams) (string, error) {
 	return "", nil
 }
 
 // ChatStream implements llm.LLMClient.ChatStream for testing.
 // Emits configured tokens one by one.
-func (m *StreamingMockLLMClient) ChatStream(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams, callback llm.StreamCallback) error {
+func (m *StreamingMockLLMClient) ChatStream(_ context.Context, messages []datatypes.Message, _ llm.GenerationParams, callback llm.StreamCallback) error {
 	m.ChatStreamCallCount++
 	m.LastMessages = messages
 
@@ -424,7 +424,7 @@ func TestBuildRAGMessagesWithHistory_NoHistory(t *testing.T) {
 	userMessage := "What is OAuth?"
 	history := []ConversationTurn{}
 
-	messages := handler.buildRAGMessagesWithHistory(ragContext, userMessage, history)
+	messages := handler.buildRAGMessagesWithHistory(ragContext, userMessage, history, false)
 
 	assert.Len(t, messages, 2, "should have system and user messages only")
 	assert.Equal(t, "system", messages[0].Role)
@@ -443,7 +443,7 @@ func TestBuildRAGMessagesWithHistory_WithHistory(t *testing.T) {
 		{Question: "What about OIDC?", Answer: "OIDC builds on OAuth."},
 	}
 
-	messages := handler.buildRAGMessagesWithHistory(ragContext, userMessage, history)
+	messages := handler.buildRAGMessagesWithHistory(ragContext, userMessage, history, false)
 
 	// Expected: system + (2 history * 2) + current user = 6 messages
 	assert.Len(t, messages, 6, "should have system + history + current user")
@@ -477,13 +477,34 @@ func TestBuildRAGMessagesWithHistory_HistoryOrder(t *testing.T) {
 		{Question: "Third", Answer: "Third answer"},
 	}
 
-	messages := handler.buildRAGMessagesWithHistory("ctx", "current", history)
+	messages := handler.buildRAGMessagesWithHistory("ctx", "current", history, false)
 
 	// Verify order: system, then history in order, then current
 	assert.Equal(t, "First", messages[1].Content)
 	assert.Equal(t, "Second", messages[3].Content)
 	assert.Equal(t, "Third", messages[5].Content)
 	assert.Equal(t, "current", messages[7].Content)
+}
+
+// TestBuildRAGMessagesWithHistory_StrictMode verifies strict mode prompt.
+func TestBuildRAGMessagesWithHistory_StrictMode(t *testing.T) {
+	handler := &streamingChatHandler{}
+	ragContext := "Document about OAuth."
+	userMessage := "What is OAuth?"
+	history := []ConversationTurn{}
+
+	// Test strict mode
+	messagesStrict := handler.buildRAGMessagesWithHistory(ragContext, userMessage, history, true)
+	assert.Len(t, messagesStrict, 2, "should have system and user messages")
+	assert.Equal(t, "system", messagesStrict[0].Role)
+	assert.Contains(t, messagesStrict[0].Content, "MUST ONLY answer based on the context")
+	assert.Contains(t, messagesStrict[0].Content, "Do NOT use your general knowledge")
+
+	// Test unrestricted mode
+	messagesUnrestricted := handler.buildRAGMessagesWithHistory(ragContext, userMessage, history, false)
+	assert.Equal(t, "system", messagesUnrestricted[0].Role)
+	assert.Contains(t, messagesUnrestricted[0].Content, "provide what help you can")
+	assert.NotContains(t, messagesUnrestricted[0].Content, "MUST ONLY")
 }
 
 // TestConversationTurn_JSONRoundTrip verifies ConversationTurn serializes correctly.
@@ -589,13 +610,13 @@ func TestGenerateTurnUUID_UniqueForDifferentInputs(t *testing.T) {
 
 	uuids := make(map[string]string)
 	for _, tc := range tests {
-		uuid := h.generateTurnUUID(tc.sessionID, tc.turnNumber, tc.question, tc.answer)
+		turnUUID := h.generateTurnUUID(tc.sessionID, tc.turnNumber, tc.question, tc.answer)
 		for name, existingUUID := range uuids {
-			if uuid == existingUUID && name != tc.name {
+			if turnUUID == existingUUID && name != tc.name {
 				t.Errorf("UUID collision between %q and %q", name, tc.name)
 			}
 		}
-		uuids[tc.name] = uuid
+		uuids[tc.name] = turnUUID
 	}
 }
 

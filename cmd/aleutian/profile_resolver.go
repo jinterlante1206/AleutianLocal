@@ -535,8 +535,8 @@ func (r *DefaultProfileResolver) Resolve(ctx context.Context, opts ProfileOption
 	var profile *ProfileInfo
 	var profileName string
 
-	if opts.ExplicitProfile != "" {
-		// Explicit profile requested
+	if opts.ExplicitProfile != "" && opts.ExplicitProfile != "auto" {
+		// Explicit profile requested (not auto-detection)
 		profileName = opts.ExplicitProfile
 		var exists bool
 		profile, exists = r.GetProfileInfo(profileName)
@@ -712,7 +712,7 @@ func (r *DefaultProfileResolver) selectProfileForRAM(ramMB int) string {
 // # Assumptions
 //
 //   - Profile is not nil
-func (r *DefaultProfileResolver) profileToEnv(profile *ProfileInfo, name string) map[string]string {
+func (r *DefaultProfileResolver) profileToEnv(profile *ProfileInfo, _ string) map[string]string {
 	env := make(map[string]string)
 
 	env["OLLAMA_MODEL"] = profile.OllamaModel
@@ -903,7 +903,7 @@ func (d *DefaultHardwareDetector) GetGPUVRAM(ctx context.Context) (int, error) {
 // # Assumptions
 //
 //   - None
-func (d *DefaultHardwareDetector) GetCPUCores(ctx context.Context) (int, error) {
+func (d *DefaultHardwareDetector) GetCPUCores(_ context.Context) (int, error) {
 	return runtime.NumCPU(), nil
 }
 
@@ -999,12 +999,12 @@ func (d *DefaultHardwareDetector) getMacOSMemory(ctx context.Context) (int, erro
 // # Assumptions
 //
 //   - /proc/meminfo is readable
-func (d *DefaultHardwareDetector) getLinuxSystemRAM(ctx context.Context) (int, error) {
+func (d *DefaultHardwareDetector) getLinuxSystemRAM(_ context.Context) (int, error) {
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

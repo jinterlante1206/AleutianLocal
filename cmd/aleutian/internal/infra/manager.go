@@ -49,6 +49,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
@@ -737,6 +738,11 @@ type InfrastructureOptions struct {
 	// Corresponds to --force-recreate CLI flag.
 	ForceRecreate bool
 
+	// FixMounts forces mount configuration fix even when foreign containers are running.
+	// This will stop foreign containers to allow machine recreation.
+	// Corresponds to --fix-mounts CLI flag.
+	FixMounts bool
+
 	// MaxHealAttempts limits self-healing recursion.
 	// Default: 2
 	MaxHealAttempts int
@@ -766,6 +772,7 @@ func DefaultInfrastructureOptions() InfrastructureOptions {
 		MemoryMB:             20480,
 		Mounts:               []string{},
 		ForceRecreate:        false,
+		FixMounts:            false,
 		MaxHealAttempts:      DefaultMaxHealAttempts,
 		SkipPrompts:          false,
 		AllowSensitiveMounts: false,
@@ -946,6 +953,14 @@ const (
 
 	// MountRejectionWarning means the mount requires confirmation.
 	MountRejectionWarning MountRejectionSeverity = "warning"
+)
+
+// Compile-time assertions to ensure severity constants are valid MountRejectionSeverity values.
+// MountRejectionHigh and MountRejectionWarning are reserved for API completeness and future use.
+var (
+	_ MountRejectionSeverity = MountRejectionCritical
+	_ MountRejectionSeverity = MountRejectionHigh
+	_ MountRejectionSeverity = MountRejectionWarning
 )
 
 // -----------------------------------------------------------------------------
@@ -1143,9 +1158,15 @@ func (m *DefaultInfrastructureManager) ensureReadyWithDepth(ctx context.Context,
 		return fmt.Errorf("failed to detect conflicts: %w", err)
 	}
 	if conflicts.HasConflicts {
-		fmt.Fprintf(m.output, "Warning: Podman Desktop is running (PID %d)\n", conflicts.PodmanDesktopPID)
-		fmt.Fprintln(m.output, "   It creates a conflicting VM that breaks CLI tools.")
-		fmt.Fprintln(m.output, "   Recommendation: Quit Podman Desktop via the Menu Bar.")
+		if _, err := fmt.Fprintf(m.output, "Warning: Podman Desktop is running (PID %d)\n", conflicts.PodmanDesktopPID); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
+		if _, err := fmt.Fprintln(m.output, "   It creates a conflicting VM that breaks CLI tools."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
+		if _, err := fmt.Fprintln(m.output, "   Recommendation: Quit Podman Desktop via the Menu Bar."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 
 		if !opts.SkipPrompts {
 			confirmed, err := m.prompter.Confirm(ctx, "Try to proceed anyway?")
@@ -1175,10 +1196,16 @@ func (m *DefaultInfrastructureManager) ensureReadyWithDepth(ctx context.Context,
 	}
 
 	if depth == 0 {
-		fmt.Fprintln(m.output, "Aleutian Infrastructure Check...")
-		fmt.Fprintf(m.output, "   Target Machine: %s (CPUs: %d, Mem: %d MB)\n", machineName, cpus, memoryMB)
+		if _, err := fmt.Fprintln(m.output, "Aleutian Infrastructure Check..."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
+		if _, err := fmt.Fprintf(m.output, "   Target Machine: %s (CPUs: %d, Mem: %d MB)\n", machineName, cpus, memoryMB); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	} else {
-		fmt.Fprintf(m.output, "   Self-Healing attempt %d/%d...\n", depth, maxAttempts)
+		if _, err := fmt.Fprintf(m.output, "   Self-Healing attempt %d/%d...\n", depth, maxAttempts); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	// Check if machine exists
@@ -1188,7 +1215,9 @@ func (m *DefaultInfrastructureManager) ensureReadyWithDepth(ctx context.Context,
 	}
 
 	if !status.Exists {
-		fmt.Fprintln(m.output, "Machine not found. Provisioning Infrastructure...")
+		if _, err := fmt.Fprintln(m.output, "Machine not found. Provisioning Infrastructure..."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 		spec := MachineSpec{
 			Name:      machineName,
 			CPUs:      cpus,
@@ -1200,25 +1229,42 @@ func (m *DefaultInfrastructureManager) ensureReadyWithDepth(ctx context.Context,
 	}
 
 	// Machine exists - verify mount configuration
-	fmt.Fprint(m.output, "Verifying machine configuration... ")
+	if _, err := fmt.Fprint(m.output, "Verifying machine configuration... "); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 	verification, err := m.VerifyMounts(ctx, machineName, opts.Mounts)
 	if err != nil {
-		fmt.Fprintf(m.output, "WARN (couldn't verify: %v)\n", err)
+		if _, err := fmt.Fprintf(m.output, "WARN (couldn't verify: %v)\n", err); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	} else if !verification.Match {
-		fmt.Fprintln(m.output, "DRIFT DETECTED.")
+		if _, err := fmt.Fprintln(m.output, "DRIFT DETECTED."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 		m.printDriftWarning(verification, machineName)
 
 		shouldRecreate := false
 
 		if opts.ForceRecreate {
-			fmt.Fprintln(m.output, "--force-recreate flag detected. Automatically fixing...")
+			if _, err := fmt.Fprintln(m.output, "--force-recreate flag detected. Automatically fixing..."); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
+			shouldRecreate = true
+		} else if opts.FixMounts {
+			if _, err := fmt.Fprintln(m.output, "--fix-mounts flag detected. Fixing mount configuration..."); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 			shouldRecreate = true
 		} else {
 			// Check for foreign workloads before auto-fix
 			assessment, _ := m.HasForeignWorkloads(ctx)
 			if assessment != nil && assessment.HasForeignWorkloads {
-				fmt.Fprintln(m.output, "Foreign containers detected. Auto-fix is disabled to protect your other work.")
-				fmt.Fprintln(m.output, "   Please fix manually using the commands above.")
+				if _, err := fmt.Fprintln(m.output, "Foreign containers detected. Auto-fix is disabled to protect your other work."); err != nil {
+					slog.Warn("failed to write output", "error", err)
+				}
+				if _, err := fmt.Fprintln(m.output, "   Use --fix-mounts to force the fix (will stop foreign containers)."); err != nil {
+					slog.Warn("failed to write output", "error", err)
+				}
 				return nil
 			}
 
@@ -1232,22 +1278,22 @@ func (m *DefaultInfrastructureManager) ensureReadyWithDepth(ctx context.Context,
 		}
 
 		if shouldRecreate {
-			fmt.Fprintln(m.output, "\nRecreating machine with correct mounts...")
+			if _, err := fmt.Fprintln(m.output, "\nRecreating machine with correct mounts..."); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 
-			// Stop the machine
-			fmt.Fprint(m.output, "   Stopping machine... ")
+			// Stop the machine (spinner handles progress)
 			_ = m.StopMachine(ctx, machineName)
-			fmt.Fprintln(m.output, "done.")
 
-			// Remove the machine
-			fmt.Fprint(m.output, "   Removing old machine... ")
+			// Remove the machine (spinner handles progress)
 			if err := m.RemoveMachine(ctx, machineName, true, "drift_fix"); err != nil {
 				return fmt.Errorf("failed to remove machine: %w", err)
 			}
-			fmt.Fprintln(m.output, "done.")
 
 			// Provision new machine
-			fmt.Fprintln(m.output, "   Provisioning new machine:")
+			if _, err := fmt.Fprintln(m.output, "Provisioning new machine:"); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 			spec := MachineSpec{
 				Name:      machineName,
 				CPUs:      cpus,
@@ -1258,22 +1304,26 @@ func (m *DefaultInfrastructureManager) ensureReadyWithDepth(ctx context.Context,
 			if err := m.ProvisionMachine(ctx, spec); err != nil {
 				return err
 			}
-			fmt.Fprintln(m.output, "\n   Machine recreated successfully!")
+			if _, err := fmt.Fprintln(m.output, "\n   Machine recreated successfully!"); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 			return nil
 		}
-		fmt.Fprintln(m.output, "\nProceeding with mismatched mounts. Services may fail to start.")
+		if _, err := fmt.Fprintln(m.output, "\nProceeding with mismatched mounts. Services may fail to start."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	} else {
-		fmt.Fprintln(m.output, "OK.")
+		if _, err := fmt.Fprintln(m.output, "OK."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	// Check if machine is running
 	if !status.Running {
-		fmt.Fprintln(m.output, "Machine is stopped. Booting up...")
 		if err := m.StartMachine(ctx, machineName); err != nil {
 			// Try self-healing
 			return m.ensureReadyWithDepth(ctx, opts, depth+1)
 		}
-		fmt.Fprintln(m.output, "Infrastructure ready.")
 	}
 
 	return nil
@@ -1281,32 +1331,63 @@ func (m *DefaultInfrastructureManager) ensureReadyWithDepth(ctx context.Context,
 
 // printDriftWarning outputs the drift detection warning message.
 func (m *DefaultInfrastructureManager) printDriftWarning(verification *MountVerification, machineName string) {
-	fmt.Fprintln(m.output)
-	fmt.Fprintln(m.output, "MOUNT CONFIGURATION MISMATCH")
-	fmt.Fprintln(m.output, "Your Podman machine has different volume mounts than your config.")
-	fmt.Fprintln(m.output, "\nExpected config mounts:")
-	for _, mount := range verification.ExpectedMounts {
-		fmt.Fprintf(m.output, "   - %s\n", mount)
+	if _, err := fmt.Fprintln(m.output); err != nil {
+		slog.Warn("failed to write output", "error", err)
 	}
-	if len(verification.MissingMounts) > 0 {
-		fmt.Fprintln(m.output, "\nMissing mounts:")
-		for _, mount := range verification.MissingMounts {
-			fmt.Fprintf(m.output, "   - %s\n", mount)
+	if _, err := fmt.Fprintln(m.output, "MOUNT CONFIGURATION MISMATCH"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output, "Your Podman machine has different volume mounts than your config."); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output, "\nExpected config mounts:"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	for _, mount := range verification.ExpectedMounts {
+		if _, err := fmt.Fprintf(m.output, "   - %s\n", mount); err != nil {
+			slog.Warn("failed to write output", "error", err)
 		}
 	}
-	fmt.Fprintln(m.output, "\nWHY THIS MATTERS:")
-	fmt.Fprintln(m.output, "   - Containers won't be able to access missing mount paths")
-	fmt.Fprintln(m.output, "   - You'll see 'statfs: not a directory' errors")
-	fmt.Fprintln(m.output, "\nTO FIX MANUALLY:")
-	fmt.Fprintln(m.output, "   1. Stop services:    aleutian stack stop")
-	fmt.Fprintf(m.output, "   2. Remove machine:   podman machine rm -f %s\n", machineName)
-	fmt.Fprintln(m.output, "   3. Restart:          aleutian stack start")
-	fmt.Fprintln(m.output)
+	if len(verification.MissingMounts) > 0 {
+		if _, err := fmt.Fprintln(m.output, "\nMissing mounts:"); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
+		for _, mount := range verification.MissingMounts {
+			if _, err := fmt.Fprintf(m.output, "   - %s\n", mount); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
+		}
+	}
+	if _, err := fmt.Fprintln(m.output, "\nWHY THIS MATTERS:"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output, "   - Containers won't be able to access missing mount paths"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output, "   - You'll see 'statfs: not a directory' errors"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output, "\nTO FIX MANUALLY:"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output, "   1. Stop services:    aleutian stack stop"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintf(m.output, "   2. Remove machine:   podman machine rm -f %s\n", machineName); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output, "   3. Restart:          aleutian stack start"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintln(m.output); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 }
 
 // GetMachineStatus returns the current state of a Podman machine.
 func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, machineName string) (*MachineStatus, error) {
-	output, err := m.proc.Run(ctx, "podman", "machine", "inspect", machineName, "--format", "json")
+	// Note: podman machine inspect outputs JSON by default, no --format flag needed
+	output, err := m.proc.Run(ctx, "podman", "machine", "inspect", machineName)
 	if err != nil {
 		// Machine doesn't exist
 		return &MachineStatus{
@@ -1397,7 +1478,7 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 }
 
 // ValidateMounts checks mount paths for security violations.
-func (m *DefaultInfrastructureManager) ValidateMounts(ctx context.Context, mounts []string) (*MountValidation, error) {
+func (m *DefaultInfrastructureManager) ValidateMounts(_ context.Context, mounts []string) (*MountValidation, error) {
 	result := &MountValidation{
 		Valid:          true,
 		ApprovedMounts: []string{},
@@ -1472,7 +1553,9 @@ func (m *DefaultInfrastructureManager) ProvisionMachine(ctx context.Context, spe
 
 	if !validation.Valid {
 		for _, rejection := range validation.RejectedMounts {
-			fmt.Fprintf(m.output, "   REJECTED: %s - %s\n", rejection.Path, rejection.Reason)
+			if _, err := fmt.Fprintf(m.output, "   REJECTED: %s - %s\n", rejection.Path, rejection.Reason); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 		}
 		return fmt.Errorf("mount validation failed: %d paths rejected", len(validation.RejectedMounts))
 	}
@@ -1517,7 +1600,9 @@ func (m *DefaultInfrastructureManager) ProvisionMachine(ctx context.Context, spe
 
 		// Check if path exists
 		if _, err := os.Stat(expandedMount); os.IsNotExist(err) {
-			fmt.Fprintf(m.output, "   SKIP: %s (path not found)\n", mount)
+			if _, err := fmt.Fprintf(m.output, "   SKIP: %s (path not found)\n", mount); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 			continue
 		}
 
@@ -1543,9 +1628,13 @@ func (m *DefaultInfrastructureManager) ProvisionMachine(ctx context.Context, spe
 		// Apply read-only if enabled and not an exception
 		if spec.Hardening.ReadOnlyMounts && !isAleutianData && !isExplicitWritable {
 			mountStr += ":ro"
-			fmt.Fprintf(m.output, "   - Mounting (ro): %s\n", mount)
+			if _, err := fmt.Fprintf(m.output, "   - Mounting (ro): %s\n", mount); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 		} else {
-			fmt.Fprintf(m.output, "   - Mounting: %s\n", mount)
+			if _, err := fmt.Fprintf(m.output, "   - Mounting: %s\n", mount); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 		}
 
 		args = append(args, "-v", mountStr)
@@ -1553,38 +1642,49 @@ func (m *DefaultInfrastructureManager) ProvisionMachine(ctx context.Context, spe
 	}
 
 	if validMounts == 0 {
-		fmt.Fprintln(m.output, "   Warning: No valid mount paths found. Creating machine without mounts.")
+		if _, err := fmt.Fprintln(m.output, "   Warning: No valid mount paths found. Creating machine without mounts."); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
-	// Execute podman machine init
-	_, err = m.proc.Run(ctx, "podman", args...)
-	if err != nil {
-		return fmt.Errorf("failed to provision podman machine: %w", err)
+	// Execute podman machine init with spinner (this can take a while)
+	spinErr := util.SpinWhileContext(ctx, "Initializing Podman machine...", func() error {
+		_, err = m.proc.Run(ctx, "podman", args...)
+		return err
+	})
+	if spinErr != nil {
+		return fmt.Errorf("failed to provision podman machine: %w", spinErr)
 	}
 
 	duration := time.Since(startTime)
 	m.metrics.RecordCollection(diagnostics.SeverityInfo, "machine_provisioned", duration.Milliseconds(), 0)
 
-	fmt.Fprintln(m.output, "Infrastructure provisioned.")
+	if _, err := fmt.Fprintln(m.output, "Infrastructure provisioned."); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 	return nil
 }
 
 // StartMachine starts a stopped Podman machine.
 func (m *DefaultInfrastructureManager) StartMachine(ctx context.Context, machineName string) error {
-	_, err := m.proc.Run(ctx, "podman", "machine", "start", machineName)
-	if err != nil {
-		return fmt.Errorf("failed to start machine %s: %w", machineName, err)
-	}
-	return nil
+	return util.SpinWhileContext(ctx, "Starting Podman machine...", func() error {
+		_, err := m.proc.Run(ctx, "podman", "machine", "start", machineName)
+		if err != nil {
+			return fmt.Errorf("failed to start machine %s: %w", machineName, err)
+		}
+		return nil
+	})
 }
 
 // StopMachine stops a running Podman machine.
 func (m *DefaultInfrastructureManager) StopMachine(ctx context.Context, machineName string) error {
-	_, err := m.proc.Run(ctx, "podman", "machine", "stop", machineName)
-	if err != nil {
-		return fmt.Errorf("failed to stop machine %s: %w", machineName, err)
-	}
-	return nil
+	return util.SpinWhileContext(ctx, "Stopping Podman machine...", func() error {
+		_, err := m.proc.Run(ctx, "podman", "machine", "stop", machineName)
+		if err != nil {
+			return fmt.Errorf("failed to stop machine %s: %w", machineName, err)
+		}
+		return nil
+	})
 }
 
 // RemoveMachine removes an existing Podman machine.
@@ -1598,11 +1698,13 @@ func (m *DefaultInfrastructureManager) RemoveMachine(ctx context.Context, machin
 	}
 	args = append(args, machineName)
 
-	_, err := m.proc.Run(ctx, "podman", args...)
-	if err != nil {
-		return fmt.Errorf("failed to remove machine %s: %w", machineName, err)
-	}
-	return nil
+	return util.SpinWhileContext(ctx, "Removing Podman machine...", func() error {
+		_, err := m.proc.Run(ctx, "podman", args...)
+		if err != nil {
+			return fmt.Errorf("failed to remove machine %s: %w", machineName, err)
+		}
+		return nil
+	})
 }
 
 // VerifyMounts checks if machine mounts match expected configuration.

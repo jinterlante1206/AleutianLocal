@@ -323,6 +323,8 @@ func init() {
 	deployCmd.Flags().BoolVar(&forceBuild, "build", false, "Force rebuild of container images")
 	deployCmd.Flags().Bool("force-recreate", false,
 		"automatically recreates the podman machine if a drift is detected.")
+	deployCmd.Flags().Bool("fix-mounts", false,
+		"Fix mount configuration drift even if foreign containers are running (will stop them)")
 	deployCmd.Flags().StringVar(&forecastMode, "forecast-mode", "", "Forecast service mode: 'standalone' (local) or 'sapheneia' (external)")
 	deployCmd.Flags().Bool("skip-model-check", false, "Skip automatic model verification and pulling (for offline use)")
 	// --- Utility Commands ---

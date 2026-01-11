@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -305,7 +306,9 @@ func (s *Spinner) Start() {
 
 	// Hide cursor if configured
 	if s.config.HideCursor {
-		fmt.Fprint(s.config.Writer, "\033[?25l")
+		if _, err := fmt.Fprint(s.config.Writer, "\033[?25l"); err != nil {
+			slog.Warn("failed to hide cursor", "error", err)
+		}
 	}
 
 	go s.spin()
@@ -357,7 +360,9 @@ func (s *Spinner) Stop() {
 
 	// Show cursor if it was hidden
 	if s.config.HideCursor {
-		fmt.Fprint(s.config.Writer, "\033[?25h")
+		if _, err := fmt.Fprint(s.config.Writer, "\033[?25h"); err != nil {
+			slog.Warn("failed to show cursor", "error", err)
+		}
 	}
 }
 
@@ -407,10 +412,14 @@ func (s *Spinner) StopSuccess(message string) {
 	if message == "" {
 		message = "Done"
 	}
-	fmt.Fprintf(s.config.Writer, "\r✓ %s\n", message)
+	if _, err := fmt.Fprintf(s.config.Writer, "\r✓ %s\n", message); err != nil {
+		slog.Warn("failed to write success message", "error", err)
+	}
 
 	if s.config.HideCursor {
-		fmt.Fprint(s.config.Writer, "\033[?25h")
+		if _, err := fmt.Fprint(s.config.Writer, "\033[?25h"); err != nil {
+			slog.Warn("failed to show cursor", "error", err)
+		}
 	}
 }
 
@@ -460,10 +469,14 @@ func (s *Spinner) StopFailure(message string) {
 	if message == "" {
 		message = "Failed"
 	}
-	fmt.Fprintf(s.config.Writer, "\r✗ %s\n", message)
+	if _, err := fmt.Fprintf(s.config.Writer, "\r✗ %s\n", message); err != nil {
+		slog.Warn("failed to write failure message", "error", err)
+	}
 
 	if s.config.HideCursor {
-		fmt.Fprint(s.config.Writer, "\033[?25h")
+		if _, err := fmt.Fprint(s.config.Writer, "\033[?25h"); err != nil {
+			slog.Warn("failed to show cursor", "error", err)
+		}
 	}
 }
 
@@ -558,12 +571,16 @@ func (s *Spinner) render() {
 	s.frame++
 	s.mu.Unlock()
 
-	fmt.Fprintf(s.config.Writer, "\r%s %s", frame, message)
+	if _, err := fmt.Fprintf(s.config.Writer, "\r%s %s", frame, message); err != nil {
+		slog.Warn("failed to render spinner frame", "error", err)
+	}
 }
 
 // clearLine clears the current line.
 func (s *Spinner) clearLine() {
-	fmt.Fprint(s.config.Writer, "\r\033[K")
+	if _, err := fmt.Fprint(s.config.Writer, "\r\033[K"); err != nil {
+		slog.Warn("failed to clear line", "error", err)
+	}
 }
 
 // =============================================================================
@@ -655,9 +672,14 @@ func SpinWhileContext(ctx context.Context, message string, fn func() error) erro
 	spinner := NewSpinner(SpinnerConfig{Message: message})
 	spinner.Start()
 
-	// Run fn in goroutine
+	// Run fn in goroutine with panic recovery
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic recovered: %v", r)
+			}
+		}()
 		done <- fn()
 	}()
 

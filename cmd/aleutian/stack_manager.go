@@ -95,6 +95,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
@@ -106,6 +107,7 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/compose"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
 )
 
 // =============================================================================
@@ -154,6 +156,24 @@ var (
 
 	// ErrPanicRecovered is returned when a panic was recovered during an operation.
 	ErrPanicRecovered = errors.New("panic recovered during operation")
+)
+
+// Compile-time assertions to ensure sentinel errors implement error interface.
+var (
+	_ error = ErrStackNotRunning
+	_ error = ErrStackAlreadyRunning
+	_ error = ErrInfrastructureNotReady
+	_ error = ErrSecretsNotReady
+	_ error = ErrModelsNotReady
+	_ error = ErrCacheNotReady
+	_ error = ErrProfileResolutionFailed
+	_ error = ErrComposeUpFailed
+	_ error = ErrServicesUnhealthy
+	_ error = ErrNilDependency
+	_ error = ErrDestroyPartial
+	_ error = ErrInvalidServiceName
+	_ error = ErrVerificationFailed
+	_ error = ErrPanicRecovered
 )
 
 // =============================================================================
@@ -466,6 +486,11 @@ type StartOptions struct {
 	// Corresponds to --force-recreate CLI flag.
 	ForceRecreate bool
 
+	// FixMounts forces mount configuration fix even when foreign containers are running.
+	// This will stop foreign containers to allow machine recreation.
+	// Corresponds to --fix-mounts CLI flag.
+	FixMounts bool
+
 	// ForceBuild rebuilds container images even if they exist.
 	// Corresponds to --build CLI flag.
 	ForceBuild bool
@@ -591,42 +616,6 @@ type discardWriter struct{}
 // Write implements io.Writer, discarding all data.
 func (discardWriter) Write(p []byte) (int, error) {
 	return len(p), nil
-}
-
-// safeWrite writes to the output writer, using discard if nil.
-//
-// # Description
-//
-// Provides nil-safe output writing. If the writer is nil, writes are
-// silently discarded. This prevents panics from propagating while
-// maintaining operation integrity.
-//
-// # Inputs
-//
-//   - w: Writer to write to (may be nil)
-//   - format: Printf-style format string
-//   - args: Format arguments
-//
-// # Outputs
-//
-//   - None (writes to w or discards)
-//
-// # Examples
-//
-//	safeWrite(s.output, "Starting containers...\n")
-//
-// # Limitations
-//
-//   - Silently discards if nil; caller may not know output was lost
-//
-// # Assumptions
-//
-//   - Format string is valid
-func safeWrite(w io.Writer, format string, args ...interface{}) {
-	if w == nil {
-		return
-	}
-	fmt.Fprintf(w, format, args...)
 }
 
 // sanitizeErrorForDiagnostics removes sensitive data from error messages.
@@ -1107,7 +1096,9 @@ func (s *DefaultStackManager) ensureInfrastructureReady(ctx context.Context, opt
 		return err
 	}
 
-	fmt.Fprintf(s.output, "Checking infrastructure...\n")
+	if _, err := fmt.Fprintf(s.output, "Checking infrastructure...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	infraOpts := s.buildInfrastructureOptions(opts)
 
@@ -1164,6 +1155,7 @@ func (s *DefaultStackManager) buildInfrastructureOptions(opts StartOptions) infr
 
 	// Apply start options
 	infraOpts.ForceRecreate = opts.ForceRecreate
+	infraOpts.FixMounts = opts.FixMounts
 	infraOpts.SkipPrompts = opts.NonInteractive
 	infraOpts.AllowSensitiveMounts = opts.AutoApprove
 
@@ -1214,7 +1206,9 @@ func (s *DefaultStackManager) ensureModelsReady(ctx context.Context, opts StartO
 		return nil
 	}
 
-	fmt.Fprintf(s.output, "Checking required models...\n")
+	if _, err := fmt.Fprintf(s.output, "Checking required models...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	result, err := s.models.EnsureModels(ctx)
 	if err != nil {
@@ -1263,11 +1257,15 @@ func (s *DefaultStackManager) ensureModelsReady(ctx context.Context, opts StartO
 //   - s.output is non-nil
 func (s *DefaultStackManager) logModelResults(result *ModelEnsureResult) {
 	for _, warn := range result.Warnings {
-		fmt.Fprintf(s.output, "  Warning: %s\n", warn)
+		if _, err := fmt.Fprintf(s.output, "  Warning: %s\n", warn); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	if len(result.ModelsPulled) > 0 {
-		fmt.Fprintf(s.output, "  Downloaded: %v\n", result.ModelsPulled)
+		if _, err := fmt.Fprintf(s.output, "  Downloaded: %v\n", result.ModelsPulled); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 }
 
@@ -1306,7 +1304,9 @@ func (s *DefaultStackManager) ensureSecretsReady(ctx context.Context, opts Start
 		return err
 	}
 
-	fmt.Fprintf(s.output, "Checking secrets...\n")
+	if _, err := fmt.Fprintf(s.output, "Checking secrets...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	requiredSecrets := s.getRequiredSecrets(opts)
 
@@ -1446,7 +1446,9 @@ func (s *DefaultStackManager) resolveCachePath(ctx context.Context) (string, err
 		return "", err
 	}
 
-	fmt.Fprintf(s.output, "Resolving cache path...\n")
+	if _, err := fmt.Fprintf(s.output, "Resolving cache path...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	cachePath, err := s.cache.Resolve(ctx, CacheTypeModels)
 	if err != nil {
@@ -1454,7 +1456,9 @@ func (s *DefaultStackManager) resolveCachePath(ctx context.Context) (string, err
 		return "", fmt.Errorf("%w: %v", ErrCacheNotReady, err)
 	}
 
-	fmt.Fprintf(s.output, "  Using cache: %s\n", cachePath)
+	if _, err := fmt.Fprintf(s.output, "  Using cache: %s\n", cachePath); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 	return cachePath, nil
 }
 
@@ -1494,7 +1498,9 @@ func (s *DefaultStackManager) resolveEnvironment(ctx context.Context, opts Start
 		return nil, err
 	}
 
-	fmt.Fprintf(s.output, "Resolving profile...\n")
+	if _, err := fmt.Fprintf(s.output, "Resolving profile...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	profileOpts := s.buildProfileOptions(opts)
 
@@ -1517,7 +1523,9 @@ func (s *DefaultStackManager) resolveEnvironment(ctx context.Context, opts Start
 
 	// Log resolved profile
 	if profileName, ok := env["ALEUTIAN_PROFILE"]; ok {
-		fmt.Fprintf(s.output, "  Using profile: %s\n", profileName)
+		if _, err := fmt.Fprintf(s.output, "  Using profile: %s\n", profileName); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	return env, nil
@@ -1601,7 +1609,9 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 		return err
 	}
 
-	fmt.Fprintf(s.output, "Starting containers...\n")
+	if _, err := fmt.Fprintf(s.output, "Starting containers...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	upOpts := compose.UpOptions{
 		ForceBuild: opts.ForceBuild,
@@ -1609,10 +1619,23 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 		Detach:     true,
 	}
 
-	result, err := s.compose.Up(ctx, upOpts)
-	if err != nil {
-		s.collectDiagnostics(ctx, "compose", err)
-		return fmt.Errorf("%w: %v", ErrComposeUpFailed, err)
+	var result *compose.ComposeResult
+	var composeErr error
+
+	// Use spinner for visual feedback during container startup
+	spinErr := util.SpinWhileContext(ctx, "Pulling images and starting services...", func() error {
+		var err error
+		result, err = s.compose.Up(ctx, upOpts)
+		composeErr = err
+		return err
+	})
+
+	if spinErr != nil {
+		if composeErr != nil {
+			s.collectDiagnostics(ctx, "compose", composeErr)
+			return fmt.Errorf("%w: %v", ErrComposeUpFailed, composeErr)
+		}
+		return spinErr
 	}
 
 	// Log meaningful stderr (not progress indicators)
@@ -1662,7 +1685,9 @@ func (s *DefaultStackManager) logComposeWarnings(result *compose.ComposeResult) 
 		return
 	}
 
-	fmt.Fprintf(s.output, "  Compose output: %s\n", stderr)
+	if _, err := fmt.Fprintf(s.output, "  Compose output: %s\n", stderr); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 }
 
 // waitForHealthy waits for all services to pass health checks.
@@ -1700,7 +1725,9 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 		return err
 	}
 
-	fmt.Fprintf(s.output, "Waiting for services to become healthy...\n")
+	if _, err := fmt.Fprintf(s.output, "Waiting for services to become healthy...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	services := health.DefaultServiceDefinitions()
 	waitOpts := health.DefaultWaitOptions()
@@ -1723,8 +1750,10 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 		return fmt.Errorf("%w: %v", ErrServicesUnhealthy, err)
 	}
 
-	fmt.Fprintf(s.output, "  All %d services healthy (took %v)\n",
-		len(result.Services), result.Duration.Round(time.Millisecond))
+	if _, err := fmt.Fprintf(s.output, "  All %d services healthy (took %v)\n",
+		len(result.Services), result.Duration.Round(time.Millisecond)); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	return nil
 }
@@ -1808,11 +1837,15 @@ func (s *DefaultStackManager) collectDiagnostics(ctx context.Context, phase stri
 
 	result, diagErr := s.diagnostics.Collect(ctx, opts)
 	if diagErr != nil {
-		fmt.Fprintf(s.output, "  Warning: Failed to collect diagnostics: %v\n", diagErr)
+		if _, err := fmt.Fprintf(s.output, "  Warning: Failed to collect diagnostics: %v\n", diagErr); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 		return
 	}
 
-	fmt.Fprintf(s.output, "  Diagnostics saved: %s\n", result.Location)
+	if _, err := fmt.Fprintf(s.output, "  Diagnostics saved: %s\n", result.Location); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 }
 
 // printStartupSummary outputs a summary after successful startup.
@@ -1844,15 +1877,27 @@ func (s *DefaultStackManager) collectDiagnostics(ctx context.Context, phase stri
 //   - s.output is non-nil
 func (s *DefaultStackManager) printStartupSummary(startTime time.Time, opts StartOptions) {
 	duration := time.Since(startTime).Round(time.Millisecond)
-	fmt.Fprintf(s.output, "\nStack started successfully in %v\n", duration)
+	if _, err := fmt.Fprintf(s.output, "\nStack started successfully in %v\n", duration); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
-	fmt.Fprintf(s.output, "\nAccess points:\n")
-	fmt.Fprintf(s.output, "  Chat UI:      http://localhost:8501\n")
-	fmt.Fprintf(s.output, "  API:          http://localhost:8080\n")
-	fmt.Fprintf(s.output, "  Weaviate:     http://localhost:8081\n")
+	if _, err := fmt.Fprintf(s.output, "\nAccess points:\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintf(s.output, "  Chat UI:      http://localhost:8501\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintf(s.output, "  API:          http://localhost:8080\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintf(s.output, "  Weaviate:     http://localhost:8081\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	if opts.Profile != "" {
-		fmt.Fprintf(s.output, "\nProfile: %s\n", opts.Profile)
+		if _, err := fmt.Fprintf(s.output, "\nProfile: %s\n", opts.Profile); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 }
 
@@ -1877,7 +1922,9 @@ func (s *DefaultStackManager) Stop(ctx context.Context) (err error) {
 		return err
 	}
 	if !isRunning {
-		fmt.Fprintf(s.output, "Stack is not running.\n")
+		if _, err := fmt.Fprintf(s.output, "Stack is not running.\n"); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 		return nil
 	}
 
@@ -1977,16 +2024,27 @@ func (s *DefaultStackManager) stopContainersGracefully(ctx context.Context) erro
 		return err
 	}
 
-	fmt.Fprintf(s.output, "Stopping containers...\n")
-
 	stopOpts := compose.StopOptions{
 		GracefulTimeout: 10 * time.Second,
 	}
 
-	result, err := s.compose.Stop(ctx, stopOpts)
-	if err != nil {
-		s.collectDiagnostics(ctx, "stop", err)
-		return fmt.Errorf("failed to stop containers: %w", err)
+	var result *compose.StopResult
+	var stopErr error
+
+	// Use spinner for visual feedback during stop
+	spinErr := util.SpinWhileContext(ctx, "Stopping containers...", func() error {
+		var err error
+		result, err = s.compose.Stop(ctx, stopOpts)
+		stopErr = err
+		return err
+	})
+
+	if spinErr != nil {
+		if stopErr != nil {
+			s.collectDiagnostics(ctx, "stop", stopErr)
+			return fmt.Errorf("failed to stop containers: %w", stopErr)
+		}
+		return spinErr
 	}
 
 	s.logStopResult(result)
@@ -2025,13 +2083,17 @@ func (s *DefaultStackManager) logStopResult(result *compose.StopResult) {
 	}
 
 	if result.TotalStopped > 0 {
-		fmt.Fprintf(s.output, "  Stopped %d containers (graceful=%d, forced=%d)\n",
-			result.TotalStopped, result.GracefulStopped, result.ForceStopped)
+		if _, err := fmt.Fprintf(s.output, "  Stopped %d containers (graceful=%d, forced=%d)\n",
+			result.TotalStopped, result.GracefulStopped, result.ForceStopped); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	if len(result.Errors) > 0 {
 		for _, errMsg := range result.Errors {
-			fmt.Fprintf(s.output, "  Warning: %s\n", errMsg)
+			if _, err := fmt.Fprintf(s.output, "  Warning: %s\n", errMsg); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
 		}
 	}
 }
@@ -2063,7 +2125,9 @@ func (s *DefaultStackManager) logStopResult(result *compose.StopResult) {
 //   - s.output is non-nil
 func (s *DefaultStackManager) printStopSummary(startTime time.Time) {
 	duration := time.Since(startTime).Round(time.Millisecond)
-	fmt.Fprintf(s.output, "Stack stopped successfully in %v\n", duration)
+	if _, err := fmt.Fprintf(s.output, "Stack stopped successfully in %v\n", duration); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 }
 
 // Destroy stops and removes all services and optionally data.
@@ -2088,7 +2152,9 @@ func (s *DefaultStackManager) Destroy(ctx context.Context, removeFiles bool) (er
 	if stopErr := s.stopContainersForDestroy(ctx); stopErr != nil {
 		// Continue with destroy even if stop fails
 		result.StopError = stopErr
-		fmt.Fprintf(s.output, "  Warning: stop failed, continuing with destroy: %v\n", stopErr)
+		if _, err := fmt.Fprintf(s.output, "  Warning: stop failed, continuing with destroy: %v\n", stopErr); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	// Phase 2: Remove containers via compose down
@@ -2101,13 +2167,17 @@ func (s *DefaultStackManager) Destroy(ctx context.Context, removeFiles bool) (er
 	// Phase 3: Force cleanup for any stragglers
 	if cleanupErr := s.forceCleanupRemainingContainers(ctx); cleanupErr != nil {
 		result.CleanupError = cleanupErr
-		fmt.Fprintf(s.output, "  Warning: cleanup completed with errors: %v\n", cleanupErr)
+		if _, err := fmt.Fprintf(s.output, "  Warning: cleanup completed with errors: %v\n", cleanupErr); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	// Phase 4: Post-operation verification
 	if verifyErr := s.verifyDestroyComplete(ctx); verifyErr != nil {
 		result.VerificationError = verifyErr
-		fmt.Fprintf(s.output, "  Warning: verification failed: %v\n", verifyErr)
+		if _, err := fmt.Fprintf(s.output, "  Warning: verification failed: %v\n", verifyErr); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 
 	s.printDestroySummary(startTime, removeFiles)
@@ -2254,14 +2324,15 @@ func (s *DefaultStackManager) stopContainersForDestroy(ctx context.Context) erro
 		return err
 	}
 
-	fmt.Fprintf(s.output, "Stopping containers...\n")
-
 	stopOpts := compose.StopOptions{
 		GracefulTimeout: 5 * time.Second, // Shorter timeout for destroy
 	}
 
-	_, err := s.compose.Stop(ctx, stopOpts)
-	return err
+	// Use spinner for visual feedback during stop
+	return util.SpinWhileContext(ctx, "Stopping containers...", func() error {
+		_, err := s.compose.Stop(ctx, stopOpts)
+		return err
+	})
 }
 
 // removeContainers executes compose down to remove containers.
@@ -2300,7 +2371,9 @@ func (s *DefaultStackManager) removeContainers(ctx context.Context, removeFiles 
 		return err
 	}
 
-	fmt.Fprintf(s.output, "Removing containers...\n")
+	if _, err := fmt.Fprintf(s.output, "Removing containers...\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
 
 	downOpts := compose.DownOptions{
 		RemoveOrphans: true,
@@ -2351,7 +2424,9 @@ func (s *DefaultStackManager) logComposeDownResult(result *compose.ComposeResult
 
 	stderr := strings.TrimSpace(result.Stderr)
 	if stderr != "" && !strings.Contains(stderr, "Stopping") {
-		fmt.Fprintf(s.output, "  Compose: %s\n", stderr)
+		if _, err := fmt.Fprintf(s.output, "  Compose: %s\n", stderr); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 }
 
@@ -2430,8 +2505,10 @@ func (s *DefaultStackManager) logCleanupResult(result *compose.CleanupResult) {
 	}
 
 	if result.ContainersRemoved > 0 || result.PodsRemoved > 0 {
-		fmt.Fprintf(s.output, "  Cleaned up: %d containers, %d pods\n",
-			result.ContainersRemoved, result.PodsRemoved)
+		if _, err := fmt.Fprintf(s.output, "  Cleaned up: %d containers, %d pods\n",
+			result.ContainersRemoved, result.PodsRemoved); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 }
 
@@ -2464,9 +2541,13 @@ func (s *DefaultStackManager) logCleanupResult(result *compose.CleanupResult) {
 func (s *DefaultStackManager) printDestroySummary(startTime time.Time, removeFiles bool) {
 	duration := time.Since(startTime).Round(time.Millisecond)
 	if removeFiles {
-		fmt.Fprintf(s.output, "Stack destroyed (including volumes) in %v\n", duration)
+		if _, err := fmt.Fprintf(s.output, "Stack destroyed (including volumes) in %v\n", duration); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	} else {
-		fmt.Fprintf(s.output, "Stack destroyed (volumes preserved) in %v\n", duration)
+		if _, err := fmt.Fprintf(s.output, "Stack destroyed (volumes preserved) in %v\n", duration); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
 	}
 }
 

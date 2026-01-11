@@ -869,7 +869,7 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 
 	// Step 10: Build messages with RAG context and session history, then stream
 	// Inbound content (LLM → user) is allowed and logged via hash chain
-	messages := h.buildRAGMessagesWithHistory(ragCtx, req.Message, sessionHistory)
+	messages := h.buildRAGMessagesWithHistory(ragCtx, req.Message, sessionHistory, req.StrictMode)
 	params := llm.GenerationParams{}
 
 	// Step 10.5: Create secure token accumulator for turn persistence
@@ -1136,7 +1136,7 @@ func (h *streamingChatHandler) streamFromLLMWithMetrics(
 	messages []datatypes.Message,
 	params llm.GenerationParams,
 	writer SSEWriter,
-	endpoint observability.Endpoint,
+	_ observability.Endpoint,
 	tokenCount *int32,
 	firstTokenTime *time.Time,
 	accumulator TokenAccumulator,
@@ -1726,9 +1726,13 @@ func (h *streamingChatHandler) filterValidTurns(turns []ConversationTurn) []Conv
 // # Description
 //
 // Builds the message array with:
-//  1. System prompt with RAG context
+//  1. System prompt with RAG context (varies based on strict mode)
 //  2. Previous conversation turns (alternating user/assistant)
 //  3. Current user message
+//
+// In strict mode, the system prompt instructs the LLM to ONLY answer from
+// the provided context and refuse to use general knowledge. In unrestricted
+// mode, the LLM can fall back to general knowledge when documents don't help.
 //
 // This enables the LLM to maintain conversation continuity when resuming
 // a session.
@@ -1738,6 +1742,7 @@ func (h *streamingChatHandler) filterValidTurns(turns []ConversationTurn) []Conv
 //   - ragContext: Retrieved document context from RAG pipeline.
 //   - userMessage: Current user question.
 //   - history: Previous conversation turns (may be empty).
+//   - strictMode: If true, LLM only answers from documents (no general knowledge).
 //
 // # Outputs
 //
@@ -1745,16 +1750,16 @@ func (h *streamingChatHandler) filterValidTurns(turns []ConversationTurn) []Conv
 //
 // # Examples
 //
+//	// Strict mode - only answer from documents
 //	messages := h.buildRAGMessagesWithHistory(
 //	    "OAuth is an authorization framework...",
 //	    "How does it compare to SAML?",
 //	    []ConversationTurn{{Question: "What is OAuth?", Answer: "OAuth is..."}},
+//	    true, // strict mode
 //	)
-//	// messages includes system prompt, history, and current question
 //
 // # Limitations
 //
-//   - System prompt is hardcoded.
 //   - History is included in linear order (no summarization).
 //
 // # Assumptions
@@ -1765,12 +1770,31 @@ func (h *streamingChatHandler) buildRAGMessagesWithHistory(
 	ragContext string,
 	userMessage string,
 	history []ConversationTurn,
+	strictMode bool,
 ) []datatypes.Message {
-	systemPrompt := `You are a helpful assistant. Use the following context to answer the user's question.
+	var systemPrompt string
+	if strictMode {
+		// Strict RAG mode: Only answer from documents, no general knowledge
+		systemPrompt = `You are a document-grounded assistant. You MUST ONLY answer based on the context provided below.
+
+IMPORTANT RULES:
+1. ONLY use information from the provided context to answer questions.
+2. If the context does not contain relevant information to answer the question, respond with:
+   "I don't have any documents about that topic in my knowledge base. Please try a different question or add relevant documents."
+3. Do NOT use your general knowledge or training data to answer questions.
+4. Do NOT speculate or make up information.
+5. If you're unsure, say you don't have that information in your documents.
+
+Context:
+` + ragContext
+	} else {
+		// Unrestricted mode: Can use general knowledge as fallback
+		systemPrompt = `You are a helpful assistant. Use the following context to answer the user's question.
 If the context doesn't contain relevant information, say so and provide what help you can.
 
 Context:
 ` + ragContext
+	}
 
 	// Calculate capacity: system + (history * 2) + current user
 	capacity := 1 + len(history)*2 + 1
