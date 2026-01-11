@@ -313,6 +313,7 @@ type ChatRAGRequest struct {
 	Stream      bool       `json:"stream,omitempty"`       // Enable SSE streaming
 	History     []ChatTurn `json:"history,omitempty"`      // Previous turns (if not using session)
 	ContentHash string     `json:"content_hash,omitempty"` // SHA-256 hash of message for integrity
+	StrictMode  bool       `json:"strict_mode,omitempty"`  // Strict RAG: only answer from docs
 }
 
 // ChatTurn represents a single turn in a conversation

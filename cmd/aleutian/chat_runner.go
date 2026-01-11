@@ -458,6 +458,7 @@ type RAGChatRunnerConfig struct {
 	Pipeline    string              // RAG pipeline name (optional, default: "reranking")
 	SessionID   string              // Session ID to resume (optional)
 	Personality ux.PersonalityLevel // Output styling (optional)
+	StrictMode  bool                // Strict RAG mode: only answer from docs (default: true)
 }
 
 // DirectChatRunnerConfig holds configuration for creating DirectChatRunner.

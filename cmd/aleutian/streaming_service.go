@@ -229,6 +229,7 @@ type RAGStreamingChatServiceConfig struct {
 	Writer      io.Writer           // Output destination (optional)
 	Personality ux.PersonalityLevel // Output styling (optional)
 	Timeout     time.Duration       // HTTP timeout (optional)
+	StrictMode  bool                // Strict RAG mode: only answer from docs (optional)
 }
 
 // DirectStreamingChatServiceConfig holds configuration for direct streaming chat service.
@@ -320,6 +321,7 @@ type ragStreamingChatService struct {
 	pipeline    string
 	writer      io.Writer
 	personality ux.PersonalityLevel
+	strictMode  bool // Strict RAG mode: only answer from docs
 	mu          sync.Mutex
 }
 
@@ -436,6 +438,7 @@ func NewRAGStreamingChatService(config RAGStreamingChatServiceConfig) StreamingC
 		pipeline:    config.Pipeline,
 		writer:      writer,
 		personality: personality,
+		strictMode:  config.StrictMode,
 	}
 }
 
@@ -490,6 +493,7 @@ func NewRAGStreamingChatServiceWithClient(client HTTPClient, config RAGStreaming
 		pipeline:    config.Pipeline,
 		writer:      writer,
 		personality: personality,
+		strictMode:  config.StrictMode,
 	}
 }
 
@@ -754,11 +758,12 @@ func (s *ragStreamingChatService) getSessionID() string {
 // All inputs are valid.
 func (s *ragStreamingChatService) buildRAGRequest(requestID, message, sessionID string) datatypes.ChatRAGRequest {
 	return datatypes.ChatRAGRequest{
-		Id:        requestID,
-		CreatedAt: time.Now().UnixMilli(),
-		Message:   message,
-		SessionId: sessionID,
-		Pipeline:  s.pipeline,
+		Id:         requestID,
+		CreatedAt:  time.Now().UnixMilli(),
+		Message:    message,
+		SessionId:  sessionID,
+		Pipeline:   s.pipeline,
+		StrictMode: s.strictMode,
 	}
 }
 

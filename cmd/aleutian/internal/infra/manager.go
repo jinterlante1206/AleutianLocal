@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides InfrastructureManager for Podman machine lifecycle management.
+Package infra provides InfrastructureManager for Podman machine lifecycle management.
 
 InfrastructureManager abstracts all Podman machine operations for testability.
 On macOS, Aleutian runs containers inside a Podman machine (Linux VM). This
@@ -42,7 +42,7 @@ allow a malicious container or hallucinating agent to access sensitive user file
   - Dependencies injected (ProcessManager, UserPrompter, DiagnosticsMetrics)
   - Thread-safe for concurrent use
 */
-package main
+package infra
 
 import (
 	"context"

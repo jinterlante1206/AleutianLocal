@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/compose"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
@@ -131,38 +132,38 @@ func (n *NoOpProcessManager) IsRunning(ctx context.Context, pattern string) (boo
 type NoOpComposeExecutor struct{}
 
 // Up returns success without doing anything.
-func (n *NoOpComposeExecutor) Up(ctx context.Context, opts UpOptions) (*ComposeResult, error) {
-	return &ComposeResult{Success: true, ExitCode: 0}, nil
+func (n *NoOpComposeExecutor) Up(ctx context.Context, opts compose.UpOptions) (*compose.ComposeResult, error) {
+	return &compose.ComposeResult{Success: true, ExitCode: 0}, nil
 }
 
 // Down returns success without doing anything.
-func (n *NoOpComposeExecutor) Down(ctx context.Context, opts DownOptions) (*ComposeResult, error) {
-	return &ComposeResult{Success: true, ExitCode: 0}, nil
+func (n *NoOpComposeExecutor) Down(ctx context.Context, opts compose.DownOptions) (*compose.ComposeResult, error) {
+	return &compose.ComposeResult{Success: true, ExitCode: 0}, nil
 }
 
 // Stop returns empty result.
-func (n *NoOpComposeExecutor) Stop(ctx context.Context, opts StopOptions) (*StopResult, error) {
-	return &StopResult{}, nil
+func (n *NoOpComposeExecutor) Stop(ctx context.Context, opts compose.StopOptions) (*compose.StopResult, error) {
+	return &compose.StopResult{}, nil
 }
 
 // Logs does nothing.
-func (n *NoOpComposeExecutor) Logs(ctx context.Context, opts LogsOptions, w io.Writer) error {
+func (n *NoOpComposeExecutor) Logs(ctx context.Context, opts compose.LogsOptions, w io.Writer) error {
 	return nil
 }
 
 // Status returns empty status.
-func (n *NoOpComposeExecutor) Status(ctx context.Context) (*ComposeStatus, error) {
-	return &ComposeStatus{Services: []ServiceStatus{}}, nil
+func (n *NoOpComposeExecutor) Status(ctx context.Context) (*compose.ComposeStatus, error) {
+	return &compose.ComposeStatus{Services: []compose.ServiceStatus{}}, nil
 }
 
 // ForceCleanup returns empty result.
-func (n *NoOpComposeExecutor) ForceCleanup(ctx context.Context) (*CleanupResult, error) {
-	return &CleanupResult{}, nil
+func (n *NoOpComposeExecutor) ForceCleanup(ctx context.Context) (*compose.CleanupResult, error) {
+	return &compose.CleanupResult{}, nil
 }
 
 // Exec returns empty result.
-func (n *NoOpComposeExecutor) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error) {
-	return &ExecResult{ExitCode: 0}, nil
+func (n *NoOpComposeExecutor) Exec(ctx context.Context, opts compose.ExecOptions) (*compose.ExecResult, error) {
+	return &compose.ExecResult{ExitCode: 0}, nil
 }
 
 // GetComposeFiles returns empty slice.
@@ -221,8 +222,8 @@ func (n *NoOpHealthChecker) IsContainerRunning(ctx context.Context, containerNam
 // =============================================================================
 
 var (
-	_ MetricsStore         = (*NoOpMetricsStore)(nil)
-	_ process.Manager      = (*NoOpProcessManager)(nil)
-	_ ComposeExecutor      = (*NoOpComposeExecutor)(nil)
-	_ health.HealthChecker = (*NoOpHealthChecker)(nil)
+	_ MetricsStore            = (*NoOpMetricsStore)(nil)
+	_ process.Manager         = (*NoOpProcessManager)(nil)
+	_ compose.ComposeExecutor = (*NoOpComposeExecutor)(nil)
+	_ health.HealthChecker    = (*NoOpHealthChecker)(nil)
 )

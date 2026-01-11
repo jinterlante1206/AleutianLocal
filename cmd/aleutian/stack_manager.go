@@ -104,6 +104,8 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/compose"
 )
 
 // =============================================================================
@@ -824,7 +826,7 @@ func recoverPanic(r interface{}, errPtr *error) {
 //   - config: Global configuration
 type DefaultStackManager struct {
 	// infra handles Podman machine lifecycle (Phase 5).
-	infra InfrastructureManager
+	infra infra.InfrastructureManager
 
 	// secrets handles API key provisioning (Phase 6).
 	secrets SecretsManager
@@ -833,7 +835,7 @@ type DefaultStackManager struct {
 	cache CachePathResolver
 
 	// compose executes podman-compose commands (Phase 8).
-	compose ComposeExecutor
+	compose compose.ComposeExecutor
 
 	// health verifies service availability (Phase 9).
 	health health.HealthChecker
@@ -914,10 +916,10 @@ type DefaultStackManager struct {
 //   - Dependencies will be valid for the lifetime of the manager
 //   - models may be nil (model checking will be skipped)
 func NewDefaultStackManager(
-	infra InfrastructureManager,
+	infraMgr infra.InfrastructureManager,
 	secrets SecretsManager,
 	cache CachePathResolver,
-	compose ComposeExecutor,
+	composeMgr compose.ComposeExecutor,
 	health health.HealthChecker,
 	models ModelEnsurer,
 	profile ProfileResolver,
@@ -925,7 +927,7 @@ func NewDefaultStackManager(
 	cfg *config.AleutianConfig,
 ) (*DefaultStackManager, error) {
 	// Validate required dependencies
-	if infra == nil {
+	if infraMgr == nil {
 		return nil, fmt.Errorf("%w: InfrastructureManager", ErrNilDependency)
 	}
 	if secrets == nil {
@@ -934,7 +936,7 @@ func NewDefaultStackManager(
 	if cache == nil {
 		return nil, fmt.Errorf("%w: CachePathResolver", ErrNilDependency)
 	}
-	if compose == nil {
+	if composeMgr == nil {
 		return nil, fmt.Errorf("%w: ComposeExecutor", ErrNilDependency)
 	}
 	if health == nil {
@@ -952,10 +954,10 @@ func NewDefaultStackManager(
 	// Note: models may be nil (model checking skipped)
 
 	return &DefaultStackManager{
-		infra:       infra,
+		infra:       infraMgr,
 		secrets:     secrets,
 		cache:       cache,
-		compose:     compose,
+		compose:     composeMgr,
 		health:      health,
 		models:      models,
 		profile:     profile,
@@ -1143,8 +1145,8 @@ func (s *DefaultStackManager) ensureInfrastructureReady(ctx context.Context, opt
 // # Assumptions
 //
 //   - DefaultInfrastructureOptions() returns sensible defaults
-func (s *DefaultStackManager) buildInfrastructureOptions(opts StartOptions) InfrastructureOptions {
-	infraOpts := DefaultInfrastructureOptions()
+func (s *DefaultStackManager) buildInfrastructureOptions(opts StartOptions) infra.InfrastructureOptions {
+	infraOpts := infra.DefaultInfrastructureOptions()
 
 	// Apply config overrides if available
 	if s.config != nil {
@@ -1601,7 +1603,7 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 
 	fmt.Fprintf(s.output, "Starting containers...\n")
 
-	upOpts := UpOptions{
+	upOpts := compose.UpOptions{
 		ForceBuild: opts.ForceBuild,
 		Env:        env,
 		Detach:     true,
@@ -1645,7 +1647,7 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 // # Assumptions
 //
 //   - result may be nil (handled gracefully)
-func (s *DefaultStackManager) logComposeWarnings(result *ComposeResult) {
+func (s *DefaultStackManager) logComposeWarnings(result *compose.ComposeResult) {
 	if result == nil {
 		return
 	}
@@ -1977,7 +1979,7 @@ func (s *DefaultStackManager) stopContainersGracefully(ctx context.Context) erro
 
 	fmt.Fprintf(s.output, "Stopping containers...\n")
 
-	stopOpts := StopOptions{
+	stopOpts := compose.StopOptions{
 		GracefulTimeout: 10 * time.Second,
 	}
 
@@ -2017,7 +2019,7 @@ func (s *DefaultStackManager) stopContainersGracefully(ctx context.Context) erro
 // # Assumptions
 //
 //   - result may be nil (handled gracefully)
-func (s *DefaultStackManager) logStopResult(result *StopResult) {
+func (s *DefaultStackManager) logStopResult(result *compose.StopResult) {
 	if result == nil {
 		return
 	}
@@ -2254,7 +2256,7 @@ func (s *DefaultStackManager) stopContainersForDestroy(ctx context.Context) erro
 
 	fmt.Fprintf(s.output, "Stopping containers...\n")
 
-	stopOpts := StopOptions{
+	stopOpts := compose.StopOptions{
 		GracefulTimeout: 5 * time.Second, // Shorter timeout for destroy
 	}
 
@@ -2300,7 +2302,7 @@ func (s *DefaultStackManager) removeContainers(ctx context.Context, removeFiles 
 
 	fmt.Fprintf(s.output, "Removing containers...\n")
 
-	downOpts := DownOptions{
+	downOpts := compose.DownOptions{
 		RemoveOrphans: true,
 		RemoveVolumes: removeFiles,
 		Timeout:       30 * time.Second,
@@ -2342,7 +2344,7 @@ func (s *DefaultStackManager) removeContainers(ctx context.Context, removeFiles 
 // # Assumptions
 //
 //   - result may be nil (handled gracefully)
-func (s *DefaultStackManager) logComposeDownResult(result *ComposeResult) {
+func (s *DefaultStackManager) logComposeDownResult(result *compose.ComposeResult) {
 	if result == nil {
 		return
 	}
@@ -2422,7 +2424,7 @@ func (s *DefaultStackManager) forceCleanupRemainingContainers(ctx context.Contex
 // # Assumptions
 //
 //   - result may be nil (handled gracefully)
-func (s *DefaultStackManager) logCleanupResult(result *CleanupResult) {
+func (s *DefaultStackManager) logCleanupResult(result *compose.CleanupResult) {
 	if result == nil {
 		return
 	}
@@ -2530,7 +2532,7 @@ func (s *DefaultStackManager) Status(ctx context.Context) (*StackStatus, error) 
 // # Assumptions
 //
 //   - ComposeExecutor dependency is non-nil
-func (s *DefaultStackManager) getComposeStatus(ctx context.Context) (*ComposeStatus, error) {
+func (s *DefaultStackManager) getComposeStatus(ctx context.Context) (*compose.ComposeStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2619,7 +2621,7 @@ func (s *DefaultStackManager) getMachineName() string {
 	if s.config != nil && s.config.Machine.Id != "" {
 		return s.config.Machine.Id
 	}
-	return DefaultMachineName
+	return infra.DefaultMachineName
 }
 
 // machineStatusToString converts MachineStatus to a display string.
@@ -2648,7 +2650,7 @@ func (s *DefaultStackManager) getMachineName() string {
 // # Assumptions
 //
 //   - status is non-nil
-func (s *DefaultStackManager) machineStatusToString(status *MachineStatus) string {
+func (s *DefaultStackManager) machineStatusToString(status *infra.MachineStatus) string {
 	if status == nil || !status.Exists {
 		return "not_found"
 	}
@@ -2685,7 +2687,7 @@ func (s *DefaultStackManager) machineStatusToString(status *MachineStatus) strin
 // # Assumptions
 //
 //   - composeStatus is non-nil
-func (s *DefaultStackManager) buildStackStatus(composeStatus *ComposeStatus, machineState string) *StackStatus {
+func (s *DefaultStackManager) buildStackStatus(composeStatus *compose.ComposeStatus, machineState string) *StackStatus {
 	status := &StackStatus{
 		MachineState:   machineState,
 		RunningCount:   composeStatus.Running,
@@ -2731,7 +2733,7 @@ func (s *DefaultStackManager) buildStackStatus(composeStatus *ComposeStatus, mac
 // # Assumptions
 //
 //   - status is non-nil
-func (s *DefaultStackManager) determineOverallState(status *ComposeStatus) string {
+func (s *DefaultStackManager) determineOverallState(status *compose.ComposeStatus) string {
 	if status.Running == 0 && status.Stopped == 0 {
 		return "unknown"
 	}
@@ -2770,7 +2772,7 @@ func (s *DefaultStackManager) determineOverallState(status *ComposeStatus) strin
 // # Assumptions
 //
 //   - status is non-nil
-func (s *DefaultStackManager) countHealthyServices(status *ComposeStatus) int {
+func (s *DefaultStackManager) countHealthyServices(status *compose.ComposeStatus) int {
 	count := 0
 	for _, svc := range status.Services {
 		if svc.Healthy != nil && *svc.Healthy {
@@ -2806,7 +2808,7 @@ func (s *DefaultStackManager) countHealthyServices(status *ComposeStatus) int {
 // # Assumptions
 //
 //   - services is non-nil
-func (s *DefaultStackManager) convertServiceStatus(services []ServiceStatus) []StackServiceInfo {
+func (s *DefaultStackManager) convertServiceStatus(services []compose.ServiceStatus) []StackServiceInfo {
 	result := make([]StackServiceInfo, len(services))
 	for i, svc := range services {
 		result[i] = s.convertSingleServiceStatus(svc)
@@ -2840,7 +2842,7 @@ func (s *DefaultStackManager) convertServiceStatus(services []ServiceStatus) []S
 // # Assumptions
 //
 //   - svc contains valid data
-func (s *DefaultStackManager) convertSingleServiceStatus(svc ServiceStatus) StackServiceInfo {
+func (s *DefaultStackManager) convertSingleServiceStatus(svc compose.ServiceStatus) StackServiceInfo {
 	info := StackServiceInfo{
 		Name:          svc.Name,
 		ContainerName: svc.ContainerName,
@@ -2884,7 +2886,7 @@ func (s *DefaultStackManager) convertSingleServiceStatus(svc ServiceStatus) Stac
 // # Assumptions
 //
 //   - ports may be nil (returns empty slice)
-func (s *DefaultStackManager) convertPortMappings(ports []PortMapping) []string {
+func (s *DefaultStackManager) convertPortMappings(ports []compose.PortMapping) []string {
 	result := make([]string, len(ports))
 	for i, port := range ports {
 		result[i] = s.formatPortMapping(port)
@@ -2919,7 +2921,7 @@ func (s *DefaultStackManager) convertPortMappings(ports []PortMapping) []string 
 // # Assumptions
 //
 //   - port contains valid data
-func (s *DefaultStackManager) formatPortMapping(port PortMapping) string {
+func (s *DefaultStackManager) formatPortMapping(port compose.PortMapping) string {
 	protocol := port.Protocol
 	if protocol == "" {
 		protocol = "tcp"
@@ -3030,8 +3032,8 @@ func (s *DefaultStackManager) streamLogs(ctx context.Context, services []string)
 // # Assumptions
 //
 //   - services may be nil or empty
-func (s *DefaultStackManager) buildLogsOptions(services []string) LogsOptions {
-	return LogsOptions{
+func (s *DefaultStackManager) buildLogsOptions(services []string) compose.LogsOptions {
+	return compose.LogsOptions{
 		Follow:     true,
 		Services:   services,
 		Timestamps: true,

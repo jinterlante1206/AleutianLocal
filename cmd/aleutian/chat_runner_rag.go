@@ -82,6 +82,7 @@ type RAGChatRunner struct {
 	sessionStartTime time.Time
 	sessionStats     ux.SessionStats
 	uniqueSources    map[string]bool
+	strictMode       bool // Strict RAG mode: only answer from docs (no LLM fallback)
 	closed           bool
 	mu               sync.Mutex
 }
@@ -147,6 +148,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		Pipeline:    pipeline,
 		Writer:      os.Stdout,
 		Personality: personality,
+		StrictMode:  config.StrictMode,
 	})
 
 	ui := ux.NewChatUI()
@@ -159,6 +161,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		pipeline:         pipeline,
 		initialSessionID: config.SessionID,
 		uniqueSources:    make(map[string]bool),
+		strictMode:       config.StrictMode,
 		closed:           false,
 	}
 }
@@ -283,6 +286,18 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 
 	// Display header
 	r.ui.Header(ux.ChatModeRAG, r.pipeline, r.initialSessionID)
+
+	// Display RAG mode notice
+	if r.strictMode {
+		fmt.Println()
+		fmt.Println(ux.Styles.Muted.Render("  Strict RAG Mode: Only answers from your documents."))
+		fmt.Println(ux.Styles.Muted.Render("  Use --unrestricted to allow LLM fallback when no relevant docs found."))
+		fmt.Println()
+	} else {
+		fmt.Println()
+		fmt.Println(ux.Styles.Warning.Render("  Unrestricted Mode: LLM may answer without document context."))
+		fmt.Println()
+	}
 
 	// Main chat loop
 	for {

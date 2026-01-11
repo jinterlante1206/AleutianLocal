@@ -105,6 +105,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
 )
 
 // -----------------------------------------------------------------------------
@@ -292,7 +294,7 @@ type ModelEnsurer interface {
 // DefaultModelEnsurer implements ModelEnsurer using SystemChecker and OllamaModelManager.
 type DefaultModelEnsurer struct {
 	// Dependencies (injected for testing)
-	systemChecker SystemChecker
+	systemChecker infra.SystemChecker
 	modelManager  OllamaModelManager
 
 	// Configuration
@@ -351,7 +353,7 @@ func NewDefaultModelEnsurer(cfg ModelEnsurerConfig) *DefaultModelEnsurer {
 	}
 
 	return NewDefaultModelEnsurerWithDeps(
-		NewDefaultSystemChecker(),
+		infra.NewDefaultSystemChecker(),
 		NewOllamaClient(baseURL),
 		cfg,
 	)
@@ -396,7 +398,7 @@ func NewDefaultModelEnsurer(cfg ModelEnsurerConfig) *DefaultModelEnsurer {
 //   - Both checker and manager are valid, non-nil implementations
 //   - Dependencies have been initialized before calling this
 func NewDefaultModelEnsurerWithDeps(
-	checker SystemChecker,
+	checker infra.SystemChecker,
 	manager OllamaModelManager,
 	cfg ModelEnsurerConfig,
 ) *DefaultModelEnsurer {

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/resilience"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/sampling"
@@ -75,7 +76,7 @@ type ReliabilityOrchestrator interface {
 	CheckResources() ResourceLimits
 
 	// ValidateImage checks if a container image is properly pinned.
-	ValidateImage(image string) (ImageValidation, error)
+	ValidateImage(image string) (infra.ImageValidation, error)
 
 	// BackupBeforeChange creates a backup before modifying a file.
 	BackupBeforeChange(path string) (string, error)
@@ -281,7 +282,7 @@ type ReliabilityManager struct {
 	metricsSchema    *DefaultMetricsSchema
 	backupManager    *resilience.DefaultBackupManager
 	retention        *DefaultRetentionEnforcer
-	imageValidator   *DefaultImagePinValidator
+	imageValidator   *infra.DefaultImagePinValidator
 	stateAuditor     *DefaultStateAuditor
 	resourceChecker  *DefaultResourceLimitsChecker
 
@@ -451,7 +452,7 @@ func (rm *ReliabilityManager) initializeSubsystems() error {
 
 	// Image validator
 	if rm.config.EnableImageValidation {
-		rm.imageValidator = NewImagePinValidator(DefaultImagePinConfig())
+		rm.imageValidator = infra.NewImagePinValidator(infra.DefaultImagePinConfig())
 	}
 
 	// State auditor
@@ -644,9 +645,9 @@ func (rm *ReliabilityManager) CheckResources() ResourceLimits {
 //	if result.Risk >= RiskHigh {
 //	    log.Printf("WARNING: %s is not pinned", result.Image)
 //	}
-func (rm *ReliabilityManager) ValidateImage(image string) (ImageValidation, error) {
+func (rm *ReliabilityManager) ValidateImage(image string) (infra.ImageValidation, error) {
 	if rm.imageValidator == nil {
-		return ImageValidation{Image: image, IsPinned: true}, nil
+		return infra.ImageValidation{Image: image, IsPinned: true}, nil
 	}
 	return rm.imageValidator.ValidateImage(image)
 }

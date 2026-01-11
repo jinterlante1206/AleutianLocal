@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains system_checker.go which provides pre-flight system checks
+Package infra contains system_checker.go which provides pre-flight system checks
 for the Aleutian CLI stack start command.
 
 # Problem Statement
@@ -179,12 +179,14 @@ The checker respects these environment variables:
   - cmd_stack.go: Integration point (runStart function)
   - docs/designs/pending/ollama_model_management.md: Full architecture
 */
-package main
+package infra
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1127,7 +1129,20 @@ func (c *DefaultSystemChecker) RunDiagnostics(ctx context.Context) *DiagnosticRe
 		if err == nil {
 			resp.Body.Close()
 			report.OllamaRunning = true
-			// TODO: Parse response to get version
+
+			// Fetch Ollama version from dedicated endpoint
+			versionResp, vErr := http.Get("http://localhost:11434/api/version")
+			if vErr == nil {
+				defer versionResp.Body.Close()
+				if body, rErr := io.ReadAll(versionResp.Body); rErr == nil {
+					var vr struct {
+						Version string `json:"version"`
+					}
+					if json.Unmarshal(body, &vr) == nil && vr.Version != "" {
+						report.OllamaVersion = vr.Version
+					}
+				}
+			}
 		}
 	}
 

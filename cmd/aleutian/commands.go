@@ -23,6 +23,7 @@ var (
 	forecastMode     string // CLI override for forecast.mode (standalone/sapheneia)
 	pipelineType     string
 	noRag            bool
+	unrestrictedMode bool // Allow LLM fallback when no relevant RAG documents found
 	enableThinking   bool
 	budgetTokens     int
 	quantizeType     string
@@ -347,6 +348,7 @@ func init() {
 	chatCmd.Flags().BoolVar(&enableThinking, "thinking", false, "Enable Extended Thinking (Claude only)")
 	chatCmd.Flags().IntVar(&budgetTokens, "budget", 2048, "Token budget for thinking (default 2048)")
 	chatCmd.Flags().BoolVar(&noRag, "no-rag", false, "Disable RAG and use direct LLM chat")
+	chatCmd.Flags().BoolVar(&unrestrictedMode, "unrestricted", false, "Allow LLM to answer when no relevant documents found (default: strict RAG mode)")
 	chatCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking", "RAG pipeline (standard, reranking, raptor, graph)")
 
 	rootCmd.AddCommand(traceCmd)

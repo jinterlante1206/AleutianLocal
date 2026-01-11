@@ -56,6 +56,12 @@ from weaviate.exceptions import WeaviateQueryException
 
 logger = logging.getLogger(__name__)
 
+# --- Strict RAG Mode Constants ---
+# Relevance thresholds for strict mode filtering
+RERANK_SCORE_THRESHOLD = 0.5  # Minimum rerank score to consider relevant
+DISTANCE_THRESHOLD = 0.8      # Maximum distance to consider relevant (lower is better)
+NO_RELEVANT_DOCS_MESSAGE = "No relevant documents found. Use `aleutian populate vectordb <file>` to add documents."
+
 # --- Default Configurable Parameters ---
 # Prompt Template
 DEFAULT_PROMPT_TEMPLATE = """You are a helpful assistant. Answer the user's question based *only* on the provided context. If the context does not contain the answer, state that you don't have enough information from the provided documents. Do not use any prior knowledge.
@@ -623,7 +629,7 @@ class BaseRAGPipeline:
             return global_filter
 
 
-    async def run(self, query: str, session_id: str | None = None) -> tuple[str, list[dict]]:
+    async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
         """
         Abstract 'run' method for the RAG pipeline.
 
@@ -645,7 +651,7 @@ class BaseRAGPipeline:
         Why it Does This:
         It defines a standard "contract" or interface for all
         pipelines. This ensures that `server.py` can treat all
-        pipelines identically, simply calling `.run(query, session_id)`
+        pipelines identically, simply calling `.run(query, session_id, strict_mode)`
         regardless of their internal complexity.
 
         Parameters
@@ -654,6 +660,10 @@ class BaseRAGPipeline:
             The user's query.
         session_id : str | None
             The current session ID, passed from the orchestrator.
+        strict_mode : bool
+            If True, only answer from documents. If no relevant docs,
+            return NO_RELEVANT_DOCS_MESSAGE instead of using LLM fallback.
+            Default: True (strict mode).
 
         Returns
         -------

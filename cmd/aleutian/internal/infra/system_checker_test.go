@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains unit tests for system_checker.go.
+Package infra contains unit tests for system_checker.go.
 
 # Testing Strategy
 
@@ -32,7 +32,7 @@ The tests cover:
   - Error classification and structured error types
   - Caching behavior
 */
-package main
+package infra
 
 import (
 	"context"
