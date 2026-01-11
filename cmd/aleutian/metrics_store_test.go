@@ -281,7 +281,7 @@ func TestEphemeralMetricsStore_JSONLPersistence(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := MetricsStoreConfig{
-		ID:                 GenerateID(),
+		ID:                 generateID(),
 		InMemoryOnly:       false,
 		MaxPointsPerMetric: 100,
 		RetentionPeriod:    1 * time.Hour,
@@ -338,7 +338,7 @@ func TestEphemeralMetricsStore_JSONLReload(t *testing.T) {
 
 	// Create first store and write data
 	config1 := MetricsStoreConfig{
-		ID:                 GenerateID(),
+		ID:                 generateID(),
 		InMemoryOnly:       false,
 		MaxPointsPerMetric: 100,
 		RetentionPeriod:    1 * time.Hour,
@@ -365,7 +365,7 @@ func TestEphemeralMetricsStore_JSONLReload(t *testing.T) {
 
 	// Create second store and verify it loads existing data
 	config2 := MetricsStoreConfig{
-		ID:                 GenerateID(),
+		ID:                 generateID(),
 		InMemoryOnly:       false,
 		MaxPointsPerMetric: 100,
 		RetentionPeriod:    1 * time.Hour,
@@ -401,7 +401,7 @@ func TestNewEphemeralMetricsStore_InvalidPath(t *testing.T) {
 	invalidPath := "/dev/null/invalid/path/metrics.jsonl"
 
 	config := MetricsStoreConfig{
-		ID:           GenerateID(),
+		ID:           generateID(),
 		InMemoryOnly: false,
 		JSONLPath:    invalidPath,
 		CreatedAt:    time.Now(),

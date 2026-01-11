@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides FileDiagnosticsViewer for local diagnostic retrieval.
+Package diagnostics provides FileDiagnosticsViewer for local diagnostic retrieval.
 
 FileDiagnosticsViewer is the FOSS-tier implementation that retrieves diagnostics
 from local file storage. This enables:
@@ -32,7 +32,7 @@ The interface is public; the implementation dictates the value.
 The GetByTraceID method is the key feature: users provide a trace ID from
 Jaeger or logs instead of pasting 500 lines of output.
 */
-package main
+package diagnostics
 
 import (
 	"context"

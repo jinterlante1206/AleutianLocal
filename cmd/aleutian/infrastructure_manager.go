@@ -55,6 +55,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
 )
@@ -1047,7 +1048,7 @@ type DefaultInfrastructureManager struct {
 	prompter util.UserPrompter
 
 	// metrics records infrastructure events for observability.
-	metrics DiagnosticsMetrics
+	metrics diagnostics.DiagnosticsMetrics
 
 	// output is where status messages are written.
 	output io.Writer
@@ -1088,11 +1089,11 @@ type DefaultInfrastructureManager struct {
 func NewDefaultInfrastructureManager(
 	proc process.Manager,
 	prompter util.UserPrompter,
-	metrics DiagnosticsMetrics,
+	metrics diagnostics.DiagnosticsMetrics,
 ) *DefaultInfrastructureManager {
 	output := io.Writer(os.Stdout)
 	if metrics == nil {
-		metrics = NewNoOpDiagnosticsMetrics()
+		metrics = diagnostics.NewNoOpDiagnosticsMetrics()
 	}
 	return &DefaultInfrastructureManager{
 		proc:     proc,
@@ -1562,7 +1563,7 @@ func (m *DefaultInfrastructureManager) ProvisionMachine(ctx context.Context, spe
 	}
 
 	duration := time.Since(startTime)
-	m.metrics.RecordCollection(SeverityInfo, "machine_provisioned", duration.Milliseconds(), 0)
+	m.metrics.RecordCollection(diagnostics.SeverityInfo, "machine_provisioned", duration.Milliseconds(), 0)
 
 	fmt.Fprintln(m.output, "Infrastructure provisioned.")
 	return nil
@@ -1589,7 +1590,7 @@ func (m *DefaultInfrastructureManager) StopMachine(ctx context.Context, machineN
 // RemoveMachine removes an existing Podman machine.
 func (m *DefaultInfrastructureManager) RemoveMachine(ctx context.Context, machineName string, force bool, reason string) error {
 	// Emit audit metric before destruction
-	m.metrics.RecordCollection(SeverityWarning, fmt.Sprintf("machine_destroy_%s", reason), 0, 0)
+	m.metrics.RecordCollection(diagnostics.SeverityWarning, fmt.Sprintf("machine_destroy_%s", reason), 0, 0)
 
 	args := []string{"machine", "rm"}
 	if force {

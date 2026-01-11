@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides JSONDiagnosticsFormatter for machine-readable output.
+Package diagnostics provides JSONDiagnosticsFormatter for machine-readable output.
 
 JSON format is the primary output format for diagnostics, designed for:
 
@@ -21,7 +21,7 @@ JSON format is the primary output format for diagnostics, designed for:
 The JSON structure is stable and versioned via the "version" field in the header.
 Changes to the schema should increment the version and maintain backward compatibility.
 */
-package main
+package diagnostics
 
 import (
 	"encoding/json"

@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides FileDiagnosticsStorage for local filesystem storage.
+Package diagnostics provides FileDiagnosticsStorage for local filesystem storage.
 
 File storage is the FOSS-tier implementation of DiagnosticsStorage, providing
 local diagnostic retention for developers debugging their own machines.
@@ -34,7 +34,7 @@ Files are stored with timestamped filenames for easy identification and
 chronological ordering. The storage directory is created automatically
 if it does not exist.
 */
-package main
+package diagnostics
 
 import (
 	"context"

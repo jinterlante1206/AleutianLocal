@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains tests for DefaultDiagnosticsCollector.
+Package diagnostics_test contains tests for DefaultDiagnosticsCollector.
 
 # Testing Strategy
 
@@ -22,7 +22,7 @@ These tests verify:
   - Thread safety under concurrent access
   - All helper function behavior
 */
-package main
+package diagnostics
 
 import (
 	"context"
@@ -36,7 +36,7 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Test Storage Helper - uses MockDiagnosticsStorage from diagnostics_mocks.go
+// Test Storage Helper - uses MockDiagnosticsStorage from mocks.go
 // -----------------------------------------------------------------------------
 
 // testDiagnosticsStorage wraps MockDiagnosticsStorage with test-specific helpers.
@@ -209,7 +209,7 @@ func (ts *testDiagnosticsStorage) GetStoreCount() int {
 }
 
 // -----------------------------------------------------------------------------
-// Test Metrics Helper - uses MockDiagnosticsMetrics from diagnostics_mocks.go
+// Test Metrics Helper - uses MockDiagnosticsMetrics from mocks.go
 // -----------------------------------------------------------------------------
 
 // testDiagnosticsMetrics wraps MockDiagnosticsMetrics with test-specific helpers.

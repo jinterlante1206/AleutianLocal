@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides type definitions for the Distributed Health Agent.
+Package diagnostics provides type definitions for the Distributed Health Agent.
 
 This file contains all data types used by the DiagnosticsCollector and related
 interfaces. Types are designed for:
@@ -19,7 +19,7 @@ interfaces. Types are designed for:
   - Prometheus metric labeling
   - GDPR-compliant audit logging
 */
-package main
+package diagnostics
 
 import (
 	"time"

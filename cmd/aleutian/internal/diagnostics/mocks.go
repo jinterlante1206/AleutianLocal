@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides mock implementations for the Distributed Health Agent.
+Package diagnostics provides mock implementations for the Distributed Health Agent.
 
 This file contains test doubles for all diagnostic interfaces, enabling fast,
 isolated unit tests without network or filesystem dependencies.
@@ -50,7 +50,7 @@ and recorded inputs are protected by mutexes.
 	    assert.Equal(t, 1, mock.CollectCallCount())
 	}
 */
-package main
+package diagnostics
 
 import (
 	"context"

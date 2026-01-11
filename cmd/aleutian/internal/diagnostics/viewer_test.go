@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides tests for FileDiagnosticsViewer.
+Package diagnostics_test provides tests for FileDiagnosticsViewer.
 
 These tests validate the FOSS-tier viewer implementation:
 
@@ -24,7 +24,7 @@ These tests validate the FOSS-tier viewer implementation:
 All tests use temporary directories to avoid side effects. Test data is
 created using real FileDiagnosticsStorage for authentic file operations.
 */
-package main
+package diagnostics
 
 import (
 	"context"

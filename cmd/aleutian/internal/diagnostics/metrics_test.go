@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides tests for DiagnosticsMetrics implementations.
+Package diagnostics_test provides tests for DiagnosticsMetrics implementations.
 
 These tests validate:
 
@@ -24,7 +24,7 @@ NoOp tests verify in-memory counters. Prometheus tests use a test registry
 to avoid conflicts with the default registry. All tests run without external
 dependencies.
 */
-package main
+package diagnostics
 
 import (
 	"sync"

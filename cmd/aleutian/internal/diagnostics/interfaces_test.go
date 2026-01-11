@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains tests for Distributed Health Agent interfaces and types.
+Package diagnostics_test contains tests for Distributed Health Agent interfaces and types.
 
 # Testing Strategy
 
@@ -19,7 +19,7 @@ These tests verify:
   - Default values are properly applied
   - Constants have expected values
 */
-package main
+package diagnostics
 
 import (
 	"testing"

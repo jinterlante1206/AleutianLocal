@@ -8,17 +8,78 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package main
+package health
 
 import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
+
+// =============================================================================
+// MOCK IMPLEMENTATIONS FOR TESTING
+// =============================================================================
+
+// MockMetricsStore is a test double for MetricsStore.
+type MockMetricsStore struct {
+	mu     sync.RWMutex
+	points map[string][]MetricPoint
+}
+
+// NewMockMetricsStore creates a new MockMetricsStore.
+func NewMockMetricsStore() *MockMetricsStore {
+	return &MockMetricsStore{
+		points: make(map[string][]MetricPoint),
+	}
+}
+
+func (m *MockMetricsStore) Record(service, metric string, value float64, timestamp time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := service + "/" + metric
+	m.points[key] = append(m.points[key], MetricPoint{Timestamp: timestamp, Value: value})
+}
+
+func (m *MockMetricsStore) Query(service, metric string, start, end time.Time) []MetricPoint {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	key := service + "/" + metric
+	var result []MetricPoint
+	for _, p := range m.points[key] {
+		if !p.Timestamp.Before(start) && !p.Timestamp.After(end) {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func (m *MockMetricsStore) GetBaseline(service, metric string, window time.Duration) *BaselineStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	key := service + "/" + metric
+	points := m.points[key]
+	if len(points) < 3 {
+		return nil
+	}
+	var sum float64
+	for _, p := range points {
+		sum += p.Value
+	}
+	mean := sum / float64(len(points))
+	return &BaselineStats{Mean: mean, P50: mean, P99: mean * 1.2}
+}
+
+// MockLogSanitizer is a test double for LogSanitizer.
+type MockLogSanitizer struct{}
+
+func (m *MockLogSanitizer) Sanitize(input string) string {
+	return input // No-op for tests
+}
 
 // =============================================================================
 // DefaultHealthIntelligence TESTS
@@ -74,8 +135,8 @@ func createTestIntelligence() *DefaultHealthIntelligence {
 		},
 	}
 
-	metrics := NewInMemoryMetricsStore()
-	sanitizer := NewDefaultLogSanitizer(DefaultSanitizationPatterns())
+	metrics := NewMockMetricsStore()
+	sanitizer := &MockLogSanitizer{}
 	config := DefaultIntelligenceConfig("/tmp/test")
 
 	return NewDefaultHealthIntelligence(checker, proc, ollama, metrics, sanitizer, config)

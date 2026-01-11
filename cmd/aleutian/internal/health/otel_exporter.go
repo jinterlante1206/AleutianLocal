@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides OpenTelemetry export for Health Intelligence.
+Package health provides OpenTelemetry export for Health Intelligence.
 
 This file implements the HealthOTelExporter interface, enabling health metrics
 and traces to be exported to OTel-compatible backends (Jaeger, Prometheus, etc.).
@@ -32,13 +32,15 @@ HealthOTelExporter bridges the Health Intelligence system with OpenTelemetry:
   - Health metrics exported to Prometheus/OTLP endpoint
   - Trace IDs included in health reports for correlation
 */
-package main
+package health
 
 import (
 	"context"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
 )
 
 // =============================================================================
@@ -440,7 +442,7 @@ func NewDefaultHealthOTelExporter(tracer DiagnosticsTracer, config HealthOTelCon
 //   - Caller doesn't require distributed tracing
 func NewNoOpHealthOTelExporter(config HealthOTelConfig) *NoOpHealthOTelExporter {
 	return &NoOpHealthOTelExporter{
-		tracer: NewNoOpDiagnosticsTracer("aleutian-health"),
+		tracer: diagnostics.NewNoOpDiagnosticsTracer("aleutian-health"),
 		config: config,
 	}
 }
@@ -674,13 +676,13 @@ func (m *MockHealthOTelExporter) GetTraceID(ctx context.Context) string {
 //
 //   - Environment variable indicates Enterprise mode
 func NewHealthOTelExporter(ctx context.Context, config HealthOTelConfig) (HealthOTelExporter, error) {
-	tracer, err := NewDefaultDiagnosticsTracer(ctx, "aleutian-health")
+	tracer, err := diagnostics.NewDefaultDiagnosticsTracer(ctx, "aleutian-health")
 	if err != nil {
 		return NewNoOpHealthOTelExporter(config), nil
 	}
 
 	// Check if we got a NoOp tracer (FOSS tier)
-	if _, isNoOp := tracer.(*NoOpDiagnosticsTracer); isNoOp {
+	if _, isNoOp := tracer.(*diagnostics.NoOpDiagnosticsTracer); isNoOp {
 		return NewNoOpHealthOTelExporter(config), nil
 	}
 

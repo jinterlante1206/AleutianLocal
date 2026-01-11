@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains tests for FileDiagnosticsStorage.
+Package diagnostics_test contains tests for FileDiagnosticsStorage.
 
 # Testing Strategy
 
@@ -22,7 +22,7 @@ These tests verify:
   - Thread safety under concurrent access
   - Filename sanitization
 */
-package main
+package diagnostics
 
 import (
 	"context"

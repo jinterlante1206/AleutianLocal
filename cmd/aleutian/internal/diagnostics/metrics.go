@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides Prometheus metrics for the Distributed Health Agent.
+Package diagnostics provides Prometheus metrics for the Distributed Health Agent.
 
 This file implements the DiagnosticsMetrics interface, enabling fleet-wide
 monitoring and alerting for diagnostic collection operations.
@@ -52,7 +52,7 @@ Use these metrics to build dashboards showing:
   - Storage growth and pruning effectiveness
   - Collection duration trends (performance regression detection)
 */
-package main
+package diagnostics
 
 import (
 	"sync"

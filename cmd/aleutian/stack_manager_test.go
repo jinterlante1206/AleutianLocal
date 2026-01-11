@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
 )
 
 // =============================================================================
@@ -266,37 +268,37 @@ func (m *testComposeExecutor) GetComposeFiles() []string {
 
 // testHealthChecker is a minimal mock for HealthChecker.
 type testHealthChecker struct {
-	waitForServicesFunc func(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error)
+	waitForServicesFunc func(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error)
 }
 
 func newTestHealthChecker() *testHealthChecker {
 	return &testHealthChecker{
-		waitForServicesFunc: func(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
-			return &WaitResult{
+		waitForServicesFunc: func(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
+			return &health.WaitResult{
 				Success:  true,
 				Duration: 5 * time.Second,
-				Services: []HealthStatus{
-					{Name: "orchestrator", State: HealthStateHealthy},
-					{Name: "weaviate", State: HealthStateHealthy},
+				Services: []health.HealthStatus{
+					{Name: "orchestrator", State: health.HealthStateHealthy},
+					{Name: "weaviate", State: health.HealthStateHealthy},
 				},
 			}, nil
 		},
 	}
 }
 
-func (m *testHealthChecker) WaitForServices(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
+func (m *testHealthChecker) WaitForServices(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
 	if m.waitForServicesFunc != nil {
 		return m.waitForServicesFunc(ctx, services, opts)
 	}
-	return &WaitResult{Success: true}, nil
+	return &health.WaitResult{Success: true}, nil
 }
 
-func (m *testHealthChecker) CheckService(ctx context.Context, service ServiceDefinition) (*HealthStatus, error) {
-	return &HealthStatus{State: HealthStateHealthy}, nil
+func (m *testHealthChecker) CheckService(ctx context.Context, service health.ServiceDefinition) (*health.HealthStatus, error) {
+	return &health.HealthStatus{State: health.HealthStateHealthy}, nil
 }
 
-func (m *testHealthChecker) CheckAllServices(ctx context.Context, services []ServiceDefinition) ([]HealthStatus, error) {
-	return []HealthStatus{{State: HealthStateHealthy}}, nil
+func (m *testHealthChecker) CheckAllServices(ctx context.Context, services []health.ServiceDefinition) ([]health.HealthStatus, error) {
+	return []health.HealthStatus{{State: health.HealthStateHealthy}}, nil
 }
 
 func (m *testHealthChecker) IsContainerRunning(ctx context.Context, containerName string) (bool, error) {
@@ -305,33 +307,33 @@ func (m *testHealthChecker) IsContainerRunning(ctx context.Context, containerNam
 
 // testDiagnosticsCollector is a minimal mock for DiagnosticsCollector.
 type testDiagnosticsCollector struct {
-	collectFunc func(ctx context.Context, opts CollectOptions) (*DiagnosticsResult, error)
+	collectFunc func(ctx context.Context, opts diagnostics.CollectOptions) (*diagnostics.DiagnosticsResult, error)
 }
 
 func newTestDiagnosticsCollector() *testDiagnosticsCollector {
 	return &testDiagnosticsCollector{
-		collectFunc: func(ctx context.Context, opts CollectOptions) (*DiagnosticsResult, error) {
-			return &DiagnosticsResult{Location: "/tmp/diagnostics.json"}, nil
+		collectFunc: func(ctx context.Context, opts diagnostics.CollectOptions) (*diagnostics.DiagnosticsResult, error) {
+			return &diagnostics.DiagnosticsResult{Location: "/tmp/diagnostics.json"}, nil
 		},
 	}
 }
 
-func (m *testDiagnosticsCollector) Collect(ctx context.Context, opts CollectOptions) (*DiagnosticsResult, error) {
+func (m *testDiagnosticsCollector) Collect(ctx context.Context, opts diagnostics.CollectOptions) (*diagnostics.DiagnosticsResult, error) {
 	if m.collectFunc != nil {
 		return m.collectFunc(ctx, opts)
 	}
-	return &DiagnosticsResult{}, nil
+	return &diagnostics.DiagnosticsResult{}, nil
 }
 
-func (m *testDiagnosticsCollector) GetLastResult() *DiagnosticsResult {
-	return &DiagnosticsResult{}
+func (m *testDiagnosticsCollector) GetLastResult() *diagnostics.DiagnosticsResult {
+	return &diagnostics.DiagnosticsResult{}
 }
 
-func (m *testDiagnosticsCollector) SetTracer(tracer DiagnosticsTracer) {}
+func (m *testDiagnosticsCollector) SetTracer(tracer diagnostics.DiagnosticsTracer) {}
 
-func (m *testDiagnosticsCollector) SetFormatter(formatter DiagnosticsFormatter) {}
+func (m *testDiagnosticsCollector) SetFormatter(formatter diagnostics.DiagnosticsFormatter) {}
 
-func (m *testDiagnosticsCollector) SetStorage(storage DiagnosticsStorage) {}
+func (m *testDiagnosticsCollector) SetStorage(storage diagnostics.DiagnosticsStorage) {}
 
 // =============================================================================
 // Test Helper Functions
@@ -508,8 +510,8 @@ func TestDefaultStackManager_Start_HealthFailure(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.health.waitForServicesFunc = func(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
-		return &WaitResult{
+	mocks.health.waitForServicesFunc = func(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
+		return &health.WaitResult{
 			Success:        false,
 			FailedCritical: []string{"orchestrator"},
 		}, nil
@@ -1013,5 +1015,5 @@ var _ InfrastructureManager = (*testInfraManager)(nil)
 var _ ProfileResolver = (*testProfileResolver)(nil)
 var _ ModelEnsurer = (*testModelEnsurer)(nil)
 var _ ComposeExecutor = (*testComposeExecutor)(nil)
-var _ HealthChecker = (*testHealthChecker)(nil)
-var _ DiagnosticsCollector = (*testDiagnosticsCollector)(nil)
+var _ health.HealthChecker = (*testHealthChecker)(nil)
+var _ diagnostics.DiagnosticsCollector = (*testDiagnosticsCollector)(nil)

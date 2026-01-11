@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
 )
@@ -40,7 +41,7 @@ func createTestInfraManager(t *testing.T) (*DefaultInfrastructureManager, *proce
 			return 0, nil
 		},
 	}
-	metrics := NewNoOpDiagnosticsMetrics()
+	metrics := diagnostics.NewNoOpDiagnosticsMetrics()
 	output := &bytes.Buffer{}
 
 	mgr := NewDefaultInfrastructureManager(proc, prompter, metrics)

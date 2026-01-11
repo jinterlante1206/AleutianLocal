@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides PanicRecoveryHandler for crash diagnostics.
+Package diagnostics provides PanicRecoveryHandler for crash diagnostics.
 
 This file implements the "Black Box Recorder" pattern - capturing system state
 exactly when a crash occurs, when it's most valuable for debugging.
@@ -56,7 +56,7 @@ The panic handler MUST respect Privacy/PII policy:
 	    // Normal execution...
 	}
 */
-package main
+package diagnostics
 
 import (
 	"context"

@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides HealthIntelligence for AI-native health analysis.
+Package health provides HealthIntelligence for AI-native health analysis.
 
 HealthIntelligence extends basic health checking with intelligent analysis:
 log anomaly detection, metric trends, code freshness checking, and
@@ -24,7 +24,7 @@ Health intelligence answers "how well is it running?" by:
   - Checking if containers are running stale code
   - Generating human-readable summaries via LLM
 */
-package main
+package health
 
 import (
 	"bytes"
@@ -1653,3 +1653,15 @@ func (m *MockHealthTextGenerator) Generate(ctx context.Context, model, prompt st
 	}
 	return "Mock LLM response: All services are healthy.", nil
 }
+
+// =============================================================================
+// COMPILE-TIME INTERFACE CHECKS
+// =============================================================================
+
+// Verify that implementations satisfy the interfaces.
+var (
+	_ HealthIntelligence  = (*DefaultHealthIntelligence)(nil)
+	_ HealthIntelligence  = (*MockHealthIntelligence)(nil)
+	_ HealthTextGenerator = (*DefaultHealthTextGenerator)(nil)
+	_ HealthTextGenerator = (*MockHealthTextGenerator)(nil)
+)

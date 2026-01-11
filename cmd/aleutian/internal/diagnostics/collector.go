@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides DefaultDiagnosticsCollector for gathering system diagnostics.
+Package diagnostics provides DefaultDiagnosticsCollector for gathering system diagnostics.
 
 The DefaultDiagnosticsCollector is the FOSS-tier implementation that collects:
 
@@ -33,7 +33,7 @@ The collector is designed for observability integration:
   - Prometheus: Metric recording hooks (Phase 3.7)
   - Jaeger: Trace ID correlation via Header.TraceID
 */
-package main
+package diagnostics
 
 import (
 	"context"

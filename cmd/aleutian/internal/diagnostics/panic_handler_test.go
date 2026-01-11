@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides tests for DefaultPanicRecoveryHandler.
+Package diagnostics_test provides tests for DefaultPanicRecoveryHandler.
 
 These tests validate:
 
@@ -25,7 +25,7 @@ Tests use a mock collector to avoid real filesystem operations. The
 SetRePanic(false) method prevents tests from actually crashing. Output
 is captured to verify formatting.
 */
-package main
+package diagnostics
 
 import (
 	"bytes"

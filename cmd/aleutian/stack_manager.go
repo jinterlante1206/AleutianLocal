@@ -102,6 +102,8 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
 )
 
 // =============================================================================
@@ -834,7 +836,7 @@ type DefaultStackManager struct {
 	compose ComposeExecutor
 
 	// health verifies service availability (Phase 9).
-	health HealthChecker
+	health health.HealthChecker
 
 	// models ensures Ollama models are available (already implemented).
 	// May be nil if model checking is disabled.
@@ -844,7 +846,7 @@ type DefaultStackManager struct {
 	profile ProfileResolver
 
 	// diagnostics collects error diagnostics (Phase 3).
-	diagnostics DiagnosticsCollector
+	diagnostics diagnostics.DiagnosticsCollector
 
 	// config is the global Aleutian configuration (Phase 0).
 	config *config.AleutianConfig
@@ -916,10 +918,10 @@ func NewDefaultStackManager(
 	secrets SecretsManager,
 	cache CachePathResolver,
 	compose ComposeExecutor,
-	health HealthChecker,
+	health health.HealthChecker,
 	models ModelEnsurer,
 	profile ProfileResolver,
-	diagnostics DiagnosticsCollector,
+	diagnostics diagnostics.DiagnosticsCollector,
 	cfg *config.AleutianConfig,
 ) (*DefaultStackManager, error) {
 	// Validate required dependencies
@@ -1698,8 +1700,8 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 
 	fmt.Fprintf(s.output, "Waiting for services to become healthy...\n")
 
-	services := DefaultServiceDefinitions()
-	waitOpts := DefaultWaitOptions()
+	services := health.DefaultServiceDefinitions()
+	waitOpts := health.DefaultWaitOptions()
 
 	// Extended timeout when models may still be loading
 	if !opts.SkipModelCheck && s.models != nil {
@@ -1750,7 +1752,7 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 // # Assumptions
 //
 //   - result is non-nil
-func (s *DefaultStackManager) getFailedServiceNames(result *WaitResult) []string {
+func (s *DefaultStackManager) getFailedServiceNames(result *health.WaitResult) []string {
 	return result.FailedCritical
 }
 
@@ -1793,7 +1795,7 @@ func (s *DefaultStackManager) collectDiagnostics(ctx context.Context, phase stri
 	// Sanitize error message to remove sensitive data before storing
 	sanitizedDetails := sanitizeErrorForDiagnostics(err.Error())
 
-	opts := CollectOptions{
+	opts := diagnostics.CollectOptions{
 		Reason:  fmt.Sprintf("stack_start_%s_failure", phase),
 		Details: sanitizedDetails,
 		Tags: map[string]string{

@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides the Distributed Health Agent interfaces for Aleutian.
+Package diagnostics provides the Distributed Health Agent interfaces for Aleutian.
 
 The Distributed Health Agent is a first-class telemetry pipeline that transforms
 the CLI from a tool into a self-reporting, self-healing platform. It solves the
@@ -40,7 +40,7 @@ The Health Agent consists of these core interfaces:
 See docs/architecture/distributed_health_agent.md for the conceptual overview.
 See docs/designs/pending/diagnostics_collector_architecture.md for implementation details.
 */
-package main
+package diagnostics
 
 import (
 	"context"

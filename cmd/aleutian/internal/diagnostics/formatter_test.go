@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains tests for DiagnosticsFormatter implementations.
+Package diagnostics_test contains tests for DiagnosticsFormatter implementations.
 
 # Testing Strategy
 
@@ -19,7 +19,7 @@ These tests verify:
   - Both formatters handle nil/empty data gracefully
   - Content types and file extensions are correct
 */
-package main
+package diagnostics
 
 import (
 	"encoding/json"

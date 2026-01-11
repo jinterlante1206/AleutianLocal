@@ -39,6 +39,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
@@ -179,23 +180,23 @@ func (n *NoOpComposeExecutor) GetComposeFiles() []string {
 type NoOpHealthChecker struct{}
 
 // CheckService returns healthy status.
-func (n *NoOpHealthChecker) CheckService(ctx context.Context, service ServiceDefinition) (*HealthStatus, error) {
-	return &HealthStatus{
-		ID:          GenerateID(),
+func (n *NoOpHealthChecker) CheckService(ctx context.Context, service health.ServiceDefinition) (*health.HealthStatus, error) {
+	return &health.HealthStatus{
+		ID:          health.GenerateID(),
 		Name:        service.Name,
-		State:       HealthStateHealthy,
+		State:       health.HealthStateHealthy,
 		LastChecked: time.Now(),
 	}, nil
 }
 
 // CheckAllServices returns all services as healthy.
-func (n *NoOpHealthChecker) CheckAllServices(ctx context.Context, services []ServiceDefinition) ([]HealthStatus, error) {
-	results := make([]HealthStatus, len(services))
+func (n *NoOpHealthChecker) CheckAllServices(ctx context.Context, services []health.ServiceDefinition) ([]health.HealthStatus, error) {
+	results := make([]health.HealthStatus, len(services))
 	for i, svc := range services {
-		results[i] = HealthStatus{
-			ID:          GenerateID(),
+		results[i] = health.HealthStatus{
+			ID:          health.GenerateID(),
 			Name:        svc.Name,
-			State:       HealthStateHealthy,
+			State:       health.HealthStateHealthy,
 			LastChecked: time.Now(),
 		}
 	}
@@ -203,9 +204,9 @@ func (n *NoOpHealthChecker) CheckAllServices(ctx context.Context, services []Ser
 }
 
 // WaitForServices returns immediately with success.
-func (n *NoOpHealthChecker) WaitForServices(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
-	return &WaitResult{
-		ID:      GenerateID(),
+func (n *NoOpHealthChecker) WaitForServices(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
+	return &health.WaitResult{
+		ID:      health.GenerateID(),
 		Success: true,
 	}, nil
 }
@@ -220,8 +221,8 @@ func (n *NoOpHealthChecker) IsContainerRunning(ctx context.Context, containerNam
 // =============================================================================
 
 var (
-	_ MetricsStore    = (*NoOpMetricsStore)(nil)
-	_ process.Manager = (*NoOpProcessManager)(nil)
-	_ ComposeExecutor = (*NoOpComposeExecutor)(nil)
-	_ HealthChecker   = (*NoOpHealthChecker)(nil)
+	_ MetricsStore         = (*NoOpMetricsStore)(nil)
+	_ process.Manager      = (*NoOpProcessManager)(nil)
+	_ ComposeExecutor      = (*NoOpComposeExecutor)(nil)
+	_ health.HealthChecker = (*NoOpHealthChecker)(nil)
 )

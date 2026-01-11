@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides tests for DiagnosticsTracer implementations.
+Package diagnostics_test provides tests for DiagnosticsTracer implementations.
 
 These tests validate:
 
@@ -24,7 +24,7 @@ These tests validate:
 NoOp tracer tests are fully offline. OTel tracer tests use the SDK but
 don't require a running collector (spans are created but not exported).
 */
-package main
+package diagnostics
 
 import (
 	"context"

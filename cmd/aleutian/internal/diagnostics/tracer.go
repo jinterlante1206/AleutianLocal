@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides OpenTelemetry integration for the Distributed Health Agent.
+Package diagnostics provides OpenTelemetry integration for the Distributed Health Agent.
 
 This file implements the DiagnosticsTracer interface, enabling trace-based
 debugging via Jaeger and other OpenTelemetry-compatible backends.
@@ -42,7 +42,7 @@ OpenTelemetry enables the "Support Ticket Revolution":
 Both implementations generate W3C-compatible 32-character hex trace IDs
 and 16-character hex span IDs for compatibility with Jaeger/Zipkin.
 */
-package main
+package diagnostics
 
 import (
 	"context"

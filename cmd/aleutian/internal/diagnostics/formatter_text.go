@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides TextDiagnosticsFormatter for human-readable output.
+Package diagnostics provides TextDiagnosticsFormatter for human-readable output.
 
 Text format is the secondary output format for diagnostics, designed for:
 
@@ -21,7 +21,7 @@ Text format is the secondary output format for diagnostics, designed for:
 The text output follows a consistent structure with clear section headers,
 making it easy to scan for relevant information.
 */
-package main
+package diagnostics
 
 import (
 	"bytes"

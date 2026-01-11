@@ -5,13 +5,15 @@
 // (at your option) any later version.
 // See the LICENSE.txt file for the full license text.
 
-package main
+package health
 
 import (
 	"context"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
 )
 
 // =============================================================================
@@ -43,7 +45,7 @@ func TestDefaultHealthOTelConfig(t *testing.T) {
 // =============================================================================
 
 func TestNewDefaultHealthOTelExporter(t *testing.T) {
-	tracer := NewNoOpDiagnosticsTracer("test")
+	tracer := diagnostics.NewNoOpDiagnosticsTracer("test")
 	config := DefaultHealthOTelConfig()
 
 	exporter := NewDefaultHealthOTelExporter(tracer, config)
@@ -60,7 +62,7 @@ func TestNewDefaultHealthOTelExporter(t *testing.T) {
 }
 
 func TestDefaultHealthOTelExporter_StartHealthAnalysisSpan(t *testing.T) {
-	tracer := NewNoOpDiagnosticsTracer("test")
+	tracer := diagnostics.NewNoOpDiagnosticsTracer("test")
 	config := DefaultHealthOTelConfig()
 	exporter := NewDefaultHealthOTelExporter(tracer, config)
 
@@ -78,7 +80,7 @@ func TestDefaultHealthOTelExporter_StartHealthAnalysisSpan(t *testing.T) {
 }
 
 func TestDefaultHealthOTelExporter_ExportHealthReport(t *testing.T) {
-	tracer := NewNoOpDiagnosticsTracer("test")
+	tracer := diagnostics.NewNoOpDiagnosticsTracer("test")
 	config := DefaultHealthOTelConfig()
 	exporter := NewDefaultHealthOTelExporter(tracer, config)
 
@@ -125,7 +127,7 @@ func TestDefaultHealthOTelExporter_ExportHealthReport(t *testing.T) {
 }
 
 func TestDefaultHealthOTelExporter_ExportServiceInsights(t *testing.T) {
-	tracer := NewNoOpDiagnosticsTracer("test")
+	tracer := diagnostics.NewNoOpDiagnosticsTracer("test")
 	config := DefaultHealthOTelConfig()
 	exporter := NewDefaultHealthOTelExporter(tracer, config)
 
@@ -153,7 +155,7 @@ func TestDefaultHealthOTelExporter_ExportServiceInsights(t *testing.T) {
 }
 
 func TestDefaultHealthOTelExporter_ExportAlert(t *testing.T) {
-	tracer := NewNoOpDiagnosticsTracer("test")
+	tracer := diagnostics.NewNoOpDiagnosticsTracer("test")
 	config := DefaultHealthOTelConfig()
 	exporter := NewDefaultHealthOTelExporter(tracer, config)
 
@@ -183,7 +185,7 @@ func TestDefaultHealthOTelExporter_ExportAlert(t *testing.T) {
 }
 
 func TestDefaultHealthOTelExporter_GetTraceID(t *testing.T) {
-	tracer := NewNoOpDiagnosticsTracer("test")
+	tracer := diagnostics.NewNoOpDiagnosticsTracer("test")
 	config := DefaultHealthOTelConfig()
 	exporter := NewDefaultHealthOTelExporter(tracer, config)
 
@@ -415,7 +417,7 @@ func TestHealthOTelExporter_InterfaceCompliance(t *testing.T) {
 // =============================================================================
 
 func TestDefaultHealthOTelExporter_ConcurrentExports(t *testing.T) {
-	tracer := NewNoOpDiagnosticsTracer("test")
+	tracer := diagnostics.NewNoOpDiagnosticsTracer("test")
 	config := DefaultHealthOTelConfig()
 	exporter := NewDefaultHealthOTelExporter(tracer, config)
 
