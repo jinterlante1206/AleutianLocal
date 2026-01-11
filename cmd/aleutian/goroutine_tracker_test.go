@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -148,7 +150,7 @@ func TestGoroutineTracker_LongRunning(t *testing.T) {
 		OnLongRunning: func(name string, duration time.Duration) {
 			atomic.AddInt32(&longRunningCalled, 1)
 		},
-		Logger: func(format string, args ...interface{}) {},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
 	done := tracker.Track("long-running")
@@ -166,7 +168,7 @@ func TestGoroutineTracker_LongRunning(t *testing.T) {
 func TestGoroutineTracker_LongRunningInStats(t *testing.T) {
 	tracker := NewGoroutineTracker(GoroutineTrackerConfig{
 		LongRunningThreshold: 50 * time.Millisecond,
-		Logger:               func(format string, args ...interface{}) {},
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
 	done := tracker.Track("will-be-long")
@@ -195,7 +197,7 @@ func TestGoroutineTracker_OnComplete(t *testing.T) {
 			completedName = name
 			completedDuration = duration
 		},
-		Logger: func(format string, args ...interface{}) {},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
 	done := tracker.Track("my-task")
@@ -371,6 +373,6 @@ func TestGoroutineTracker_InterfaceCompliance(t *testing.T) {
 func quietTrackerConfig() GoroutineTrackerConfig {
 	return GoroutineTrackerConfig{
 		LongRunningThreshold: time.Hour, // Long threshold to avoid warnings
-		Logger:               func(format string, args ...interface{}) {},
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

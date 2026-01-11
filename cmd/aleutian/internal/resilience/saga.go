@@ -10,7 +10,7 @@ package resilience
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -129,7 +129,7 @@ type SagaStep struct {
 //	config := SagaConfig{
 //	    StepTimeout:      30 * time.Second,
 //	    CompensateOnFail: true,
-//	    Logger:           log.Printf,
+//	    Logger:           slog.Default(),
 //	}
 //
 // # Limitations
@@ -152,9 +152,9 @@ type SagaConfig struct {
 	// Default: true
 	CompensateOnFail bool
 
-	// Logger is called for step execution and compensation events.
-	// Default: log.Printf
-	Logger func(format string, args ...interface{})
+	// Logger is used for step execution and compensation events.
+	// Default: slog.Default()
+	Logger *slog.Logger
 
 	// OnStepStart is called before each step executes.
 	OnStepStart func(step SagaStep)
@@ -235,17 +235,17 @@ type CompensationError struct {
 //
 // # Limitations
 //
-//   - Uses log.Printf which may not be suitable for all applications
+//   - None
 //
 // # Assumptions
 //
-//   - log package is available
+//   - slog package is available
 func DefaultSagaConfig() SagaConfig {
 	return SagaConfig{
 		StepTimeout:         60 * time.Second,
 		CompensationTimeout: 30 * time.Second,
 		CompensateOnFail:    true,
-		Logger:              log.Printf,
+		Logger:              slog.Default(),
 	}
 }
 
@@ -276,8 +276,11 @@ func DefaultSagaConfig() SagaConfig {
 //
 // # Thread Safety
 //
-// Saga is NOT safe for concurrent use. Each saga instance should be
-// used from a single goroutine.
+// Saga is safe for concurrent use from multiple goroutines. All public
+// methods are protected by a mutex. However, calls to Execute() on the
+// same instance are serialized - concurrent Execute() calls will block
+// until the preceding execution completes. A single Saga instance does
+// not support parallel execution of its steps.
 //
 // # Example
 //
@@ -339,7 +342,7 @@ var _ SagaExecutor = (*Saga)(nil)
 //
 //	saga := NewSaga(SagaConfig{
 //	    StepTimeout: 30 * time.Second,
-//	    Logger:      log.Printf,
+//	    Logger:      slog.Default(),
 //	})
 //
 // # Limitations
@@ -357,7 +360,7 @@ func NewSaga(config SagaConfig) *Saga {
 		config.CompensationTimeout = 30 * time.Second
 	}
 	if config.Logger == nil {
-		config.Logger = log.Printf
+		config.Logger = slog.Default()
 	}
 
 	return &Saga{
@@ -523,7 +526,7 @@ func (s *Saga) executeStep(ctx context.Context, step SagaStep, timeout time.Dura
 		s.config.OnStepStart(step)
 	}
 
-	s.config.Logger("Executing step: %s", step.Name)
+	s.config.Logger.Info("Executing step", "step", step.Name)
 	start := time.Now()
 
 	// Create timeout context
@@ -540,10 +543,10 @@ func (s *Saga) executeStep(ctx context.Context, step SagaStep, timeout time.Dura
 	case err := <-done:
 		duration := time.Since(start)
 		if err != nil {
-			s.config.Logger("Step %s failed after %v: %v", step.Name, duration, err)
+			s.config.Logger.Error("Step failed", "step", step.Name, "duration", duration, "error", err)
 			return err
 		}
-		s.config.Logger("Step %s completed in %v", step.Name, duration)
+		s.config.Logger.Info("Step completed", "step", step.Name, "duration", duration)
 		if s.config.OnStepComplete != nil {
 			s.config.OnStepComplete(step, duration)
 		}
@@ -584,7 +587,7 @@ func (s *Saga) compensate(ctx context.Context) {
 		return
 	}
 
-	s.config.Logger("Compensating %d completed steps...", len(s.completed))
+	s.config.Logger.Info("Compensating completed steps", "count", len(s.completed))
 
 	// Create a context for compensation that won't be cancelled
 	// even if parent is cancelled (we want to complete cleanup)
@@ -596,11 +599,11 @@ func (s *Saga) compensate(ctx context.Context) {
 	for i := len(s.completed) - 1; i >= 0; i-- {
 		step := s.completed[i]
 		if step.Compensate == nil {
-			s.config.Logger("No compensation defined for step: %s", step.Name)
+			s.config.Logger.Debug("No compensation defined", "step", step.Name)
 			continue
 		}
 
-		s.config.Logger("Compensating step: %s", step.Name)
+		s.config.Logger.Info("Compensating step", "step", step.Name)
 
 		stepCtx, stepCancel := context.WithTimeout(compensateCtx, s.config.CompensationTimeout)
 
@@ -608,12 +611,12 @@ func (s *Saga) compensate(ctx context.Context) {
 		stepCancel()
 
 		if err != nil {
-			s.config.Logger("WARNING: Compensation failed for %s: %v", step.Name, err)
+			s.config.Logger.Warn("Compensation failed", "step", step.Name, "error", err)
 			if s.config.OnCompensate != nil {
 				s.config.OnCompensate(step, err)
 			}
 		} else {
-			s.config.Logger("Compensated step: %s", step.Name)
+			s.config.Logger.Info("Compensated step", "step", step.Name)
 			if s.config.OnCompensate != nil {
 				s.config.OnCompensate(step, nil)
 			}

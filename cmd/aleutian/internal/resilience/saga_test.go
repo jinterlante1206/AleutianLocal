@@ -10,6 +10,8 @@ package resilience
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -653,6 +655,6 @@ func quietConfig() SagaConfig {
 		StepTimeout:         5 * time.Second,
 		CompensationTimeout: 5 * time.Second,
 		CompensateOnFail:    true,
-		Logger:              func(format string, args ...interface{}) {}, // Silent
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

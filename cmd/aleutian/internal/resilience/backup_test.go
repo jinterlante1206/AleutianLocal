@@ -8,6 +8,7 @@
 package resilience
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -423,13 +424,86 @@ func TestBackupBeforeOverwrite_Convenience(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	backupPath, err := BackupBeforeOverwriteFunc(testFile)
+	ctx := context.Background()
+	backupPath, err := BackupBeforeOverwriteFunc(ctx, testFile)
 	if err != nil {
 		t.Fatalf("BackupBeforeOverwriteFunc failed: %v", err)
 	}
 
 	if backupPath == "" {
 		t.Error("BackupBeforeOverwriteFunc returned empty path")
+	}
+}
+
+// =============================================================================
+// ValidatePath Tests
+// =============================================================================
+
+func TestValidatePath_ValidPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"absolute path", "/tmp/test.txt"},
+		{"relative path", "test.txt"},
+		{"path with spaces", "/tmp/test file.txt"},
+		{"nested path", "/tmp/a/b/c/test.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ValidatePath(tt.path)
+			if err != nil {
+				t.Errorf("ValidatePath(%q) returned error: %v", tt.path, err)
+			}
+			if result == "" {
+				t.Errorf("ValidatePath(%q) returned empty string", tt.path)
+			}
+			// Result should be an absolute path
+			if !filepath.IsAbs(result) {
+				t.Errorf("ValidatePath(%q) = %q, expected absolute path", tt.path, result)
+			}
+		})
+	}
+}
+
+func TestValidatePath_CleansDotDot(t *testing.T) {
+	// Path with .. should be cleaned
+	result, err := ValidatePath("/tmp/../tmp/test.txt")
+	if err != nil {
+		t.Fatalf("ValidatePath failed: %v", err)
+	}
+
+	// The result should not contain ..
+	if strings.Contains(result, "..") {
+		t.Errorf("ValidatePath did not clean path: %s", result)
+	}
+}
+
+func TestValidatePath_EmptyPath(t *testing.T) {
+	// Empty path should resolve to current directory
+	result, err := ValidatePath("")
+	if err != nil {
+		t.Fatalf("ValidatePath(\"\") returned error: %v", err)
+	}
+
+	// Should be the current working directory
+	cwd, _ := os.Getwd()
+	if result != cwd {
+		t.Errorf("ValidatePath(\"\") = %q, expected current directory %q", result, cwd)
+	}
+}
+
+func TestBackupBeforeOverwriteFunc_WithValidation(t *testing.T) {
+	ctx := context.Background()
+
+	// Non-existent file should return empty string and no error
+	backupPath, err := BackupBeforeOverwriteFunc(ctx, "/nonexistent/path/file.txt")
+	if err != nil {
+		t.Fatalf("BackupBeforeOverwriteFunc failed for non-existent file: %v", err)
+	}
+	if backupPath != "" {
+		t.Errorf("Expected empty backup path for non-existent file, got: %s", backupPath)
 	}
 }
 
