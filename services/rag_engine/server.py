@@ -161,6 +161,7 @@ if 'provider' in locals():
 class RAGEngineRequest(BaseModel):
     query: str
     session_id: str | None = None
+    strict_mode: bool = True  # Strict RAG: only answer from docs (no LLM fallback)
 
 pipeline_config = {
     "embedding_url": EMBEDDING_SERVICE_URL,
@@ -182,7 +183,7 @@ async def run_standard_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = standard.StandardRAGPipeline(weaviate_client, pipeline_config)
-        answer, source_docs = await pipeline.run(request.query, request.session_id)
+        answer, source_docs = await pipeline.run(request.query, request.session_id, request.strict_mode)
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in standard RAG pipeline: {e}", exc_info=True)
@@ -196,7 +197,7 @@ async def run_reranking_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = reranking.RerankingPipeline(weaviate_client, pipeline_config)
-        answer, source_docs = await pipeline.run(request.query, request.session_id)
+        answer, source_docs = await pipeline.run(request.query, request.session_id, request.strict_mode)
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in reranking RAG pipeline: {e}", exc_info=True)
@@ -254,7 +255,7 @@ async def run_verified_rag(request: RAGEngineRequest):
         pipeline = verified.VerifiedRAGPipeline(weaviate_client, pipeline_config)
 
         # Run it
-        answer, source_docs = await pipeline.run(request.query, request.session_id)
+        answer, source_docs = await pipeline.run(request.query, request.session_id, request.strict_mode)
 
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:

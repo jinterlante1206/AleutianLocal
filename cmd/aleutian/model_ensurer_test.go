@@ -36,9 +36,56 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
 )
+
+// MockSystemChecker implements infra.SystemChecker for testing.
+type MockSystemChecker struct {
+	ollamaInstalled    bool
+	ollamaInPath       bool
+	ollamaPath         string
+	canSelfHeal        bool
+	selfHealError      error
+	networkError       error
+	availableDiskSpace int64
+	diskError          error
+	modelStoragePath   string
+	canOperateOffline  bool
+	mu                 sync.Mutex
+}
+
+func (m *MockSystemChecker) IsOllamaInstalled() bool              { return m.ollamaInstalled }
+func (m *MockSystemChecker) IsOllamaInPath() bool                 { return m.ollamaInPath }
+func (m *MockSystemChecker) GetOllamaPath() string                { return m.ollamaPath }
+func (m *MockSystemChecker) GetOllamaInstallInstructions() string { return "Mock install instructions" }
+func (m *MockSystemChecker) CanSelfHealOllama() bool              { return m.canSelfHeal }
+func (m *MockSystemChecker) SelfHealOllama() error                { return m.selfHealError }
+func (m *MockSystemChecker) CheckNetworkConnectivity(ctx context.Context) error {
+	return m.networkError
+}
+func (m *MockSystemChecker) CanOperateOffline(requiredModels []string) bool {
+	return m.canOperateOffline
+}
+func (m *MockSystemChecker) CheckDiskSpace(requiredBytes int64, configuredLimitBytes int64) error {
+	if m.diskError != nil {
+		return m.diskError
+	}
+	if m.availableDiskSpace < requiredBytes {
+		return &infra.CheckError{Type: infra.CheckErrorDiskSpaceLow, Message: "Insufficient disk space"}
+	}
+	return nil
+}
+func (m *MockSystemChecker) GetAvailableDiskSpace() (int64, error) {
+	return m.availableDiskSpace, m.diskError
+}
+func (m *MockSystemChecker) GetModelStoragePath() string { return m.modelStoragePath }
+func (m *MockSystemChecker) RunDiagnostics(ctx context.Context) *infra.DiagnosticReport {
+	return &infra.DiagnosticReport{Timestamp: time.Now()}
+}
 
 // -----------------------------------------------------------------------------
 // Test Helpers

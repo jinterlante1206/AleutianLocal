@@ -59,6 +59,7 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
 )
 
 // -----------------------------------------------------------------------------
@@ -748,7 +749,7 @@ func (m *SecretMetadata) NeedsRenewal(threshold time.Duration) bool {
 // DefaultSecretsManager is safe for concurrent use.
 type DefaultSecretsManager struct {
 	config            config.SecretsConfig
-	metrics           DiagnosticsMetrics
+	metrics           diagnostics.DiagnosticsMetrics
 	envFunc           func(string) string
 	execCommandFunc   func(ctx context.Context, name string, args ...string) *exec.Cmd
 	availableBackends []string
@@ -769,7 +770,7 @@ type DefaultSecretsManager struct {
 // # Inputs
 //
 //   - cfg: Secrets configuration from aleutian.yaml
-//   - metrics: DiagnosticsMetrics for audit trail (may be nil for no-op)
+//   - metrics: diagnostics.DiagnosticsMetrics for audit trail (may be nil for no-op)
 //
 // # Outputs
 //
@@ -789,7 +790,7 @@ type DefaultSecretsManager struct {
 // # Assumptions
 //
 //   - Configuration has been loaded and validated before calling
-func NewDefaultSecretsManager(cfg config.SecretsConfig, metrics DiagnosticsMetrics) *DefaultSecretsManager {
+func NewDefaultSecretsManager(cfg config.SecretsConfig, metrics diagnostics.DiagnosticsMetrics) *DefaultSecretsManager {
 	mgr := &DefaultSecretsManager{
 		config:          cfg,
 		metrics:         metrics,
@@ -1493,9 +1494,9 @@ func (m *DefaultSecretsManager) recordAccess(name string, found bool, backend st
 	if m.metrics == nil {
 		return
 	}
-	severity := SeverityInfo
+	severity := diagnostics.SeverityInfo
 	if !found {
-		severity = SeverityWarning
+		severity = diagnostics.SeverityWarning
 	}
 	label := fmt.Sprintf("secret_access:%s:%s", name, backend)
 	m.metrics.RecordCollection(severity, label, 0, 0)

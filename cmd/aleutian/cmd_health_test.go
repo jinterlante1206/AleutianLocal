@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
@@ -127,14 +128,14 @@ func TestWrapText(t *testing.T) {
 
 func TestGetStateIcon(t *testing.T) {
 	tests := []struct {
-		state    IntelligentHealthState
+		state    health.IntelligentHealthState
 		expected string
 	}{
-		{IntelligentStateHealthy, "✓"},
-		{IntelligentStateDegraded, "◐"},
-		{IntelligentStateAtRisk, "⚠"},
-		{IntelligentStateCritical, "✗"},
-		{IntelligentStateUnknown, "?"},
+		{health.IntelligentStateHealthy, "✓"},
+		{health.IntelligentStateDegraded, "◐"},
+		{health.IntelligentStateAtRisk, "⚠"},
+		{health.IntelligentStateCritical, "✗"},
+		{health.IntelligentStateUnknown, "?"},
 	}
 
 	for _, tt := range tests {
@@ -149,14 +150,14 @@ func TestGetStateIcon(t *testing.T) {
 
 func TestGetStateColor(t *testing.T) {
 	tests := []struct {
-		state    IntelligentHealthState
+		state    health.IntelligentHealthState
 		expected string
 	}{
-		{IntelligentStateHealthy, colorGreen},
-		{IntelligentStateDegraded, colorYellow},
-		{IntelligentStateAtRisk, colorYellow},
-		{IntelligentStateCritical, colorRed},
-		{IntelligentStateUnknown, colorCyan},
+		{health.IntelligentStateHealthy, colorGreen},
+		{health.IntelligentStateDegraded, colorYellow},
+		{health.IntelligentStateAtRisk, colorYellow},
+		{health.IntelligentStateCritical, colorRed},
+		{health.IntelligentStateUnknown, colorCyan},
 	}
 
 	for _, tt := range tests {
@@ -171,14 +172,14 @@ func TestGetStateColor(t *testing.T) {
 
 func TestGetAlertIcon(t *testing.T) {
 	tests := []struct {
-		severity AlertSeverity
+		severity health.AlertSeverity
 		expected string
 	}{
-		{AlertSeverityInfo, "ℹ"},
-		{AlertSeverityWarning, "⚠"},
-		{AlertSeverityError, "✗"},
-		{AlertSeverityCritical, "🔥"},
-		{AlertSeverity("unknown"), "•"},
+		{health.AlertSeverityInfo, "ℹ"},
+		{health.AlertSeverityWarning, "⚠"},
+		{health.AlertSeverityError, "✗"},
+		{health.AlertSeverityCritical, "🔥"},
+		{health.AlertSeverity("unknown"), "•"},
 	}
 
 	for _, tt := range tests {
@@ -193,14 +194,14 @@ func TestGetAlertIcon(t *testing.T) {
 
 func TestGetAlertColor(t *testing.T) {
 	tests := []struct {
-		severity AlertSeverity
+		severity health.AlertSeverity
 		expected string
 	}{
-		{AlertSeverityInfo, colorBlue},
-		{AlertSeverityWarning, colorYellow},
-		{AlertSeverityError, colorRed},
-		{AlertSeverityCritical, colorRed},
-		{AlertSeverity("unknown"), colorReset},
+		{health.AlertSeverityInfo, colorBlue},
+		{health.AlertSeverityWarning, colorYellow},
+		{health.AlertSeverityError, colorRed},
+		{health.AlertSeverityCritical, colorRed},
+		{health.AlertSeverity("unknown"), colorReset},
 	}
 
 	for _, tt := range tests {
@@ -245,15 +246,15 @@ func TestGetAleutianStackDir(t *testing.T) {
 // =============================================================================
 
 func TestOutputHealthJSON(t *testing.T) {
-	report := &IntelligentHealthReport{
+	report := &health.IntelligentHealthReport{
 		ID:           "test-report",
 		Timestamp:    time.Now(),
-		OverallState: IntelligentStateHealthy,
-		Services: []ServiceInsights{
+		OverallState: health.IntelligentStateHealthy,
+		Services: []health.ServiceInsights{
 			{
 				ID:               "svc-1",
 				Name:             "Test Service",
-				IntelligentState: IntelligentStateHealthy,
+				IntelligentState: health.IntelligentStateHealthy,
 			},
 		},
 		CreatedAt: time.Now(),
@@ -266,42 +267,42 @@ func TestOutputHealthJSON(t *testing.T) {
 }
 
 func TestOutputHealthReport(t *testing.T) {
-	report := &IntelligentHealthReport{
-		ID:           GenerateID(),
+	report := &health.IntelligentHealthReport{
+		ID:           health.GenerateID(),
 		Timestamp:    time.Now(),
-		OverallState: IntelligentStateDegraded,
+		OverallState: health.IntelligentStateDegraded,
 		Summary:      "Test summary message for health analysis.",
-		Services: []ServiceInsights{
+		Services: []health.ServiceInsights{
 			{
-				ID:               GenerateID(),
+				ID:               health.GenerateID(),
 				Name:             "Orchestrator",
-				IntelligentState: IntelligentStateHealthy,
-				BasicHealth:      HealthStatus{State: HealthStateHealthy},
+				IntelligentState: health.IntelligentStateHealthy,
+				BasicHealth:      health.HealthStatus{State: health.HealthStateHealthy},
 				LatencyP99:       150 * time.Millisecond,
-				LatencyTrend:     TrendStable,
+				LatencyTrend:     health.TrendStable,
 			},
 			{
-				ID:               GenerateID(),
+				ID:               health.GenerateID(),
 				Name:             "Weaviate",
-				IntelligentState: IntelligentStateDegraded,
-				BasicHealth:      HealthStatus{State: HealthStateHealthy},
+				IntelligentState: health.IntelligentStateDegraded,
+				BasicHealth:      health.HealthStatus{State: health.HealthStateHealthy},
 				LatencyP99:       800 * time.Millisecond,
-				LatencyTrend:     TrendIncreasing,
+				LatencyTrend:     health.TrendIncreasing,
 				RecentErrors:     3,
 				Insights:         []string{"Latency increasing", "Connection retries detected"},
 			},
 		},
-		Alerts: []HealthAlert{
+		Alerts: []health.HealthAlert{
 			{
-				ID:       GenerateID(),
-				Severity: AlertSeverityWarning,
+				ID:       health.GenerateID(),
+				Severity: health.AlertSeverityWarning,
 				Service:  "Weaviate",
 				Title:    "Elevated latency",
 			},
 		},
-		FreshnessReports: []FreshnessReport{
+		FreshnessReports: []health.FreshnessReport{
 			{
-				ID:          GenerateID(),
+				ID:          health.GenerateID(),
 				ServiceName: "Orchestrator",
 				IsStale:     false,
 			},
@@ -337,46 +338,46 @@ func TestHealthCommandIntegration_MockedDependencies(t *testing.T) {
 		},
 	}
 
-	mockChecker := &MockHealthChecker{
-		CheckAllServicesFunc: func(ctx context.Context, services []ServiceDefinition) ([]HealthStatus, error) {
-			statuses := make([]HealthStatus, len(services))
+	mockChecker := &health.MockHealthChecker{
+		CheckAllServicesFunc: func(ctx context.Context, services []health.ServiceDefinition) ([]health.HealthStatus, error) {
+			statuses := make([]health.HealthStatus, len(services))
 			for i, svc := range services {
-				statuses[i] = HealthStatus{
-					ID:          GenerateID(),
+				statuses[i] = health.HealthStatus{
+					ID:          health.GenerateID(),
 					Name:        svc.Name,
-					State:       HealthStateHealthy,
+					State:       health.HealthStateHealthy,
 					LastChecked: time.Now(),
 				}
 			}
 			return statuses, nil
 		},
-		CheckServiceFunc: func(ctx context.Context, service ServiceDefinition) (*HealthStatus, error) {
-			return &HealthStatus{
-				ID:          GenerateID(),
+		CheckServiceFunc: func(ctx context.Context, service health.ServiceDefinition) (*health.HealthStatus, error) {
+			return &health.HealthStatus{
+				ID:          health.GenerateID(),
 				Name:        service.Name,
-				State:       HealthStateHealthy,
+				State:       health.HealthStateHealthy,
 				LastChecked: time.Now(),
 			}, nil
 		},
 	}
 
-	mockTextGen := &MockHealthTextGenerator{
+	mockTextGen := &health.MockHealthTextGenerator{
 		GenerateFunc: func(ctx context.Context, model, prompt string) (string, error) {
 			return "All services are healthy. No issues detected.", nil
 		},
 	}
 
-	config := DefaultIntelligenceConfig("/tmp/test")
+	config := health.DefaultIntelligenceConfig("/tmp/test")
 	sanitizer := NewDefaultLogSanitizer(DefaultSanitizationPatterns())
 	metricsStore, _ := NewEphemeralMetricsStore(MetricsStoreConfig{InMemoryOnly: true})
 
-	intel := NewDefaultHealthIntelligence(mockChecker, mockProc, mockTextGen, metricsStore, sanitizer, config)
+	intel := health.NewDefaultHealthIntelligence(mockChecker, mockProc, mockTextGen, &metricsStoreAdapter{store: metricsStore}, sanitizer, config)
 
 	ctx := context.Background()
-	opts := AnalysisOptions{
-		ID:                GenerateID(),
+	opts := health.AnalysisOptions{
+		ID:                health.GenerateID(),
 		TimeWindow:        5 * time.Minute,
-		Services:          DefaultServiceDefinitions(),
+		Services:          health.DefaultServiceDefinitions(),
 		IncludeLLMSummary: true,
 		MaxLogLines:       100,
 		CreatedAt:         time.Now(),
@@ -468,10 +469,10 @@ func TestHealthCommandShortFlags(t *testing.T) {
 // =============================================================================
 
 func TestOutputHealthReport_EmptyReport(t *testing.T) {
-	report := &IntelligentHealthReport{
-		ID:           GenerateID(),
+	report := &health.IntelligentHealthReport{
+		ID:           health.GenerateID(),
 		Timestamp:    time.Now(),
-		OverallState: IntelligentStateUnknown,
+		OverallState: health.IntelligentStateUnknown,
 		CreatedAt:    time.Now(),
 	}
 
@@ -480,10 +481,10 @@ func TestOutputHealthReport_EmptyReport(t *testing.T) {
 }
 
 func TestOutputHealthReport_LongSummary(t *testing.T) {
-	report := &IntelligentHealthReport{
-		ID:           GenerateID(),
+	report := &health.IntelligentHealthReport{
+		ID:           health.GenerateID(),
 		Timestamp:    time.Now(),
-		OverallState: IntelligentStateHealthy,
+		OverallState: health.IntelligentStateHealthy,
 		Summary:      strings.Repeat("This is a very long summary that should be wrapped properly. ", 10),
 		CreatedAt:    time.Now(),
 	}

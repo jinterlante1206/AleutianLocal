@@ -280,7 +280,7 @@ type MetricsStore interface {
 // # Examples
 //
 //	point := MetricPoint{
-//	    ID:        GenerateID(),
+//	    ID:        generateID(),
 //	    Service:   "orchestrator",
 //	    Metric:    "latency_p99",
 //	    Value:     150.0,
@@ -528,7 +528,7 @@ type MockMetricsStore struct {
 //   - stackDir is a valid path
 func DefaultMetricsStoreConfig(stackDir string) MetricsStoreConfig {
 	return MetricsStoreConfig{
-		ID:                 GenerateID(),
+		ID:                 generateID(),
 		InMemoryOnly:       false,
 		MaxPointsPerMetric: 1000,
 		RetentionPeriod:    1 * time.Hour,
@@ -630,7 +630,7 @@ func NewEphemeralMetricsStore(config MetricsStoreConfig) (*EphemeralMetricsStore
 func NewInMemoryMetricsStore() *EphemeralMetricsStore {
 	return &EphemeralMetricsStore{
 		config: MetricsStoreConfig{
-			ID:                 GenerateID(),
+			ID:                 generateID(),
 			InMemoryOnly:       true,
 			MaxPointsPerMetric: 1000,
 			RetentionPeriod:    1 * time.Hour,
@@ -678,7 +678,7 @@ func NewInMemoryMetricsStore() *EphemeralMetricsStore {
 func (s *EphemeralMetricsStore) Record(service, metric string, value float64, timestamp time.Time) {
 	key := service + ":" + metric
 	point := MetricPoint{
-		ID:        GenerateID(),
+		ID:        generateID(),
 		Service:   service,
 		Metric:    metric,
 		Value:     value,
@@ -828,7 +828,7 @@ func (s *EphemeralMetricsStore) GetBaseline(service, metric string, window time.
 	stddev := math.Sqrt(variance / float64(n))
 
 	return &BaselineStats{
-		ID:          GenerateID(),
+		ID:          generateID(),
 		P50:         sorted[p50Idx],
 		P99:         sorted[p99Idx],
 		Mean:        mean,
@@ -1175,7 +1175,7 @@ func (m *MockMetricsStore) Record(service, metric string, value float64, timesta
 	defer m.mu.Unlock()
 
 	m.RecordedPoints = append(m.RecordedPoints, MetricPoint{
-		ID:        GenerateID(),
+		ID:        generateID(),
 		Service:   service,
 		Metric:    metric,
 		Value:     value,

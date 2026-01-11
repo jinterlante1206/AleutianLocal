@@ -100,9 +100,10 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 		})
 	} else {
 		runner = NewRAGChatRunner(RAGChatRunnerConfig{
-			BaseURL:   baseURL,
-			Pipeline:  pipelineType,
-			SessionID: resumeID,
+			BaseURL:    baseURL,
+			Pipeline:   pipelineType,
+			SessionID:  resumeID,
+			StrictMode: !unrestrictedMode, // Strict by default (only answer from RAG docs)
 		})
 	}
 	defer runner.Close()

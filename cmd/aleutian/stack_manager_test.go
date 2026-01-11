@@ -22,6 +22,10 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/compose"
 )
 
 // =============================================================================
@@ -30,21 +34,21 @@ import (
 
 // testInfraManager is a minimal mock for InfrastructureManager.
 type testInfraManager struct {
-	ensureReadyFunc       func(ctx context.Context, opts InfrastructureOptions) error
-	getMachineStatusFunc  func(ctx context.Context, machineName string) (*MachineStatus, error)
-	ensureReadyCalls      []InfrastructureOptions
+	ensureReadyFunc       func(ctx context.Context, opts infra.InfrastructureOptions) error
+	getMachineStatusFunc  func(ctx context.Context, machineName string) (*infra.MachineStatus, error)
+	ensureReadyCalls      []infra.InfrastructureOptions
 	getMachineStatusCalls []string
 	mu                    sync.Mutex
 }
 
 func newTestInfraManager() *testInfraManager {
 	return &testInfraManager{
-		ensureReadyCalls:      make([]InfrastructureOptions, 0),
+		ensureReadyCalls:      make([]infra.InfrastructureOptions, 0),
 		getMachineStatusCalls: make([]string, 0),
 	}
 }
 
-func (m *testInfraManager) EnsureReady(ctx context.Context, opts InfrastructureOptions) error {
+func (m *testInfraManager) EnsureReady(ctx context.Context, opts infra.InfrastructureOptions) error {
 	m.mu.Lock()
 	m.ensureReadyCalls = append(m.ensureReadyCalls, opts)
 	m.mu.Unlock()
@@ -54,21 +58,21 @@ func (m *testInfraManager) EnsureReady(ctx context.Context, opts InfrastructureO
 	return nil
 }
 
-func (m *testInfraManager) GetMachineStatus(ctx context.Context, machineName string) (*MachineStatus, error) {
+func (m *testInfraManager) GetMachineStatus(ctx context.Context, machineName string) (*infra.MachineStatus, error) {
 	m.mu.Lock()
 	m.getMachineStatusCalls = append(m.getMachineStatusCalls, machineName)
 	m.mu.Unlock()
 	if m.getMachineStatusFunc != nil {
 		return m.getMachineStatusFunc(ctx, machineName)
 	}
-	return &MachineStatus{Exists: true, Running: true}, nil
+	return &infra.MachineStatus{Exists: true, Running: true}, nil
 }
 
-func (m *testInfraManager) ValidateMounts(ctx context.Context, mounts []string) (*MountValidation, error) {
-	return &MountValidation{Valid: true}, nil
+func (m *testInfraManager) ValidateMounts(ctx context.Context, mounts []string) (*infra.MountValidation, error) {
+	return &infra.MountValidation{Valid: true}, nil
 }
 
-func (m *testInfraManager) ProvisionMachine(ctx context.Context, spec MachineSpec) error {
+func (m *testInfraManager) ProvisionMachine(ctx context.Context, spec infra.MachineSpec) error {
 	return nil
 }
 
@@ -84,20 +88,20 @@ func (m *testInfraManager) RemoveMachine(ctx context.Context, machineName string
 	return nil
 }
 
-func (m *testInfraManager) VerifyMounts(ctx context.Context, machineName string, expectedMounts []string) (*MountVerification, error) {
-	return &MountVerification{Match: true}, nil
+func (m *testInfraManager) VerifyMounts(ctx context.Context, machineName string, expectedMounts []string) (*infra.MountVerification, error) {
+	return &infra.MountVerification{Match: true}, nil
 }
 
-func (m *testInfraManager) DetectConflicts(ctx context.Context) (*ConflictReport, error) {
-	return &ConflictReport{HasConflicts: false}, nil
+func (m *testInfraManager) DetectConflicts(ctx context.Context) (*infra.ConflictReport, error) {
+	return &infra.ConflictReport{HasConflicts: false}, nil
 }
 
-func (m *testInfraManager) HasForeignWorkloads(ctx context.Context) (*WorkloadAssessment, error) {
-	return &WorkloadAssessment{HasForeignWorkloads: false}, nil
+func (m *testInfraManager) HasForeignWorkloads(ctx context.Context) (*infra.WorkloadAssessment, error) {
+	return &infra.WorkloadAssessment{HasForeignWorkloads: false}, nil
 }
 
-func (m *testInfraManager) VerifyNetworkIsolation(ctx context.Context, containerID string) (*NetworkIsolationStatus, error) {
-	return &NetworkIsolationStatus{Isolated: true}, nil
+func (m *testInfraManager) VerifyNetworkIsolation(ctx context.Context, containerID string) (*infra.NetworkIsolationStatus, error) {
+	return &infra.NetworkIsolationStatus{Isolated: true}, nil
 }
 
 // testProfileResolver is a minimal mock for ProfileResolver.
@@ -160,12 +164,12 @@ func (m *testModelEnsurer) SetProgressCallback(callback PullProgressCallback) {}
 
 // testComposeExecutor is a minimal mock for ComposeExecutor.
 type testComposeExecutor struct {
-	upFunc           func(ctx context.Context, opts UpOptions) (*ComposeResult, error)
-	downFunc         func(ctx context.Context, opts DownOptions) (*ComposeResult, error)
-	stopFunc         func(ctx context.Context, opts StopOptions) (*StopResult, error)
-	statusFunc       func(ctx context.Context) (*ComposeStatus, error)
-	logsFunc         func(ctx context.Context, opts LogsOptions, w io.Writer) error
-	forceCleanupFunc func(ctx context.Context) (*CleanupResult, error)
+	upFunc           func(ctx context.Context, opts compose.UpOptions) (*compose.ComposeResult, error)
+	downFunc         func(ctx context.Context, opts compose.DownOptions) (*compose.ComposeResult, error)
+	stopFunc         func(ctx context.Context, opts compose.StopOptions) (*compose.StopResult, error)
+	statusFunc       func(ctx context.Context) (*compose.ComposeStatus, error)
+	logsFunc         func(ctx context.Context, opts compose.LogsOptions, w io.Writer) error
+	forceCleanupFunc func(ctx context.Context) (*compose.CleanupResult, error)
 	// destroyed tracks whether Down() has been called for stateful behavior
 	destroyed bool
 	mu        sync.Mutex
@@ -173,91 +177,91 @@ type testComposeExecutor struct {
 
 func newTestComposeExecutor() *testComposeExecutor {
 	return &testComposeExecutor{
-		statusFunc: func(ctx context.Context) (*ComposeStatus, error) {
-			return &ComposeStatus{
+		statusFunc: func(ctx context.Context) (*compose.ComposeStatus, error) {
+			return &compose.ComposeStatus{
 				Running: 3,
 				Stopped: 0,
-				Services: []ServiceStatus{
+				Services: []compose.ServiceStatus{
 					{Name: "orchestrator", State: "running", ContainerName: "aleutian-orchestrator"},
 					{Name: "weaviate", State: "running", ContainerName: "aleutian-weaviate"},
 					{Name: "ollama", State: "running", ContainerName: "aleutian-ollama"},
 				},
 			}, nil
 		},
-		upFunc: func(ctx context.Context, opts UpOptions) (*ComposeResult, error) {
-			return &ComposeResult{Success: true}, nil
+		upFunc: func(ctx context.Context, opts compose.UpOptions) (*compose.ComposeResult, error) {
+			return &compose.ComposeResult{Success: true}, nil
 		},
-		downFunc: func(ctx context.Context, opts DownOptions) (*ComposeResult, error) {
-			return &ComposeResult{Success: true}, nil
+		downFunc: func(ctx context.Context, opts compose.DownOptions) (*compose.ComposeResult, error) {
+			return &compose.ComposeResult{Success: true}, nil
 		},
-		stopFunc: func(ctx context.Context, opts StopOptions) (*StopResult, error) {
-			return &StopResult{TotalStopped: 3, GracefulStopped: 3}, nil
+		stopFunc: func(ctx context.Context, opts compose.StopOptions) (*compose.StopResult, error) {
+			return &compose.StopResult{TotalStopped: 3, GracefulStopped: 3}, nil
 		},
-		forceCleanupFunc: func(ctx context.Context) (*CleanupResult, error) {
-			return &CleanupResult{ContainersRemoved: 0, PodsRemoved: 0}, nil
+		forceCleanupFunc: func(ctx context.Context) (*compose.CleanupResult, error) {
+			return &compose.CleanupResult{ContainersRemoved: 0, PodsRemoved: 0}, nil
 		},
-		logsFunc: func(ctx context.Context, opts LogsOptions, w io.Writer) error {
+		logsFunc: func(ctx context.Context, opts compose.LogsOptions, w io.Writer) error {
 			return nil
 		},
 	}
 }
 
-func (m *testComposeExecutor) Up(ctx context.Context, opts UpOptions) (*ComposeResult, error) {
+func (m *testComposeExecutor) Up(ctx context.Context, opts compose.UpOptions) (*compose.ComposeResult, error) {
 	if m.upFunc != nil {
 		return m.upFunc(ctx, opts)
 	}
-	return &ComposeResult{Success: true}, nil
+	return &compose.ComposeResult{Success: true}, nil
 }
 
-func (m *testComposeExecutor) Down(ctx context.Context, opts DownOptions) (*ComposeResult, error) {
+func (m *testComposeExecutor) Down(ctx context.Context, opts compose.DownOptions) (*compose.ComposeResult, error) {
 	m.mu.Lock()
 	m.destroyed = true
 	m.mu.Unlock()
 	if m.downFunc != nil {
 		return m.downFunc(ctx, opts)
 	}
-	return &ComposeResult{Success: true}, nil
+	return &compose.ComposeResult{Success: true}, nil
 }
 
-func (m *testComposeExecutor) Stop(ctx context.Context, opts StopOptions) (*StopResult, error) {
+func (m *testComposeExecutor) Stop(ctx context.Context, opts compose.StopOptions) (*compose.StopResult, error) {
 	if m.stopFunc != nil {
 		return m.stopFunc(ctx, opts)
 	}
-	return &StopResult{TotalStopped: 3}, nil
+	return &compose.StopResult{TotalStopped: 3}, nil
 }
 
-func (m *testComposeExecutor) Logs(ctx context.Context, opts LogsOptions, w io.Writer) error {
+func (m *testComposeExecutor) Logs(ctx context.Context, opts compose.LogsOptions, w io.Writer) error {
 	if m.logsFunc != nil {
 		return m.logsFunc(ctx, opts, w)
 	}
 	return nil
 }
 
-func (m *testComposeExecutor) Status(ctx context.Context) (*ComposeStatus, error) {
+func (m *testComposeExecutor) Status(ctx context.Context) (*compose.ComposeStatus, error) {
 	m.mu.Lock()
 	isDestroyed := m.destroyed
 	m.mu.Unlock()
 
 	// After Down() is called, return empty status for verification
 	if isDestroyed {
-		return &ComposeStatus{Running: 0, Stopped: 0, Services: nil}, nil
+		return &compose.ComposeStatus{Running: 0, Stopped: 0, Services: nil}, nil
 	}
 
 	if m.statusFunc != nil {
 		return m.statusFunc(ctx)
 	}
-	return &ComposeStatus{Running: 3}, nil
+	return &compose.ComposeStatus{Running: 3}, nil
 }
 
-func (m *testComposeExecutor) ForceCleanup(ctx context.Context) (*CleanupResult, error) {
+func (m *testComposeExecutor) ForceCleanup(ctx context.Context) (*compose.CleanupResult, error) {
 	if m.forceCleanupFunc != nil {
 		return m.forceCleanupFunc(ctx)
 	}
-	return &CleanupResult{}, nil
+	return &compose.CleanupResult{}, nil
 }
 
-func (m *testComposeExecutor) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error) {
-	return &ExecResult{ExitCode: 0}, nil
+func (m *testComposeExecutor) Exec(ctx context.Context, opts compose.ExecOptions) (*compose.ExecResult, error) {
+	return &compose.ExecResult{ExitCode: 0}, nil
 }
 
 func (m *testComposeExecutor) GetComposeFiles() []string {
@@ -266,37 +270,37 @@ func (m *testComposeExecutor) GetComposeFiles() []string {
 
 // testHealthChecker is a minimal mock for HealthChecker.
 type testHealthChecker struct {
-	waitForServicesFunc func(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error)
+	waitForServicesFunc func(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error)
 }
 
 func newTestHealthChecker() *testHealthChecker {
 	return &testHealthChecker{
-		waitForServicesFunc: func(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
-			return &WaitResult{
+		waitForServicesFunc: func(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
+			return &health.WaitResult{
 				Success:  true,
 				Duration: 5 * time.Second,
-				Services: []HealthStatus{
-					{Name: "orchestrator", State: HealthStateHealthy},
-					{Name: "weaviate", State: HealthStateHealthy},
+				Services: []health.HealthStatus{
+					{Name: "orchestrator", State: health.HealthStateHealthy},
+					{Name: "weaviate", State: health.HealthStateHealthy},
 				},
 			}, nil
 		},
 	}
 }
 
-func (m *testHealthChecker) WaitForServices(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
+func (m *testHealthChecker) WaitForServices(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
 	if m.waitForServicesFunc != nil {
 		return m.waitForServicesFunc(ctx, services, opts)
 	}
-	return &WaitResult{Success: true}, nil
+	return &health.WaitResult{Success: true}, nil
 }
 
-func (m *testHealthChecker) CheckService(ctx context.Context, service ServiceDefinition) (*HealthStatus, error) {
-	return &HealthStatus{State: HealthStateHealthy}, nil
+func (m *testHealthChecker) CheckService(ctx context.Context, service health.ServiceDefinition) (*health.HealthStatus, error) {
+	return &health.HealthStatus{State: health.HealthStateHealthy}, nil
 }
 
-func (m *testHealthChecker) CheckAllServices(ctx context.Context, services []ServiceDefinition) ([]HealthStatus, error) {
-	return []HealthStatus{{State: HealthStateHealthy}}, nil
+func (m *testHealthChecker) CheckAllServices(ctx context.Context, services []health.ServiceDefinition) ([]health.HealthStatus, error) {
+	return []health.HealthStatus{{State: health.HealthStateHealthy}}, nil
 }
 
 func (m *testHealthChecker) IsContainerRunning(ctx context.Context, containerName string) (bool, error) {
@@ -305,33 +309,33 @@ func (m *testHealthChecker) IsContainerRunning(ctx context.Context, containerNam
 
 // testDiagnosticsCollector is a minimal mock for DiagnosticsCollector.
 type testDiagnosticsCollector struct {
-	collectFunc func(ctx context.Context, opts CollectOptions) (*DiagnosticsResult, error)
+	collectFunc func(ctx context.Context, opts diagnostics.CollectOptions) (*diagnostics.DiagnosticsResult, error)
 }
 
 func newTestDiagnosticsCollector() *testDiagnosticsCollector {
 	return &testDiagnosticsCollector{
-		collectFunc: func(ctx context.Context, opts CollectOptions) (*DiagnosticsResult, error) {
-			return &DiagnosticsResult{Location: "/tmp/diagnostics.json"}, nil
+		collectFunc: func(ctx context.Context, opts diagnostics.CollectOptions) (*diagnostics.DiagnosticsResult, error) {
+			return &diagnostics.DiagnosticsResult{Location: "/tmp/diagnostics.json"}, nil
 		},
 	}
 }
 
-func (m *testDiagnosticsCollector) Collect(ctx context.Context, opts CollectOptions) (*DiagnosticsResult, error) {
+func (m *testDiagnosticsCollector) Collect(ctx context.Context, opts diagnostics.CollectOptions) (*diagnostics.DiagnosticsResult, error) {
 	if m.collectFunc != nil {
 		return m.collectFunc(ctx, opts)
 	}
-	return &DiagnosticsResult{}, nil
+	return &diagnostics.DiagnosticsResult{}, nil
 }
 
-func (m *testDiagnosticsCollector) GetLastResult() *DiagnosticsResult {
-	return &DiagnosticsResult{}
+func (m *testDiagnosticsCollector) GetLastResult() *diagnostics.DiagnosticsResult {
+	return &diagnostics.DiagnosticsResult{}
 }
 
-func (m *testDiagnosticsCollector) SetTracer(tracer DiagnosticsTracer) {}
+func (m *testDiagnosticsCollector) SetTracer(tracer diagnostics.DiagnosticsTracer) {}
 
-func (m *testDiagnosticsCollector) SetFormatter(formatter DiagnosticsFormatter) {}
+func (m *testDiagnosticsCollector) SetFormatter(formatter diagnostics.DiagnosticsFormatter) {}
 
-func (m *testDiagnosticsCollector) SetStorage(storage DiagnosticsStorage) {}
+func (m *testDiagnosticsCollector) SetStorage(storage diagnostics.DiagnosticsStorage) {}
 
 // =============================================================================
 // Test Helper Functions
@@ -438,7 +442,7 @@ func TestDefaultStackManager_Start_InfraFailure(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.infra.ensureReadyFunc = func(ctx context.Context, opts InfrastructureOptions) error {
+	mocks.infra.ensureReadyFunc = func(ctx context.Context, opts infra.InfrastructureOptions) error {
 		return errors.New("podman machine failed")
 	}
 
@@ -490,7 +494,7 @@ func TestDefaultStackManager_Start_ComposeFailure(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.compose.upFunc = func(ctx context.Context, opts UpOptions) (*ComposeResult, error) {
+	mocks.compose.upFunc = func(ctx context.Context, opts compose.UpOptions) (*compose.ComposeResult, error) {
 		return nil, errors.New("container build failed")
 	}
 
@@ -508,8 +512,8 @@ func TestDefaultStackManager_Start_HealthFailure(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.health.waitForServicesFunc = func(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
-		return &WaitResult{
+	mocks.health.waitForServicesFunc = func(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
+		return &health.WaitResult{
 			Success:        false,
 			FailedCritical: []string{"orchestrator"},
 		}, nil
@@ -558,8 +562,8 @@ func TestDefaultStackManager_Stop_NotRunning(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.compose.statusFunc = func(ctx context.Context) (*ComposeStatus, error) {
-		return &ComposeStatus{Running: 0, Stopped: 3}, nil
+	mocks.compose.statusFunc = func(ctx context.Context) (*compose.ComposeStatus, error) {
+		return &compose.ComposeStatus{Running: 0, Stopped: 3}, nil
 	}
 
 	err := mgr.Stop(ctx)
@@ -572,7 +576,7 @@ func TestDefaultStackManager_Stop_Failure(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.compose.stopFunc = func(ctx context.Context, opts StopOptions) (*StopResult, error) {
+	mocks.compose.stopFunc = func(ctx context.Context, opts compose.StopOptions) (*compose.StopResult, error) {
 		return nil, errors.New("stop timeout")
 	}
 
@@ -610,7 +614,7 @@ func TestDefaultStackManager_Destroy_DownFailure(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.compose.downFunc = func(ctx context.Context, opts DownOptions) (*ComposeResult, error) {
+	mocks.compose.downFunc = func(ctx context.Context, opts compose.DownOptions) (*compose.ComposeResult, error) {
 		return nil, errors.New("down failed")
 	}
 
@@ -646,8 +650,8 @@ func TestDefaultStackManager_Status_Stopped(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.compose.statusFunc = func(ctx context.Context) (*ComposeStatus, error) {
-		return &ComposeStatus{Running: 0, Stopped: 3}, nil
+	mocks.compose.statusFunc = func(ctx context.Context) (*compose.ComposeStatus, error) {
+		return &compose.ComposeStatus{Running: 0, Stopped: 3}, nil
 	}
 
 	status, err := mgr.Status(ctx)
@@ -664,8 +668,8 @@ func TestDefaultStackManager_Status_Partial(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.compose.statusFunc = func(ctx context.Context) (*ComposeStatus, error) {
-		return &ComposeStatus{Running: 2, Stopped: 1}, nil
+	mocks.compose.statusFunc = func(ctx context.Context) (*compose.ComposeStatus, error) {
+		return &compose.ComposeStatus{Running: 2, Stopped: 1}, nil
 	}
 
 	status, err := mgr.Status(ctx)
@@ -696,8 +700,8 @@ func TestDefaultStackManager_Logs_NotRunning(t *testing.T) {
 	mgr, mocks := newTestStackManagerWithMocks()
 	ctx := context.Background()
 
-	mocks.compose.statusFunc = func(ctx context.Context) (*ComposeStatus, error) {
-		return &ComposeStatus{Running: 0, Stopped: 3}, nil
+	mocks.compose.statusFunc = func(ctx context.Context) (*compose.ComposeStatus, error) {
+		return &compose.ComposeStatus{Running: 0, Stopped: 3}, nil
 	}
 
 	err := mgr.Logs(ctx, nil)
@@ -936,7 +940,7 @@ func TestDefaultStackManager_Start_PanicRecovery(t *testing.T) {
 	ctx := context.Background()
 
 	// Configure infrastructure to panic
-	mocks.infra.ensureReadyFunc = func(ctx context.Context, opts InfrastructureOptions) error {
+	mocks.infra.ensureReadyFunc = func(ctx context.Context, opts infra.InfrastructureOptions) error {
 		panic("simulated infrastructure panic")
 	}
 
@@ -968,7 +972,7 @@ func TestDefaultStackManager_Stop_PanicRecovery(t *testing.T) {
 	ctx := context.Background()
 
 	// Configure stop to panic
-	mocks.compose.stopFunc = func(ctx context.Context, opts StopOptions) (*StopResult, error) {
+	mocks.compose.stopFunc = func(ctx context.Context, opts compose.StopOptions) (*compose.StopResult, error) {
 		panic("simulated stop panic")
 	}
 
@@ -989,7 +993,7 @@ func TestDefaultStackManager_Destroy_PanicRecovery(t *testing.T) {
 	ctx := context.Background()
 
 	// Configure down to panic
-	mocks.compose.downFunc = func(ctx context.Context, opts DownOptions) (*ComposeResult, error) {
+	mocks.compose.downFunc = func(ctx context.Context, opts compose.DownOptions) (*compose.ComposeResult, error) {
 		panic("simulated destroy panic")
 	}
 
@@ -1009,9 +1013,9 @@ func TestDefaultStackManager_Destroy_PanicRecovery(t *testing.T) {
 // Compile-time Interface Compliance
 // =============================================================================
 
-var _ InfrastructureManager = (*testInfraManager)(nil)
+var _ infra.InfrastructureManager = (*testInfraManager)(nil)
 var _ ProfileResolver = (*testProfileResolver)(nil)
 var _ ModelEnsurer = (*testModelEnsurer)(nil)
-var _ ComposeExecutor = (*testComposeExecutor)(nil)
-var _ HealthChecker = (*testHealthChecker)(nil)
-var _ DiagnosticsCollector = (*testDiagnosticsCollector)(nil)
+var _ compose.ComposeExecutor = (*testComposeExecutor)(nil)
+var _ health.HealthChecker = (*testHealthChecker)(nil)
+var _ diagnostics.DiagnosticsCollector = (*testDiagnosticsCollector)(nil)

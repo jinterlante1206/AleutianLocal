@@ -39,6 +39,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/compose"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
@@ -130,38 +132,38 @@ func (n *NoOpProcessManager) IsRunning(ctx context.Context, pattern string) (boo
 type NoOpComposeExecutor struct{}
 
 // Up returns success without doing anything.
-func (n *NoOpComposeExecutor) Up(ctx context.Context, opts UpOptions) (*ComposeResult, error) {
-	return &ComposeResult{Success: true, ExitCode: 0}, nil
+func (n *NoOpComposeExecutor) Up(ctx context.Context, opts compose.UpOptions) (*compose.ComposeResult, error) {
+	return &compose.ComposeResult{Success: true, ExitCode: 0}, nil
 }
 
 // Down returns success without doing anything.
-func (n *NoOpComposeExecutor) Down(ctx context.Context, opts DownOptions) (*ComposeResult, error) {
-	return &ComposeResult{Success: true, ExitCode: 0}, nil
+func (n *NoOpComposeExecutor) Down(ctx context.Context, opts compose.DownOptions) (*compose.ComposeResult, error) {
+	return &compose.ComposeResult{Success: true, ExitCode: 0}, nil
 }
 
 // Stop returns empty result.
-func (n *NoOpComposeExecutor) Stop(ctx context.Context, opts StopOptions) (*StopResult, error) {
-	return &StopResult{}, nil
+func (n *NoOpComposeExecutor) Stop(ctx context.Context, opts compose.StopOptions) (*compose.StopResult, error) {
+	return &compose.StopResult{}, nil
 }
 
 // Logs does nothing.
-func (n *NoOpComposeExecutor) Logs(ctx context.Context, opts LogsOptions, w io.Writer) error {
+func (n *NoOpComposeExecutor) Logs(ctx context.Context, opts compose.LogsOptions, w io.Writer) error {
 	return nil
 }
 
 // Status returns empty status.
-func (n *NoOpComposeExecutor) Status(ctx context.Context) (*ComposeStatus, error) {
-	return &ComposeStatus{Services: []ServiceStatus{}}, nil
+func (n *NoOpComposeExecutor) Status(ctx context.Context) (*compose.ComposeStatus, error) {
+	return &compose.ComposeStatus{Services: []compose.ServiceStatus{}}, nil
 }
 
 // ForceCleanup returns empty result.
-func (n *NoOpComposeExecutor) ForceCleanup(ctx context.Context) (*CleanupResult, error) {
-	return &CleanupResult{}, nil
+func (n *NoOpComposeExecutor) ForceCleanup(ctx context.Context) (*compose.CleanupResult, error) {
+	return &compose.CleanupResult{}, nil
 }
 
 // Exec returns empty result.
-func (n *NoOpComposeExecutor) Exec(ctx context.Context, opts ExecOptions) (*ExecResult, error) {
-	return &ExecResult{ExitCode: 0}, nil
+func (n *NoOpComposeExecutor) Exec(ctx context.Context, opts compose.ExecOptions) (*compose.ExecResult, error) {
+	return &compose.ExecResult{ExitCode: 0}, nil
 }
 
 // GetComposeFiles returns empty slice.
@@ -179,23 +181,23 @@ func (n *NoOpComposeExecutor) GetComposeFiles() []string {
 type NoOpHealthChecker struct{}
 
 // CheckService returns healthy status.
-func (n *NoOpHealthChecker) CheckService(ctx context.Context, service ServiceDefinition) (*HealthStatus, error) {
-	return &HealthStatus{
-		ID:          GenerateID(),
+func (n *NoOpHealthChecker) CheckService(ctx context.Context, service health.ServiceDefinition) (*health.HealthStatus, error) {
+	return &health.HealthStatus{
+		ID:          health.GenerateID(),
 		Name:        service.Name,
-		State:       HealthStateHealthy,
+		State:       health.HealthStateHealthy,
 		LastChecked: time.Now(),
 	}, nil
 }
 
 // CheckAllServices returns all services as healthy.
-func (n *NoOpHealthChecker) CheckAllServices(ctx context.Context, services []ServiceDefinition) ([]HealthStatus, error) {
-	results := make([]HealthStatus, len(services))
+func (n *NoOpHealthChecker) CheckAllServices(ctx context.Context, services []health.ServiceDefinition) ([]health.HealthStatus, error) {
+	results := make([]health.HealthStatus, len(services))
 	for i, svc := range services {
-		results[i] = HealthStatus{
-			ID:          GenerateID(),
+		results[i] = health.HealthStatus{
+			ID:          health.GenerateID(),
 			Name:        svc.Name,
-			State:       HealthStateHealthy,
+			State:       health.HealthStateHealthy,
 			LastChecked: time.Now(),
 		}
 	}
@@ -203,9 +205,9 @@ func (n *NoOpHealthChecker) CheckAllServices(ctx context.Context, services []Ser
 }
 
 // WaitForServices returns immediately with success.
-func (n *NoOpHealthChecker) WaitForServices(ctx context.Context, services []ServiceDefinition, opts WaitOptions) (*WaitResult, error) {
-	return &WaitResult{
-		ID:      GenerateID(),
+func (n *NoOpHealthChecker) WaitForServices(ctx context.Context, services []health.ServiceDefinition, opts health.WaitOptions) (*health.WaitResult, error) {
+	return &health.WaitResult{
+		ID:      health.GenerateID(),
 		Success: true,
 	}, nil
 }
@@ -220,8 +222,8 @@ func (n *NoOpHealthChecker) IsContainerRunning(ctx context.Context, containerNam
 // =============================================================================
 
 var (
-	_ MetricsStore    = (*NoOpMetricsStore)(nil)
-	_ process.Manager = (*NoOpProcessManager)(nil)
-	_ ComposeExecutor = (*NoOpComposeExecutor)(nil)
-	_ HealthChecker   = (*NoOpHealthChecker)(nil)
+	_ MetricsStore            = (*NoOpMetricsStore)(nil)
+	_ process.Manager         = (*NoOpProcessManager)(nil)
+	_ compose.ComposeExecutor = (*NoOpComposeExecutor)(nil)
+	_ health.HealthChecker    = (*NoOpHealthChecker)(nil)
 )

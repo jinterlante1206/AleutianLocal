@@ -1195,21 +1195,28 @@ func runVerifySession(cmd *cobra.Command, args []string) {
 	if result.Verified {
 		switch personality {
 		case ux.PersonalityFull:
-			fmt.Println()
-			fmt.Println(ux.Styles.Success.Render("╔══════════════════════════════════════════════════════════════╗"))
-			fmt.Println(ux.Styles.Success.Render("║           INTEGRITY VERIFICATION SUCCESSFUL                  ║"))
-			fmt.Println(ux.Styles.Success.Render("╚══════════════════════════════════════════════════════════════╝"))
-			fmt.Println()
-			fmt.Printf("  Session:    %s\n", result.SessionID)
-			fmt.Printf("  Status:     %s\n", ux.Styles.Success.Render("✓ VERIFIED"))
-			fmt.Printf("  Turns:      %d conversation turns verified\n", result.TurnCount)
-			if result.ChainHash != "" {
-				fmt.Printf("  Chain Hash: %s...%s\n", result.ChainHash[:8], result.ChainHash[len(result.ChainHash)-4:])
+			if fullVerify {
+				// Full Phase 13 design output
+				printVerifyFullOutput(result, sessionID, baseURL)
+			} else {
+				// Basic verification output
+				fmt.Println()
+				fmt.Println(ux.Styles.Success.Render("╔══════════════════════════════════════════════════════════════╗"))
+				fmt.Println(ux.Styles.Success.Render("║           INTEGRITY VERIFICATION SUCCESSFUL                  ║"))
+				fmt.Println(ux.Styles.Success.Render("╚══════════════════════════════════════════════════════════════╝"))
+				fmt.Println()
+				fmt.Printf("  Session:    %s\n", result.SessionID)
+				fmt.Printf("  Status:     %s\n", ux.Styles.Success.Render("✓ VERIFIED"))
+				fmt.Printf("  Turns:      %d conversation turns verified\n", result.TurnCount)
+				if result.ChainHash != "" {
+					fmt.Printf("  Chain Hash: %s...%s\n", result.ChainHash[:8], result.ChainHash[len(result.ChainHash)-4:])
+				}
+				fmt.Printf("  Verified:   %s\n", time.UnixMilli(result.VerifiedAt).Format(time.RFC3339))
+				fmt.Println()
+				fmt.Println(ux.Styles.Muted.Render("  The hash chain is intact. No tampering detected."))
+				fmt.Println(ux.Styles.Muted.Render("  Use --full for detailed output with Weaviate queries."))
+				fmt.Println()
 			}
-			fmt.Printf("  Verified:   %s\n", time.UnixMilli(result.VerifiedAt).Format(time.RFC3339))
-			fmt.Println()
-			fmt.Println(ux.Styles.Muted.Render("  The hash chain is intact. No tampering detected."))
-			fmt.Println()
 
 		case ux.PersonalityStandard:
 			fmt.Printf("✓ Session %s verified (%d turns)\n", result.SessionID, result.TurnCount)
@@ -1257,6 +1264,115 @@ func runVerifySession(cmd *cobra.Command, args []string) {
 		}
 		os.Exit(1)
 	}
+}
+
+// printVerifyFullOutput displays the full Phase 13 design output for session verification.
+//
+// # Description
+//
+// Shows comprehensive verification details including:
+//   - Integrity & Hash Chain section with turn hashes
+//   - Query Your Data section with REST API and Weaviate GraphQL examples
+//   - Weaviate Storage section (counts)
+//   - Logs & Debugging section
+//
+// # Inputs
+//
+//   - result: The verification response from orchestrator
+//   - sessionID: The session ID being verified
+//   - baseURL: The orchestrator base URL for building curl commands
+//
+// # Outputs
+//
+// Prints formatted output to stdout.
+func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL string) {
+	divider := "═══════════════════════════════════════════════════════════════"
+	sectionDivider := "───────────────────────────────────────────────────────────────"
+
+	fmt.Println()
+	fmt.Println(divider)
+	fmt.Println("INTEGRITY & HASH CHAIN")
+	fmt.Println(divider)
+	fmt.Println()
+	fmt.Printf("  %s  Chain Verification:      %s (all %d turns verified)\n",
+		ux.Styles.Success.Render("🔐"),
+		ux.Styles.Success.Render("✓ PASSED"),
+		result.TurnCount)
+	fmt.Printf("  🔗  Chain Length:            %d events\n", result.TurnCount)
+	fmt.Println()
+
+	// Final Chain Hash
+	fmt.Println("  Final Chain Hash:")
+	if result.ChainHash != "" {
+		fmt.Printf("    %s\n", result.ChainHash)
+	} else {
+		fmt.Println("    (not available)")
+	}
+	fmt.Println()
+
+	// Turn Hashes
+	if len(result.TurnHashes) > 0 {
+		fmt.Println("  Turn Hashes:")
+		for i := 1; i <= len(result.TurnHashes); i++ {
+			if hash, ok := result.TurnHashes[i]; ok {
+				fmt.Printf("    Turn %d (Q&A):  %s\n", i, hash)
+			}
+		}
+		fmt.Println()
+	}
+
+	// Verify command
+	fmt.Println("  Verify command:")
+	fmt.Printf("    curl -X POST %s/v1/sessions/%s/verify\n", baseURL, sessionID)
+	fmt.Println()
+
+	fmt.Println(sectionDivider)
+	fmt.Println("QUERY YOUR DATA")
+	fmt.Println(sectionDivider)
+	fmt.Println()
+
+	// REST API
+	fmt.Println("  REST API:")
+	fmt.Printf("    curl %s/v1/sessions/%s\n", baseURL, sessionID)
+	fmt.Println()
+
+	// Weaviate GraphQL Console
+	fmt.Println("  Weaviate GraphQL Console:")
+	fmt.Println("    http://localhost:8081/v1/graphql")
+	fmt.Println()
+
+	// Session Query
+	fmt.Println("  Session Query:")
+	fmt.Println("    {")
+	fmt.Println("      Get {")
+	fmt.Println("        Session(where: {path: [\"session_id\"], operator: Equal, valueString: \"" + sessionID + "\"}) {")
+	fmt.Println("          session_id")
+	fmt.Println("          created_at")
+	fmt.Println("          conversation_count")
+	fmt.Println("        }")
+	fmt.Println("      }")
+	fmt.Println("    }")
+	fmt.Println()
+
+	fmt.Println(sectionDivider)
+	fmt.Println("WEAVIATE STORAGE")
+	fmt.Println(sectionDivider)
+	fmt.Println()
+	fmt.Printf("  📊  Session Records:         1\n")
+	fmt.Printf("  💬  Conversation Turns:      %d\n", result.TurnCount)
+	fmt.Printf("  📄  Document Chunks:         (query Weaviate for count)\n")
+	fmt.Println()
+
+	fmt.Println(sectionDivider)
+	fmt.Println("LOGS & DEBUGGING")
+	fmt.Println(sectionDivider)
+	fmt.Println()
+	fmt.Println("  Find logs:")
+	fmt.Println("    docker logs aleutian-orchestrator-1 2>&1 | grep \"" + sessionID + "\"")
+	fmt.Println()
+
+	fmt.Println(divider)
+	fmt.Println()
 }
 
 // runListSessions lists all active chat sessions from the orchestrator.

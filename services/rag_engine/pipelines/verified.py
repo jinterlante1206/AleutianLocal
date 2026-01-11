@@ -22,6 +22,7 @@ from datatypes.verified import (
 )
 import time
 from .reranking import RerankingPipeline
+from .base import RERANK_SCORE_THRESHOLD, NO_RELEVANT_DOCS_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -157,17 +158,32 @@ class VerifiedRAGPipeline(RerankingPipeline):
 
     # --- 3. The Orchestration Loop (Single Responsibility: Workflow) ---
 
-    async def run(self, query: str, session_id: str | None = None) -> tuple[str, list[dict]]:
+    async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
         # A. Retrieve Data
         query_vector = await self._get_embedding(query)
         # This calls the method from reranking.py (the PDR logic)
         initial_docs = await self._search_weaviate_initial(query_vector, session_id)
         context_docs = await self._rerank_docs(query, initial_docs)
 
+        # Apply relevance threshold filtering in strict mode
+        if strict_mode:
+            relevant_docs = [
+                d for d in context_docs
+                if d.get("metadata") and hasattr(d["metadata"], "rerank_score")
+                and d["metadata"].rerank_score >= RERANK_SCORE_THRESHOLD
+            ]
+            logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold {RERANK_SCORE_THRESHOLD}")
+
+            if not relevant_docs:
+                logger.info("No relevant documents found in strict mode, returning message")
+                return NO_RELEVANT_DOCS_MESSAGE, []
+
+            context_docs = relevant_docs
+
         # Extract properties for prompt usage
         context_props = [d["properties"] for d in context_docs]
         if not context_props:
-            return "No relevant documents found.", []
+            return NO_RELEVANT_DOCS_MESSAGE, []
 
         # B. Initial "Optimist" Draft
         draft_prompt = self._build_prompt(query, context_props)

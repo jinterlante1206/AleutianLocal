@@ -39,8 +39,8 @@ import torch
 from opentelemetry import trace
 from sentence_transformers import CrossEncoder
 
-# Import the base class
-from .base import BaseRAGPipeline
+# Import the base class and strict mode constants
+from .base import BaseRAGPipeline, RERANK_SCORE_THRESHOLD, NO_RELEVANT_DOCS_MESSAGE
 # Import Weaviate classes needed for search override
 import weaviate
 import weaviate.classes as wvc
@@ -216,14 +216,27 @@ class RerankingPipeline(BaseRAGPipeline):
                 reranked_docs_with_meta[i]["metadata"].rerank_score = score
         return reranked_docs_with_meta
 
-    async def run(self, query: str, session_id: str | None = None) -> tuple[str, list[dict]]:
-        """Executes the RAG pipeline with reranking."""
+    async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
+        """Executes the RAG pipeline with reranking.
+
+        Parameters
+        ----------
+        query : str
+            The user's query.
+        session_id : str | None
+            The current session ID, passed from the orchestrator.
+        strict_mode : bool
+            If True, only answer from documents. If no relevant docs (rerank score < threshold),
+            return NO_RELEVANT_DOCS_MESSAGE instead of using LLM fallback.
+            Default: True (strict mode).
+        """
         tracer = trace.get_tracer("aleutian.rag.reranking")
         with tracer.start_as_current_span("reranking_pipeline.run") as span:
             span.set_attribute("query.length", len(query))
+            span.set_attribute("strict_mode", strict_mode)
             if session_id:
                 span.set_attribute("session.id", session_id)
-            logger.info(f"Reranking RAG run started...")
+            logger.info(f"Reranking RAG run started (strict_mode={strict_mode})...")
 
             with tracer.start_as_current_span("get_embedding"):
                 query_vector = await self._get_embedding(query)
@@ -235,8 +248,26 @@ class RerankingPipeline(BaseRAGPipeline):
 
             with tracer.start_as_current_span("rerank_docs"):
                 context_docs_with_meta = await self._rerank_docs(query, initial_docs_with_meta)
-                context_docs_props = [d["properties"] for d in context_docs_with_meta]
-                span.set_attribute("retrieved.final_count", len(context_docs_props))
+                span.set_attribute("retrieved.reranked_count", len(context_docs_with_meta))
+
+            # Apply relevance threshold filtering in strict mode
+            if strict_mode:
+                relevant_docs = [
+                    d for d in context_docs_with_meta
+                    if d.get("metadata") and hasattr(d["metadata"], "rerank_score")
+                    and d["metadata"].rerank_score >= RERANK_SCORE_THRESHOLD
+                ]
+                span.set_attribute("retrieved.relevant_count", len(relevant_docs))
+                logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs_with_meta)} docs above threshold {RERANK_SCORE_THRESHOLD}")
+
+                if not relevant_docs:
+                    logger.info("No relevant documents found in strict mode, returning message")
+                    return NO_RELEVANT_DOCS_MESSAGE, []
+
+                context_docs_with_meta = relevant_docs
+
+            context_docs_props = [d["properties"] for d in context_docs_with_meta]
+            span.set_attribute("retrieved.final_count", len(context_docs_props))
 
             with tracer.start_as_current_span("build_prompt"):
                 prompt = self._build_prompt(query, context_docs_props)

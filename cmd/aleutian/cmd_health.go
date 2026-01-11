@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/spf13/cobra"
 )
@@ -138,10 +139,10 @@ func runHealthCommand(cmd *cobra.Command, args []string) {
 	stackDir := getAleutianStackDir()
 
 	// Create OTel exporter for tracing health analysis
-	otelExporter, err := NewHealthOTelExporter(ctx, DefaultHealthOTelConfig())
+	otelExporter, err := health.NewHealthOTelExporter(ctx, health.DefaultHealthOTelConfig())
 	if err != nil {
 		// Non-fatal: continue without OTel export
-		otelExporter = NewNoOpHealthOTelExporter(DefaultHealthOTelConfig())
+		otelExporter = health.NewNoOpHealthOTelExporter(health.DefaultHealthOTelConfig())
 	}
 
 	// Start OTel span for the health analysis
@@ -150,25 +151,25 @@ func runHealthCommand(cmd *cobra.Command, args []string) {
 
 	// Create dependencies
 	proc := process.NewDefaultManager()
-	checker := NewDefaultHealthChecker(proc, DefaultHealthCheckerConfig())
-	metricsStore := createMetricsStore(stackDir)
+	checker := health.NewDefaultHealthChecker(proc, health.DefaultHealthCheckerConfig())
+	metricsStore := &metricsStoreAdapter{store: createMetricsStore(stackDir)}
 	sanitizer := NewDefaultLogSanitizer(DefaultSanitizationPatterns())
 
 	// Create text generator if LLM summary requested
-	var textGen HealthTextGenerator
+	var textGen health.HealthTextGenerator
 	if healthIncludeLLM {
-		textGen = NewDefaultHealthTextGenerator("http://localhost:11434")
+		textGen = health.NewDefaultHealthTextGenerator("http://localhost:11434")
 	}
 
 	// Create intelligence instance
-	config := DefaultIntelligenceConfig(stackDir)
-	intel := NewDefaultHealthIntelligence(checker, proc, textGen, metricsStore, sanitizer, config)
+	config := health.DefaultIntelligenceConfig(stackDir)
+	intel := health.NewDefaultHealthIntelligence(checker, proc, textGen, metricsStore, sanitizer, config)
 
 	// Configure analysis options
-	opts := AnalysisOptions{
-		ID:                GenerateID(),
+	opts := health.AnalysisOptions{
+		ID:                health.GenerateID(),
 		TimeWindow:        window,
-		Services:          DefaultServiceDefinitions(),
+		Services:          health.DefaultServiceDefinitions(),
 		IncludeLLMSummary: healthIncludeLLM,
 		MaxLogLines:       1000,
 		CreatedAt:         time.Now(),
@@ -201,7 +202,7 @@ func runHealthCommand(cmd *cobra.Command, args []string) {
 	}
 
 	// Exit with non-zero if critical
-	if report.OverallState == IntelligentStateCritical {
+	if report.OverallState == health.IntelligentStateCritical {
 		os.Exit(1)
 	}
 }
@@ -231,7 +232,7 @@ func runHealthCommand(cmd *cobra.Command, args []string) {
 // # Assumptions
 //
 //   - report is non-nil
-func outputHealthJSON(report *IntelligentHealthReport) {
+func outputHealthJSON(report *health.IntelligentHealthReport) {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
@@ -262,7 +263,7 @@ func outputHealthJSON(report *IntelligentHealthReport) {
 // # Assumptions
 //
 //   - Terminal supports Unicode
-func outputHealthReport(report *IntelligentHealthReport) {
+func outputHealthReport(report *health.IntelligentHealthReport) {
 	width := 70
 
 	// Header
@@ -291,7 +292,7 @@ func outputHealthReport(report *IntelligentHealthReport) {
 	printBoxSeparator(width)
 	printBoxLine("Services:", width)
 	for _, svc := range report.Services {
-		svcIcon := getStateIcon(IntelligentHealthState(svc.BasicHealth.State))
+		svcIcon := getStateIcon(health.IntelligentHealthState(svc.BasicHealth.State))
 		svcColor := getStateColor(svc.IntelligentState)
 
 		// Build status line
@@ -304,9 +305,9 @@ func outputHealthReport(report *IntelligentHealthReport) {
 		// Add key metrics if available
 		if svc.LatencyP99 > 0 {
 			status += fmt.Sprintf(" latency: %v", svc.LatencyP99)
-			if svc.LatencyTrend == TrendIncreasing {
+			if svc.LatencyTrend == health.TrendIncreasing {
 				status += " (↑)"
-			} else if svc.LatencyTrend == TrendDecreasing {
+			} else if svc.LatencyTrend == health.TrendDecreasing {
 				status += " (↓)"
 			}
 		}
@@ -499,60 +500,60 @@ func wrapText(text string, width int) []string {
 // STATE/ALERT FORMATTING
 // =============================================================================
 
-func getStateIcon(state IntelligentHealthState) string {
+func getStateIcon(state health.IntelligentHealthState) string {
 	switch state {
-	case IntelligentStateHealthy:
+	case health.IntelligentStateHealthy:
 		return "✓"
-	case IntelligentStateDegraded:
+	case health.IntelligentStateDegraded:
 		return "◐"
-	case IntelligentStateAtRisk:
+	case health.IntelligentStateAtRisk:
 		return "⚠"
-	case IntelligentStateCritical:
+	case health.IntelligentStateCritical:
 		return "✗"
 	default:
 		return "?"
 	}
 }
 
-func getStateColor(state IntelligentHealthState) string {
+func getStateColor(state health.IntelligentHealthState) string {
 	switch state {
-	case IntelligentStateHealthy:
+	case health.IntelligentStateHealthy:
 		return colorGreen
-	case IntelligentStateDegraded:
+	case health.IntelligentStateDegraded:
 		return colorYellow
-	case IntelligentStateAtRisk:
+	case health.IntelligentStateAtRisk:
 		return colorYellow
-	case IntelligentStateCritical:
+	case health.IntelligentStateCritical:
 		return colorRed
 	default:
 		return colorCyan
 	}
 }
 
-func getAlertIcon(severity AlertSeverity) string {
+func getAlertIcon(severity health.AlertSeverity) string {
 	switch severity {
-	case AlertSeverityInfo:
+	case health.AlertSeverityInfo:
 		return "ℹ"
-	case AlertSeverityWarning:
+	case health.AlertSeverityWarning:
 		return "⚠"
-	case AlertSeverityError:
+	case health.AlertSeverityError:
 		return "✗"
-	case AlertSeverityCritical:
+	case health.AlertSeverityCritical:
 		return "🔥"
 	default:
 		return "•"
 	}
 }
 
-func getAlertColor(severity AlertSeverity) string {
+func getAlertColor(severity health.AlertSeverity) string {
 	switch severity {
-	case AlertSeverityInfo:
+	case health.AlertSeverityInfo:
 		return colorBlue
-	case AlertSeverityWarning:
+	case health.AlertSeverityWarning:
 		return colorYellow
-	case AlertSeverityError:
+	case health.AlertSeverityError:
 		return colorRed
-	case AlertSeverityCritical:
+	case health.AlertSeverityCritical:
 		return colorRed
 	default:
 		return colorReset
@@ -593,6 +594,35 @@ func createMetricsStore(stackDir string) MetricsStore {
 	}
 	store, _ := NewEphemeralMetricsStore(config)
 	return store
+}
+
+// metricsStoreAdapter adapts main package MetricsStore to health.MetricsStore.
+//
+// This adapter bridges the type difference between the main package's
+// MetricsStore and the health package's MetricsStore until Phase 8 unifies them.
+type metricsStoreAdapter struct {
+	store MetricsStore
+}
+
+func (a *metricsStoreAdapter) Record(service, metric string, value float64, timestamp time.Time) {
+	a.store.Record(service, metric, value, timestamp)
+}
+
+func (a *metricsStoreAdapter) Query(service, metric string, start, end time.Time) []health.MetricPoint {
+	points := a.store.Query(service, metric, start, end)
+	result := make([]health.MetricPoint, len(points))
+	for i, p := range points {
+		result[i] = health.MetricPoint{Timestamp: p.Timestamp, Value: p.Value}
+	}
+	return result
+}
+
+func (a *metricsStoreAdapter) GetBaseline(service, metric string, window time.Duration) *health.BaselineStats {
+	baseline := a.store.GetBaseline(service, metric, window)
+	if baseline == nil {
+		return nil
+	}
+	return &health.BaselineStats{Mean: baseline.Mean, P50: baseline.P50, P99: baseline.P99}
 }
 
 // getAleutianStackDir returns the Aleutian stack directory.

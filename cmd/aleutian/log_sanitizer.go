@@ -30,10 +30,22 @@ By applying regex-based sanitization, we ensure defense-in-depth:
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"regexp"
 	"sync"
 	"time"
 )
+
+// generateID creates a unique identifier for sanitization entities.
+// This is a local copy to avoid coupling to health package.
+func generateID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return hex.EncodeToString([]byte(time.Now().Format("20060102150405.000")))[:16]
+	}
+	return hex.EncodeToString(b)
+}
 
 // =============================================================================
 // INTERFACE DEFINITIONS
@@ -209,7 +221,7 @@ type LogSanitizer interface {
 // # Examples
 //
 //	pattern := SanitizationPattern{
-//	    ID:          GenerateID(),
+//	    ID:          generateID(),
 //	    Name:        "email",
 //	    Pattern:     regexp.MustCompile(`[\w.+-]+@[\w.-]+\.\w+`),
 //	    Replacement: "[EMAIL_REDACTED]",
@@ -341,7 +353,7 @@ func NewDefaultLogSanitizer(patterns []SanitizationPattern) *DefaultLogSanitizer
 	// Assign IDs to patterns that don't have them
 	for i := range patterns {
 		if patterns[i].ID == "" {
-			patterns[i].ID = GenerateID()
+			patterns[i].ID = generateID()
 		}
 		if patterns[i].CreatedAt.IsZero() {
 			patterns[i].CreatedAt = now
@@ -391,7 +403,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 	return []SanitizationPattern{
 		// Email addresses
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "email",
 			Pattern:     regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`),
 			Replacement: "[EMAIL_REDACTED]",
@@ -400,7 +412,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// IP addresses (IPv4)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "ipv4",
 			Pattern:     regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
 			Replacement: "[IP_REDACTED]",
@@ -409,7 +421,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// IPv6 addresses (simplified pattern)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "ipv6",
 			Pattern:     regexp.MustCompile(`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`),
 			Replacement: "[IPV6_REDACTED]",
@@ -418,7 +430,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// API keys (common patterns)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "api_key",
 			Pattern:     regexp.MustCompile(`(?i)(api[_\-]?key|apikey|secret[_\-]?key|auth[_\-]?token)[=:\s]["']?([a-zA-Z0-9_\-]{16,})["']?`),
 			Replacement: "$1=[KEY_REDACTED]",
@@ -427,7 +439,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// Bearer tokens
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "bearer",
 			Pattern:     regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_\-\.]+`),
 			Replacement: "Bearer [TOKEN_REDACTED]",
@@ -436,7 +448,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// Credit card numbers (basic pattern)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "credit_card",
 			Pattern:     regexp.MustCompile(`\b(?:\d{4}[\s\-]?){3}\d{4}\b`),
 			Replacement: "[CC_REDACTED]",
@@ -445,7 +457,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// SSN (US format)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "ssn",
 			Pattern:     regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
 			Replacement: "[SSN_REDACTED]",
@@ -454,7 +466,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// AWS access keys
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "aws_key",
 			Pattern:     regexp.MustCompile(`(?i)(AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}`),
 			Replacement: "[AWS_KEY_REDACTED]",
@@ -463,7 +475,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// Generic hex secrets (32+ chars, likely tokens/hashes)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "hex_secret",
 			Pattern:     regexp.MustCompile(`\b[a-fA-F0-9]{32,}\b`),
 			Replacement: "[HEX_REDACTED]",
@@ -472,7 +484,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// JWT tokens
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "jwt",
 			Pattern:     regexp.MustCompile(`eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*`),
 			Replacement: "[JWT_REDACTED]",
@@ -481,7 +493,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// File paths with usernames (macOS)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "user_path_mac",
 			Pattern:     regexp.MustCompile(`/Users/[a-zA-Z0-9_\-]+/`),
 			Replacement: "/Users/[USER]/",
@@ -490,7 +502,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// Home directory paths (Linux)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "home_path_linux",
 			Pattern:     regexp.MustCompile(`/home/[a-zA-Z0-9_\-]+/`),
 			Replacement: "/home/[USER]/",
@@ -499,7 +511,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// Private key content
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "private_key",
 			Pattern:     regexp.MustCompile(`(?i)-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(RSA\s+)?PRIVATE\s+KEY-----`),
 			Replacement: "[PRIVATE_KEY_REDACTED]",
@@ -508,7 +520,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// Password in URLs
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "url_password",
 			Pattern:     regexp.MustCompile(`://[^:]+:([^@]+)@`),
 			Replacement: "://[USER]:[PASSWORD_REDACTED]@",
@@ -517,7 +529,7 @@ func DefaultSanitizationPatterns() []SanitizationPattern {
 		},
 		// Phone numbers (US format)
 		{
-			ID:          GenerateID(),
+			ID:          generateID(),
 			Name:        "phone_us",
 			Pattern:     regexp.MustCompile(`\b(?:\+1[\s\-]?)?(?:\(?\d{3}\)?[\s\-]?)?\d{3}[\s\-]?\d{4}\b`),
 			Replacement: "[PHONE_REDACTED]",
@@ -621,7 +633,7 @@ func (s *DefaultLogSanitizer) AddPattern(name string, pattern *regexp.Regexp, re
 	defer s.mu.Unlock()
 
 	s.patterns = append(s.patterns, SanitizationPattern{
-		ID:          GenerateID(),
+		ID:          generateID(),
 		Name:        name,
 		Pattern:     pattern,
 		Replacement: replacement,
@@ -673,7 +685,7 @@ func (s *DefaultLogSanitizer) GetStats() *SanitizationStats {
 	}
 
 	return &SanitizationStats{
-		ID:               GenerateID(),
+		ID:               generateID(),
 		TotalCalls:       s.totalCalls,
 		TotalRedactions:  s.totalRedactions,
 		ByPattern:        byPattern,
@@ -704,7 +716,7 @@ func (m *MockLogSanitizer) AddPattern(name string, pattern *regexp.Regexp, repla
 	defer m.mu.Unlock()
 
 	m.AddedPatterns = append(m.AddedPatterns, SanitizationPattern{
-		ID:          GenerateID(),
+		ID:          generateID(),
 		Name:        name,
 		Pattern:     pattern,
 		Replacement: replacement,
@@ -725,7 +737,7 @@ func (m *MockLogSanitizer) GetStats() *SanitizationStats {
 		return m.StatsToReturn
 	}
 	return &SanitizationStats{
-		ID:        GenerateID(),
+		ID:        generateID(),
 		ByPattern: make(map[string]int64),
 		CreatedAt: time.Now(),
 	}

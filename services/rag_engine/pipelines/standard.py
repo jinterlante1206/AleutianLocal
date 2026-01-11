@@ -13,7 +13,7 @@ import logging
 import weaviate
 import weaviate.classes as wvc
 from weaviate.exceptions import WeaviateQueryException
-from .base import BaseRAGPipeline
+from .base import BaseRAGPipeline, DISTANCE_THRESHOLD, NO_RELEVANT_DOCS_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +90,21 @@ class StandardRAGPipeline(BaseRAGPipeline):
             raise RuntimeError(f"Weaviate interaction failed: {e}")
 
 
-    async def run(self, query: str, session_id: str | None = None) -> tuple[str, list[dict]]:
-        """Executes the standard RAG pipeline."""
-        # --- SIGNATURE MODIFIED to accept session_id ---
+    async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
+        """Executes the standard RAG pipeline.
 
-        logger.info(f"Standard RAG run started for query: {query[:50]}...")
+        Parameters
+        ----------
+        query : str
+            The user's query.
+        session_id : str | None
+            The current session ID, passed from the orchestrator.
+        strict_mode : bool
+            If True, only answer from documents. If no relevant docs (distance > threshold),
+            return NO_RELEVANT_DOCS_MESSAGE instead of using LLM fallback.
+            Default: True (strict mode).
+        """
+        logger.info(f"Standard RAG run started (strict_mode={strict_mode}) for query: {query[:50]}...")
 
         # 1. Get query embedding (uses inherited _get_embedding)
         logger.debug("Getting query embedding...")
@@ -103,12 +113,26 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
         # 2. Search for relevant documents
         logger.debug("Searching Weaviate...")
-        # --- MODIFIED LINE: Pass session_id and call correct function ---
         context_docs_with_meta = await self._search_weaviate_initial(query_vector, session_id)
-        # --- END MODIFICATION ---
+        logger.debug(f"Found {len(context_docs_with_meta)} context documents.")
+
+        # Apply relevance threshold filtering in strict mode
+        if strict_mode:
+            relevant_docs = [
+                d for d in context_docs_with_meta
+                if d.get("metadata") and hasattr(d["metadata"], "distance")
+                and d["metadata"].distance < DISTANCE_THRESHOLD
+            ]
+            logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs_with_meta)} docs below distance threshold {DISTANCE_THRESHOLD}")
+
+            if not relevant_docs:
+                logger.info("No relevant documents found in strict mode, returning message")
+                return NO_RELEVANT_DOCS_MESSAGE, []
+
+            context_docs_with_meta = relevant_docs
 
         context_docs_props = [d["properties"] for d in context_docs_with_meta]
-        logger.debug(f"Found {len(context_docs_props)} context documents.")
+        logger.debug(f"Using {len(context_docs_props)} context documents for prompt.")
 
         # 3. Build the prompt (uses inherited _build_prompt)
         logger.debug("Building prompt...")

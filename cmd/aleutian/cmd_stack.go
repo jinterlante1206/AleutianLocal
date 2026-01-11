@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/spf13/cobra"
 )
@@ -618,6 +620,25 @@ func runStart(cmd *cobra.Command, args []string) {
 	}
 
 	composeArgs = append(composeArgs, "up", "-d")
+
+	// Auto-detect if orchestrator rebuild is needed based on source file timestamps.
+	// Uses ImageChecker to compare file modification times against image creation time.
+	if !forceBuild {
+		imageChecker := infra.NewDefaultImageChecker()
+		orchestratorDir := filepath.Join(stackDir, "services", "orchestrator")
+		needsRebuild, err := imageChecker.NeedsRebuild(
+			"aleutian-go-orchestrator",
+			orchestratorDir,
+			[]string{".go", "Dockerfile", "go.mod", "go.sum"},
+		)
+		if err != nil {
+			slog.Debug("Image check failed, skipping auto-rebuild", "error", err)
+		} else if needsRebuild {
+			fmt.Println("🔄 Detected code changes in orchestrator, triggering rebuild...")
+			forceBuild = true
+		}
+	}
+
 	if forceBuild {
 		fmt.Println("Force build enabled: Recompiling containers")
 		composeArgs = append(composeArgs, "--build")
@@ -627,6 +648,15 @@ func runStart(cmd *cobra.Command, args []string) {
 	if err != nil {
 		collectDiagnostics("Startup Failed", err.Error())
 		log.Fatalf("Failed to start services: %v", err)
+	}
+
+	// Clean up dangling images after build to prevent disk space accumulation.
+	// This is a non-critical operation; errors are logged but not fatal.
+	if forceBuild {
+		pruneChecker := infra.NewDefaultImageChecker()
+		if pruneErr := pruneChecker.PruneDanglingImages(); pruneErr != nil {
+			slog.Debug("Image prune failed (non-fatal)", "error", pruneErr)
+		}
 	}
 
 	fmt.Println("\n⏳ Waiting for services to initialize...")
@@ -807,53 +837,53 @@ func hasForeignWorkloads() (bool, []string, error) {
 func waitForServicesReady() error {
 	// Create HealthChecker with production dependencies
 	proc := process.NewDefaultManager()
-	checker := NewDefaultHealthChecker(proc, DefaultHealthCheckerConfig())
+	checker := health.NewDefaultHealthChecker(proc, health.DefaultHealthCheckerConfig())
 
 	// Build service definitions for critical services
-	services := []ServiceDefinition{
+	services := []health.ServiceDefinition{
 		{
-			ID:             GenerateID(),
+			ID:             health.GenerateID(),
 			Name:           "Orchestrator",
 			URL:            fmt.Sprintf("%s/health", getOrchestratorBaseURL()),
 			ContainerName:  "aleutian-go-orchestrator",
-			CheckType:      HealthCheckHTTP,
+			CheckType:      health.HealthCheckHTTP,
 			Critical:       true,
 			Timeout:        10 * time.Second,
 			ExpectedStatus: 200,
-			Version:        HealthCheckVersion,
+			Version:        health.HealthCheckVersion,
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		},
 		{
-			ID:             GenerateID(),
+			ID:             health.GenerateID(),
 			Name:           "Data Fetcher",
 			URL:            "http://localhost:12001/health",
 			ContainerName:  "aleutian-data-fetcher",
-			CheckType:      HealthCheckHTTP,
+			CheckType:      health.HealthCheckHTTP,
 			Critical:       true,
 			Timeout:        10 * time.Second,
 			ExpectedStatus: 200,
-			Version:        HealthCheckVersion,
+			Version:        health.HealthCheckVersion,
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		},
 		{
-			ID:             GenerateID(),
+			ID:             health.GenerateID(),
 			Name:           "Weaviate",
 			URL:            "http://localhost:8080/v1/.well-known/ready",
 			ContainerName:  "weaviate-db",
-			CheckType:      HealthCheckHTTP,
+			CheckType:      health.HealthCheckHTTP,
 			Critical:       true,
 			Timeout:        10 * time.Second,
 			ExpectedStatus: 200,
-			Version:        HealthCheckVersion,
+			Version:        health.HealthCheckVersion,
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		},
 	}
 
 	// Use default wait options with exponential backoff
-	opts := DefaultWaitOptions()
+	opts := health.DefaultWaitOptions()
 	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
 
@@ -865,11 +895,11 @@ func waitForServicesReady() error {
 
 	// Print individual service statuses
 	for _, status := range result.Services {
-		if status.State == HealthStateHealthy {
+		if status.State == health.HealthStateHealthy {
 			fmt.Printf("   Checking %s... ✓ (%.1fs)\n",
 				status.Name,
 				status.Latency.Seconds())
-		} else if status.State == HealthStateSkipped {
+		} else if status.State == health.HealthStateSkipped {
 			fmt.Printf("   Checking %s... - (skipped)\n", status.Name)
 		} else {
 			fmt.Printf("   Checking %s... ✗ (%s)\n",
