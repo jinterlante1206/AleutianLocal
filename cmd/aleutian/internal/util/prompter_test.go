@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains unit tests for UserPrompter.
+Package util contains unit tests for UserPrompter.
 
 # Testing Strategy
 
@@ -19,7 +19,7 @@ These tests verify:
   - MockPrompter works correctly for test doubles
   - Error handling for edge cases
 */
-package main
+package util
 
 import (
 	"bytes"

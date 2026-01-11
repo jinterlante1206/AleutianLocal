@@ -59,6 +59,7 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
 )
 
 // -----------------------------------------------------------------------------
@@ -702,7 +703,7 @@ func (c *CacheConfig) GetMachineName() string {
 type DefaultCachePathResolver struct {
 	config               CacheConfig
 	proc                 process.Manager
-	prompter             UserPrompter
+	prompter             util.UserPrompter
 	osStatFunc           func(string) (os.FileInfo, error)
 	osMkdirAllFunc       func(string, os.FileMode) error
 	osGetenvFunc         func(string) string
@@ -756,7 +757,7 @@ type DefaultCachePathResolver struct {
 //
 //   - ProcessManager is properly configured for podman commands
 //   - StackDir is a valid, writable directory path
-func NewDefaultCachePathResolver(cfg CacheConfig, proc process.Manager, prompter UserPrompter) *DefaultCachePathResolver {
+func NewDefaultCachePathResolver(cfg CacheConfig, proc process.Manager, prompter util.UserPrompter) *DefaultCachePathResolver {
 	return &DefaultCachePathResolver{
 		config:               cfg,
 		proc:                 proc,

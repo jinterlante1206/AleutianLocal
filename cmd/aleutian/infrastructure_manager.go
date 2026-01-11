@@ -56,6 +56,7 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
 )
 
 // -----------------------------------------------------------------------------
@@ -1043,7 +1044,7 @@ type DefaultInfrastructureManager struct {
 	proc process.Manager
 
 	// prompter handles interactive user prompts.
-	prompter UserPrompter
+	prompter util.UserPrompter
 
 	// metrics records infrastructure events for observability.
 	metrics DiagnosticsMetrics
@@ -1086,7 +1087,7 @@ type DefaultInfrastructureManager struct {
 //   - proc and prompter are non-nil
 func NewDefaultInfrastructureManager(
 	proc process.Manager,
-	prompter UserPrompter,
+	prompter util.UserPrompter,
 	metrics DiagnosticsMetrics,
 ) *DefaultInfrastructureManager {
 	output := io.Writer(os.Stdout)

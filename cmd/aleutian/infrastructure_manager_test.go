@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/util"
 )
 
 // -----------------------------------------------------------------------------
@@ -27,11 +28,11 @@ import (
 // -----------------------------------------------------------------------------
 
 // createTestInfraManager creates an InfrastructureManager with mocks for testing.
-func createTestInfraManager(t *testing.T) (*DefaultInfrastructureManager, *process.MockManager, *MockPrompter, *bytes.Buffer) {
+func createTestInfraManager(t *testing.T) (*DefaultInfrastructureManager, *process.MockManager, *util.MockPrompter, *bytes.Buffer) {
 	t.Helper()
 
 	proc := &process.MockManager{}
-	prompter := &MockPrompter{
+	prompter := &util.MockPrompter{
 		ConfirmFunc: func(ctx context.Context, prompt string) (bool, error) {
 			return true, nil
 		},

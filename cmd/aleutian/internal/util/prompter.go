@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides UserPrompter for handling interactive user input.
+Package util provides UserPrompter for handling interactive user input.
 
 UserPrompter abstracts all user interaction, enabling:
   - Interactive prompts in terminal environments
@@ -19,13 +19,13 @@ UserPrompter abstracts all user interaction, enabling:
 
 # Design Rationale
 
-User prompts are scattered throughout cmd_stack.go. By abstracting them behind
+User prompts are scattered throughout command handlers. By abstracting them behind
 an interface, we can:
   - Test code that prompts users without real stdin
   - Support CI environments that cannot respond to prompts
   - Provide --yes flag to auto-approve all prompts
 */
-package main
+package util
 
 import (
 	"bufio"
@@ -69,6 +69,11 @@ var ErrInvalidSelection = errors.New("invalid selection")
 //
 // Methods accept context for cancellation support, though interactive
 // prompts may not immediately respond to cancellation while waiting for input.
+//
+// # Assumptions
+//
+//   - Callers handle the case where context is cancelled before prompt completes
+//   - For interactive use, stdin/stdout are available and functional
 type UserPrompter interface {
 	// Confirm asks a yes/no question and returns the answer.
 	//
@@ -99,8 +104,12 @@ type UserPrompter interface {
 	//
 	// # Limitations
 	//
-	//   - May not immediately respond to context cancellation
+	//   - May not immediately respond to context cancellation while blocking on read
 	//   - Empty input defaults to 'no' for safety
+	//
+	// # Assumptions
+	//
+	//   - prompt string does not contain control characters
 	Confirm(ctx context.Context, prompt string) (bool, error)
 
 	// Select presents options and returns the selected index.
@@ -136,6 +145,12 @@ type UserPrompter interface {
 	//
 	//   - User must enter 1-based number, not option text
 	//   - Options slice must not be empty
+	//   - Cannot interrupt blocking read once started
+	//
+	// # Assumptions
+	//
+	//   - options slice is non-empty (returns error if empty)
+	//   - option strings do not contain newlines
 	Select(ctx context.Context, prompt string, options []string) (int, error)
 
 	// IsInteractive returns true if prompts are enabled.
@@ -166,6 +181,15 @@ type UserPrompter interface {
 // This is the default prompter for terminal environments. It reads user
 // input from the configured reader (typically os.Stdin) and writes prompts
 // to the configured writer (typically os.Stdout).
+//
+// # Thread Safety
+//
+// Not safe for concurrent use. Prompts should be serialized.
+//
+// # Assumptions
+//
+//   - reader and writer are valid and not nil
+//   - reader provides line-based input (newline-terminated)
 type InteractivePrompter struct {
 	reader io.Reader
 	writer io.Writer
@@ -186,6 +210,10 @@ type InteractivePrompter struct {
 //
 //	prompter := NewInteractivePrompter()
 //	confirmed, err := prompter.Confirm(ctx, "Continue?")
+//
+// # Assumptions
+//
+//   - os.Stdin and os.Stdout are available
 func NewInteractivePrompter() *InteractivePrompter {
 	return &InteractivePrompter{
 		reader: os.Stdin,
@@ -202,8 +230,8 @@ func NewInteractivePrompter() *InteractivePrompter {
 //
 // # Inputs
 //
-//   - reader: Source for user input
-//   - writer: Destination for prompts
+//   - reader: Source for user input (must not be nil)
+//   - writer: Destination for prompts (must not be nil)
 //
 // # Outputs
 //
@@ -214,6 +242,11 @@ func NewInteractivePrompter() *InteractivePrompter {
 //	var buf bytes.Buffer
 //	buf.WriteString("y\n")
 //	prompter := NewInteractivePrompterWithIO(&buf, os.Stdout)
+//
+// # Assumptions
+//
+//   - reader and writer are not nil
+//   - reader provides newline-terminated input
 func NewInteractivePrompterWithIO(reader io.Reader, writer io.Writer) *InteractivePrompter {
 	return &InteractivePrompter{
 		reader: reader,
@@ -310,6 +343,14 @@ func (p *InteractivePrompter) IsInteractive() bool {
 //
 // This prompter either auto-approves all prompts (for --yes flag) or
 // returns errors for all prompts (for --non-interactive without --yes).
+//
+// # Thread Safety
+//
+// Safe for concurrent use (stateless after construction).
+//
+// # Assumptions
+//
+//   - Auto-approve mode always selects the first option for Select()
 type NonInteractivePrompter struct {
 	// autoApprove determines behavior:
 	//   - true: Confirm returns true, Select returns 0 (first option)
@@ -353,6 +394,10 @@ func NewNonInteractivePrompter() *NonInteractivePrompter {
 //	prompter := NewAutoApprovePrompter()
 //	confirmed, err := prompter.Confirm(ctx, "Continue?")
 //	// confirmed == true, err == nil
+//
+// # Assumptions
+//
+//   - For Select(), the first option (index 0) is acceptable as default
 func NewAutoApprovePrompter() *NonInteractivePrompter {
 	return &NonInteractivePrompter{autoApprove: true}
 }
@@ -390,6 +435,10 @@ func (p *NonInteractivePrompter) IsInteractive() bool {
 // Configure the mock by setting function fields before use. If a function
 // field is nil and the corresponding method is called, it will panic.
 //
+// # Thread Safety
+//
+// Not safe for concurrent use due to Calls slice mutation.
+//
 // # Examples
 //
 //	mock := &MockPrompter{
@@ -400,6 +449,11 @@ func (p *NonInteractivePrompter) IsInteractive() bool {
 //	        return false, nil
 //	    },
 //	}
+//
+// # Assumptions
+//
+//   - ConfirmFunc/SelectFunc are set before calling respective methods
+//   - Panics if function fields are nil (fail-fast for test debugging)
 type MockPrompter struct {
 	// ConfirmFunc is called when Confirm is invoked
 	ConfirmFunc func(ctx context.Context, prompt string) (bool, error)
