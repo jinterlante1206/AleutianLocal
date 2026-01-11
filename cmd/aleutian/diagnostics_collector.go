@@ -44,6 +44,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // -----------------------------------------------------------------------------
@@ -76,7 +78,7 @@ import (
 // Multiple goroutines can call Collect() concurrently.
 type DefaultDiagnosticsCollector struct {
 	// processManager executes external commands (podman).
-	processManager ProcessManager
+	processManager process.Manager
 
 	// formatter converts collected data to output format.
 	formatter DiagnosticsFormatter
@@ -143,7 +145,7 @@ func NewDefaultDiagnosticsCollector(version string) (*DefaultDiagnosticsCollecto
 	}
 
 	return &DefaultDiagnosticsCollector{
-		processManager:  NewDefaultProcessManager(),
+		processManager:  process.NewDefaultManager(),
 		formatter:       NewJSONDiagnosticsFormatter(),
 		storage:         storage,
 		aleutianVersion: version,
@@ -188,7 +190,7 @@ func NewDefaultDiagnosticsCollector(version string) (*DefaultDiagnosticsCollecto
 //
 //   - All dependencies are non-nil and properly initialized
 func NewDiagnosticsCollectorWithDeps(
-	pm ProcessManager,
+	pm process.Manager,
 	formatter DiagnosticsFormatter,
 	storage DiagnosticsStorage,
 	version string,

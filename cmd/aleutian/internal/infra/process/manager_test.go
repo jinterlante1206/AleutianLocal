@@ -9,17 +9,17 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main contains unit tests for ProcessManager.
+Package process contains unit tests for Manager.
 
 # Testing Strategy
 
 These tests verify:
-  - DefaultProcessManager correctly executes real commands
+  - DefaultManager correctly executes real commands
   - Error handling for non-existent commands
   - Context cancellation support
-  - MockProcessManager works correctly for test doubles
+  - MockManager works correctly for test doubles
 */
-package main
+package process
 
 import (
 	"context"
@@ -31,12 +31,12 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// DefaultProcessManager Tests
+// DefaultManager Tests
 // -----------------------------------------------------------------------------
 
-// TestDefaultProcessManager_Run_Success verifies successful command execution.
-func TestDefaultProcessManager_Run_Success(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Run_Success verifies successful command execution.
+func TestDefaultManager_Run_Success(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	output, err := pm.Run(ctx, "echo", "hello world")
@@ -50,9 +50,9 @@ func TestDefaultProcessManager_Run_Success(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_Run_WithArgs verifies multiple arguments.
-func TestDefaultProcessManager_Run_WithArgs(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Run_WithArgs verifies multiple arguments.
+func TestDefaultManager_Run_WithArgs(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	output, err := pm.Run(ctx, "printf", "%s %s", "hello", "world")
@@ -66,9 +66,9 @@ func TestDefaultProcessManager_Run_WithArgs(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_Run_CommandNotFound verifies error for missing command.
-func TestDefaultProcessManager_Run_CommandNotFound(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Run_CommandNotFound verifies error for missing command.
+func TestDefaultManager_Run_CommandNotFound(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	_, err := pm.Run(ctx, "nonexistent-command-12345")
@@ -77,9 +77,9 @@ func TestDefaultProcessManager_Run_CommandNotFound(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_Run_CommandFailure verifies error for failing command.
-func TestDefaultProcessManager_Run_CommandFailure(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Run_CommandFailure verifies error for failing command.
+func TestDefaultManager_Run_CommandFailure(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	_, err := pm.Run(ctx, "false") // 'false' always exits with code 1
@@ -88,9 +88,9 @@ func TestDefaultProcessManager_Run_CommandFailure(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_Run_ContextCancellation verifies cancellation support.
-func TestDefaultProcessManager_Run_ContextCancellation(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Run_ContextCancellation verifies cancellation support.
+func TestDefaultManager_Run_ContextCancellation(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Cancel immediately
@@ -102,9 +102,9 @@ func TestDefaultProcessManager_Run_ContextCancellation(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_Run_Timeout verifies timeout support.
-func TestDefaultProcessManager_Run_Timeout(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Run_Timeout verifies timeout support.
+func TestDefaultManager_Run_Timeout(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
@@ -118,9 +118,9 @@ func TestDefaultProcessManager_Run_Timeout(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_RunWithInput_Success verifies stdin piping.
-func TestDefaultProcessManager_RunWithInput_Success(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_RunWithInput_Success verifies stdin piping.
+func TestDefaultManager_RunWithInput_Success(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	input := []byte("hello from stdin")
@@ -135,9 +135,9 @@ func TestDefaultProcessManager_RunWithInput_Success(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_RunWithInput_EmptyInput verifies empty stdin.
-func TestDefaultProcessManager_RunWithInput_EmptyInput(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_RunWithInput_EmptyInput verifies empty stdin.
+func TestDefaultManager_RunWithInput_EmptyInput(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	output, err := pm.RunWithInput(ctx, "cat", nil)
@@ -150,9 +150,9 @@ func TestDefaultProcessManager_RunWithInput_EmptyInput(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_RunWithInput_LargeInput verifies large stdin handling.
-func TestDefaultProcessManager_RunWithInput_LargeInput(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_RunWithInput_LargeInput verifies large stdin handling.
+func TestDefaultManager_RunWithInput_LargeInput(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	// Create 100KB of input
@@ -173,9 +173,9 @@ func TestDefaultProcessManager_RunWithInput_LargeInput(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_Start_Success verifies background process start.
-func TestDefaultProcessManager_Start_Success(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Start_Success verifies background process start.
+func TestDefaultManager_Start_Success(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	// Start a short-lived process
@@ -192,9 +192,9 @@ func TestDefaultProcessManager_Start_Success(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 }
 
-// TestDefaultProcessManager_Start_InvalidCommand verifies error for missing command.
-func TestDefaultProcessManager_Start_InvalidCommand(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_Start_InvalidCommand verifies error for missing command.
+func TestDefaultManager_Start_InvalidCommand(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	_, err := pm.Start(ctx, "nonexistent-command-12345")
@@ -203,9 +203,9 @@ func TestDefaultProcessManager_Start_InvalidCommand(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_IsRunning_ProcessExists verifies detection of running process.
-func TestDefaultProcessManager_IsRunning_ProcessExists(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_IsRunning_ProcessExists verifies detection of running process.
+func TestDefaultManager_IsRunning_ProcessExists(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	// Start a background process
@@ -236,9 +236,9 @@ func TestDefaultProcessManager_IsRunning_ProcessExists(t *testing.T) {
 	t.Logf("Started PID: %d, Found PID: %d", pid, foundPid)
 }
 
-// TestDefaultProcessManager_IsRunning_ProcessNotExists verifies detection when process is absent.
-func TestDefaultProcessManager_IsRunning_ProcessNotExists(t *testing.T) {
-	pm := NewDefaultProcessManager()
+// TestDefaultManager_IsRunning_ProcessNotExists verifies detection when process is absent.
+func TestDefaultManager_IsRunning_ProcessNotExists(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	// Check for a process that definitely doesn't exist
@@ -257,12 +257,12 @@ func TestDefaultProcessManager_IsRunning_ProcessNotExists(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// MockProcessManager Tests
+// MockManager Tests
 // -----------------------------------------------------------------------------
 
-// TestMockProcessManager_Run verifies mock Run behavior.
-func TestMockProcessManager_Run(t *testing.T) {
-	mock := &MockProcessManager{
+// TestMockManager_Run verifies mock Run behavior.
+func TestMockManager_Run(t *testing.T) {
+	mock := &MockManager{
 		RunFunc: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			if name == "podman" && len(args) > 0 && args[0] == "version" {
 				return []byte("podman version 4.0.0"), nil
@@ -298,9 +298,9 @@ func TestMockProcessManager_Run(t *testing.T) {
 	}
 }
 
-// TestMockProcessManager_RunWithInput verifies mock RunWithInput behavior.
-func TestMockProcessManager_RunWithInput(t *testing.T) {
-	mock := &MockProcessManager{
+// TestMockManager_RunWithInput verifies mock RunWithInput behavior.
+func TestMockManager_RunWithInput(t *testing.T) {
+	mock := &MockManager{
 		RunWithInputFunc: func(ctx context.Context, name string, input []byte, args ...string) ([]byte, error) {
 			return input, nil // Echo back input
 		},
@@ -331,9 +331,9 @@ func TestMockProcessManager_RunWithInput(t *testing.T) {
 	}
 }
 
-// TestMockProcessManager_Start verifies mock Start behavior.
-func TestMockProcessManager_Start(t *testing.T) {
-	mock := &MockProcessManager{
+// TestMockManager_Start verifies mock Start behavior.
+func TestMockManager_Start(t *testing.T) {
+	mock := &MockManager{
 		StartFunc: func(ctx context.Context, name string, args ...string) (int, error) {
 			return 12345, nil
 		},
@@ -360,9 +360,9 @@ func TestMockProcessManager_Start(t *testing.T) {
 	}
 }
 
-// TestMockProcessManager_IsRunning verifies mock IsRunning behavior.
-func TestMockProcessManager_IsRunning(t *testing.T) {
-	mock := &MockProcessManager{
+// TestMockManager_IsRunning verifies mock IsRunning behavior.
+func TestMockManager_IsRunning(t *testing.T) {
+	mock := &MockManager{
 		IsRunningFunc: func(ctx context.Context, pattern string) (bool, int, error) {
 			if pattern == "Podman Desktop" {
 				return true, 9999, nil
@@ -397,9 +397,9 @@ func TestMockProcessManager_IsRunning(t *testing.T) {
 	}
 }
 
-// TestMockProcessManager_Reset verifies call history reset.
-func TestMockProcessManager_Reset(t *testing.T) {
-	mock := &MockProcessManager{
+// TestMockManager_Reset verifies call history reset.
+func TestMockManager_Reset(t *testing.T) {
+	mock := &MockManager{
 		RunFunc: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			return nil, nil
 		},
@@ -420,9 +420,9 @@ func TestMockProcessManager_Reset(t *testing.T) {
 	}
 }
 
-// TestMockProcessManager_NilFunc_Panics verifies panic on unconfigured mock.
-func TestMockProcessManager_NilFunc_Panics(t *testing.T) {
-	mock := &MockProcessManager{} // No functions set
+// TestMockManager_NilFunc_Panics verifies panic on unconfigured mock.
+func TestMockManager_NilFunc_Panics(t *testing.T) {
+	mock := &MockManager{} // No functions set
 
 	defer func() {
 		if r := recover(); r == nil {
@@ -434,10 +434,10 @@ func TestMockProcessManager_NilFunc_Panics(t *testing.T) {
 	_, _ = mock.Run(ctx, "test")
 }
 
-// TestMockProcessManager_MultipleCommands verifies recording multiple commands.
-func TestMockProcessManager_MultipleCommands(t *testing.T) {
+// TestMockManager_MultipleCommands verifies recording multiple commands.
+func TestMockManager_MultipleCommands(t *testing.T) {
 	callCount := 0
-	mock := &MockProcessManager{
+	mock := &MockManager{
 		RunFunc: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			callCount++
 			return []byte("ok"), nil
@@ -481,7 +481,7 @@ func TestMockProcessManager_MultipleCommands(t *testing.T) {
 // RunInDir Tests
 // -----------------------------------------------------------------------------
 
-// TestDefaultProcessManager_RunInDir_Success verifies RunInDir with directory and env.
+// TestDefaultManager_RunInDir_Success verifies RunInDir with directory and env.
 //
 // # Description
 //
@@ -507,8 +507,8 @@ func TestMockProcessManager_MultipleCommands(t *testing.T) {
 // # Assumptions
 //
 //   - /tmp directory exists and is writable
-func TestDefaultProcessManager_RunInDir_Success(t *testing.T) {
-	pm := NewDefaultProcessManager()
+func TestDefaultManager_RunInDir_Success(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	stdout, stderr, exitCode, err := pm.RunInDir(
@@ -532,7 +532,7 @@ func TestDefaultProcessManager_RunInDir_Success(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_RunInDir_NonZeroExit verifies non-zero exit handling.
+// TestDefaultManager_RunInDir_NonZeroExit verifies non-zero exit handling.
 //
 // # Description
 //
@@ -555,8 +555,8 @@ func TestDefaultProcessManager_RunInDir_Success(t *testing.T) {
 // # Assumptions
 //
 //   - 'false' command is available on the system
-func TestDefaultProcessManager_RunInDir_NonZeroExit(t *testing.T) {
-	pm := NewDefaultProcessManager()
+func TestDefaultManager_RunInDir_NonZeroExit(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	_, _, exitCode, err := pm.RunInDir(ctx, "", nil, "false")
@@ -569,7 +569,7 @@ func TestDefaultProcessManager_RunInDir_NonZeroExit(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_RunInDir_CommandNotFound verifies error for missing command.
+// TestDefaultManager_RunInDir_CommandNotFound verifies error for missing command.
 //
 // # Description
 //
@@ -592,8 +592,8 @@ func TestDefaultProcessManager_RunInDir_NonZeroExit(t *testing.T) {
 // # Assumptions
 //
 //   - nonexistent-command-12345 does not exist
-func TestDefaultProcessManager_RunInDir_CommandNotFound(t *testing.T) {
-	pm := NewDefaultProcessManager()
+func TestDefaultManager_RunInDir_CommandNotFound(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	_, _, exitCode, err := pm.RunInDir(ctx, "", nil, "nonexistent-command-12345")
@@ -606,7 +606,7 @@ func TestDefaultProcessManager_RunInDir_CommandNotFound(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_RunInDir_Stderr verifies stderr capture.
+// TestDefaultManager_RunInDir_Stderr verifies stderr capture.
 //
 // # Description
 //
@@ -628,8 +628,8 @@ func TestDefaultProcessManager_RunInDir_CommandNotFound(t *testing.T) {
 // # Assumptions
 //
 //   - sh is available
-func TestDefaultProcessManager_RunInDir_Stderr(t *testing.T) {
-	pm := NewDefaultProcessManager()
+func TestDefaultManager_RunInDir_Stderr(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	stdout, stderr, exitCode, err := pm.RunInDir(
@@ -655,7 +655,7 @@ func TestDefaultProcessManager_RunInDir_Stderr(t *testing.T) {
 // RunStreaming Tests
 // -----------------------------------------------------------------------------
 
-// TestDefaultProcessManager_RunStreaming_Success verifies streaming output.
+// TestDefaultManager_RunStreaming_Success verifies streaming output.
 //
 // # Description
 //
@@ -678,8 +678,8 @@ func TestDefaultProcessManager_RunInDir_Stderr(t *testing.T) {
 // # Assumptions
 //
 //   - echo command is available
-func TestDefaultProcessManager_RunStreaming_Success(t *testing.T) {
-	pm := NewDefaultProcessManager()
+func TestDefaultManager_RunStreaming_Success(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx := context.Background()
 
 	var buf strings.Builder
@@ -693,7 +693,7 @@ func TestDefaultProcessManager_RunStreaming_Success(t *testing.T) {
 	}
 }
 
-// TestDefaultProcessManager_RunStreaming_ContextCancellation verifies cancellation.
+// TestDefaultManager_RunStreaming_ContextCancellation verifies cancellation.
 //
 // # Description
 //
@@ -715,8 +715,8 @@ func TestDefaultProcessManager_RunStreaming_Success(t *testing.T) {
 // # Assumptions
 //
 //   - sleep command is available
-func TestDefaultProcessManager_RunStreaming_ContextCancellation(t *testing.T) {
-	pm := NewDefaultProcessManager()
+func TestDefaultManager_RunStreaming_ContextCancellation(t *testing.T) {
+	pm := NewDefaultManager()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Cancel immediately
@@ -737,11 +737,11 @@ func TestDefaultProcessManager_RunStreaming_ContextCancellation(t *testing.T) {
 // Mock RunInDir and RunStreaming Tests
 // -----------------------------------------------------------------------------
 
-// TestMockProcessManager_RunInDir verifies mock RunInDir behavior.
+// TestMockManager_RunInDir verifies mock RunInDir behavior.
 //
 // # Description
 //
-// Tests that MockProcessManager correctly delegates to RunInDirFunc
+// Tests that MockManager correctly delegates to RunInDirFunc
 // and records the call with dir and env.
 //
 // # Inputs
@@ -760,8 +760,8 @@ func TestDefaultProcessManager_RunStreaming_ContextCancellation(t *testing.T) {
 // # Assumptions
 //
 //   - RunInDirFunc is set
-func TestMockProcessManager_RunInDir(t *testing.T) {
-	mock := &MockProcessManager{
+func TestMockManager_RunInDir(t *testing.T) {
+	mock := &MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "stdout", "stderr", 0, nil
 		},
@@ -802,11 +802,11 @@ func TestMockProcessManager_RunInDir(t *testing.T) {
 	}
 }
 
-// TestMockProcessManager_RunStreaming verifies mock RunStreaming behavior.
+// TestMockManager_RunStreaming verifies mock RunStreaming behavior.
 //
 // # Description
 //
-// Tests that MockProcessManager correctly delegates to RunStreamingFunc
+// Tests that MockManager correctly delegates to RunStreamingFunc
 // and records the call.
 //
 // # Inputs
@@ -826,8 +826,8 @@ func TestMockProcessManager_RunInDir(t *testing.T) {
 // # Assumptions
 //
 //   - RunStreamingFunc is set
-func TestMockProcessManager_RunStreaming(t *testing.T) {
-	mock := &MockProcessManager{
+func TestMockManager_RunStreaming(t *testing.T) {
+	mock := &MockManager{
 		RunStreamingFunc: func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
 			_, _ = w.Write([]byte("mock streaming output"))
 			return nil
@@ -863,9 +863,9 @@ func TestMockProcessManager_RunStreaming(t *testing.T) {
 // Interface Compliance Tests
 // -----------------------------------------------------------------------------
 
-// TestProcessManager_InterfaceCompliance verifies interface implementations.
-func TestProcessManager_InterfaceCompliance(t *testing.T) {
+// TestManager_InterfaceCompliance verifies interface implementations.
+func TestManager_InterfaceCompliance(t *testing.T) {
 	// These will fail to compile if interfaces aren't implemented correctly
-	var _ ProcessManager = (*DefaultProcessManager)(nil)
-	var _ ProcessManager = (*MockProcessManager)(nil)
+	var _ Manager = (*DefaultManager)(nil)
+	var _ Manager = (*MockManager)(nil)
 }

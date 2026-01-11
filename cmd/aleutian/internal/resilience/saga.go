@@ -1,12 +1,23 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package resilience
 
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
+
+// =============================================================================
+// Saga Executor Interface
+// =============================================================================
 
 // SagaExecutor defines the interface for saga-based transaction execution.
 //
@@ -20,6 +31,24 @@ import (
 //
 // Implementations must be safe for use from a single goroutine.
 // Concurrent execution of the same saga is not supported.
+//
+// # Example
+//
+//	var executor SagaExecutor = NewSaga(DefaultSagaConfig())
+//	executor.AddStep(SagaStep{...})
+//	if err := executor.Execute(ctx); err != nil {
+//	    log.Printf("Saga failed: %v", err)
+//	}
+//
+// # Limitations
+//
+//   - Implementations may vary in persistence and recovery capabilities
+//   - Not designed for concurrent execution
+//
+// # Assumptions
+//
+//   - Execute is called from a single goroutine
+//   - Steps are added before Execute is called
 type SagaExecutor interface {
 	// AddStep adds a step to the saga.
 	AddStep(step SagaStep)
@@ -36,6 +65,10 @@ type SagaExecutor interface {
 	// LastError returns the error that caused the saga to fail.
 	LastError() error
 }
+
+// =============================================================================
+// Saga Step
+// =============================================================================
 
 // SagaStep represents one step in a saga with its rollback action.
 //
@@ -61,6 +94,11 @@ type SagaExecutor interface {
 //
 //   - Compensate should be idempotent (safe to call multiple times)
 //   - Compensate should not fail on "already doesn't exist" scenarios
+//
+// # Assumptions
+//
+//   - Execute respects context cancellation
+//   - Compensate can be nil if no cleanup is needed
 type SagaStep struct {
 	// Name identifies the step for logging and debugging.
 	Name string
@@ -75,19 +113,32 @@ type SagaStep struct {
 	Timeout time.Duration
 }
 
+// =============================================================================
+// Saga Configuration
+// =============================================================================
+
 // SagaConfig configures saga behavior.
 //
 // # Description
 //
-// Controls timeouts, logging, and compensation behavior.
+// Controls timeouts, logging, and compensation behavior. All fields have
+// sensible defaults that can be overridden.
 //
 // # Example
 //
 //	config := SagaConfig{
 //	    StepTimeout:      30 * time.Second,
 //	    CompensateOnFail: true,
-//	    Logger:           log.Printf,
+//	    Logger:           slog.Default(),
 //	}
+//
+// # Limitations
+//
+//   - Logger must be thread-safe if saga callbacks access shared state
+//
+// # Assumptions
+//
+//   - Callbacks are non-blocking or have reasonable timeouts
 type SagaConfig struct {
 	// StepTimeout is the default timeout for each step.
 	// Default: 60 seconds
@@ -101,9 +152,9 @@ type SagaConfig struct {
 	// Default: true
 	CompensateOnFail bool
 
-	// Logger is called for step execution and compensation events.
-	// Default: log.Printf
-	Logger func(format string, args ...interface{})
+	// Logger is used for step execution and compensation events.
+	// Default: slog.Default()
+	Logger *slog.Logger
 
 	// OnStepStart is called before each step executes.
 	OnStepStart func(step SagaStep)
@@ -118,23 +169,9 @@ type SagaConfig struct {
 	OnCompensate func(step SagaStep, err error)
 }
 
-// DefaultSagaConfig returns sensible defaults.
-//
-// # Description
-//
-// Returns a configuration with reasonable timeouts and logging enabled.
-//
-// # Outputs
-//
-//   - SagaConfig: Configuration with default values
-func DefaultSagaConfig() SagaConfig {
-	return SagaConfig{
-		StepTimeout:         60 * time.Second,
-		CompensationTimeout: 30 * time.Second,
-		CompensateOnFail:    true,
-		Logger:              log.Printf,
-	}
-}
+// =============================================================================
+// Saga Result Types
+// =============================================================================
 
 // SagaResult contains the outcome of a saga execution.
 //
@@ -171,6 +208,51 @@ type CompensationError struct {
 	Error error
 }
 
+// =============================================================================
+// Constructor Functions
+// =============================================================================
+
+// DefaultSagaConfig returns sensible defaults.
+//
+// # Description
+//
+// Returns a configuration with reasonable timeouts and logging enabled.
+// Suitable for most use cases.
+//
+// # Inputs
+//
+//   - None
+//
+// # Outputs
+//
+//   - SagaConfig: Configuration with default values
+//
+// # Example
+//
+//	config := DefaultSagaConfig()
+//	config.StepTimeout = 30 * time.Second
+//	saga := NewSaga(config)
+//
+// # Limitations
+//
+//   - None
+//
+// # Assumptions
+//
+//   - slog package is available
+func DefaultSagaConfig() SagaConfig {
+	return SagaConfig{
+		StepTimeout:         60 * time.Second,
+		CompensationTimeout: 30 * time.Second,
+		CompensateOnFail:    true,
+		Logger:              slog.Default(),
+	}
+}
+
+// =============================================================================
+// Saga Struct
+// =============================================================================
+
 // Saga implements SagaExecutor for multi-step operations with rollback.
 //
 // # Description
@@ -194,20 +276,11 @@ type CompensationError struct {
 //
 // # Thread Safety
 //
-// Saga is NOT safe for concurrent use. Each saga instance should be
-// used from a single goroutine.
-//
-// # Limitations
-//
-//   - Steps execute sequentially (no parallel execution)
-//   - Compensation may fail, leaving partial state
-//   - No persistence - saga state is lost on process crash
-//
-// # Assumptions
-//
-//   - Compensate functions are idempotent
-//   - Context cancellation should be respected
-//   - Steps have reasonable timeouts
+// Saga is safe for concurrent use from multiple goroutines. All public
+// methods are protected by a mutex. However, calls to Execute() on the
+// same instance are serialized - concurrent Execute() calls will block
+// until the preceding execution completes. A single Saga instance does
+// not support parallel execution of its steps.
 //
 // # Example
 //
@@ -223,20 +296,21 @@ type CompensationError struct {
 //	    },
 //	})
 //
-//	saga.AddStep(SagaStep{
-//	    Name: "Start Weaviate",
-//	    Execute: func(ctx context.Context) error {
-//	        return compose.Up(ctx, UpOptions{Services: []string{"weaviate"}})
-//	    },
-//	    Compensate: func(ctx context.Context) error {
-//	        return compose.Down(ctx, DownOptions{Services: []string{"weaviate"}})
-//	    },
-//	})
-//
 //	if err := saga.Execute(ctx); err != nil {
-//	    // All completed steps have been rolled back
 //	    log.Printf("Stack start failed: %v", err)
 //	}
+//
+// # Limitations
+//
+//   - Steps execute sequentially (no parallel execution)
+//   - Compensation may fail, leaving partial state
+//   - No persistence - saga state is lost on process crash
+//
+// # Assumptions
+//
+//   - Compensate functions are idempotent
+//   - Context cancellation should be respected
+//   - Steps have reasonable timeouts
 type Saga struct {
 	config    SagaConfig
 	steps     []SagaStep
@@ -245,12 +319,16 @@ type Saga struct {
 	mu        sync.Mutex
 }
 
+// Compile-time interface satisfaction check
+var _ SagaExecutor = (*Saga)(nil)
+
 // NewSaga creates a new saga with the given configuration.
 //
 // # Description
 //
 // Creates an empty saga ready to receive steps. The saga will use
-// the provided configuration for timeouts and callbacks.
+// the provided configuration for timeouts and callbacks. Zero values
+// in config are replaced with sensible defaults.
 //
 // # Inputs
 //
@@ -264,8 +342,16 @@ type Saga struct {
 //
 //	saga := NewSaga(SagaConfig{
 //	    StepTimeout: 30 * time.Second,
-//	    Logger:      log.Printf,
+//	    Logger:      slog.Default(),
 //	})
+//
+// # Limitations
+//
+//   - Does not validate callback functions
+//
+// # Assumptions
+//
+//   - Caller will add steps before executing
 func NewSaga(config SagaConfig) *Saga {
 	if config.StepTimeout <= 0 {
 		config.StepTimeout = 60 * time.Second
@@ -274,7 +360,7 @@ func NewSaga(config SagaConfig) *Saga {
 		config.CompensationTimeout = 30 * time.Second
 	}
 	if config.Logger == nil {
-		config.Logger = log.Printf
+		config.Logger = slog.Default()
 	}
 
 	return &Saga{
@@ -284,16 +370,25 @@ func NewSaga(config SagaConfig) *Saga {
 	}
 }
 
+// =============================================================================
+// Saga Methods
+// =============================================================================
+
 // AddStep adds a step to the saga.
 //
 // # Description
 //
 // Steps are executed in the order they are added. Each step should
 // have a corresponding Compensate function that can undo its effects.
+// Thread-safe for concurrent step additions.
 //
 // # Inputs
 //
 //   - step: Step to add to the saga
+//
+// # Outputs
+//
+//   - None
 //
 // # Example
 //
@@ -302,6 +397,15 @@ func NewSaga(config SagaConfig) *Saga {
 //	    Execute:    createVolume,
 //	    Compensate: deleteVolume,
 //	})
+//
+// # Limitations
+//
+//   - Does not validate step fields
+//
+// # Assumptions
+//
+//   - Step has a non-empty Name for debugging
+//   - Execute function is not nil
 func (s *Saga) AddStep(step SagaStep) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -338,9 +442,18 @@ func (s *Saga) AddStep(step SagaStep) {
 //
 //	err := saga.Execute(ctx)
 //	if err != nil {
-//	    // Saga failed and rolled back
-//	    log.Printf("Operation failed: %v", err)
+//	    log.Printf("Operation failed and rolled back: %v", err)
 //	}
+//
+// # Limitations
+//
+//   - Compensation errors are logged but not returned
+//   - Cannot recover from process crash mid-execution
+//
+// # Assumptions
+//
+//   - ctx is not nil
+//   - Steps respect context cancellation
 func (s *Saga) Execute(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -385,12 +498,35 @@ func (s *Saga) Execute(ctx context.Context) error {
 }
 
 // executeStep runs a single step with timeout.
+//
+// # Description
+//
+// Executes a single step within the specified timeout. Calls the
+// appropriate callbacks before and after execution.
+//
+// # Inputs
+//
+//   - ctx: Parent context
+//   - step: Step to execute
+//   - timeout: Maximum duration for step execution
+//
+// # Outputs
+//
+//   - error: nil on success, error on failure or timeout
+//
+// # Limitations
+//
+//   - Step function runs in a goroutine and may leak if it ignores context
+//
+// # Assumptions
+//
+//   - Step respects context cancellation
 func (s *Saga) executeStep(ctx context.Context, step SagaStep, timeout time.Duration) error {
 	if s.config.OnStepStart != nil {
 		s.config.OnStepStart(step)
 	}
 
-	s.config.Logger("Executing step: %s", step.Name)
+	s.config.Logger.Info("Executing step", "step", step.Name)
 	start := time.Now()
 
 	// Create timeout context
@@ -407,10 +543,10 @@ func (s *Saga) executeStep(ctx context.Context, step SagaStep, timeout time.Dura
 	case err := <-done:
 		duration := time.Since(start)
 		if err != nil {
-			s.config.Logger("Step %s failed after %v: %v", step.Name, duration, err)
+			s.config.Logger.Error("Step failed", "step", step.Name, "duration", duration, "error", err)
 			return err
 		}
-		s.config.Logger("Step %s completed in %v", step.Name, duration)
+		s.config.Logger.Info("Step completed", "step", step.Name, "duration", duration)
 		if s.config.OnStepComplete != nil {
 			s.config.OnStepComplete(step, duration)
 		}
@@ -422,12 +558,36 @@ func (s *Saga) executeStep(ctx context.Context, step SagaStep, timeout time.Dura
 }
 
 // compensate runs compensation for completed steps in reverse order.
+//
+// # Description
+//
+// Compensates all completed steps in reverse order of execution.
+// Compensation errors are logged but do not stop other compensations.
+// Uses a fresh context independent of the parent to ensure cleanup completes.
+//
+// # Inputs
+//
+//   - ctx: Original context (used for logging only)
+//
+// # Outputs
+//
+//   - None
+//
+// # Limitations
+//
+//   - Does not return compensation errors
+//   - May leave partial state if compensation fails
+//
+// # Assumptions
+//
+//   - Compensate functions are idempotent
+//   - Compensate functions have reasonable timeouts
 func (s *Saga) compensate(ctx context.Context) {
 	if len(s.completed) == 0 {
 		return
 	}
 
-	s.config.Logger("Compensating %d completed steps...", len(s.completed))
+	s.config.Logger.Info("Compensating completed steps", "count", len(s.completed))
 
 	// Create a context for compensation that won't be cancelled
 	// even if parent is cancelled (we want to complete cleanup)
@@ -439,11 +599,11 @@ func (s *Saga) compensate(ctx context.Context) {
 	for i := len(s.completed) - 1; i >= 0; i-- {
 		step := s.completed[i]
 		if step.Compensate == nil {
-			s.config.Logger("No compensation defined for step: %s", step.Name)
+			s.config.Logger.Debug("No compensation defined", "step", step.Name)
 			continue
 		}
 
-		s.config.Logger("Compensating step: %s", step.Name)
+		s.config.Logger.Info("Compensating step", "step", step.Name)
 
 		stepCtx, stepCancel := context.WithTimeout(compensateCtx, s.config.CompensationTimeout)
 
@@ -451,12 +611,12 @@ func (s *Saga) compensate(ctx context.Context) {
 		stepCancel()
 
 		if err != nil {
-			s.config.Logger("WARNING: Compensation failed for %s: %v", step.Name, err)
+			s.config.Logger.Warn("Compensation failed", "step", step.Name, "error", err)
 			if s.config.OnCompensate != nil {
 				s.config.OnCompensate(step, err)
 			}
 		} else {
-			s.config.Logger("Compensated step: %s", step.Name)
+			s.config.Logger.Info("Compensated step", "step", step.Name)
 			if s.config.OnCompensate != nil {
 				s.config.OnCompensate(step, nil)
 			}
@@ -469,7 +629,30 @@ func (s *Saga) compensate(ctx context.Context) {
 // # Description
 //
 // Resets the saga to its initial empty state. Use this to reuse
-// a saga instance for a new operation.
+// a saga instance for a new operation. Clears steps, completed steps,
+// and last error.
+//
+// # Inputs
+//
+//   - None (receiver only)
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	saga.Reset()
+//	saga.AddStep(newStep)
+//	saga.Execute(ctx)
+//
+// # Limitations
+//
+//   - Does not reset config or callbacks
+//
+// # Assumptions
+//
+//   - Saga is not currently executing
 func (s *Saga) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -485,9 +668,27 @@ func (s *Saga) Reset() {
 // Returns the names of steps that executed successfully before
 // any failure occurred. Useful for debugging and logging.
 //
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
 //   - []string: Names of completed steps in execution order
+//
+// # Example
+//
+//	if err := saga.Execute(ctx); err != nil {
+//	    log.Printf("Completed before failure: %v", saga.CompletedSteps())
+//	}
+//
+// # Limitations
+//
+//   - Returns a copy, not a reference to internal state
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Saga) CompletedSteps() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -504,10 +705,29 @@ func (s *Saga) CompletedSteps() []string {
 // # Description
 //
 // Returns nil if the saga has not been executed or if it succeeded.
+// The error includes context about which step failed.
+//
+// # Inputs
+//
+//   - None (receiver only)
 //
 // # Outputs
 //
 //   - error: The failure error, or nil
+//
+// # Example
+//
+//	if saga.LastError() != nil {
+//	    log.Printf("Last failure: %v", saga.LastError())
+//	}
+//
+// # Limitations
+//
+//   - Only stores the most recent error
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Saga) LastError() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -515,11 +735,35 @@ func (s *Saga) LastError() error {
 }
 
 // StepCount returns the total number of steps in the saga.
+//
+// # Description
+//
+// Returns the number of steps that have been added to the saga.
+// Useful for debugging and validation.
+//
+// # Inputs
+//
+//   - None (receiver only)
+//
+// # Outputs
+//
+//   - int: Total number of steps
+//
+// # Example
+//
+//	if saga.StepCount() == 0 {
+//	    log.Println("No steps added to saga")
+//	}
+//
+// # Limitations
+//
+//   - Value may be stale in concurrent scenarios
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *Saga) StepCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.steps)
 }
-
-// Compile-time interface satisfaction check
-var _ SagaExecutor = (*Saga)(nil)

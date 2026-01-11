@@ -1,12 +1,24 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package resilience
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// =============================================================================
+// DefaultBackupConfig Tests
+// =============================================================================
 
 func TestDefaultBackupConfig(t *testing.T) {
 	config := DefaultBackupConfig()
@@ -21,6 +33,10 @@ func TestDefaultBackupConfig(t *testing.T) {
 		t.Error("TimeFormat should have default value")
 	}
 }
+
+// =============================================================================
+// NewBackupManager Tests
+// =============================================================================
 
 func TestNewBackupManager(t *testing.T) {
 	tests := []struct {
@@ -56,6 +72,10 @@ func TestNewBackupManager(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// BackupBeforeOverwrite Tests
+// =============================================================================
 
 func TestBackupManager_BackupBeforeOverwrite_NonExistent(t *testing.T) {
 	mgr := NewBackupManager(DefaultBackupConfig())
@@ -158,6 +178,10 @@ func TestBackupManager_BackupBeforeOverwrite_Directory(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// ListBackups Tests
+// =============================================================================
+
 func TestBackupManager_ListBackups(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -224,6 +248,10 @@ func TestBackupManager_ListBackups_NoBackups(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// RestoreBackup Tests
+// =============================================================================
+
 func TestBackupManager_RestoreBackup(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -274,6 +302,10 @@ func TestBackupManager_RestoreBackup(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// CleanOldBackups Tests
+// =============================================================================
+
 func TestBackupManager_CleanOldBackups(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -309,6 +341,10 @@ func TestBackupManager_CleanOldBackups(t *testing.T) {
 		t.Errorf("CleanOldBackups removed %d, want 1", removed)
 	}
 }
+
+// =============================================================================
+// Backup Rotation Tests
+// =============================================================================
 
 func TestBackupManager_BackupRotation(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -346,6 +382,10 @@ func TestBackupManager_BackupRotation(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Backup Path Format Tests
+// =============================================================================
+
 func TestBackupManager_BackupPath_Format(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "config.yaml")
@@ -372,6 +412,10 @@ func TestBackupManager_BackupPath_Format(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Convenience Function Tests
+// =============================================================================
+
 func TestBackupBeforeOverwrite_Convenience(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -380,15 +424,92 @@ func TestBackupBeforeOverwrite_Convenience(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	backupPath, err := BackupBeforeOverwrite(testFile)
+	ctx := context.Background()
+	backupPath, err := BackupBeforeOverwriteFunc(ctx, testFile)
 	if err != nil {
-		t.Fatalf("BackupBeforeOverwrite failed: %v", err)
+		t.Fatalf("BackupBeforeOverwriteFunc failed: %v", err)
 	}
 
 	if backupPath == "" {
-		t.Error("BackupBeforeOverwrite returned empty path")
+		t.Error("BackupBeforeOverwriteFunc returned empty path")
 	}
 }
+
+// =============================================================================
+// ValidatePath Tests
+// =============================================================================
+
+func TestValidatePath_ValidPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"absolute path", "/tmp/test.txt"},
+		{"relative path", "test.txt"},
+		{"path with spaces", "/tmp/test file.txt"},
+		{"nested path", "/tmp/a/b/c/test.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ValidatePath(tt.path)
+			if err != nil {
+				t.Errorf("ValidatePath(%q) returned error: %v", tt.path, err)
+			}
+			if result == "" {
+				t.Errorf("ValidatePath(%q) returned empty string", tt.path)
+			}
+			// Result should be an absolute path
+			if !filepath.IsAbs(result) {
+				t.Errorf("ValidatePath(%q) = %q, expected absolute path", tt.path, result)
+			}
+		})
+	}
+}
+
+func TestValidatePath_CleansDotDot(t *testing.T) {
+	// Path with .. should be cleaned
+	result, err := ValidatePath("/tmp/../tmp/test.txt")
+	if err != nil {
+		t.Fatalf("ValidatePath failed: %v", err)
+	}
+
+	// The result should not contain ..
+	if strings.Contains(result, "..") {
+		t.Errorf("ValidatePath did not clean path: %s", result)
+	}
+}
+
+func TestValidatePath_EmptyPath(t *testing.T) {
+	// Empty path should resolve to current directory
+	result, err := ValidatePath("")
+	if err != nil {
+		t.Fatalf("ValidatePath(\"\") returned error: %v", err)
+	}
+
+	// Should be the current working directory
+	cwd, _ := os.Getwd()
+	if result != cwd {
+		t.Errorf("ValidatePath(\"\") = %q, expected current directory %q", result, cwd)
+	}
+}
+
+func TestBackupBeforeOverwriteFunc_WithValidation(t *testing.T) {
+	ctx := context.Background()
+
+	// Non-existent file should return empty string and no error
+	backupPath, err := BackupBeforeOverwriteFunc(ctx, "/nonexistent/path/file.txt")
+	if err != nil {
+		t.Fatalf("BackupBeforeOverwriteFunc failed for non-existent file: %v", err)
+	}
+	if backupPath != "" {
+		t.Errorf("Expected empty backup path for non-existent file, got: %s", backupPath)
+	}
+}
+
+// =============================================================================
+// Interface Compliance Tests
+// =============================================================================
 
 func TestBackupManager_InterfaceCompliance(t *testing.T) {
 	var _ BackupManager = (*DefaultBackupManager)(nil)

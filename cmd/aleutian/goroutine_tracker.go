@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -101,8 +101,8 @@ type GoroutineTrackerConfig struct {
 	OnComplete func(name string, duration time.Duration)
 
 	// Logger for debug output.
-	// Default: log.Printf
-	Logger func(format string, args ...interface{})
+	// Default: slog.Default()
+	Logger *slog.Logger
 }
 
 // DefaultGoroutineTrackerConfig returns sensible defaults.
@@ -118,7 +118,7 @@ type GoroutineTrackerConfig struct {
 func DefaultGoroutineTrackerConfig() GoroutineTrackerConfig {
 	return GoroutineTrackerConfig{
 		LongRunningThreshold: 30 * time.Second,
-		Logger:               log.Printf,
+		Logger:               slog.Default(),
 	}
 }
 
@@ -214,7 +214,7 @@ func NewGoroutineTracker(config GoroutineTrackerConfig) *GoroutineTracker {
 		config.LongRunningThreshold = 30 * time.Second
 	}
 	if config.Logger == nil {
-		config.Logger = log.Printf
+		config.Logger = slog.Default()
 	}
 
 	return &GoroutineTracker{
@@ -299,8 +299,10 @@ func (t *GoroutineTracker) Track(name string) func() {
 				if t.config.OnLongRunning != nil {
 					t.config.OnLongRunning(name, duration)
 				} else {
-					t.config.Logger("WARNING: Goroutine %q ran for %v (threshold: %v)",
-						name, duration, t.config.LongRunningThreshold)
+					t.config.Logger.Warn("Long-running goroutine detected",
+						"goroutine", name,
+						"duration", duration,
+						"threshold", t.config.LongRunningThreshold)
 				}
 			}
 

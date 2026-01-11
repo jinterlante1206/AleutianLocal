@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/spf13/cobra"
 )
 
@@ -148,7 +149,7 @@ func runHealthCommand(cmd *cobra.Command, args []string) {
 	defer finishSpan(nil)
 
 	// Create dependencies
-	proc := NewDefaultProcessManager()
+	proc := process.NewDefaultManager()
 	checker := NewDefaultHealthChecker(proc, DefaultHealthCheckerConfig())
 	metricsStore := createMetricsStore(stackDir)
 	sanitizer := NewDefaultLogSanitizer(DefaultSanitizationPatterns())

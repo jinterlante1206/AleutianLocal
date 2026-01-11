@@ -40,6 +40,8 @@ import (
 	"sync"
 	"text/template"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -675,7 +677,7 @@ type IntelligenceConfig struct {
 // DefaultHealthIntelligence implements HealthIntelligence.
 type DefaultHealthIntelligence struct {
 	checker   HealthChecker
-	proc      ProcessManager
+	proc      process.Manager
 	textGen   HealthTextGenerator
 	metrics   MetricsStore
 	sanitizer LogSanitizer
@@ -753,7 +755,7 @@ func DefaultAnalysisOptions() AnalysisOptions {
 // NewDefaultHealthIntelligence creates a health intelligence instance.
 func NewDefaultHealthIntelligence(
 	checker HealthChecker,
-	proc ProcessManager,
+	proc process.Manager,
 	textGen HealthTextGenerator,
 	metrics MetricsStore,
 	sanitizer LogSanitizer,

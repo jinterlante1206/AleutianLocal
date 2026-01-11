@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -642,7 +644,7 @@ type ExecResult struct {
 // DefaultComposeExecutor implements ComposeExecutor using podman-compose.
 type DefaultComposeExecutor struct {
 	config     ComposeConfig
-	proc       ProcessManager
+	proc       process.Manager
 	osStatFunc func(string) (os.FileInfo, error)
 	mu         sync.Mutex
 }
@@ -688,7 +690,7 @@ type DefaultComposeExecutor struct {
 //
 //   - StackDir will exist when operations are executed
 //   - ProcessManager is properly initialized and not nil
-func NewDefaultComposeExecutor(cfg ComposeConfig, proc ProcessManager) (*DefaultComposeExecutor, error) {
+func NewDefaultComposeExecutor(cfg ComposeConfig, proc process.Manager) (*DefaultComposeExecutor, error) {
 	if err := validateComposeConfig(&cfg); err != nil {
 		return nil, err
 	}

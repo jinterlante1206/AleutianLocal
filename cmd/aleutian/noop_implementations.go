@@ -38,6 +38,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -219,7 +221,7 @@ func (n *NoOpHealthChecker) IsContainerRunning(ctx context.Context, containerNam
 
 var (
 	_ MetricsStore    = (*NoOpMetricsStore)(nil)
-	_ ProcessManager  = (*NoOpProcessManager)(nil)
+	_ process.Manager = (*NoOpProcessManager)(nil)
 	_ ComposeExecutor = (*NoOpComposeExecutor)(nil)
 	_ HealthChecker   = (*NoOpHealthChecker)(nil)
 )

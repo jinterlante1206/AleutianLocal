@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // -----------------------------------------------------------------------------
@@ -282,9 +284,9 @@ func (tm *testDiagnosticsMetrics) GetCollectionCount() int {
 // Mock Process Manager Helper
 // -----------------------------------------------------------------------------
 
-// newTestProcessManager creates a MockProcessManager configured for common test scenarios.
-func newTestProcessManager() *MockProcessManager {
-	return &MockProcessManager{
+// newTestProcessManager creates a process.MockManager configured for common test scenarios.
+func newTestProcessManager() *process.MockManager {
+	return &process.MockManager{
 		RunFunc: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			// Default: return empty for unknown commands
 			return nil, fmt.Errorf("command not mocked: %s %v", name, args)
@@ -293,7 +295,7 @@ func newTestProcessManager() *MockProcessManager {
 }
 
 // configurePodmanAvailable sets up the mock to return successful podman responses.
-func configurePodmanAvailable(pm *MockProcessManager, containers string) {
+func configurePodmanAvailable(pm *process.MockManager, containers string) {
 	pm.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name != "podman" {
 			return nil, fmt.Errorf("unexpected command: %s", name)
@@ -320,7 +322,7 @@ func configurePodmanAvailable(pm *MockProcessManager, containers string) {
 }
 
 // configurePodmanUnavailable sets up the mock to return podman not found.
-func configurePodmanUnavailable(pm *MockProcessManager) {
+func configurePodmanUnavailable(pm *process.MockManager) {
 	pm.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "podman" && len(args) >= 1 && args[0] == "version" {
 			return nil, fmt.Errorf("podman: command not found")

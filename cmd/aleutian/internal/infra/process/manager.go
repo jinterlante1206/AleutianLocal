@@ -9,7 +9,7 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package main provides ProcessManager for abstracting external process execution.
+Package process provides ProcessManager for abstracting external process execution.
 
 ProcessManager enables testable interaction with the operating system's process
 management capabilities. All exec.Command calls in the stack management code
@@ -23,7 +23,7 @@ By abstracting process execution behind an interface, we can:
   - Capture and verify command invocations
   - Simulate success/failure scenarios without real processes
 */
-package main
+package process
 
 import (
 	"bytes"
@@ -43,7 +43,7 @@ import (
 // Interface Definition
 // -----------------------------------------------------------------------------
 
-// ProcessManager handles external process operations.
+// Manager handles external process operations.
 //
 // This interface abstracts all interaction with the operating system's process
 // management, enabling testable code that doesn't require real process execution.
@@ -56,7 +56,7 @@ import (
 //
 // All methods accept a context.Context for cancellation and timeout support.
 // Long-running processes should respect context cancellation.
-type ProcessManager interface {
+type Manager interface {
 	// Run executes a command synchronously and returns its output.
 	//
 	// # Description
@@ -287,33 +287,33 @@ type ProcessManager interface {
 // Implementation
 // -----------------------------------------------------------------------------
 
-// DefaultProcessManager implements ProcessManager using os/exec.
+// DefaultManager implements Manager using os/exec.
 //
 // This is the production implementation that executes real processes on the
-// system. Use MockProcessManager in tests instead.
-type DefaultProcessManager struct{}
+// system. Use MockManager in tests instead.
+type DefaultManager struct{}
 
-// NewDefaultProcessManager creates a new DefaultProcessManager.
+// NewDefaultManager creates a new DefaultManager.
 //
 // # Description
 //
-// Creates a ProcessManager that executes real processes using os/exec.
+// Creates a Manager that executes real processes using os/exec.
 // This should be used in production code.
 //
 // # Outputs
 //
-//   - *DefaultProcessManager: Ready-to-use process manager
+//   - *DefaultManager: Ready-to-use process manager
 //
 // # Examples
 //
-//	pm := NewDefaultProcessManager()
+//	pm := NewDefaultManager()
 //	output, err := pm.Run(ctx, "podman", "version")
-func NewDefaultProcessManager() *DefaultProcessManager {
-	return &DefaultProcessManager{}
+func NewDefaultManager() *DefaultManager {
+	return &DefaultManager{}
 }
 
 // Run executes a command synchronously and returns its output.
-func (pm *DefaultProcessManager) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+func (pm *DefaultManager) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 
 	var stdout, stderr bytes.Buffer
@@ -333,7 +333,7 @@ func (pm *DefaultProcessManager) Run(ctx context.Context, name string, args ...s
 }
 
 // RunWithInput executes a command with data piped to stdin.
-func (pm *DefaultProcessManager) RunWithInput(ctx context.Context, name string, input []byte, args ...string) ([]byte, error) {
+func (pm *DefaultManager) RunWithInput(ctx context.Context, name string, input []byte, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = bytes.NewReader(input)
 
@@ -361,7 +361,7 @@ func (pm *DefaultProcessManager) RunWithInput(ctx context.Context, name string, 
 //
 // Note: On process termination, use syscall.Kill(-pid, signal) with a negative
 // PID to kill the entire process group.
-func (pm *DefaultProcessManager) Start(ctx context.Context, name string, args ...string) (int, error) {
+func (pm *DefaultManager) Start(ctx context.Context, name string, args ...string) (int, error) {
 	cmd := exec.Command(name, args...)
 
 	// Create a new session to prevent zombie processes
@@ -378,7 +378,7 @@ func (pm *DefaultProcessManager) Start(ctx context.Context, name string, args ..
 }
 
 // IsRunning checks if a process matching the pattern exists.
-func (pm *DefaultProcessManager) IsRunning(ctx context.Context, pattern string) (bool, int, error) {
+func (pm *DefaultManager) IsRunning(ctx context.Context, pattern string) (bool, int, error) {
 	cmd := exec.CommandContext(ctx, "pgrep", "-f", pattern)
 	output, err := cmd.Output()
 
@@ -441,7 +441,7 @@ func (pm *DefaultProcessManager) IsRunning(ctx context.Context, pattern string) 
 // # Assumptions
 //
 //   - Working directory exists
-func (pm *DefaultProcessManager) RunInDir(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error) {
+func (pm *DefaultManager) RunInDir(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 
@@ -502,7 +502,7 @@ func (pm *DefaultProcessManager) RunInDir(ctx context.Context, dir string, env [
 // # Assumptions
 //
 //   - Writer is safe for concurrent writes
-func (pm *DefaultProcessManager) RunStreaming(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
+func (pm *DefaultManager) RunStreaming(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdout = w
@@ -523,14 +523,14 @@ func (pm *DefaultProcessManager) RunStreaming(ctx context.Context, dir string, w
 // Mock Implementation for Testing
 // -----------------------------------------------------------------------------
 
-// MockProcessManager is a test double for ProcessManager.
+// MockManager is a test double for Manager.
 //
 // Configure the mock by setting function fields before use. If a function
 // field is nil and the corresponding method is called, it will panic.
 //
 // # Examples
 //
-//	mock := &MockProcessManager{
+//	mock := &MockManager{
 //	    RunFunc: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 //	        if name == "podman" && args[0] == "version" {
 //	            return []byte("podman version 4.0.0"), nil
@@ -538,7 +538,7 @@ func (pm *DefaultProcessManager) RunStreaming(ctx context.Context, dir string, w
 //	        return nil, fmt.Errorf("unexpected command: %s", name)
 //	    },
 //	}
-type MockProcessManager struct {
+type MockManager struct {
 	// RunFunc is called when Run is invoked
 	RunFunc func(ctx context.Context, name string, args ...string) ([]byte, error)
 
@@ -558,14 +558,14 @@ type MockProcessManager struct {
 	RunStreamingFunc func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error
 
 	// Calls records all method invocations for verification
-	Calls []ProcessManagerCall
+	Calls []ManagerCall
 
 	// mu protects Calls for concurrent access
 	mu sync.Mutex
 }
 
-// ProcessManagerCall records a single method invocation.
-type ProcessManagerCall struct {
+// ManagerCall records a single method invocation.
+type ManagerCall struct {
 	Method string
 	Name   string
 	Args   []string
@@ -575,61 +575,61 @@ type ProcessManagerCall struct {
 }
 
 // Run delegates to RunFunc and records the call.
-func (m *MockProcessManager) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+func (m *MockManager) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, ProcessManagerCall{
+	m.Calls = append(m.Calls, ManagerCall{
 		Method: "Run",
 		Name:   name,
 		Args:   args,
 	})
 	if m.RunFunc == nil {
-		panic("MockProcessManager.RunFunc not set")
+		panic("MockManager.RunFunc not set")
 	}
 	return m.RunFunc(ctx, name, args...)
 }
 
 // RunWithInput delegates to RunWithInputFunc and records the call.
-func (m *MockProcessManager) RunWithInput(ctx context.Context, name string, input []byte, args ...string) ([]byte, error) {
+func (m *MockManager) RunWithInput(ctx context.Context, name string, input []byte, args ...string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, ProcessManagerCall{
+	m.Calls = append(m.Calls, ManagerCall{
 		Method: "RunWithInput",
 		Name:   name,
 		Args:   args,
 		Input:  input,
 	})
 	if m.RunWithInputFunc == nil {
-		panic("MockProcessManager.RunWithInputFunc not set")
+		panic("MockManager.RunWithInputFunc not set")
 	}
 	return m.RunWithInputFunc(ctx, name, input, args...)
 }
 
 // Start delegates to StartFunc and records the call.
-func (m *MockProcessManager) Start(ctx context.Context, name string, args ...string) (int, error) {
+func (m *MockManager) Start(ctx context.Context, name string, args ...string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, ProcessManagerCall{
+	m.Calls = append(m.Calls, ManagerCall{
 		Method: "Start",
 		Name:   name,
 		Args:   args,
 	})
 	if m.StartFunc == nil {
-		panic("MockProcessManager.StartFunc not set")
+		panic("MockManager.StartFunc not set")
 	}
 	return m.StartFunc(ctx, name, args...)
 }
 
 // IsRunning delegates to IsRunningFunc and records the call.
-func (m *MockProcessManager) IsRunning(ctx context.Context, pattern string) (bool, int, error) {
+func (m *MockManager) IsRunning(ctx context.Context, pattern string) (bool, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, ProcessManagerCall{
+	m.Calls = append(m.Calls, ManagerCall{
 		Method: "IsRunning",
 		Name:   pattern,
 	})
 	if m.IsRunningFunc == nil {
-		panic("MockProcessManager.IsRunningFunc not set")
+		panic("MockManager.IsRunningFunc not set")
 	}
 	return m.IsRunningFunc(ctx, pattern)
 }
@@ -669,10 +669,10 @@ func (m *MockProcessManager) IsRunning(ctx context.Context, pattern string) (boo
 // # Assumptions
 //
 //   - RunInDirFunc is set before calling
-func (m *MockProcessManager) RunInDir(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error) {
+func (m *MockManager) RunInDir(ctx context.Context, dir string, env []string, name string, args ...string) (stdout, stderr string, exitCode int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, ProcessManagerCall{
+	m.Calls = append(m.Calls, ManagerCall{
 		Method: "RunInDir",
 		Name:   name,
 		Args:   args,
@@ -680,7 +680,7 @@ func (m *MockProcessManager) RunInDir(ctx context.Context, dir string, env []str
 		Env:    env,
 	})
 	if m.RunInDirFunc == nil {
-		panic("MockProcessManager.RunInDirFunc not set")
+		panic("MockManager.RunInDirFunc not set")
 	}
 	return m.RunInDirFunc(ctx, dir, env, name, args...)
 }
@@ -718,39 +718,39 @@ func (m *MockProcessManager) RunInDir(ctx context.Context, dir string, env []str
 // # Assumptions
 //
 //   - RunStreamingFunc is set before calling
-func (m *MockProcessManager) RunStreaming(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
+func (m *MockManager) RunStreaming(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Calls = append(m.Calls, ProcessManagerCall{
+	m.Calls = append(m.Calls, ManagerCall{
 		Method: "RunStreaming",
 		Name:   name,
 		Args:   args,
 		Dir:    dir,
 	})
 	if m.RunStreamingFunc == nil {
-		panic("MockProcessManager.RunStreamingFunc not set")
+		panic("MockManager.RunStreamingFunc not set")
 	}
 	return m.RunStreamingFunc(ctx, dir, w, name, args...)
 }
 
 // Reset clears all recorded calls.
-func (m *MockProcessManager) Reset() {
+func (m *MockManager) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Calls = nil
 }
 
 // GetCalls returns a copy of all recorded calls.
-func (m *MockProcessManager) GetCalls() []ProcessManagerCall {
+func (m *MockManager) GetCalls() []ManagerCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	result := make([]ProcessManagerCall, len(m.Calls))
+	result := make([]ManagerCall, len(m.Calls))
 	copy(result, m.Calls)
 	return result
 }
 
 // Compile-time interface compliance check.
 var (
-	_ ProcessManager = (*DefaultProcessManager)(nil)
-	_ ProcessManager = (*MockProcessManager)(nil)
+	_ Manager = (*DefaultManager)(nil)
+	_ Manager = (*MockManager)(nil)
 )

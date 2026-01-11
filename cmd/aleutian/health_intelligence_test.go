@@ -16,6 +16,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -48,7 +50,7 @@ func createTestIntelligence() *DefaultHealthIntelligence {
 		},
 	}
 
-	proc := &MockProcessManager{
+	proc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			// Mock log output
 			if len(args) > 0 && args[0] == "logs" {
@@ -271,7 +273,7 @@ func TestDefaultHealthIntelligence_CheckCodeFreshness(t *testing.T) {
 func TestDefaultHealthIntelligence_GetMetricTrends_NoMetrics(t *testing.T) {
 	// Create intelligence with no metrics store
 	checker := &MockHealthChecker{}
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	config := DefaultIntelligenceConfig("/tmp")
 
 	intel := NewDefaultHealthIntelligence(checker, proc, nil, nil, nil, config)
@@ -339,7 +341,7 @@ func TestDefaultHealthIntelligence_GenerateLLMSummary_Basic(t *testing.T) {
 
 func TestDefaultHealthIntelligence_GenerateLLMSummary_NoOllama(t *testing.T) {
 	checker := &MockHealthChecker{}
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	config := DefaultIntelligenceConfig("/tmp")
 
 	intel := NewDefaultHealthIntelligence(checker, proc, nil, nil, nil, config)

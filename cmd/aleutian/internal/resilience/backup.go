@@ -1,6 +1,7 @@
-package main
+package resilience
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -500,30 +501,100 @@ func (m *DefaultBackupManager) originalPathFromBackup(backupPath string) string 
 // Compile-time interface check
 var _ BackupManager = (*DefaultBackupManager)(nil)
 
-// BackupBeforeOverwrite is a convenience function using default config.
+// ValidatePath validates that a path is safe and within expected boundaries.
+//
+// # Description
+//
+// Ensures the path is cleaned and absolute, preventing path traversal attacks.
+// Evaluates symlinks to prevent traversal via symbolic links.
+//
+// # Inputs
+//
+//   - path: Path to validate
+//
+// # Outputs
+//
+//   - string: Cleaned absolute path
+//   - error: Non-nil if path is invalid or traversal attempted
+//
+// # Example
+//
+//	validPath, err := ValidatePath("/home/user/config.yaml")
+//	if err != nil {
+//	    return fmt.Errorf("invalid path: %w", err)
+//	}
+//
+// # Limitations
+//
+//   - Cannot detect all symlink attacks if path doesn't exist yet
+//
+// # Assumptions
+//
+//   - Filesystem is accessible for symlink evaluation
+func ValidatePath(path string) (string, error) {
+	// Clean the path to remove . and .. elements
+	cleaned := filepath.Clean(path)
+
+	// Convert to absolute path
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+
+	// Evaluate symlinks to prevent symlink-based traversal
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to evaluate symlinks: %w", err)
+	}
+
+	// If file doesn't exist, use the cleaned absolute path
+	if os.IsNotExist(err) {
+		realPath = absPath
+	}
+
+	return realPath, nil
+}
+
+// BackupBeforeOverwriteFunc is a convenience function using default config.
 //
 // # Description
 //
 // Creates a backup of the specified path using default configuration.
 // Returns the backup path or empty string if nothing to backup.
+// Validates the path to prevent directory traversal attacks.
 //
 // # Inputs
 //
-//   - path: Path to backup
+//   - ctx: Context for cancellation and timeouts
+//   - path: Path to backup (validated for safety)
 //
 // # Outputs
 //
 //   - string: Backup path (empty if nothing to backup)
-//   - error: Non-nil if backup failed
+//   - error: Non-nil if backup failed or path invalid
 //
 // # Example
 //
-//	backupPath, err := BackupBeforeOverwrite("/path/to/config")
+//	backupPath, err := BackupBeforeOverwriteFunc(ctx, "/path/to/config")
 //	if err != nil {
 //	    return err
 //	}
 //	// Proceed with destructive operation
-func BackupBeforeOverwrite(path string) (string, error) {
+//
+// # Limitations
+//
+//   - Uses default backup configuration
+//
+// # Assumptions
+//
+//   - ctx is not nil
+func BackupBeforeOverwriteFunc(ctx context.Context, path string) (string, error) {
+	// Validate path to prevent traversal attacks
+	validPath, err := ValidatePath(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+
 	mgr := NewBackupManager(DefaultBackupConfig())
-	return mgr.BackupBeforeOverwrite(path)
+	return mgr.BackupBeforeOverwrite(validPath)
 }

@@ -1,13 +1,26 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package resilience
 
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// =============================================================================
+// DefaultSagaConfig Tests
+// =============================================================================
 
 func TestDefaultSagaConfig(t *testing.T) {
 	config := DefaultSagaConfig()
@@ -25,6 +38,10 @@ func TestDefaultSagaConfig(t *testing.T) {
 		t.Error("Logger should not be nil")
 	}
 }
+
+// =============================================================================
+// NewSaga Tests
+// =============================================================================
 
 func TestNewSaga(t *testing.T) {
 	tests := []struct {
@@ -63,6 +80,10 @@ func TestNewSaga(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// AddStep Tests
+// =============================================================================
+
 func TestSaga_AddStep(t *testing.T) {
 	saga := NewSaga(DefaultSagaConfig())
 
@@ -76,6 +97,10 @@ func TestSaga_AddStep(t *testing.T) {
 		t.Errorf("StepCount() = %d, want 2", saga.StepCount())
 	}
 }
+
+// =============================================================================
+// Execute Tests - Success Path
+// =============================================================================
 
 func TestSaga_Execute_AllSuccess(t *testing.T) {
 	saga := NewSaga(quietConfig())
@@ -121,6 +146,10 @@ func TestSaga_Execute_AllSuccess(t *testing.T) {
 		t.Errorf("LastError() = %v, want nil", saga.LastError())
 	}
 }
+
+// =============================================================================
+// Execute Tests - Failure Path
+// =============================================================================
 
 func TestSaga_Execute_FailureWithCompensation(t *testing.T) {
 	saga := NewSaga(quietConfig())
@@ -283,6 +312,10 @@ func TestSaga_Execute_CompensationError(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Execute Tests - Context Cancellation
+// =============================================================================
+
 func TestSaga_Execute_ContextCancelledBeforeStart(t *testing.T) {
 	saga := NewSaga(quietConfig())
 
@@ -353,6 +386,10 @@ func TestSaga_Execute_ContextCancelledDuringStep(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Execute Tests - Timeouts
+// =============================================================================
+
 func TestSaga_Execute_StepTimeout(t *testing.T) {
 	config := quietConfig()
 	config.StepTimeout = 100 * time.Millisecond
@@ -419,6 +456,10 @@ func TestSaga_Execute_CustomStepTimeout(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Reset Tests
+// =============================================================================
+
 func TestSaga_Reset(t *testing.T) {
 	saga := NewSaga(quietConfig())
 
@@ -448,6 +489,10 @@ func TestSaga_Reset(t *testing.T) {
 		t.Errorf("After reset: LastError() = %v, want nil", saga.LastError())
 	}
 }
+
+// =============================================================================
+// Callback Tests
+// =============================================================================
 
 func TestSaga_Callbacks(t *testing.T) {
 	var started []string
@@ -492,9 +537,65 @@ func TestSaga_Callbacks(t *testing.T) {
 	}
 }
 
+func TestSaga_OnCompensateCallback(t *testing.T) {
+	var compensations []string
+
+	config := quietConfig()
+	config.OnCompensate = func(step SagaStep, err error) {
+		status := "success"
+		if err != nil {
+			status = "failed"
+		}
+		compensations = append(compensations, step.Name+":"+status)
+	}
+
+	saga := NewSaga(config)
+
+	saga.AddStep(SagaStep{
+		Name:    "Step1",
+		Execute: func(ctx context.Context) error { return nil },
+		Compensate: func(ctx context.Context) error {
+			return nil
+		},
+	})
+	saga.AddStep(SagaStep{
+		Name:    "Step2",
+		Execute: func(ctx context.Context) error { return nil },
+		Compensate: func(ctx context.Context) error {
+			return errors.New("compensation failed")
+		},
+	})
+	saga.AddStep(SagaStep{
+		Name:    "Step3_Fails",
+		Execute: func(ctx context.Context) error { return errors.New("fail") },
+	})
+
+	_ = saga.Execute(context.Background())
+
+	if len(compensations) != 2 {
+		t.Errorf("OnCompensate called %d times, want 2", len(compensations))
+	}
+	// Step2 compensates first (reverse order) and fails
+	if len(compensations) > 0 && compensations[0] != "Step2:failed" {
+		t.Errorf("First compensation = %s, want Step2:failed", compensations[0])
+	}
+	// Step1 compensates second and succeeds
+	if len(compensations) > 1 && compensations[1] != "Step1:success" {
+		t.Errorf("Second compensation = %s, want Step1:success", compensations[1])
+	}
+}
+
+// =============================================================================
+// Interface Compliance Tests
+// =============================================================================
+
 func TestSaga_InterfaceCompliance(t *testing.T) {
 	var _ SagaExecutor = (*Saga)(nil)
 }
+
+// =============================================================================
+// Concurrency Tests
+// =============================================================================
 
 func TestSaga_ConcurrentSafety(t *testing.T) {
 	// While Saga is not designed for concurrent use, we should verify
@@ -527,12 +628,33 @@ func TestSaga_ConcurrentSafety(t *testing.T) {
 	}
 }
 
-// quietConfig returns a config with no logging for cleaner test output
+// =============================================================================
+// Empty Saga Tests
+// =============================================================================
+
+func TestSaga_Execute_EmptySaga(t *testing.T) {
+	saga := NewSaga(quietConfig())
+
+	err := saga.Execute(context.Background())
+	if err != nil {
+		t.Errorf("Execute() on empty saga should succeed, got: %v", err)
+	}
+
+	if len(saga.CompletedSteps()) != 0 {
+		t.Errorf("CompletedSteps() should be empty, got %d", len(saga.CompletedSteps()))
+	}
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+// quietConfig returns a config with no logging for cleaner test output.
 func quietConfig() SagaConfig {
 	return SagaConfig{
 		StepTimeout:         5 * time.Second,
 		CompensationTimeout: 5 * time.Second,
 		CompensateOnFail:    true,
-		Logger:              func(format string, args ...interface{}) {}, // Silent
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

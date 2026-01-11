@@ -57,6 +57,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // -----------------------------------------------------------------------------
@@ -699,7 +701,7 @@ func (c *CacheConfig) GetMachineName() string {
 // mutex protects shared state during resolution.
 type DefaultCachePathResolver struct {
 	config               CacheConfig
-	proc                 ProcessManager
+	proc                 process.Manager
 	prompter             UserPrompter
 	osStatFunc           func(string) (os.FileInfo, error)
 	osMkdirAllFunc       func(string, os.FileMode) error
@@ -754,7 +756,7 @@ type DefaultCachePathResolver struct {
 //
 //   - ProcessManager is properly configured for podman commands
 //   - StackDir is a valid, writable directory path
-func NewDefaultCachePathResolver(cfg CacheConfig, proc ProcessManager, prompter UserPrompter) *DefaultCachePathResolver {
+func NewDefaultCachePathResolver(cfg CacheConfig, proc process.Manager, prompter UserPrompter) *DefaultCachePathResolver {
 	return &DefaultCachePathResolver{
 		config:               cfg,
 		proc:                 proc,

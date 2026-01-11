@@ -1,4 +1,11 @@
-package main
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+
+package sampling
 
 import (
 	"context"
@@ -7,6 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// =============================================================================
+// Adaptive Sampler Interface
+// =============================================================================
 
 // AdaptiveSampler defines the interface for load-adaptive sampling.
 //
@@ -19,6 +30,24 @@ import (
 // # Thread Safety
 //
 // Implementations must be safe for concurrent use.
+//
+// # Example
+//
+//	var sampler AdaptiveSampler = NewAdaptiveSampler(DefaultSamplingConfig())
+//	if sampler.ShouldSample() {
+//	    trace.Start()
+//	    defer trace.End()
+//	}
+//
+// # Limitations
+//
+//   - Sampling is probabilistic; important events may be missed
+//   - Rate adjustment has some latency
+//
+// # Assumptions
+//
+//   - Caller records latencies for adaptive behavior
+//   - Missing some samples is acceptable
 type AdaptiveSampler interface {
 	// ShouldSample returns true if this item should be sampled.
 	ShouldSample() bool
@@ -41,6 +70,10 @@ type AdaptiveSampler interface {
 	// ForceEnable temporarily enables 100% sampling (for debugging).
 	ForceEnable(duration time.Duration)
 }
+
+// =============================================================================
+// Sampler Statistics
+// =============================================================================
 
 // SamplerStats contains sampling statistics.
 //
@@ -70,7 +103,11 @@ type SamplerStats struct {
 	ForceEnabled bool
 }
 
-// SamplingConfig configures the adaptive sampler.
+// =============================================================================
+// Sampling Configuration
+// =============================================================================
+
+// Config configures the adaptive sampler.
 //
 // # Description
 //
@@ -78,13 +115,21 @@ type SamplerStats struct {
 //
 // # Example
 //
-//	config := SamplingConfig{
+//	config := Config{
 //	    BaseSamplingRate: 0.1,      // 10% base rate
 //	    MinSamplingRate:  0.01,     // Never go below 1%
 //	    MaxSamplingRate:  1.0,      // Can go up to 100%
 //	    LatencyThreshold: 100 * time.Millisecond,
 //	}
-type SamplingConfig struct {
+//
+// # Limitations
+//
+//   - All rate values must be in range [0.0, 1.0]
+//
+// # Assumptions
+//
+//   - MinSamplingRate <= BaseSamplingRate <= MaxSamplingRate
+type Config struct {
 	// BaseSamplingRate is the default sampling rate (0.0-1.0).
 	// Default: 0.1 (10%)
 	BaseSamplingRate float64
@@ -115,18 +160,40 @@ type SamplingConfig struct {
 	LatencyBufferSize int
 }
 
-// DefaultSamplingConfig returns sensible defaults.
+// =============================================================================
+// Constructor Functions
+// =============================================================================
+
+// DefaultConfig returns sensible defaults.
 //
 // # Description
 //
 // Returns configuration with 10% base sampling rate that adapts
 // based on system latency.
 //
+// # Inputs
+//
+//   - None
+//
 // # Outputs
 //
-//   - SamplingConfig: Default configuration
-func DefaultSamplingConfig() SamplingConfig {
-	return SamplingConfig{
+//   - Config: Default configuration
+//
+// # Example
+//
+//	config := DefaultConfig()
+//	config.BaseSamplingRate = 0.2  // Override to 20%
+//	sampler := NewAdaptiveSampler(config)
+//
+// # Limitations
+//
+//   - Defaults may not be optimal for all workloads
+//
+// # Assumptions
+//
+//   - Caller will tune for their specific use case
+func DefaultConfig() Config {
+	return Config{
 		BaseSamplingRate:   0.1,
 		MinSamplingRate:    0.01,
 		MaxSamplingRate:    1.0,
@@ -136,6 +203,10 @@ func DefaultSamplingConfig() SamplingConfig {
 		LatencyBufferSize:  1024,
 	}
 }
+
+// =============================================================================
+// Default Adaptive Sampler Struct
+// =============================================================================
 
 // DefaultAdaptiveSampler implements AdaptiveSampler.
 //
@@ -161,14 +232,10 @@ func DefaultSamplingConfig() SamplingConfig {
 //   - If avg latency > threshold: rate = rate * (threshold / latency)
 //   - If avg latency < threshold/2: rate = min(rate * 1.1, max)
 //
-// # Limitations
-//
-//   - Uses simple random sampling (not reservoir)
-//   - Latency window uses ring buffer (fixed size)
-//
 // # Example
 //
-//	sampler := NewAdaptiveSampler(DefaultSamplingConfig())
+//	sampler := NewAdaptiveSampler(DefaultConfig())
+//	defer sampler.Stop()
 //
 //	// In request handler:
 //	if sampler.ShouldSample() {
@@ -178,8 +245,18 @@ func DefaultSamplingConfig() SamplingConfig {
 //
 //	// Record latency after request:
 //	sampler.RecordLatency(time.Since(start))
+//
+// # Limitations
+//
+//   - Uses simple random sampling (not reservoir)
+//   - Latency window uses ring buffer (fixed size)
+//
+// # Assumptions
+//
+//   - Caller calls Stop() on shutdown
+//   - Latency recordings represent actual system load
 type DefaultAdaptiveSampler struct {
-	config   SamplingConfig
+	config   Config
 	configMu sync.RWMutex // Protects config field access
 
 	// Current state
@@ -208,12 +285,16 @@ type DefaultAdaptiveSampler struct {
 	wg       sync.WaitGroup
 }
 
+// Compile-time interface check
+var _ AdaptiveSampler = (*DefaultAdaptiveSampler)(nil)
+
 // NewAdaptiveSampler creates a new adaptive sampler.
 //
 // # Description
 //
 // Creates a sampler that automatically adjusts rate based on latency.
-// Starts a background goroutine for periodic adjustment.
+// Starts a background goroutine for periodic adjustment. Caller must
+// call Stop() to clean up the background goroutine.
 //
 // # Inputs
 //
@@ -222,7 +303,23 @@ type DefaultAdaptiveSampler struct {
 // # Outputs
 //
 //   - *DefaultAdaptiveSampler: New sampler
-func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
+//
+// # Example
+//
+//	sampler := NewAdaptiveSampler(Config{
+//	    BaseSamplingRate: 0.2,
+//	    LatencyThreshold: 50 * time.Millisecond,
+//	})
+//	defer sampler.Stop()
+//
+// # Limitations
+//
+//   - Starts a background goroutine that must be stopped
+//
+// # Assumptions
+//
+//   - Caller will call Stop() on shutdown
+func NewAdaptiveSampler(config Config) *DefaultAdaptiveSampler {
 	// Apply defaults and validate bounds [0.0, 1.0]
 	if config.BaseSamplingRate <= 0 || config.BaseSamplingRate > 1.0 {
 		config.BaseSamplingRate = 0.1
@@ -275,6 +372,10 @@ func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
 	return s
 }
 
+// =============================================================================
+// DefaultAdaptiveSampler Methods
+// =============================================================================
+
 // ShouldSample returns true if this item should be sampled.
 //
 // # Description
@@ -282,9 +383,27 @@ func NewAdaptiveSampler(config SamplingConfig) *DefaultAdaptiveSampler {
 // Uses the current sampling rate to make a probabilistic decision.
 // Thread-safe and fast (lock-free for the common path).
 //
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
 //   - bool: True if item should be sampled
+//
+// # Example
+//
+//	if sampler.ShouldSample() {
+//	    // Record trace, log, etc.
+//	}
+//
+// # Limitations
+//
+//   - Decision is probabilistic; results vary between calls
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *DefaultAdaptiveSampler) ShouldSample() bool {
 	// Check force-enable state under read lock
 	s.forceMu.RLock()
@@ -346,6 +465,21 @@ func (s *DefaultAdaptiveSampler) ShouldSample() bool {
 //
 //   - context.Context: Context with sampling decision
 //   - bool: True if item should be sampled
+//
+// # Example
+//
+//	ctx, sampled := sampler.ShouldSampleContext(ctx)
+//	if sampled {
+//	    // All operations with this ctx will consistently sample
+//	}
+//
+// # Limitations
+//
+//   - Context must be propagated for consistent sampling
+//
+// # Assumptions
+//
+//   - ctx is not nil
 func (s *DefaultAdaptiveSampler) ShouldSampleContext(ctx context.Context) (context.Context, bool) {
 	// Check if already decided - DO NOT increment counters here,
 	// as they were already incremented on the initial call.
@@ -379,6 +513,24 @@ type samplingContextKey struct{}
 // # Inputs
 //
 //   - latency: The measured latency
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	start := time.Now()
+//	doWork()
+//	sampler.RecordLatency(time.Since(start))
+//
+// # Limitations
+//
+//   - High-frequency recording may cause mutex contention
+//
+// # Assumptions
+//
+//   - Latency values are representative of system load
 func (s *DefaultAdaptiveSampler) RecordLatency(latency time.Duration) {
 	s.latencyMu.Lock()
 	s.latencies[s.latencyIndex] = latency
@@ -392,9 +544,26 @@ func (s *DefaultAdaptiveSampler) RecordLatency(latency time.Duration) {
 //
 // Returns the current effective sampling rate (0.0-1.0).
 //
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
 //   - float64: Current sampling rate
+//
+// # Example
+//
+//	rate := sampler.GetSamplingRate()
+//	log.Printf("Current sampling rate: %.1f%%", rate*100)
+//
+// # Limitations
+//
+//   - Value may change immediately after return
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *DefaultAdaptiveSampler) GetSamplingRate() float64 {
 	return s.currentRate.Load().(float64)
 }
@@ -415,6 +584,22 @@ func (s *DefaultAdaptiveSampler) GetSamplingRate() float64 {
 // # Inputs
 //
 //   - rate: New base rate (0.0-1.0)
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	sampler.SetBaseSamplingRate(0.5)  // Set to 50%
+//
+// # Limitations
+//
+//   - Rate change takes effect on next adjustment cycle
+//
+// # Assumptions
+//
+//   - Rate is in valid range [0.0, 1.0]
 func (s *DefaultAdaptiveSampler) SetBaseSamplingRate(rate float64) {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
@@ -436,9 +621,27 @@ func (s *DefaultAdaptiveSampler) SetBaseSamplingRate(rate float64) {
 //
 // Returns a snapshot of current sampling statistics.
 //
+// # Inputs
+//
+//   - None (receiver only)
+//
 // # Outputs
 //
 //   - SamplerStats: Current statistics
+//
+// # Example
+//
+//	stats := sampler.Stats()
+//	log.Printf("Sampled: %d, Dropped: %d, Rate: %.1f%%",
+//	    stats.TotalSampled, stats.TotalDropped, stats.CurrentRate*100)
+//
+// # Limitations
+//
+//   - Values are point-in-time snapshot
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *DefaultAdaptiveSampler) Stats() SamplerStats {
 	s.forceMu.RLock()
 	forceEnabled := s.forceEnabled
@@ -466,6 +669,22 @@ func (s *DefaultAdaptiveSampler) Stats() SamplerStats {
 // # Inputs
 //
 //   - duration: How long to force 100% sampling
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	sampler.ForceEnable(5 * time.Minute)  // 100% sampling for 5 minutes
+//
+// # Limitations
+//
+//   - May cause performance degradation if duration is long
+//
+// # Assumptions
+//
+//   - Duration is reasonable for the system load
 func (s *DefaultAdaptiveSampler) ForceEnable(duration time.Duration) {
 	s.forceMu.Lock()
 	defer s.forceMu.Unlock()
@@ -479,6 +698,27 @@ func (s *DefaultAdaptiveSampler) ForceEnable(duration time.Duration) {
 //
 // Stops the adjustment loop. Should be called on shutdown.
 // Idempotent: safe to call multiple times without panic.
+//
+// # Inputs
+//
+//   - None (receiver only)
+//
+// # Outputs
+//
+//   - None
+//
+// # Example
+//
+//	sampler := NewAdaptiveSampler(config)
+//	defer sampler.Stop()
+//
+// # Limitations
+//
+//   - Sampler should not be used after Stop()
+//
+// # Assumptions
+//
+//   - Receiver is not nil
 func (s *DefaultAdaptiveSampler) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
@@ -582,14 +822,16 @@ func (s *DefaultAdaptiveSampler) calculateAverageLatency() time.Duration {
 	return total / time.Duration(count)
 }
 
-// Compile-time interface check
-var _ AdaptiveSampler = (*DefaultAdaptiveSampler)(nil)
+// =============================================================================
+// Helper Functions
+// =============================================================================
 
 // AlwaysSampleError is a helper that always samples errors.
 //
 // # Description
 //
 // Wraps ShouldSample to always return true for errors.
+// Useful when you want to ensure all errors are captured.
 //
 // # Inputs
 //
@@ -599,6 +841,20 @@ var _ AdaptiveSampler = (*DefaultAdaptiveSampler)(nil)
 // # Outputs
 //
 //   - bool: True if should sample (always true for errors)
+//
+// # Example
+//
+//	if AlwaysSampleError(sampler, err != nil) {
+//	    recordTrace()
+//	}
+//
+// # Limitations
+//
+//   - May increase sampling volume if errors are frequent
+//
+// # Assumptions
+//
+//   - sampler is not nil
 func AlwaysSampleError(sampler AdaptiveSampler, isError bool) bool {
 	if isError {
 		return true
@@ -611,6 +867,7 @@ func AlwaysSampleError(sampler AdaptiveSampler, isError bool) bool {
 // # Description
 //
 // Useful for sampling the start of a batch operation.
+// Thread-safe via atomic counter.
 //
 // # Inputs
 //
@@ -620,9 +877,22 @@ func AlwaysSampleError(sampler AdaptiveSampler, isError bool) bool {
 //
 //   - func(): Function that returns true for first N calls
 //
-// # Input Validation
+// # Example
 //
-// If n <= 0, returns a sampler that never samples.
+//	sampler := HeadSampler(10)
+//	for _, item := range items {
+//	    if sampler() {
+//	        log.Printf("Processing item: %v", item)
+//	    }
+//	}
+//
+// # Limitations
+//
+//   - Once N items are sampled, never samples again
+//
+// # Assumptions
+//
+//   - N is positive; if N <= 0, returns a sampler that never samples
 func HeadSampler(n int) func() bool {
 	if n <= 0 {
 		// Return a sampler that never samples for non-positive N
@@ -650,9 +920,22 @@ func HeadSampler(n int) func() bool {
 //
 //   - func() bool: Function that returns true if under rate limit
 //
-// # Input Validation
+// # Example
 //
-// If perSecond <= 0, returns a sampler that never samples.
+//	sampler := RateLimitedSampler(100)  // Max 100 per second
+//	for event := range events {
+//	    if sampler() {
+//	        processEvent(event)
+//	    }
+//	}
+//
+// # Limitations
+//
+//   - Window resets every second (not sliding window)
+//
+// # Assumptions
+//
+//   - perSecond is positive; if <= 0, returns a sampler that never samples
 func RateLimitedSampler(perSecond int) func() bool {
 	if perSecond <= 0 {
 		// Return a sampler that never samples for non-positive rates
