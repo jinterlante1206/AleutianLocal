@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -321,7 +323,7 @@ func TestOutputHealthReport(t *testing.T) {
 
 func TestHealthCommandIntegration_MockedDependencies(t *testing.T) {
 	// Create mock dependencies
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			// Mock container inspection
 			if name == "podman" && len(args) > 0 && args[0] == "inspect" {

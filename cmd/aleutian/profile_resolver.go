@@ -54,6 +54,7 @@ import (
 	"strings"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // -----------------------------------------------------------------------------
@@ -745,7 +746,7 @@ func (r *DefaultProfileResolver) profileToEnv(profile *ProfileInfo, name string)
 // DefaultHardwareDetector is safe for concurrent use.
 type DefaultHardwareDetector struct {
 	// proc executes system commands.
-	proc ProcessManager
+	proc process.Manager
 }
 
 // NewDefaultHardwareDetector creates a hardware detector with the given process manager.
@@ -775,7 +776,7 @@ type DefaultHardwareDetector struct {
 // # Assumptions
 //
 //   - ProcessManager is functional
-func NewDefaultHardwareDetector(proc ProcessManager) *DefaultHardwareDetector {
+func NewDefaultHardwareDetector(proc process.Manager) *DefaultHardwareDetector {
 	return &DefaultHardwareDetector{
 		proc: proc,
 	}

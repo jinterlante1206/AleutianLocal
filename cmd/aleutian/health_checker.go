@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -278,7 +280,7 @@ type HealthHTTPClient interface {
 //	config := DefaultHealthCheckerConfig()
 //	checker := NewDefaultHealthChecker(proc, config)
 type DefaultHealthChecker struct {
-	proc       ProcessManager
+	proc       process.Manager
 	httpClient HealthHTTPClient
 	config     HealthCheckerConfig
 	mu         sync.RWMutex
@@ -456,7 +458,7 @@ func isURLSafe(rawURL string) error {
 //
 //   - ProcessManager is initialized and functional
 //   - Config has valid timeout values (> 0)
-func NewDefaultHealthChecker(proc ProcessManager, config HealthCheckerConfig) *DefaultHealthChecker {
+func NewDefaultHealthChecker(proc process.Manager, config HealthCheckerConfig) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
 		proc:   proc,
 		config: config,
@@ -500,7 +502,7 @@ func NewDefaultHealthChecker(proc ProcessManager, config HealthCheckerConfig) *D
 // # Assumptions
 //
 //   - HealthHTTPClient implements timeout handling
-func NewDefaultHealthCheckerWithHTTPClient(proc ProcessManager, config HealthCheckerConfig, httpClient HealthHTTPClient) *DefaultHealthChecker {
+func NewDefaultHealthCheckerWithHTTPClient(proc process.Manager, config HealthCheckerConfig, httpClient HealthHTTPClient) *DefaultHealthChecker {
 	return &DefaultHealthChecker{
 		proc:       proc,
 		config:     config,

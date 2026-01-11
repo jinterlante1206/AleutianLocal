@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -215,7 +216,7 @@ func TestMockHardwareDetector_ErrorReturns(t *testing.T) {
 func TestDefaultHardwareDetector_GetPlatform(t *testing.T) {
 	t.Parallel()
 
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	detector := NewDefaultHardwareDetector(proc)
 
 	platform := detector.GetPlatform()
@@ -232,7 +233,7 @@ func TestDefaultHardwareDetector_GetPlatform(t *testing.T) {
 func TestDefaultHardwareDetector_GetCPUCores(t *testing.T) {
 	t.Parallel()
 
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	detector := NewDefaultHardwareDetector(proc)
 
 	cores, err := detector.GetCPUCores(context.Background())
@@ -252,7 +253,7 @@ func TestDefaultHardwareDetector_GetCPUCores(t *testing.T) {
 func TestDefaultHardwareDetector_GetGPUVRAM_Success(t *testing.T) {
 	t.Parallel()
 
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	proc.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "nvidia-smi" {
 			// Simulate two GPUs
@@ -279,7 +280,7 @@ func TestDefaultHardwareDetector_GetGPUVRAM_Success(t *testing.T) {
 func TestDefaultHardwareDetector_GetGPUVRAM_NoGPU(t *testing.T) {
 	t.Parallel()
 
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	proc.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, errors.New("nvidia-smi not found")
 	}
@@ -299,7 +300,7 @@ func TestDefaultHardwareDetector_GetGPUVRAM_NoGPU(t *testing.T) {
 func TestDefaultHardwareDetector_GetGPUVRAM_EmptyOutput(t *testing.T) {
 	t.Parallel()
 
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	proc.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return []byte(""), nil
 	}
@@ -322,7 +323,7 @@ func TestDefaultHardwareDetector_GetGPUVRAM_EmptyOutput(t *testing.T) {
 func TestDefaultHardwareDetector_GetGPUVRAM_InvalidOutput(t *testing.T) {
 	t.Parallel()
 
-	proc := &MockProcessManager{}
+	proc := &process.MockManager{}
 	proc.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return []byte("invalid\nnot_a_number\n"), nil
 	}

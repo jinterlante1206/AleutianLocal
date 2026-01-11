@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/spf13/cobra"
 )
 
@@ -805,7 +806,7 @@ func hasForeignWorkloads() (bool, []string, error) {
 //   - Network is accessible on localhost
 func waitForServicesReady() error {
 	// Create HealthChecker with production dependencies
-	proc := NewDefaultProcessManager()
+	proc := process.NewDefaultManager()
 	checker := NewDefaultHealthChecker(proc, DefaultHealthCheckerConfig())
 
 	// Build service definitions for critical services

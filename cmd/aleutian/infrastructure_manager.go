@@ -54,6 +54,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // -----------------------------------------------------------------------------
@@ -1038,7 +1040,7 @@ type NetworkIsolationStatus struct {
 // DefaultInfrastructureManager is safe for concurrent use.
 type DefaultInfrastructureManager struct {
 	// proc executes system commands (podman CLI).
-	proc ProcessManager
+	proc process.Manager
 
 	// prompter handles interactive user prompts.
 	prompter UserPrompter
@@ -1083,7 +1085,7 @@ type DefaultInfrastructureManager struct {
 //
 //   - proc and prompter are non-nil
 func NewDefaultInfrastructureManager(
-	proc ProcessManager,
+	proc process.Manager,
 	prompter UserPrompter,
 	metrics DiagnosticsMetrics,
 ) *DefaultInfrastructureManager {

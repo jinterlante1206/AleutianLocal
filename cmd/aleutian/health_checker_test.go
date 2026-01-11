@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -35,7 +37,7 @@ func (m *mockHealthHTTPClient) Do(req *http.Request) (*http.Response, error) {
 
 // createTestHealthChecker creates a checker with mock dependencies.
 func createTestHealthChecker(httpClient HealthHTTPClient) *DefaultHealthChecker {
-	proc := &MockProcessManager{
+	proc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			if name == "podman" && len(args) >= 3 && args[0] == "inspect" {
 				return "true", "", 0, nil
@@ -354,7 +356,7 @@ func TestDefaultHealthChecker_CheckService_HTTP_CustomExpectedStatus(t *testing.
 //
 //   - "true" from inspect means running
 func TestDefaultHealthChecker_CheckService_Container_Running(t *testing.T) {
-	proc := &MockProcessManager{
+	proc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			if name == "podman" && args[0] == "inspect" {
 				return "true", "", 0, nil
@@ -411,7 +413,7 @@ func TestDefaultHealthChecker_CheckService_Container_Running(t *testing.T) {
 //
 //   - "false" from inspect means not running
 func TestDefaultHealthChecker_CheckService_Container_NotRunning(t *testing.T) {
-	proc := &MockProcessManager{
+	proc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			if name == "podman" && args[0] == "inspect" {
 				return "false", "", 0, nil
@@ -1221,7 +1223,7 @@ func TestDefaultHealthChecker_WaitForServices_ResultHasCorrectTimestamps(t *test
 
 // TestDefaultHealthChecker_IsContainerRunning_True tests running container.
 func TestDefaultHealthChecker_IsContainerRunning_True(t *testing.T) {
-	proc := &MockProcessManager{
+	proc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "true", "", 0, nil
 		},
@@ -1240,7 +1242,7 @@ func TestDefaultHealthChecker_IsContainerRunning_True(t *testing.T) {
 
 // TestDefaultHealthChecker_IsContainerRunning_False tests stopped container.
 func TestDefaultHealthChecker_IsContainerRunning_False(t *testing.T) {
-	proc := &MockProcessManager{
+	proc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "false", "", 0, nil
 		},
@@ -1259,7 +1261,7 @@ func TestDefaultHealthChecker_IsContainerRunning_False(t *testing.T) {
 
 // TestDefaultHealthChecker_IsContainerRunning_NotFound tests non-existent container.
 func TestDefaultHealthChecker_IsContainerRunning_NotFound(t *testing.T) {
-	proc := &MockProcessManager{
+	proc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "", "no such container", 1, errors.New("no such container")
 		},

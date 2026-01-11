@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/resilience"
 	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/sampling"
 )
@@ -274,7 +275,7 @@ type ReliabilityManager struct {
 	config ReliabilityConfig
 
 	// Subsystems
-	processLock      *ProcessLock
+	processLock      *process.ProcessLock
 	goroutineTracker *GoroutineTracker
 	sampler          *sampling.DefaultAdaptiveSampler
 	metricsSchema    *DefaultMetricsSchema
@@ -412,7 +413,7 @@ func (rm *ReliabilityManager) ensureDirectories() error {
 func (rm *ReliabilityManager) initializeSubsystems() error {
 	// Process lock
 	if rm.config.EnableProcessLock {
-		rm.processLock = NewProcessLock(ProcessLockConfig{
+		rm.processLock = process.NewProcessLock(process.ProcessLockConfig{
 			LockDir:  rm.config.LockDir,
 			LockName: "aleutian",
 		})

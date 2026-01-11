@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================
@@ -72,7 +74,7 @@ func createTestComposeConfig(stackDir string) ComposeConfig {
 //
 // # Example
 //
-//	mock := &MockProcessManager{}
+//	mock := &process.MockManager{}
 //	executor := createTestComposeExecutor(cfg, mock, nil)
 //
 // # Limitations
@@ -82,7 +84,7 @@ func createTestComposeConfig(stackDir string) ComposeConfig {
 // # Assumptions
 //
 //   - Configuration is valid
-func createTestComposeExecutor(cfg ComposeConfig, mockProc *MockProcessManager, statFunc func(string) (os.FileInfo, error)) *DefaultComposeExecutor {
+func createTestComposeExecutor(cfg ComposeConfig, mockProc *process.MockManager, statFunc func(string) (os.FileInfo, error)) *DefaultComposeExecutor {
 	if statFunc == nil {
 		statFunc = func(path string) (os.FileInfo, error) {
 			return nil, os.ErrNotExist
@@ -201,7 +203,7 @@ func TestNewDefaultComposeExecutor_ValidConfig(t *testing.T) {
 	cfg := ComposeConfig{
 		StackDir: "/test/stack",
 	}
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 
 	executor, err := NewDefaultComposeExecutor(cfg, mockProc)
 
@@ -244,7 +246,7 @@ func TestNewDefaultComposeExecutor_EmptyStackDir(t *testing.T) {
 	cfg := ComposeConfig{
 		StackDir: "",
 	}
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 
 	executor, err := NewDefaultComposeExecutor(cfg, mockProc)
 
@@ -286,7 +288,7 @@ func TestNewDefaultComposeExecutor_DefaultsApplied(t *testing.T) {
 	cfg := ComposeConfig{
 		StackDir: "/test/stack",
 	}
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 
 	executor, err := NewDefaultComposeExecutor(cfg, mockProc)
 	if err != nil {
@@ -336,7 +338,7 @@ func TestNewDefaultComposeExecutor_DefaultsApplied(t *testing.T) {
 //   - Mock returns exit code 0
 func TestDefaultComposeExecutor_Up_Success(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			// Verify command is podman-compose
 			if name != "podman-compose" {
@@ -391,7 +393,7 @@ func TestDefaultComposeExecutor_Up_Success(t *testing.T) {
 func TestDefaultComposeExecutor_Up_WithBuildFlag(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedArgs []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			capturedArgs = args
 			return "", "", 0, nil
@@ -436,7 +438,7 @@ func TestDefaultComposeExecutor_Up_WithBuildFlag(t *testing.T) {
 func TestDefaultComposeExecutor_Up_WithServices(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedArgs []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			capturedArgs = args
 			return "", "", 0, nil
@@ -481,7 +483,7 @@ func TestDefaultComposeExecutor_Up_WithServices(t *testing.T) {
 func TestDefaultComposeExecutor_Up_WithEnvVars(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedEnv []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			capturedEnv = env
 			return "", "", 0, nil
@@ -532,7 +534,7 @@ func TestDefaultComposeExecutor_Up_WithEnvVars(t *testing.T) {
 //   - Non-zero exit is treated as error
 func TestDefaultComposeExecutor_Up_CommandError(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "", "error building image", 1, nil
 		},
@@ -582,7 +584,7 @@ func TestDefaultComposeExecutor_Up_CommandError(t *testing.T) {
 //   - Mock returns exit code 0
 func TestDefaultComposeExecutor_Down_Success(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			argsStr := strings.Join(args, " ")
 			if !strings.Contains(argsStr, "down") {
@@ -632,7 +634,7 @@ func TestDefaultComposeExecutor_Down_Success(t *testing.T) {
 func TestDefaultComposeExecutor_Down_WithRemoveOrphans(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedArgs []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			capturedArgs = args
 			return "", "", 0, nil
@@ -677,7 +679,7 @@ func TestDefaultComposeExecutor_Down_WithRemoveOrphans(t *testing.T) {
 func TestDefaultComposeExecutor_Down_WithRemoveVolumes(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedArgs []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			capturedArgs = args
 			return "", "", 0, nil
@@ -727,7 +729,7 @@ func TestDefaultComposeExecutor_Down_WithRemoveVolumes(t *testing.T) {
 func TestDefaultComposeExecutor_Stop_GracefulSuccess(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	callCount := 0
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			callCount++
 			argsStr := strings.Join(args, " ")
@@ -789,7 +791,7 @@ func TestDefaultComposeExecutor_Stop_ForceAfterGraceful(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	stopCalls := 0
 	psCalls := 0
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			argsStr := strings.Join(args, " ")
 			// ps -q calls
@@ -854,7 +856,7 @@ func TestDefaultComposeExecutor_Stop_ForceAfterGraceful(t *testing.T) {
 func TestDefaultComposeExecutor_Stop_SkipForceStop(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	stopCalls := 0
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			argsStr := strings.Join(args, " ")
 			if strings.Contains(argsStr, "ps -q") {
@@ -919,7 +921,7 @@ func TestDefaultComposeExecutor_Status_ParsesJSON(t *testing.T) {
 		{"Names":["test-weaviate-1"],"State":"running","Status":"Up 2 hours (healthy)","Image":"weaviate:latest","Ports":[]},
 		{"Names":["test-ollama-1"],"State":"exited","Status":"Exited (0) 1 hour ago","Image":"ollama:latest","Ports":[]}
 	]`
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return jsonOutput, "", 0, nil
 		},
@@ -971,7 +973,7 @@ func TestDefaultComposeExecutor_Status_ParsesJSON(t *testing.T) {
 //   - Empty output means no containers
 func TestDefaultComposeExecutor_Status_EmptyOutput(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "", "", 0, nil
 		},
@@ -1021,7 +1023,7 @@ func TestDefaultComposeExecutor_Status_HealthStatus(t *testing.T) {
 		{"Names":["test-unhealthy-1"],"State":"running","Status":"Up (unhealthy)","Image":"img","Ports":[]},
 		{"Names":["test-nocheck-1"],"State":"running","Status":"Up","Image":"img","Ports":[]}
 	]`
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return jsonOutput, "", 0, nil
 		},
@@ -1084,7 +1086,7 @@ func TestDefaultComposeExecutor_Status_HealthStatus(t *testing.T) {
 //   - RunStreaming writes to provided writer
 func TestDefaultComposeExecutor_Logs_Streaming(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunStreamingFunc: func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
 			_, err := w.Write([]byte("log line 1\nlog line 2\n"))
 			return err
@@ -1132,7 +1134,7 @@ func TestDefaultComposeExecutor_Logs_Streaming(t *testing.T) {
 func TestDefaultComposeExecutor_Logs_WithFollow(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedArgs []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunStreamingFunc: func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
 			capturedArgs = args
 			return nil
@@ -1177,7 +1179,7 @@ func TestDefaultComposeExecutor_Logs_WithFollow(t *testing.T) {
 func TestDefaultComposeExecutor_Logs_WithTail(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedArgs []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunStreamingFunc: func(ctx context.Context, dir string, w io.Writer, name string, args ...string) error {
 			capturedArgs = args
 			return nil
@@ -1226,7 +1228,7 @@ func TestDefaultComposeExecutor_Logs_WithTail(t *testing.T) {
 //   - Four distinct operations: stop, rm by name, rm by label, rm pods
 func TestDefaultComposeExecutor_ForceCleanup_Success(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			argsStr := strings.Join(args, " ")
 			// Pod list returns no pods
@@ -1281,7 +1283,7 @@ func TestDefaultComposeExecutor_ForceCleanup_Success(t *testing.T) {
 //   - Cleanup continues after individual failures
 func TestDefaultComposeExecutor_ForceCleanup_PartialError(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			argsStr := strings.Join(args, " ")
 			// Stop command fails
@@ -1340,7 +1342,7 @@ func TestDefaultComposeExecutor_ForceCleanup_PartialError(t *testing.T) {
 //   - Container is running
 func TestDefaultComposeExecutor_Exec_Success(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			argsStr := strings.Join(args, " ")
 			if !strings.Contains(argsStr, "exec") {
@@ -1395,7 +1397,7 @@ func TestDefaultComposeExecutor_Exec_Success(t *testing.T) {
 //   - Service is required
 func TestDefaultComposeExecutor_Exec_EmptyService(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	executor := createTestComposeExecutor(cfg, mockProc, nil)
 
 	ctx := context.Background()
@@ -1436,7 +1438,7 @@ func TestDefaultComposeExecutor_Exec_EmptyService(t *testing.T) {
 //   - Command is required
 func TestDefaultComposeExecutor_Exec_EmptyCommand(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	executor := createTestComposeExecutor(cfg, mockProc, nil)
 
 	ctx := context.Background()
@@ -1477,7 +1479,7 @@ func TestDefaultComposeExecutor_Exec_EmptyCommand(t *testing.T) {
 //   - Stderr contains "not running"
 func TestDefaultComposeExecutor_Exec_ContainerNotRunning(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "", "container not running", 1, nil
 		},
@@ -1523,7 +1525,7 @@ func TestDefaultComposeExecutor_Exec_ContainerNotRunning(t *testing.T) {
 func TestDefaultComposeExecutor_Exec_WithOptions(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	var capturedArgs []string
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			capturedArgs = args
 			return "", "", 0, nil
@@ -1583,7 +1585,7 @@ func TestDefaultComposeExecutor_Exec_WithOptions(t *testing.T) {
 //   - Base file is always included
 func TestDefaultComposeExecutor_GetComposeFiles_BaseOnly(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	executor := createTestComposeExecutor(cfg, mockProc, nil) // nil stat = all files don't exist
 
 	files := executor.GetComposeFiles()
@@ -1623,7 +1625,7 @@ func TestDefaultComposeExecutor_GetComposeFiles_BaseOnly(t *testing.T) {
 //   - Override comes after base
 func TestDefaultComposeExecutor_GetComposeFiles_WithOverride(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	statFunc := mockStatForPaths(
 		"/test/stack/podman-compose.yml",
 		"/test/stack/podman-compose.override.yml",
@@ -1668,7 +1670,7 @@ func TestDefaultComposeExecutor_GetComposeFiles_WithOverride(t *testing.T) {
 func TestDefaultComposeExecutor_GetComposeFiles_WithExtensions(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
 	cfg.ExtensionFiles = []string{"gpu.yml", "dev.yml"}
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	statFunc := mockStatForPaths(
 		"/test/stack/podman-compose.yml",
 		"/test/stack/gpu.yml",
@@ -1714,7 +1716,7 @@ func TestDefaultComposeExecutor_GetComposeFiles_WithExtensions(t *testing.T) {
 //   - Container names follow prefix-service-N pattern
 func TestDefaultComposeExecutor_ExtractServiceName(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	executor := createTestComposeExecutor(cfg, mockProc, nil)
 
 	tests := []struct {
@@ -1765,7 +1767,7 @@ func TestDefaultComposeExecutor_ExtractServiceName(t *testing.T) {
 //   - Common sensitive patterns are TOKEN, SECRET, KEY, PASSWORD
 func TestDefaultComposeExecutor_IsSensitiveEnvVar(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	executor := createTestComposeExecutor(cfg, mockProc, nil)
 
 	tests := []struct {
@@ -1820,7 +1822,7 @@ func TestDefaultComposeExecutor_IsSensitiveEnvVar(t *testing.T) {
 //   - PATH exists in process environment for testing override
 func TestDefaultComposeExecutor_BuildCommandEnvironment(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	executor := createTestComposeExecutor(cfg, mockProc, nil)
 
 	t.Run("adds new variables", func(t *testing.T) {
@@ -1899,7 +1901,7 @@ func TestDefaultComposeExecutor_BuildCommandEnvironment(t *testing.T) {
 //   - Empty lines are filtered out
 func TestDefaultComposeExecutor_ParseLines(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{}
+	mockProc := &process.MockManager{}
 	executor := createTestComposeExecutor(cfg, mockProc, nil)
 
 	tests := []struct {
@@ -2086,7 +2088,7 @@ func TestMockComposeExecutor_CleanupCalls(t *testing.T) {
 //   - ProcessManager respects context
 func TestDefaultComposeExecutor_Up_ContextCancellation(t *testing.T) {
 	cfg := createTestComposeConfig("/test/stack")
-	mockProc := &MockProcessManager{
+	mockProc := &process.MockManager{
 		RunInDirFunc: func(ctx context.Context, dir string, env []string, name string, args ...string) (string, string, int, error) {
 			return "", "", 0, ctx.Err()
 		},
