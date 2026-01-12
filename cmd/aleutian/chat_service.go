@@ -231,6 +231,20 @@ type HTTPClient interface {
 	//   - error: Non-nil if the request failed or context was cancelled
 	Post(ctx context.Context, url, contentType string, body io.Reader) (*http.Response, error)
 
+	// PostWithHeaders sends an HTTP POST request with custom headers.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeout control
+	//   - url: The target URL
+	//   - contentType: The Content-Type header value (typically "application/json")
+	//   - body: The request body reader
+	//   - headers: Additional headers to set on the request
+	//
+	// Returns:
+	//   - *http.Response: The response (caller must close Body)
+	//   - error: Non-nil if the request failed or context was cancelled
+	PostWithHeaders(ctx context.Context, url, contentType string, body io.Reader, headers map[string]string) (*http.Response, error)
+
 	// Get sends an HTTP GET request with context support.
 	//
 	// Parameters:
@@ -261,6 +275,22 @@ func (c *defaultHTTPClient) Post(ctx context.Context, targetURL, contentType str
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", contentType)
+	return c.client.Do(req)
+}
+
+// PostWithHeaders implements HTTPClient.PostWithHeaders with custom headers.
+//
+// Creates an HTTP request with the given context and additional headers,
+// allowing cancellation, timeout propagation, and custom header injection.
+func (c *defaultHTTPClient) PostWithHeaders(ctx context.Context, targetURL, contentType string, body io.Reader, headers map[string]string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 	return c.client.Do(req)
 }
 

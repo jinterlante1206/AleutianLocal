@@ -33,6 +33,7 @@ var (
 	forecastHorizon  int
 	forecastContext  int
 	personalityLevel string // UX personality level (full/standard/minimal/machine)
+	verbosityLevel   int    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
 
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
@@ -323,6 +324,8 @@ func init() {
 	deployCmd.Flags().BoolVar(&forceBuild, "build", false, "Force rebuild of container images")
 	deployCmd.Flags().Bool("force-recreate", false,
 		"automatically recreates the podman machine if a drift is detected.")
+	deployCmd.Flags().Bool("fix-mounts", false,
+		"Fix mount configuration drift even if foreign containers are running (will stop them)")
 	deployCmd.Flags().StringVar(&forecastMode, "forecast-mode", "", "Forecast service mode: 'standalone' (local) or 'sapheneia' (external)")
 	deployCmd.Flags().Bool("skip-model-check", false, "Skip automatic model verification and pulling (for offline use)")
 	// --- Utility Commands ---
@@ -349,7 +352,8 @@ func init() {
 	chatCmd.Flags().IntVar(&budgetTokens, "budget", 2048, "Token budget for thinking (default 2048)")
 	chatCmd.Flags().BoolVar(&noRag, "no-rag", false, "Disable RAG and use direct LLM chat")
 	chatCmd.Flags().BoolVar(&unrestrictedMode, "unrestricted", false, "Allow LLM to answer when no relevant documents found (default: strict RAG mode)")
-	chatCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking", "RAG pipeline (standard, reranking, raptor, graph)")
+	chatCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking", "RAG pipeline (standard, reranking, raptor, graph, verified)")
+	chatCmd.Flags().IntVarP(&verbosityLevel, "verbosity", "V", 2, "Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (default: 2)")
 
 	rootCmd.AddCommand(traceCmd)
 

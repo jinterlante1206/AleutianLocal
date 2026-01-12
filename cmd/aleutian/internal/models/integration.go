@@ -942,7 +942,8 @@ func (m *DefaultModelManager) ensureModelWithFallbacks(ctx context.Context, mode
 		return ModelResult{}, err
 	}
 
-	ctx = m.applyTimeout(ctx, opts.Timeout)
+	ctx, cancel := m.applyTimeout(ctx, opts.Timeout)
+	defer cancel()
 
 	result, err := m.attemptEnsureWithRetry(ctx, normalizedModel, opts)
 	if err == nil {
@@ -954,13 +955,13 @@ func (m *DefaultModelManager) ensureModelWithFallbacks(ctx context.Context, mode
 }
 
 // applyTimeout creates a context with the appropriate timeout.
-func (m *DefaultModelManager) applyTimeout(ctx context.Context, optTimeout time.Duration) context.Context {
+// The caller MUST call the returned cancel function to avoid context leaks.
+func (m *DefaultModelManager) applyTimeout(ctx context.Context, optTimeout time.Duration) (context.Context, context.CancelFunc) {
 	timeout := m.defaultTimeout
 	if optTimeout > 0 {
 		timeout = optTimeout
 	}
-	ctx, _ = context.WithTimeout(ctx, timeout)
-	return ctx
+	return context.WithTimeout(ctx, timeout)
 }
 
 // tryFallbackModels attempts each fallback model sequentially.
@@ -1053,7 +1054,7 @@ func (m *DefaultModelManager) attemptEnsureOnce(ctx context.Context, model strin
 
 // logEnsureStart records the start of an ensure operation.
 func (m *DefaultModelManager) logEnsureStart(model string) {
-	m.auditLogger.LogModelPull(ModelAuditEvent{
+	_ = m.auditLogger.LogModelPull(ModelAuditEvent{
 		Action: "ensure_start",
 		Model:  model,
 	})
@@ -1090,7 +1091,7 @@ func (m *DefaultModelManager) verifyExistingModel(ctx context.Context, model str
 
 // logModelExists records that a model was found locally.
 func (m *DefaultModelManager) logModelExists(model string, digest string) {
-	m.auditLogger.LogModelPull(ModelAuditEvent{
+	_ = m.auditLogger.LogModelPull(ModelAuditEvent{
 		Action:  "ensure_exists",
 		Model:   model,
 		Success: true,
@@ -1127,7 +1128,7 @@ func (m *DefaultModelManager) executePull(ctx context.Context, model string) err
 
 // logPullFailed records a pull failure.
 func (m *DefaultModelManager) logPullFailed(model string, err error) {
-	m.auditLogger.LogModelPull(ModelAuditEvent{
+	_ = m.auditLogger.LogModelPull(ModelAuditEvent{
 		Action:       "pull_failed",
 		Model:        model,
 		Success:      false,
@@ -1163,7 +1164,7 @@ func (m *DefaultModelManager) buildPullResult(ctx context.Context, model string,
 
 // logPullComplete records a successful pull.
 func (m *DefaultModelManager) logPullComplete(model string, info *ModelInfo) {
-	m.auditLogger.LogModelPull(ModelAuditEvent{
+	_ = m.auditLogger.LogModelPull(ModelAuditEvent{
 		Action:     "pull_complete",
 		Model:      model,
 		Success:    true,
@@ -1281,7 +1282,7 @@ func (m *DefaultModelManager) executeVerification(ctx context.Context, model str
 
 // logVerification records the verification operation.
 func (m *DefaultModelManager) logVerification(model string, verified bool, digest string) {
-	m.auditLogger.LogModelVerify(ModelAuditEvent{
+	_ = m.auditLogger.LogModelVerify(ModelAuditEvent{
 		Action:  "verify",
 		Model:   model,
 		Success: verified,
@@ -1515,7 +1516,7 @@ func (m *DefaultModelManager) markModelPulling(model string, pulling bool) {
 
 // logPullStart records the start of a pull operation.
 func (m *DefaultModelManager) logPullStart(model string) {
-	m.auditLogger.LogModelPull(ModelAuditEvent{
+	_ = m.auditLogger.LogModelPull(ModelAuditEvent{
 		Action: "pull_start",
 		Model:  model,
 	})
@@ -1528,7 +1529,7 @@ func (m *DefaultModelManager) streamPullProgress(ctx context.Context, model stri
 		progressCh <- PullProgress{Status: "error", Error: err}
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		err := fmt.Errorf("pull failed with status %d", resp.StatusCode)
@@ -1610,7 +1611,7 @@ func (m *DefaultModelManager) finalizePull(model string, totalBytes int64, progr
 		Percent:   100,
 	}
 
-	m.auditLogger.LogModelPull(ModelAuditEvent{
+	_ = m.auditLogger.LogModelPull(ModelAuditEvent{
 		Action:     "pull_complete",
 		Model:      model,
 		Success:    true,
@@ -1686,7 +1687,7 @@ func (m *DefaultModelManager) checkModelAllowed(model string) error {
 
 // recordBlockedModel logs a blocked model request.
 func (m *DefaultModelManager) recordBlockedModel(model string, reason string) {
-	m.auditLogger.LogModelBlock(ModelAuditEvent{
+	_ = m.auditLogger.LogModelBlock(ModelAuditEvent{
 		Action:       "block",
 		Model:        model,
 		Success:      false,
@@ -1703,7 +1704,7 @@ func (m *DefaultModelManager) pullModelWithoutProgress(ctx context.Context, mode
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -1733,7 +1734,7 @@ func (m *DefaultModelManager) queryLocalModelsFromAPI(ctx context.Context) ([]Lo
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to list models: status %d", resp.StatusCode)

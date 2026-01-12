@@ -230,6 +230,7 @@ type RAGStreamingChatServiceConfig struct {
 	Personality ux.PersonalityLevel // Output styling (optional)
 	Timeout     time.Duration       // HTTP timeout (optional)
 	StrictMode  bool                // Strict RAG mode: only answer from docs (optional)
+	Verbosity   int                 // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (optional)
 }
 
 // DirectStreamingChatServiceConfig holds configuration for direct streaming chat service.
@@ -322,6 +323,7 @@ type ragStreamingChatService struct {
 	writer      io.Writer
 	personality ux.PersonalityLevel
 	strictMode  bool // Strict RAG mode: only answer from docs
+	verbosity   int  // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed
 	mu          sync.Mutex
 }
 
@@ -427,6 +429,11 @@ func NewRAGStreamingChatService(config RAGStreamingChatServiceConfig) StreamingC
 
 	parser := ux.NewSSEParser()
 
+	verbosity := config.Verbosity
+	if verbosity == 0 && config.Pipeline != "verified" {
+		verbosity = 2 // Default to detailed for verified pipeline
+	}
+
 	return &ragStreamingChatService{
 		client: &defaultHTTPClient{
 			client: &http.Client{Timeout: timeout},
@@ -439,6 +446,7 @@ func NewRAGStreamingChatService(config RAGStreamingChatServiceConfig) StreamingC
 		writer:      writer,
 		personality: personality,
 		strictMode:  config.StrictMode,
+		verbosity:   verbosity,
 	}
 }
 
@@ -484,6 +492,11 @@ func NewRAGStreamingChatServiceWithClient(client HTTPClient, config RAGStreaming
 
 	parser := ux.NewSSEParser()
 
+	verbosity := config.Verbosity
+	if verbosity == 0 && config.Pipeline != "verified" {
+		verbosity = 2 // Default to detailed for verified pipeline
+	}
+
 	return &ragStreamingChatService{
 		client:      client,
 		parser:      parser,
@@ -494,6 +507,7 @@ func NewRAGStreamingChatServiceWithClient(client HTTPClient, config RAGStreaming
 		writer:      writer,
 		personality: personality,
 		strictMode:  config.StrictMode,
+		verbosity:   verbosity,
 	}
 }
 
@@ -690,7 +704,11 @@ func (s *ragStreamingChatService) SendMessage(ctx context.Context, message strin
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		if err := Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}(resp.Body)
 
 	if err := s.validateResponse(requestID, resp); err != nil {
 		return nil, err
@@ -772,6 +790,8 @@ func (s *ragStreamingChatService) buildRAGRequest(requestID, message, sessionID 
 // # Description
 //
 // Marshals request body and sends POST to streaming endpoint.
+// Routes to verified endpoint when pipeline is "verified" and includes
+// X-Verbosity header for progress event filtering.
 //
 // # Inputs
 //
@@ -792,7 +812,13 @@ func (s *ragStreamingChatService) buildRAGRequest(requestID, message, sessionID 
 //
 // Caller will close response body.
 func (s *ragStreamingChatService) postRequest(ctx context.Context, requestID string, reqBody datatypes.ChatRAGRequest) (*http.Response, error) {
-	targetURL := fmt.Sprintf("%s/v1/chat/rag/stream", s.baseURL)
+	// Route to verified endpoint for verified pipeline
+	var targetURL string
+	if s.pipeline == "verified" {
+		targetURL = fmt.Sprintf("%s/v1/chat/rag/verified/stream", s.baseURL)
+	} else {
+		targetURL = fmt.Sprintf("%s/v1/chat/rag/stream", s.baseURL)
+	}
 
 	postBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -803,7 +829,9 @@ func (s *ragStreamingChatService) postRequest(ctx context.Context, requestID str
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := s.client.Post(ctx, targetURL, "application/json", bytes.NewBuffer(postBody))
+	resp, err := s.client.PostWithHeaders(ctx, targetURL, "application/json", bytes.NewBuffer(postBody), map[string]string{
+		"X-Verbosity": fmt.Sprintf("%d", s.verbosity),
+	})
 	if err != nil {
 		slog.Error("RAG streaming HTTP request failed",
 			"request_id", requestID,
@@ -841,7 +869,15 @@ func (s *ragStreamingChatService) postRequest(ctx context.Context, requestID str
 // Response body is readable.
 func (s *ragStreamingChatService) validateResponse(requestID string, resp *http.Response) error {
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			slog.Error("RAG streaming server returned error (failed to read body)",
+				"request_id", requestID,
+				"status_code", resp.StatusCode,
+				"read_error", err,
+			)
+			return fmt.Errorf("server error (%d): failed to read response body", resp.StatusCode)
+		}
 		slog.Error("RAG streaming server returned error",
 			"request_id", requestID,
 			"status_code", resp.StatusCode,
@@ -1157,10 +1193,22 @@ func (s *directStreamingChatService) executeStreamingRequest(ctx context.Context
 		)
 		return nil, fmt.Errorf("http post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			slog.Error("direct streaming server returned error (failed to read body)",
+				"request_id", requestID,
+				"status_code", resp.StatusCode,
+				"read_error", err,
+			)
+			return nil, fmt.Errorf("server error (%d): failed to read response body", resp.StatusCode)
+		}
 		slog.Error("direct streaming server returned error",
 			"request_id", requestID,
 			"status_code", resp.StatusCode,
@@ -1414,7 +1462,11 @@ func (s *directStreamingChatService) LoadSessionHistory(ctx context.Context, ses
 		)
 		return 0, fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("session history request failed",

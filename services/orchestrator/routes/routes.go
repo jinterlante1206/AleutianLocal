@@ -83,8 +83,9 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		// Vector DB-dependent routes (requires Weaviate client)
 		if client != nil {
 			v1.GET("/chat/ws", handlers.HandleChatWebSocket(client, globalLLMClient, policyEngine))
-			v1.POST("/chat/rag", chatHandler.HandleChatRAG)                   // Conversational RAG (default for CLI)
-			v1.POST("/chat/rag/stream", streamingHandler.HandleChatRAGStream) // Streaming RAG
+			v1.POST("/chat/rag", chatHandler.HandleChatRAG)                                // Conversational RAG (default for CLI)
+			v1.POST("/chat/rag/stream", streamingHandler.HandleChatRAGStream)              // Streaming RAG
+			v1.POST("/chat/rag/verified/stream", streamingHandler.HandleVerifiedRAGStream) // Verified pipeline streaming
 			v1.POST("/documents", handlers.CreateDocument(client))
 			v1.GET("/documents", handlers.ListDocuments(client))
 			v1.DELETE("/document", handlers.DeleteBySource(client))

@@ -554,6 +554,11 @@ func (m *runnerMockHTTPClient) Post(ctx context.Context, url, contentType string
 	}, nil
 }
 
+func (m *runnerMockHTTPClient) PostWithHeaders(ctx context.Context, url, contentType string, body io.Reader, _ map[string]string) (*http.Response, error) {
+	// Delegate to Post for mock simplicity
+	return m.Post(ctx, url, contentType, body)
+}
+
 func (m *runnerMockHTTPClient) Get(ctx context.Context, url string) (*http.Response, error) {
 	if m.getFunc != nil {
 		return m.getFunc(ctx, url)

@@ -149,6 +149,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		Writer:      os.Stdout,
 		Personality: personality,
 		StrictMode:  config.StrictMode,
+		Verbosity:   config.Verbosity,
 	})
 
 	ui := ux.NewChatUI()
@@ -530,7 +531,7 @@ func (r *RAGChatRunner) handleShutdown(ctx context.Context) error {
 // # Assumptions
 //
 //   - Session data already persisted server-side
-func (r *RAGChatRunner) saveConversationState(ctx context.Context) error {
+func (r *RAGChatRunner) saveConversationState(_ context.Context) error {
 	sessionID := r.service.GetSessionID()
 	if sessionID != "" {
 		slog.Info("conversation state preserved",
