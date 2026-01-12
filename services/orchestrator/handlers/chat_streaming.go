@@ -8,14 +8,74 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
+// =============================================================================
+// STREAMING CHAT MODULE - PIPELINE FEATURE PARITY
+// =============================================================================
+//
+// This module implements SSE streaming for multiple RAG pipelines. When adding
+// new pipelines (REFRAG, GraphRAG, etc.), ensure feature parity with the
+// reference implementation (HandleChatRAGStream).
+//
+// # Feature Parity Matrix
+//
+// | Feature                    | Direct | RAG (reranking) | Verified | REFRAG | GraphRAG |
+// |----------------------------|--------|-----------------|----------|--------|----------|
+// | SSE streaming              | ✅     | ✅              | ✅       | TODO   | TODO     |
+// | Session ID in done event   | ✅     | ✅              | ✅       | TODO   | TODO     |
+// | Turn persistence           | ❌ (1) | ✅              | ✅       | TODO   | TODO     |
+// | Session history loading    | ❌ (1) | ✅              | ❌ (2)   | TODO   | TODO     |
+// | History in LLM prompt      | ❌ (1) | ✅              | ❌ (2)   | TODO   | TODO     |
+// | PII audit (outbound)       | ✅     | ✅              | ✅       | TODO   | TODO     |
+// | PII audit (RAG context)    | ❌     | ✅              | ❌ (3)   | TODO   | TODO     |
+// | PII audit (answer)         | ❌     | ✅              | ✅       | TODO   | TODO     |
+// | Heartbeat keepalive        | ✅     | ✅              | ❌ (4)   | TODO   | TODO     |
+// | Hash chain integrity       | ❌     | ✅              | ✅ (5)   | TODO   | TODO     |
+// | Debate log persistence     | N/A    | N/A             | ❌ (6)   | N/A    | N/A      |
+//
+// # Notes
+//
+// (1) Direct chat intentionally doesn't persist turns - no session context.
+// (2) Verified pipeline proxies to Python which builds prompts internally.
+//     To support --resume with conversation context:
+//     a) Go must load history from Weaviate (loadSessionHistory)
+//     b) Go must pass history to Python in request body
+//     c) Python must include history in Optimist/Skeptic/Refiner prompts
+// (3) Verified does RAG context audit in Python, not Go.
+// (4) Verified streams from Python which handles its own timeouts.
+// (5) Verified uses simple SHA256 of final answer (not incremental token hashing).
+// (6) Skeptic/Optimist debate details are logged in Python but not persisted
+//     to Weaviate. Future: expose via `session verify --full` command.
+//
+// # Adding a New Pipeline
+//
+// When implementing a new pipeline handler (e.g., HandleREFRAGStream):
+//
+// 1. Copy the structure from HandleChatRAGStream (reference implementation)
+// 2. Implement all ✅ features from the matrix above
+// 3. Add session history loading (Step 2.5 in HandleChatRAGStream)
+// 4. Add turn persistence (Step 10.5-10.6 in HandleChatRAGStream)
+// 5. Update the feature matrix in this comment
+// 6. Add tests for the new handler
+//
+// # Related Files
+//
+// - services/rag_engine/pipelines/*.py - Python pipeline implementations
+// - services/orchestrator/services/chat_rag.go - RAG service client
+// - cmd/aleutian/commands/chat.go - CLI chat command
+//
+// =============================================================================
+
 package handlers
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -243,6 +303,44 @@ type StreamingChatHandler interface {
 	//   - Client supports SSE
 	//   - RAG service is available
 	HandleChatRAGStream(c *gin.Context)
+
+	// HandleVerifiedRAGStream processes verified RAG requests with progress streaming.
+	//
+	// # Description
+	//
+	// Handles POST /v1/chat/rag/verified/stream requests. Runs the skeptic/optimist
+	// debate and streams progress events in real-time via SSE. This enables users
+	// to see the verification process as it happens.
+	//
+	// # Inputs
+	//
+	//   - c: Gin context containing the HTTP request.
+	//
+	// # Outputs
+	//
+	// SSE stream with events:
+	//   - progress: Debate progress updates (retrieval, draft, skeptic audit, etc.)
+	//   - answer: Final verified answer with sources
+	//   - done: Stream completion
+	//   - error: Error events (if failure occurs)
+	//
+	// # Verbosity Levels
+	//
+	// The CLI controls verbosity via the "X-Verbosity" header:
+	//   - 0: Silent (no progress events forwarded)
+	//   - 1: Summary (message only)
+	//   - 2: Detailed (message + details + OTel trace link)
+	//
+	// # Limitations
+	//
+	//   - Requires Python RAG engine's /rag/verified/stream endpoint
+	//   - Client must support SSE
+	//
+	// # Assumptions
+	//
+	//   - RAG engine is available and running
+	//   - Client supports SSE
+	HandleVerifiedRAGStream(c *gin.Context)
 }
 
 // =============================================================================
@@ -1014,6 +1112,814 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 
 	success = true
 	span.SetStatus(codes.Ok, "stream completed successfully")
+}
+
+// HandleVerifiedRAGStream processes verified RAG requests with progress streaming.
+//
+// # Description
+//
+// Handles POST /v1/chat/rag/verified/stream requests. This method:
+//  1. Parses and validates the request
+//  2. Calls Python's /rag/verified/stream endpoint
+//  3. Reads SSE events from Python
+//  4. Applies verbosity filtering based on X-Verbosity header
+//  5. Forwards filtered events to the client
+//
+// # Security
+//
+// - Outbound (user → system): Scanned and blocked if contains sensitive data
+// - Inbound (system → user): Allowed, logged via hash chain for async audit
+//
+// # Inputs
+//
+//   - c: Gin context containing the HTTP request
+//
+// Request Body (datatypes.ChatRAGRequest):
+//   - message: Required. User's query.
+//   - session_id: Optional. Existing session to continue.
+//   - temperature_overrides: Optional. Per-role temperature overrides.
+//   - strictness: Optional. "strict" or "balanced".
+//
+// Request Headers:
+//   - X-Verbosity: Optional. Controls output detail (0, 1, or 2). Default: 2.
+//
+// # Outputs
+//
+// SSE Events:
+//   - event: progress, data: {"event_type":"...", "message":"...", ...}
+//   - event: answer, data: {"answer":"...", "sources":[...], "is_verified":...}
+//   - event: done, data: {}
+//   - event: error, data: {"error":"..."}
+//
+// HTTP Status (before streaming starts):
+//   - 400 Bad Request: Invalid request body
+//   - 403 Forbidden: Policy violation detected
+//   - 500 Internal Server Error: SSE setup failure
+//   - 503 Service Unavailable: RAG engine not reachable
+//
+// # Examples
+//
+// Request:
+//
+//	POST /v1/chat/rag/verified/stream
+//	Accept: text/event-stream
+//	X-Verbosity: 2
+//	{"message": "What is Detroit known for?"}
+//
+// Response (SSE stream):
+//
+//	event: progress
+//	data: {"event_type":"retrieval_start","message":"Retrieving documents..."}
+//
+//	event: progress
+//	data: {"event_type":"skeptic_audit_complete","message":"✓ All claims verified!"}
+//
+//	event: answer
+//	data: {"answer":"Detroit is known for...","sources":[...],"is_verified":true}
+//
+//	event: done
+//	data: {}
+//
+// # Limitations
+//
+//   - Requires Python RAG engine to be running
+//   - Verbosity filtering happens at this layer, not in Python
+//
+// # Assumptions
+//
+//   - Python /rag/verified/stream endpoint is available
+//   - Client supports SSE
+func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
+	startTime := time.Now()
+	endpoint := observability.EndpointRAGStream // Reuse existing metric endpoint
+
+	ctx, span := h.tracer.Start(c.Request.Context(), "HandleVerifiedRAGStream")
+	defer span.End()
+
+	// Track active stream (for metrics)
+	if m := observability.DefaultMetrics; m != nil {
+		m.StreamStarted(endpoint)
+		defer m.StreamEnded(endpoint)
+	}
+
+	success := false
+	defer func() {
+		if m := observability.DefaultMetrics; m != nil {
+			duration := time.Since(startTime).Seconds()
+			m.RecordRequest(endpoint, success)
+			m.RecordStreamDuration(endpoint, duration, success)
+		}
+	}()
+
+	// Step 1: Parse request body
+	var req datatypes.ChatRAGRequest
+	if err := c.BindJSON(&req); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid request body")
+		slog.Error("Failed to parse verified streaming request", "error", err)
+		if m := observability.DefaultMetrics; m != nil {
+			m.RecordError(endpoint, observability.ErrorCodeValidation)
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	// Ensure pipeline is set to "verified"
+	req.Pipeline = "verified"
+
+	// Add request attributes to span
+	span.SetAttributes(
+		attribute.String("request.id", req.Id),
+		attribute.String("request.pipeline", req.Pipeline),
+		attribute.String("request.session_id", req.SessionId),
+	)
+
+	// Step 2: Scan user message for policy violations (OUTBOUND protection)
+	findings := h.policyEngine.ScanFileContent(req.Message)
+	if len(findings) > 0 {
+		span.SetAttributes(attribute.Int("policy.findings_count", len(findings)))
+		slog.Warn("Blocked verified streaming: user attempting to send sensitive data",
+			"findings_count", len(findings),
+			"requestId", req.Id,
+		)
+		if m := observability.DefaultMetrics; m != nil {
+			m.RecordError(endpoint, observability.ErrorCodePolicyViolation)
+		}
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":    "Policy Violation: Message contains sensitive data.",
+			"findings": findings,
+		})
+		return
+	}
+
+	// Step 3: Get verbosity level from header (default: 2 for development)
+	verbosity := h.getVerbosityLevel(c)
+	span.SetAttributes(attribute.Int("verbosity", verbosity))
+
+	// Step 4: Set SSE headers and create writer
+	SetSSEHeaders(c.Writer)
+	sseWriter, err := NewSSEWriter(c.Writer)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "SSE setup failed")
+		slog.Error("Failed to create SSE writer",
+			"error", err,
+			"requestId", req.Id,
+		)
+		if m := observability.DefaultMetrics; m != nil {
+			m.RecordError(endpoint, observability.ErrorCodeInternal)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Streaming not supported"})
+		return
+	}
+
+	// Step 5: Determine session ID (from request or generate from Id)
+	sessionID := req.SessionId
+	if sessionID == "" {
+		sessionID = req.Id
+	}
+
+	// Step 6: Call Python's verified streaming endpoint
+	result, err := h.streamFromVerifiedPipeline(ctx, &req, sseWriter, verbosity, sessionID, span)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Verified streaming failed")
+		slog.Error("Verified streaming failed",
+			"error", err,
+			"requestId", req.Id,
+		)
+		if m := observability.DefaultMetrics; m != nil {
+			m.RecordError(endpoint, observability.ErrorCodeRAGError)
+		}
+		// Error already sent via SSE in streamFromVerifiedPipeline
+		return
+	}
+
+	// Step 7: Persist conversation turn with hash chain
+	// This enables session verify to show turn counts and verify integrity
+	// NOTE: Use a detached context for persistence because the HTTP request
+	// context may be canceled after the stream completes (client disconnects).
+	if result != nil && result.Answer != "" {
+		// Create a detached context with timeout for persistence
+		// This ensures persistence completes even if client disconnects
+		persistCtx, persistCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer persistCancel()
+
+		// Compute hash of the answer for integrity verification
+		answerHash := fmt.Sprintf("%x", sha256.Sum256([]byte(result.Answer)))
+
+		// Audit answer for PII before persistence
+		shouldBlock, piiFindings := h.auditAnswerForPII(sessionID, result.Answer)
+		span.SetAttributes(attribute.Int("pii.findings_count", len(piiFindings)))
+
+		if shouldBlock {
+			slog.Warn("turn persistence blocked due to PII in answer",
+				"requestId", req.Id,
+				"sessionId", sessionID,
+				"findingsCount", len(piiFindings),
+			)
+		} else {
+			// Get current turn count to determine next turn number
+			currentTurnCount, countErr := h.getTurnCount(persistCtx, sessionID)
+			if countErr != nil {
+				slog.Warn("failed to get turn count, using turn number 1",
+					"requestId", req.Id,
+					"sessionId", sessionID,
+					"error", countErr,
+				)
+				currentTurnCount = 0
+			}
+			turnNumber := currentTurnCount + 1
+
+			// Persist the conversation turn
+			persistErr := h.persistConversationTurn(
+				persistCtx,
+				sessionID,
+				turnNumber,
+				req.Message, // The user's question
+				result.Answer,
+				answerHash,
+			)
+			if persistErr != nil {
+				slog.Error("failed to persist conversation turn",
+					"requestId", req.Id,
+					"sessionId", sessionID,
+					"turnNumber", turnNumber,
+					"error", persistErr,
+				)
+			} else {
+				span.SetAttributes(
+					attribute.Int("turn.number", turnNumber),
+					attribute.String("turn.hash", answerHash[:16]+"..."), // Truncate for logging
+					attribute.Bool("turn.is_verified", result.IsVerified),
+				)
+				slog.Info("verified conversation turn persisted successfully",
+					"requestId", req.Id,
+					"sessionId", sessionID,
+					"turnNumber", turnNumber,
+					"isVerified", result.IsVerified,
+				)
+			}
+		}
+	}
+
+	success = true
+	span.SetStatus(codes.Ok, "verified stream completed successfully")
+}
+
+// getVerbosityLevel extracts verbosity from the X-Verbosity header.
+//
+// # Description
+//
+// Parses the X-Verbosity header to determine output detail level.
+// Returns 2 (detailed) if header is missing or invalid.
+//
+// # Inputs
+//
+//   - c: Gin context containing the request headers.
+//
+// # Outputs
+//
+//   - int: Verbosity level (0=silent, 1=summary, 2=detailed).
+//
+// # Examples
+//
+//	verbosity := h.getVerbosityLevel(c)
+//	if verbosity >= 2 {
+//	    // Include detailed information
+//	}
+//
+// # Limitations
+//
+//   - Defaults to 2 if parsing fails.
+//
+// # Assumptions
+//
+//   - Valid values are 0, 1, or 2.
+func (h *streamingChatHandler) getVerbosityLevel(c *gin.Context) int {
+	header := c.GetHeader("X-Verbosity")
+	if header == "" {
+		return 2 // Default to detailed for development
+	}
+
+	switch header {
+	case "0":
+		return 0
+	case "1":
+		return 1
+	case "2":
+		return 2
+	default:
+		slog.Debug("Invalid X-Verbosity header, using default",
+			"header", header,
+		)
+		return 2
+	}
+}
+
+// streamFromVerifiedPipeline calls Python's /rag/verified/stream and forwards events.
+//
+// # Description
+//
+// Makes an HTTP request to the Python RAG engine's verified streaming endpoint,
+// reads SSE events from the response, applies verbosity filtering, and forwards
+// appropriate events to the client. Returns the captured answer for persistence.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation.
+//   - req: The verified RAG request.
+//   - writer: SSE writer for output.
+//   - verbosity: Output detail level (0=silent, 1=summary, 2=detailed).
+//   - sessionID: The session ID for the conversation (for done event).
+//   - span: OTel span for tracing.
+//
+// # Outputs
+//
+//   - *verifiedStreamResult: Captured answer and verification status.
+//   - error: Non-nil if streaming failed.
+//
+// # Examples
+//
+//	result, err := h.streamFromVerifiedPipeline(ctx, req, writer, 2, sessionID, span)
+//
+// # Limitations
+//
+//   - Requires RAG_ENGINE_URL environment variable.
+//   - Python endpoint must be available.
+//
+// # Assumptions
+//
+//   - Python endpoint returns SSE with progress, answer, error, and done events.
+func (h *streamingChatHandler) streamFromVerifiedPipeline(
+	ctx context.Context,
+	req *datatypes.ChatRAGRequest,
+	writer SSEWriter,
+	verbosity int,
+	sessionID string,
+	span trace.Span,
+) (*verifiedStreamResult, error) {
+	// Get RAG engine URL
+	ragEngineURL := os.Getenv("RAG_ENGINE_URL")
+	if ragEngineURL == "" {
+		ragEngineURL = "http://localhost:8081"
+	}
+	streamURL := ragEngineURL + "/rag/verified/stream"
+
+	// Build request body
+	requestBody := h.buildVerifiedStreamRequest(req)
+	reqJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		_ = writer.WriteError("Failed to prepare request")
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, streamURL, bytes.NewReader(reqJSON))
+	if err != nil {
+		_ = writer.WriteError("Failed to create request")
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	// Make request with longer timeout for LLM calls
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		_ = writer.WriteError("Failed to connect to RAG engine")
+		return nil, fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		_ = writer.WriteError("RAG engine returned an error")
+		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	// Process SSE stream from Python
+	return h.processVerifiedSSEStream(ctx, resp.Body, writer, verbosity, sessionID, span)
+}
+
+// buildVerifiedStreamRequest constructs the request body for Python's endpoint.
+//
+// # Description
+//
+// Builds the JSON request body for the /rag/verified/stream endpoint,
+// including query, session_id, strict_mode, and temperature_overrides.
+//
+// # Inputs
+//
+//   - req: The ChatRAGRequest from the client.
+//
+// # Outputs
+//
+//   - map[string]interface{}: Request body for Python endpoint.
+//
+// # Limitations
+//
+//   - Only includes non-nil temperature overrides.
+//
+// # Assumptions
+//
+//   - Python endpoint accepts the same structure as VerifiedRAGRequest.
+func (h *streamingChatHandler) buildVerifiedStreamRequest(req *datatypes.ChatRAGRequest) map[string]interface{} {
+	body := map[string]interface{}{
+		"query":       req.Message,
+		"session_id":  req.SessionId,
+		"strict_mode": req.StrictMode,
+	}
+
+	// Add temperature overrides if provided
+	if req.TemperatureOverrides != nil {
+		tempOverrides := req.TemperatureOverrides.ToMap()
+		if tempOverrides != nil {
+			body["temperature_overrides"] = tempOverrides
+		}
+	}
+
+	return body
+}
+
+// processVerifiedSSEStream reads and forwards SSE events from Python.
+//
+// # Description
+//
+// Reads Server-Sent Events from the Python response, parses them,
+// applies verbosity filtering, and forwards to the client writer.
+// Captures the answer text for turn persistence.
+//
+// # SSE Event Format
+//
+// Events from Python:
+//   - event: progress, data: {"event_type":"...", "message":"...", ...}
+//   - event: answer, data: {"answer":"...", "sources":[...], "is_verified":...}
+//   - event: error, data: {"error":"..."}
+//   - event: done, data: {}
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation.
+//   - body: Response body from Python (SSE stream).
+//   - writer: SSE writer for output.
+//   - verbosity: Output detail level.
+//   - sessionID: The session ID for the conversation (for done event).
+//   - span: OTel span for tracing.
+//
+// # Outputs
+//
+//   - *verifiedStreamResult: Captured answer and verification status.
+//   - error: Non-nil if processing failed.
+//
+// # Limitations
+//
+//   - Expects well-formed SSE (event: and data: lines).
+//
+// # Assumptions
+//
+//   - Python sends events in standard SSE format.
+func (h *streamingChatHandler) processVerifiedSSEStream(
+	ctx context.Context,
+	body io.Reader,
+	writer SSEWriter,
+	verbosity int,
+	sessionID string,
+	span trace.Span,
+) (*verifiedStreamResult, error) {
+	scanner := bufio.NewScanner(body)
+	var currentEvent string
+	var currentData string
+
+	// Result struct to capture answer for persistence
+	result := &verifiedStreamResult{}
+
+	for scanner.Scan() {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		line := scanner.Text()
+
+		// Parse SSE format
+		if line == "" {
+			// Empty line = event complete, dispatch it
+			if currentEvent != "" && currentData != "" {
+				err := h.dispatchVerifiedEvent(currentEvent, currentData, writer, verbosity, sessionID, result, span)
+				if err != nil {
+					return nil, err
+				}
+			}
+			currentEvent = ""
+			currentData = ""
+			continue
+		}
+
+		if len(line) > 6 && line[:6] == "event:" {
+			currentEvent = line[6:]
+			// Trim leading space if present
+			if len(currentEvent) > 0 && currentEvent[0] == ' ' {
+				currentEvent = currentEvent[1:]
+			}
+		} else if len(line) > 5 && line[:5] == "data:" {
+			currentData = line[5:]
+			// Trim leading space if present
+			if len(currentData) > 0 && currentData[0] == ' ' {
+				currentData = currentData[1:]
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan SSE stream: %w", err)
+	}
+
+	return result, nil
+}
+
+// dispatchVerifiedEvent forwards a parsed SSE event with verbosity filtering.
+//
+// # Description
+//
+// Dispatches a single SSE event based on its type and the configured
+// verbosity level. Progress events are filtered; answer and done events
+// are always forwarded. When an answer event is processed, the answer
+// text and verification status are captured in the result struct.
+//
+// # Verbosity Filtering
+//
+//   - Level 0: No progress events, only answer and done
+//   - Level 1: Progress events with message only
+//   - Level 2: Progress events with full details + OTel trace link
+//
+// # Inputs
+//
+//   - eventType: SSE event type (progress, answer, error, done).
+//   - data: JSON-encoded event data.
+//   - writer: SSE writer for output.
+//   - verbosity: Output detail level.
+//   - sessionID: The session ID for the conversation (for done event).
+//   - result: Pointer to result struct for capturing answer (may be nil).
+//   - span: OTel span for tracing.
+//
+// # Outputs
+//
+//   - error: Non-nil if writing failed.
+//
+// # Limitations
+//
+//   - OTel trace link format is hardcoded to Jaeger.
+//
+// # Assumptions
+//
+//   - Event data is valid JSON.
+func (h *streamingChatHandler) dispatchVerifiedEvent(
+	eventType string,
+	data string,
+	writer SSEWriter,
+	verbosity int,
+	sessionID string,
+	result *verifiedStreamResult,
+	span trace.Span,
+) error {
+	switch eventType {
+	case "progress":
+		return h.handleProgressEvent(data, writer, verbosity, span)
+	case "answer":
+		answerText, isVerified, err := h.handleAnswerEvent(data, writer, span)
+		if err != nil {
+			return err
+		}
+		// Capture answer for persistence
+		if result != nil {
+			result.Answer = answerText
+			result.IsVerified = isVerified
+		}
+		return nil
+	case "error":
+		return h.handleErrorEvent(data, writer, span)
+	case "done":
+		return h.handleDoneEvent(writer, sessionID)
+	default:
+		slog.Debug("Unknown verified SSE event type", "type", eventType)
+		return nil
+	}
+}
+
+// handleProgressEvent processes a progress event with verbosity filtering.
+//
+// # Description
+//
+// Parses the progress event JSON and applies verbosity filtering:
+//   - Level 0: Skip all progress events
+//   - Level 1: Forward message only
+//   - Level 2: Forward full event with OTel trace link
+//
+// # Inputs
+//
+//   - data: JSON-encoded ProgressEvent.
+//   - writer: SSE writer for output.
+//   - verbosity: Output detail level.
+//   - span: OTel span for tracing.
+//
+// # Outputs
+//
+//   - error: Non-nil if writing failed.
+func (h *streamingChatHandler) handleProgressEvent(
+	data string,
+	writer SSEWriter,
+	verbosity int,
+	span trace.Span,
+) error {
+	// Skip progress events entirely at verbosity 0
+	if verbosity == 0 {
+		return nil
+	}
+
+	// Parse the progress event
+	var event datatypes.ProgressEvent
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		slog.Warn("Failed to parse progress event", "error", err, "data", data[:min(100, len(data))])
+		return nil // Don't fail on parse errors
+	}
+
+	// Record event in span
+	span.SetAttributes(
+		attribute.String("progress.event_type", string(event.EventType)),
+		attribute.Int("progress.attempt", event.Attempt),
+	)
+
+	if verbosity == 1 {
+		// Summary mode: just write the message as a status event
+		return writer.WriteStatus(event.Message)
+	}
+
+	// Verbosity 2: Full details
+	// Add OTel trace link if we have a trace ID
+	if event.TraceID != "" {
+		jaegerURL := h.getJaegerURL()
+		if jaegerURL != "" {
+			traceLink := fmt.Sprintf("  View trace: %s/trace/%s", jaegerURL, event.TraceID)
+			slog.Info("Verified pipeline trace available", "trace_id", event.TraceID, "trace_link", traceLink)
+		}
+	}
+
+	// Forward the full event as a progress status
+	// Include details based on event type
+	message := event.Message
+	if event.AuditDetails != nil && !event.AuditDetails.IsVerified {
+		if len(event.AuditDetails.Hallucinations) > 0 {
+			message += fmt.Sprintf("\n  Hallucinations: %v", event.AuditDetails.Hallucinations[:min(3, len(event.AuditDetails.Hallucinations))])
+		}
+	}
+	if event.RetrievalDetails != nil {
+		message += fmt.Sprintf("\n  Documents: %d, Sources: %v",
+			event.RetrievalDetails.DocumentCount,
+			event.RetrievalDetails.Sources[:min(3, len(event.RetrievalDetails.Sources))])
+	}
+
+	return writer.WriteStatus(message)
+}
+
+// handleAnswerEvent processes the final answer event.
+//
+// # Description
+//
+// Forwards the answer event to the client. Always forwarded regardless
+// of verbosity level. Also returns the answer text and verification status
+// for turn persistence.
+//
+// # Inputs
+//
+//   - data: JSON-encoded answer with answer, sources, and is_verified.
+//   - writer: SSE writer for output.
+//   - span: OTel span for tracing.
+//
+// # Outputs
+//
+//   - string: The answer text (for persistence).
+//   - bool: Whether the answer was verified.
+//   - error: Non-nil if writing failed.
+func (h *streamingChatHandler) handleAnswerEvent(
+	data string,
+	writer SSEWriter,
+	span trace.Span,
+) (string, bool, error) {
+	var answer datatypes.VerifiedStreamAnswer
+	if err := json.Unmarshal([]byte(data), &answer); err != nil {
+		slog.Warn("Failed to parse answer event", "error", err)
+		return "", false, writer.WriteError("Failed to parse answer")
+	}
+
+	span.SetAttributes(
+		attribute.Bool("answer.is_verified", answer.IsVerified),
+		attribute.Int("answer.length", len(answer.Answer)),
+	)
+
+	// Stream the answer as tokens (to maintain consistency with other streaming)
+	// For now, just emit the full answer as one token
+	if err := writer.WriteToken(answer.Answer); err != nil {
+		return "", false, err
+	}
+
+	// Emit sources if available
+	if len(answer.Sources) > 0 {
+		// Convert to SourceInfo format
+		sources := make([]datatypes.SourceInfo, 0, len(answer.Sources))
+		for _, s := range answer.Sources {
+			source := datatypes.SourceInfo{}
+			if src, ok := s["source"].(string); ok {
+				source.Source = src
+			}
+			if score, ok := s["score"].(float64); ok {
+				source.Score = score
+			}
+			sources = append(sources, source)
+		}
+		if err := writer.WriteSources(sources); err != nil {
+			slog.Warn("Failed to write sources", "error", err)
+		}
+	}
+
+	return answer.Answer, answer.IsVerified, nil
+}
+
+// handleErrorEvent processes an error event from Python.
+//
+// # Description
+//
+// Forwards error events to the client.
+//
+// # Inputs
+//
+//   - data: JSON-encoded error with error message.
+//   - writer: SSE writer for output.
+//   - span: OTel span for tracing.
+//
+// # Outputs
+//
+//   - error: Non-nil if writing failed.
+func (h *streamingChatHandler) handleErrorEvent(
+	data string,
+	writer SSEWriter,
+	span trace.Span,
+) error {
+	var errEvent datatypes.VerifiedStreamError
+	if err := json.Unmarshal([]byte(data), &errEvent); err != nil {
+		return writer.WriteError("Unknown error occurred")
+	}
+
+	span.RecordError(fmt.Errorf("%s", errEvent.Error))
+	return writer.WriteError(sanitizeErrorForClient(errEvent.Error))
+}
+
+// verifiedStreamResult holds the captured data from a verified stream.
+//
+// # Description
+//
+// This struct captures the answer and metadata from a verified pipeline
+// stream so it can be persisted after the stream completes.
+type verifiedStreamResult struct {
+	Answer     string // The final verified answer text
+	IsVerified bool   // Whether the answer passed verification
+}
+
+// handleDoneEvent processes the done event.
+//
+// # Description
+//
+// Signals stream completion with the session ID. The done event is always
+// forwarded and includes the session ID for client-side session management.
+//
+// # Inputs
+//
+//   - writer: SSE writer for output.
+//   - sessionID: The session ID for the conversation.
+//
+// # Outputs
+//
+//   - error: Non-nil if writing failed.
+func (h *streamingChatHandler) handleDoneEvent(writer SSEWriter, sessionID string) error {
+	return writer.WriteDone(sessionID)
+}
+
+// getJaegerURL returns the Jaeger UI URL for trace viewing.
+//
+// # Description
+//
+// Gets the Jaeger URL from environment variable or returns default.
+//
+// # Outputs
+//
+//   - string: Jaeger UI URL (empty if not configured).
+func (h *streamingChatHandler) getJaegerURL() string {
+	url := os.Getenv("JAEGER_UI_URL")
+	if url == "" {
+		return "http://localhost:16686"
+	}
+	return url
 }
 
 // =============================================================================

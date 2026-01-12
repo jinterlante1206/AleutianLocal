@@ -52,13 +52,14 @@ import os
 import json
 import weaviate
 import weaviate.classes as wvc
-from weaviate.exceptions import WeaviateQueryException
 
 logger = logging.getLogger(__name__)
 
 # --- Strict RAG Mode Constants ---
 # Relevance thresholds for strict mode filtering
-RERANK_SCORE_THRESHOLD = 0.5  # Minimum rerank score to consider relevant
+# Score is sigmoid-normalized (0-1 range). 0.5 = neutral, higher = more relevant.
+# 0.3 corresponds to raw logit of ~-0.85, accepting moderately relevant docs.
+RERANK_SCORE_THRESHOLD = 0.3  # Minimum rerank score to consider relevant
 DISTANCE_THRESHOLD = 0.8      # Maximum distance to consider relevant (lower is better)
 NO_RELEVANT_DOCS_MESSAGE = "No relevant documents found. Use `aleutian populate vectordb <file>` to add documents."
 
@@ -85,14 +86,14 @@ except ValueError:
     LLM_DEFAULT_TOP_P = 0.9
     logger.warning("Invalid LLM_DEFAULT_TOP_P, using 0.9")
 
-LLM_DEFAULT_STOP_SEQUENCES_JSON = os.getenv("LLM_DEFAULT_STOP_SEQUENCES", '["\\n"]')
+LLM_DEFAULT_STOP_SEQUENCES_JSON = os.getenv("LLM_DEFAULT_STOP_SEQUENCES", '[]')
 try:
     LLM_DEFAULT_STOP_SEQUENCES = json.loads(LLM_DEFAULT_STOP_SEQUENCES_JSON)
     if not isinstance(LLM_DEFAULT_STOP_SEQUENCES, list):
          raise ValueError("Must be a JSON list of strings")
 except (json.JSONDecodeError, ValueError) as e:
-     logger.warning(f"Invalid LLM_DEFAULT_STOP_SEQUENCES JSON: {e}. Using default ['\\n'].")
-     LLM_DEFAULT_STOP_SEQUENCES = ["\n"]
+     logger.warning(f"Invalid LLM_DEFAULT_STOP_SEQUENCES JSON: {e}. Using default [].")
+     LLM_DEFAULT_STOP_SEQUENCES = []
 try:
     LLM_DEFAULT_MAX_TOKENS = int(os.getenv("LLM_DEFAULT_MAX_TOKENS", "1024"))
 except ValueError:
@@ -108,14 +109,14 @@ try:
 except ValueError:
     LLM_DEFAULT_TOP_P = 0.9
     logger.warning("Invalid LLM_DEFAULT_TOP_P, using 0.9")
-LLM_DEFAULT_STOP_SEQUENCES_JSON = os.getenv("LLM_DEFAULT_STOP_SEQUENCES", '["\\n"]')
+LLM_DEFAULT_STOP_SEQUENCES_JSON = os.getenv("LLM_DEFAULT_STOP_SEQUENCES", '[]')
 try:
     LLM_DEFAULT_STOP_SEQUENCES = json.loads(LLM_DEFAULT_STOP_SEQUENCES_JSON)
     if not isinstance(LLM_DEFAULT_STOP_SEQUENCES, list):
          raise ValueError("Must be a JSON list of strings")
 except (json.JSONDecodeError, ValueError) as e:
-     logger.warning(f"Invalid LLM_DEFAULT_STOP_SEQUENCES JSON: {e}. Using default ['\\n'].")
-     LLM_DEFAULT_STOP_SEQUENCES = ["\n"]
+     logger.warning(f"Invalid LLM_DEFAULT_STOP_SEQUENCES JSON: {e}. Using default [].")
+     LLM_DEFAULT_STOP_SEQUENCES = []
 
 
 class BaseRAGPipeline:
@@ -352,7 +353,13 @@ class BaseRAGPipeline:
             raise RuntimeError(f"Embedding generation failed: {e}")
 
     # --- Moved from standard.py ---
-    async def _call_llm(self, prompt: str, model_override: str=None, **kwargs) -> str:
+    async def _call_llm(
+        self,
+        prompt: str,
+        model_override: str = None,
+        temperature: float = None,
+        **kwargs
+    ) -> str:
         """
         Calls the configured LLM backend with the final prompt.
 
@@ -377,6 +384,15 @@ class BaseRAGPipeline:
         ----------
         prompt : str
             The final, formatted prompt to be sent to the LLM.
+        model_override : str | None
+            Optional model name to use instead of the default configured model.
+            Useful for using different models for different pipeline stages
+            (e.g., a specialized skeptic model for verification).
+            If None, uses the default model for the configured backend.
+        temperature : float | None
+            Optional temperature override for this specific call.
+            Useful for role-specific temperatures (e.g., lower for skeptic,
+            higher for optimist). If None, uses the default from config.
 
         Returns
         -------
@@ -399,6 +415,11 @@ class BaseRAGPipeline:
         generation_params = self.default_llm_params.copy()
         generation_params.update(kwargs)
 
+        # Apply temperature override if provided (P4-2: role-specific temperatures)
+        if temperature is not None:
+            generation_params["temperature"] = temperature
+            logger.debug(f"Using temperature override: {temperature}")
+
         logger.debug(f"Calling LLM backend: {self.llm_backend}")
 
         # --- Backend Specific Logic with Params ---
@@ -413,11 +434,17 @@ class BaseRAGPipeline:
                 "content-type": "application/json"
             }
 
+            # Use model_override if provided, otherwise use default from env
+            default_claude_model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20240620")
+            effective_model = model_override if model_override else default_claude_model
+            if model_override:
+                logger.debug(f"Using model override: {model_override} (default: {default_claude_model})")
+
             # Note: For RAG, we treat the whole prompt as the user message for now.
             # To use "Prompt Caching" effectively, you would need to split
             # the 'context' out into a 'system' block here.
             payload = {
-                "model": os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20240620"),
+                "model": effective_model,
                 "max_tokens": self.default_llm_params["max_tokens"],
                 "messages": [{"role": "user", "content": prompt}]
             }
@@ -431,8 +458,12 @@ class BaseRAGPipeline:
                 payload["temperature"] = None  # Required for thinking
         elif self.llm_backend == "ollama":
             api_url = f"{self.llm_url}/api/generate"
+            # Use model_override if provided, otherwise use default ollama_model
+            effective_model = model_override if model_override else self.ollama_model
+            if model_override:
+                logger.debug(f"Using model override: {model_override} (default: {self.ollama_model})")
             payload = {
-                "model": self.ollama_model,
+                "model": effective_model,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
@@ -448,8 +479,12 @@ class BaseRAGPipeline:
                 raise ValueError("OpenAI API key secret not configured")
             api_url = f"{self.llm_url}/chat/completions"
             headers["Authorization"] = f"Bearer {self.openai_api_key}"
+            # Use model_override if provided, otherwise use default openai_model
+            effective_model = model_override if model_override else self.openai_model
+            if model_override:
+                logger.debug(f"Using model override: {model_override} (default: {self.openai_model})")
             payload = {
-                "model": self.openai_model,
+                "model": effective_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": self.default_llm_params["temperature"],
                 "max_tokens": self.default_llm_params["max_tokens"],
@@ -458,6 +493,10 @@ class BaseRAGPipeline:
             }
         elif self.llm_backend == "local":
             api_url = f"{self.llm_url}/completion"
+            # Local backend: model_override could specify a different model path/name
+            # Log if override is provided (less common for local)
+            if model_override:
+                logger.debug(f"Local backend model_override specified: {model_override}")
             payload = {
                 "prompt": prompt,
                 "n_predict": self.default_llm_params["max_tokens"],
@@ -466,6 +505,9 @@ class BaseRAGPipeline:
                 "top_p": self.default_llm_params["top_p"],
                 "stop": self.default_llm_params["stop"]
             }
+            # Add model to payload if override specified (llama.cpp server format)
+            if model_override:
+                payload["model"] = model_override
         else:
             raise ValueError(f"Unsupported LLM backend in RAG engine: {self.llm_backend}")
 
@@ -677,3 +719,84 @@ class BaseRAGPipeline:
             If a subclass fails to implement this method.
         """
         raise NotImplementedError("Subclasses must implement the 'run' method.")
+
+    async def retrieve_only(
+        self,
+        query: str,
+        session_id: str | None = None,
+        strict_mode: bool = True,
+        max_chunks: int = 5
+    ) -> tuple[list[dict], str, bool]:
+        """
+        Retrieval-only mode: returns documents without LLM generation.
+
+        What it Does:
+        Performs only the retrieval and reranking steps of the RAG pipeline,
+        returning the raw document content instead of generating an LLM answer.
+        This enables the Go orchestrator to stream responses while having
+        full access to the actual document content.
+
+        How it Fits:
+        This method is called by the `/rag/retrieve/{pipeline}` endpoint in
+        `server.py`. It supports the streaming integration where:
+        1. Python RAG retrieves and reranks documents (this method)
+        2. Go orchestrator receives raw document content
+        3. Go orchestrator streams LLM response with full document context
+
+        Why it Does This:
+        The original RAG flow had a "two-LLM" problem where Python generated
+        an answer, then Go used that answer as "context" for a second LLM.
+        The second LLM would judge Python's answer as insufficient, saying
+        "no documents found" even when sources were displayed. This method
+        fixes that by returning the actual documents.
+
+        Parameters
+        ----------
+        query : str
+            The user's query to retrieve documents for.
+        session_id : str | None
+            The current session ID for session-scoped document filtering.
+        strict_mode : bool
+            If True, only return documents above relevance threshold.
+            Default: True.
+        max_chunks : int
+            Maximum number of document chunks to return.
+            Default: 5 (matches top_k_final in reranking).
+
+        Returns
+        -------
+        tuple[list[dict], str, bool]
+            A tuple containing:
+            - chunks: List of document dictionaries with keys:
+                - content: The document text
+                - source: The source file/URL
+                - rerank_score: Optional relevance score
+            - context_text: Formatted string for LLM context with
+              "[Document N: source]" headers for clear citation
+            - has_relevant_docs: Boolean indicating if relevant documents
+              were found (respects strict_mode threshold)
+
+        Raises
+        ------
+        NotImplementedError
+            If a subclass does not implement this method.
+
+        Examples
+        --------
+        >>> pipeline = RerankingPipeline(weaviate_client, config)
+        >>> chunks, context, has_docs = await pipeline.retrieve_only(
+        ...     "What is George Washington known for?",
+        ...     session_id="abc123",
+        ...     strict_mode=True,
+        ...     max_chunks=5
+        ... )
+        >>> print(has_docs)
+        True
+        >>> print(context[:100])
+        [Document 1: washington_biography.md]
+        George Washington was the first President of the United...
+        """
+        raise NotImplementedError(
+            "Subclasses must implement 'retrieve_only' for retrieval-only mode. "
+            "Currently only RerankingPipeline supports this."
+        )

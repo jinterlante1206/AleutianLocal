@@ -54,6 +54,11 @@ func (m *mockHTTPClient) Post(ctx context.Context, url, contentType string, body
 	return m.response, m.err
 }
 
+func (m *mockHTTPClient) PostWithHeaders(ctx context.Context, url, contentType string, body io.Reader, _ map[string]string) (*http.Response, error) {
+	// Delegate to Post for mock simplicity
+	return m.Post(ctx, url, contentType, body)
+}
+
 func (m *mockHTTPClient) Get(ctx context.Context, url string) (*http.Response, error) {
 	m.lastGetURL = url
 	if m.GetFunc != nil {
@@ -373,13 +378,13 @@ func TestDirectChatService_SendMessage_RemovesMessageOnError(t *testing.T) {
 	ctx := context.Background()
 
 	// First message succeeds
-	service.SendMessage(ctx, "First")
+	_, _ = service.SendMessage(ctx, "First")
 
 	// Second message fails
-	service.SendMessage(ctx, "Failing")
+	_, _ = service.SendMessage(ctx, "Failing")
 
 	// Third message - should not contain "Failing" in history
-	service.SendMessage(ctx, "Third")
+	_, _ = service.SendMessage(ctx, "Third")
 
 	// The failing message should not be in history
 	if strings.Contains(mock.lastPostBody, "Failing") {

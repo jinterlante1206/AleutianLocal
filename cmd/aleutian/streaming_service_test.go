@@ -45,15 +45,21 @@ type mockStreamingHTTPClient struct {
 }
 
 // Post implements HTTPClient.Post for testing.
-func (m *mockStreamingHTTPClient) Post(ctx context.Context, url, contentType string, body io.Reader) (*http.Response, error) {
+func (m *mockStreamingHTTPClient) Post(_ context.Context, _, _ string, _ io.Reader) (*http.Response, error) {
 	if m.postError != nil {
 		return nil, m.postError
 	}
 	return m.postResponse, nil
 }
 
+// PostWithHeaders implements HTTPClient.PostWithHeaders for testing.
+func (m *mockStreamingHTTPClient) PostWithHeaders(ctx context.Context, url, contentType string, body io.Reader, _ map[string]string) (*http.Response, error) {
+	// Delegate to Post for mock simplicity
+	return m.Post(ctx, url, contentType, body)
+}
+
 // Get implements HTTPClient.Get for testing.
-func (m *mockStreamingHTTPClient) Get(ctx context.Context, url string) (*http.Response, error) {
+func (m *mockStreamingHTTPClient) Get(_ context.Context, _ string) (*http.Response, error) {
 	if m.getError != nil {
 		return nil, m.getError
 	}

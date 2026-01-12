@@ -1890,7 +1890,7 @@ func (s *DefaultStackManager) printStartupSummary(startTime time.Time, opts Star
 	if _, err := fmt.Fprintf(s.output, "  API:          http://localhost:8080\n"); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
-	if _, err := fmt.Fprintf(s.output, "  Weaviate:     http://localhost:8081\n"); err != nil {
+	if _, err := fmt.Fprintf(s.output, "  Weaviate:     http://localhost:12127\n"); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
 

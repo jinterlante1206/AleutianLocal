@@ -33,6 +33,7 @@ var (
 	forecastHorizon  int
 	forecastContext  int
 	personalityLevel string // UX personality level (full/standard/minimal/machine)
+	verbosityLevel   int    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
 
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
@@ -351,7 +352,8 @@ func init() {
 	chatCmd.Flags().IntVar(&budgetTokens, "budget", 2048, "Token budget for thinking (default 2048)")
 	chatCmd.Flags().BoolVar(&noRag, "no-rag", false, "Disable RAG and use direct LLM chat")
 	chatCmd.Flags().BoolVar(&unrestrictedMode, "unrestricted", false, "Allow LLM to answer when no relevant documents found (default: strict RAG mode)")
-	chatCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking", "RAG pipeline (standard, reranking, raptor, graph)")
+	chatCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking", "RAG pipeline (standard, reranking, raptor, graph, verified)")
+	chatCmd.Flags().IntVarP(&verbosityLevel, "verbosity", "V", 2, "Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (default: 2)")
 
 	rootCmd.AddCommand(traceCmd)
 

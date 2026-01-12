@@ -34,6 +34,7 @@ set via environment variables.
 """
 import asyncio
 import logging
+import math
 import os
 import torch
 from opentelemetry import trace
@@ -55,6 +56,31 @@ DEFAULT_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL", DEFAULT_RERANKER_MODEL)
 reranker_model = None
 reranker_device = None
+
+
+def _sigmoid(x: float) -> float:
+    """
+    Convert raw logit score to normalized probability in range [0, 1].
+
+    Cross-encoder models like MS-MARCO MiniLM return raw logits which can
+    range from approximately -10 to +10. This function normalizes them to
+    a 0-1 range using the sigmoid function for compatibility with threshold
+    comparisons.
+
+    Parameters
+    ----------
+    x : float
+        Raw logit score from cross-encoder.
+
+    Returns
+    -------
+    float
+        Normalized score in range [0, 1].
+    """
+    # Clamp to prevent overflow in exp()
+    x = max(-20.0, min(20.0, x))
+    return 1.0 / (1.0 + math.exp(-x))
+
 
 def _load_reranker_model():
     """
@@ -213,7 +239,11 @@ class RerankingPipeline(BaseRAGPipeline):
         reranked_docs_with_meta = [doc for score, doc in scored_docs[:self.top_k_final]]
         logger.info(f"Reranked from {len(initial_docs_with_meta)} down to {len(reranked_docs_with_meta)} documents.")
         for i, (score, doc) in enumerate(scored_docs[:self.top_k_final]):
-                reranked_docs_with_meta[i]["metadata"].rerank_score = score
+                # Normalize raw logit score to 0-1 range using sigmoid
+                # MS-MARCO cross-encoder returns logits, not probabilities
+                normalized_score = _sigmoid(score)
+                reranked_docs_with_meta[i]["metadata"].rerank_score = normalized_score
+                logger.debug(f"Doc {i}: raw_score={score:.4f} -> normalized={normalized_score:.4f}")
         return reranked_docs_with_meta
 
     async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
@@ -290,3 +320,122 @@ class RerankingPipeline(BaseRAGPipeline):
             ]
 
             return answer, sources  # Return both
+
+    async def retrieve_only(
+        self,
+        query: str,
+        session_id: str | None = None,
+        strict_mode: bool = True,
+        max_chunks: int = 5
+    ) -> tuple[list[dict], str, bool]:
+        """
+        Retrieval-only mode: returns documents without LLM generation.
+
+        This method performs the retrieval and reranking steps without
+        calling the LLM, returning raw document content that can be used
+        by the Go orchestrator for streaming.
+
+        Parameters
+        ----------
+        query : str
+            The user's query to retrieve documents for.
+        session_id : str | None
+            The current session ID for session-scoped document filtering.
+        strict_mode : bool
+            If True, only return documents above relevance threshold.
+        max_chunks : int
+            Maximum number of document chunks to return.
+
+        Returns
+        -------
+        tuple[list[dict], str, bool]
+            - chunks: List of document dicts with content, source, rerank_score
+            - context_text: Formatted string with "[Document N: source]" headers
+            - has_relevant_docs: Whether relevant documents were found
+        """
+        tracer = trace.get_tracer("aleutian.rag.reranking")
+        with tracer.start_as_current_span("reranking_pipeline.retrieve_only") as span:
+            span.set_attribute("query.length", len(query))
+            span.set_attribute("strict_mode", strict_mode)
+            span.set_attribute("max_chunks", max_chunks)
+            if session_id:
+                span.set_attribute("session.id", session_id)
+            logger.info(f"Retrieval-only mode started (strict_mode={strict_mode}, max_chunks={max_chunks})...")
+
+            # Step 1: Get query embedding
+            with tracer.start_as_current_span("get_embedding"):
+                query_vector = await self._get_embedding(query)
+
+            if not query_vector:
+                logger.warning("Empty query vector, returning no documents")
+                return [], "", False
+
+            # Step 2: Initial search
+            with tracer.start_as_current_span("initial_search"):
+                initial_docs_with_meta = await self._search_weaviate_initial(
+                    query_vector, session_id
+                )
+                span.set_attribute("retrieved.initial_count", len(initial_docs_with_meta))
+
+            if not initial_docs_with_meta:
+                logger.info("No documents found in initial search")
+                return [], "", False
+
+            # Step 3: Rerank documents
+            with tracer.start_as_current_span("rerank_docs"):
+                reranked_docs = await self._rerank_docs(query, initial_docs_with_meta)
+                span.set_attribute("retrieved.reranked_count", len(reranked_docs))
+
+            # Step 4: Apply strict mode filtering
+            has_relevant_docs = True
+            if strict_mode:
+                relevant_docs = [
+                    d for d in reranked_docs
+                    if d.get("metadata") and hasattr(d["metadata"], "rerank_score")
+                    and d["metadata"].rerank_score >= RERANK_SCORE_THRESHOLD
+                ]
+                span.set_attribute("retrieved.relevant_count", len(relevant_docs))
+                logger.info(
+                    f"Strict mode: {len(relevant_docs)} of {len(reranked_docs)} docs "
+                    f"above threshold {RERANK_SCORE_THRESHOLD}"
+                )
+
+                if not relevant_docs:
+                    has_relevant_docs = False
+                    # Still return the best docs even if below threshold,
+                    # but flag has_relevant_docs as False
+                    relevant_docs = reranked_docs
+
+                reranked_docs = relevant_docs
+
+            # Step 5: Limit to max_chunks
+            final_docs = reranked_docs[:max_chunks]
+            span.set_attribute("retrieved.final_count", len(final_docs))
+
+            # Step 6: Build chunks list for response
+            chunks = []
+            for doc in final_docs:
+                chunk = {
+                    "content": doc["properties"].get("content", ""),
+                    "source": doc["properties"].get("source", "Unknown"),
+                }
+                if doc.get("metadata") and hasattr(doc["metadata"], "rerank_score"):
+                    chunk["rerank_score"] = doc["metadata"].rerank_score
+                chunks.append(chunk)
+
+            # Step 7: Format context text with [Document N: source] headers
+            context_parts = []
+            for i, chunk in enumerate(chunks, 1):
+                source = chunk["source"]
+                content = chunk["content"]
+                context_parts.append(f"[Document {i}: {source}]\n{content}")
+
+            context_text = "\n\n".join(context_parts)
+            span.set_attribute("context.length", len(context_text))
+
+            logger.info(
+                f"Retrieval-only complete: {len(chunks)} chunks, "
+                f"has_relevant_docs={has_relevant_docs}"
+            )
+
+            return chunks, context_text, has_relevant_docs

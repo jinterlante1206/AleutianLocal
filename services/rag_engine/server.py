@@ -9,15 +9,14 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 """
+import asyncio
 import os
 import logging
 import time
 
 import weaviate
-import weaviate.classes as wvc
-from sympy import false
-from weaviate.connect import ConnectionParams
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
@@ -33,6 +32,7 @@ from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
 from pipelines import standard, reranking, agent, verified
 from datatypes.agent import AgentStepResponse, AgentStepRequest
+from datatypes.verified import ProgressEvent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,6 +97,31 @@ class SourceDocument(BaseModel):
 class RAGEngineResponse(BaseModel):
     answer: str
     sources: list[SourceDocument] = []
+
+
+# --- Retrieval-Only Models (for streaming integration) ---
+
+class RetrievalChunk(BaseModel):
+    """A single document chunk returned from retrieval-only mode."""
+    content: str
+    source: str
+    rerank_score: float | None = None
+
+
+class RetrievalRequest(BaseModel):
+    """Request for retrieval-only mode (no LLM generation)."""
+    query: str
+    session_id: str | None = None
+    strict_mode: bool = True
+    max_chunks: int = 5  # Default matches top_k_final in reranking
+
+
+class RetrievalResponse(BaseModel):
+    """Response from retrieval-only mode with document content for streaming."""
+    chunks: list[RetrievalChunk] = []
+    context_text: str  # Formatted for LLM: "[Document N: source]\n..."
+    has_relevant_docs: bool
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -163,6 +188,34 @@ class RAGEngineRequest(BaseModel):
     session_id: str | None = None
     strict_mode: bool = True  # Strict RAG: only answer from docs (no LLM fallback)
 
+
+class TemperatureOverrides(BaseModel):
+    """Per-request temperature overrides for verified pipeline roles."""
+    optimist: float | None = None  # Draft generation (0.0-2.0)
+    skeptic: float | None = None   # Skeptic audits (0.0-2.0)
+    refiner: float | None = None   # Refinement (0.0-2.0)
+
+
+class VerifiedRAGRequest(RAGEngineRequest):
+    """Extended request model for verified pipeline with configurability.
+
+    Supports request-level temperature overrides for fine-grained control
+    over the skeptic/optimist debate behavior.
+
+    Examples
+    --------
+    Basic request:
+        {"query": "What is X?"}
+
+    With temperature overrides:
+        {
+            "query": "What is X?",
+            "temperature_overrides": {"optimist": 0.7, "skeptic": 0.1}
+        }
+    """
+    temperature_overrides: TemperatureOverrides | None = None
+
+
 pipeline_config = {
     "embedding_url": EMBEDDING_SERVICE_URL,
     "embedding_model": EMBEDDING_MODEL,
@@ -202,6 +255,72 @@ async def run_reranking_rag(request: RAGEngineRequest):
     except Exception as e:
         logger.error(f"Error in reranking RAG pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/rag/retrieve/{pipeline}", response_model=RetrievalResponse)
+async def retrieve_documents(pipeline: str, request: RetrievalRequest):
+    """
+    Retrieval-only mode: returns document content without LLM generation.
+
+    This endpoint supports streaming integration where:
+    1. Python RAG retrieves and reranks documents
+    2. Go orchestrator receives raw document content
+    3. Go orchestrator streams LLM response with full document context
+
+    Args:
+        pipeline: Pipeline to use for retrieval (currently only "reranking" supported)
+        request: Query and retrieval parameters
+
+    Returns:
+        RetrievalResponse with document chunks and formatted context text
+    """
+    rag_request_counter.add(1, {"pipeline": f"retrieve_{pipeline}"})
+    logger.info(f"Retrieval-only mode ({pipeline}) for query: {request.query[:50]}...")
+
+    if not weaviate_client or not weaviate_client.is_connected():
+        raise HTTPException(status_code=503, detail="Weaviate client not connected")
+
+    # Supported pipelines for retrieval-only mode
+    supported_retrieve_pipelines = {"reranking", "verified"}
+    if pipeline not in supported_retrieve_pipelines:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Retrieval-only mode not supported for pipeline: {pipeline}. Use one of: {', '.join(sorted(supported_retrieve_pipelines))}"
+        )
+
+    try:
+        # Select the appropriate pipeline
+        if pipeline == "verified":
+            rag_pipeline = verified.VerifiedRAGPipeline(weaviate_client, pipeline_config)
+        else:
+            rag_pipeline = reranking.RerankingPipeline(weaviate_client, pipeline_config)
+
+        chunks, context_text, has_relevant = await rag_pipeline.retrieve_only(
+            request.query,
+            request.session_id,
+            request.strict_mode,
+            request.max_chunks
+        )
+
+        return RetrievalResponse(
+            chunks=[
+                RetrievalChunk(
+                    content=chunk["content"],
+                    source=chunk["source"],
+                    rerank_score=chunk.get("rerank_score")
+                )
+                for chunk in chunks
+            ],
+            context_text=context_text,
+            has_relevant_docs=has_relevant
+        )
+    except NotImplementedError:
+        logger.warning(f"retrieve_only not implemented for pipeline: {pipeline}")
+        raise HTTPException(status_code=501, detail=f"retrieve_only not implemented for {pipeline}")
+    except Exception as e:
+        logger.error(f"Error in retrieval-only mode: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 #
 # @app.post("/rag/raptor", response_model=RAGEngineResponse)
@@ -245,7 +364,32 @@ async def run_reranking_rag(request: RAGEngineRequest):
 
 
 @app.post("/rag/verified", response_model=RAGEngineResponse)
-async def run_verified_rag(request: RAGEngineRequest):
+async def run_verified_rag(request: VerifiedRAGRequest):
+    """Execute the verified RAG pipeline with skeptic/optimist debate.
+
+    Supports request-level temperature overrides for fine-grained control.
+
+    Request Body
+    ------------
+    query : str
+        The user's question to answer.
+    session_id : str, optional
+        Session ID for session-scoped document filtering.
+    strict_mode : bool, default=True
+        If True, only answer from documents (no LLM fallback).
+    temperature_overrides : dict, optional
+        Per-role temperature overrides:
+        - optimist: float (0.0-2.0) for draft generation
+        - skeptic: float (0.0-2.0) for audits
+        - refiner: float (0.0-2.0) for refinement
+
+    Example
+    -------
+    curl -X POST /rag/verified -d '{
+        "query": "What is George Washington known for?",
+        "temperature_overrides": {"optimist": 0.7, "skeptic": 0.1}
+    }'
+    """
     rag_request_counter.add(1, {"pipeline": "verified"})
     logger.info(f"Running Verified RAG (Skeptic Mode) for query: {request.query[:50]}...")
     if not weaviate_client or not weaviate_client.is_connected():
@@ -254,13 +398,197 @@ async def run_verified_rag(request: RAGEngineRequest):
         # Initialize the Verified pipeline
         pipeline = verified.VerifiedRAGPipeline(weaviate_client, pipeline_config)
 
-        # Run it
-        answer, source_docs = await pipeline.run(request.query, request.session_id, request.strict_mode)
+        # Build temperature overrides dict if provided
+        temp_overrides = None
+        if request.temperature_overrides:
+            temp_overrides = {}
+            if request.temperature_overrides.optimist is not None:
+                temp_overrides["optimist"] = request.temperature_overrides.optimist
+            if request.temperature_overrides.skeptic is not None:
+                temp_overrides["skeptic"] = request.temperature_overrides.skeptic
+            if request.temperature_overrides.refiner is not None:
+                temp_overrides["refiner"] = request.temperature_overrides.refiner
+
+        # Run with optional temperature overrides
+        answer, source_docs = await pipeline.run(
+            request.query,
+            request.session_id,
+            request.strict_mode,
+            temperature_overrides=temp_overrides
+        )
 
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in Verified RAG pipeline: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/rag/verified/stream")
+async def run_verified_rag_streaming(request: VerifiedRAGRequest):
+    """
+    Execute verified RAG pipeline with real-time progress streaming via SSE.
+
+    # Description
+
+    This endpoint runs the skeptic/optimist debate and streams progress events
+    to the client in real-time using Server-Sent Events (SSE). This enables
+    users to see the verification process as it happens.
+
+    # Event Format
+
+    Events are streamed as SSE with the following format:
+    ```
+    event: progress
+    data: {"event_type": "skeptic_audit_start", "message": "...", ...}
+
+    event: answer
+    data: {"answer": "...", "sources": [...], "is_verified": true}
+
+    event: done
+    data: {}
+    ```
+
+    # Request Body
+
+    Same as `/rag/verified`:
+    - query: str - The user's question
+    - session_id: str, optional - Session ID for document filtering
+    - strict_mode: bool, default=True - Only answer from documents
+    - temperature_overrides: dict, optional - Per-role temperature overrides
+
+    # Response
+
+    SSE stream with progress events, then final answer, then done marker.
+
+    # Example
+
+    ```bash
+    curl -N -X POST http://localhost:8081/rag/verified/stream \\
+      -H "Content-Type: application/json" \\
+      -d '{"query": "What is Detroit known for?"}'
+    ```
+
+    # Limitations
+
+    - Client must support SSE streaming
+    - Connection timeout may apply (configure client appropriately)
+    - If pipeline fails, an error event is emitted before closing
+
+    # Assumptions
+
+    - Client will process events in order
+    - Client handles reconnection if stream is interrupted
+    """
+    rag_request_counter.add(1, {"pipeline": "verified_stream"})
+    logger.info(f"Running Verified RAG (Streaming) for query: {request.query[:50]}...")
+
+    if not weaviate_client or not weaviate_client.is_connected():
+        raise HTTPException(status_code=503, detail="Weaviate client not connected")
+
+    async def generate_events():
+        """
+        Generator that yields SSE events during verified pipeline execution.
+
+        Uses an asyncio queue to receive progress events from the pipeline
+        and yields them as SSE-formatted strings.
+        """
+        event_queue = asyncio.Queue()
+
+        async def progress_callback(event: ProgressEvent) -> None:
+            """Callback that puts events on the queue for streaming."""
+            await event_queue.put(event)
+
+        try:
+            # Initialize the pipeline
+            pipeline = verified.VerifiedRAGPipeline(weaviate_client, pipeline_config)
+
+            # Build temperature overrides dict if provided
+            temp_overrides = None
+            if request.temperature_overrides:
+                temp_overrides = {}
+                if request.temperature_overrides.optimist is not None:
+                    temp_overrides["optimist"] = request.temperature_overrides.optimist
+                if request.temperature_overrides.skeptic is not None:
+                    temp_overrides["skeptic"] = request.temperature_overrides.skeptic
+                if request.temperature_overrides.refiner is not None:
+                    temp_overrides["refiner"] = request.temperature_overrides.refiner
+
+            # Run pipeline with progress callback in a background task
+            async def run_pipeline():
+                try:
+                    answer, sources = await pipeline.run_with_progress(
+                        request.query,
+                        progress_callback=progress_callback,
+                        session_id=request.session_id,
+                        strict_mode=request.strict_mode,
+                        temperature_overrides=temp_overrides
+                    )
+                    # Signal completion with final answer
+                    await event_queue.put({
+                        "type": "answer",
+                        "answer": answer,
+                        "sources": sources
+                    })
+                except Exception as e:
+                    logger.error(f"Pipeline error during streaming: {e}", exc_info=True)
+                    await event_queue.put({
+                        "type": "error",
+                        "error": str(e)
+                    })
+                finally:
+                    # Signal end of stream
+                    await event_queue.put(None)
+
+            # Start pipeline in background
+            pipeline_task = asyncio.create_task(run_pipeline())
+
+            # Yield events as they arrive
+            while True:
+                event = await event_queue.get()
+
+                if event is None:
+                    # End of stream - yield done marker
+                    yield "event: done\ndata: {}\n\n"
+                    break
+
+                if isinstance(event, ProgressEvent):
+                    # Progress event from callback
+                    yield f"event: progress\ndata: {event.to_sse_data()}\n\n"
+                elif isinstance(event, dict):
+                    if event.get("type") == "answer":
+                        # Final answer event
+                        import json
+                        answer_data = json.dumps({
+                            "answer": event["answer"],
+                            "sources": event["sources"],
+                            "is_verified": not event["answer"].endswith("*(Warning: Verification incomplete)*")
+                        })
+                        yield f"event: answer\ndata: {answer_data}\n\n"
+                    elif event.get("type") == "error":
+                        # Error event
+                        import json
+                        error_data = json.dumps({"error": event["error"]})
+                        yield f"event: error\ndata: {error_data}\n\n"
+
+            # Ensure pipeline task completes
+            await pipeline_task
+
+        except Exception as e:
+            logger.error(f"SSE streaming error: {e}", exc_info=True)
+            import json
+            error_data = json.dumps({"error": str(e)})
+            yield f"event: error\ndata: {error_data}\n\n"
+            yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering for real-time streaming
+        }
+    )
 
 
 class AgentRequest(BaseModel):

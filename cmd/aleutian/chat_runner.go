@@ -459,6 +459,7 @@ type RAGChatRunnerConfig struct {
 	SessionID   string              // Session ID to resume (optional)
 	Personality ux.PersonalityLevel // Output styling (optional)
 	StrictMode  bool                // Strict RAG mode: only answer from docs (default: true)
+	Verbosity   int                 // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (optional)
 }
 
 // DirectChatRunnerConfig holds configuration for creating DirectChatRunner.

@@ -90,6 +90,244 @@ type RAGRequest struct {
 	NoRag     bool   `json:"no_rag"`
 }
 
+// =============================================================================
+// Verified Pipeline Configuration Types
+// =============================================================================
+
+// TemperatureOverrides allows per-request temperature configuration for the
+// verified pipeline's debate roles.
+//
+// # Description
+//
+// The verified pipeline uses three LLM roles with different temperature needs:
+//   - Optimist: Generates initial draft (higher temp = more creative)
+//   - Skeptic: Audits for hallucinations (lower temp = more consistent)
+//   - Refiner: Rewrites to remove hallucinations (balanced temp)
+//
+// All fields are optional. Omitted fields use the pipeline's configured defaults
+// (from environment variables or config).
+//
+// # Fields
+//
+//   - Optimist: Temperature for draft generation (0.0-2.0, default: 0.6)
+//   - Skeptic: Temperature for skeptic audits (0.0-2.0, default: 0.2)
+//   - Refiner: Temperature for refinement (0.0-2.0, default: 0.4)
+//
+// # Examples
+//
+//	// More creative drafts, stricter verification
+//	overrides := &TemperatureOverrides{Optimist: ptr(0.8), Skeptic: ptr(0.1)}
+//
+//	// Conservative mode (all low temperatures)
+//	overrides := &TemperatureOverrides{Optimist: ptr(0.3), Skeptic: ptr(0.1), Refiner: ptr(0.2)}
+type TemperatureOverrides struct {
+	Optimist *float64 `json:"optimist,omitempty"`
+	Skeptic  *float64 `json:"skeptic,omitempty"`
+	Refiner  *float64 `json:"refiner,omitempty"`
+}
+
+// VerifiedPipelineConfig contains configuration options specific to the
+// verified (skeptic/optimist) RAG pipeline.
+//
+// # Description
+//
+// This struct extends the standard RAG request with verified-pipeline-specific
+// options like temperature overrides and strictness mode.
+//
+// # Fields
+//
+//   - TemperatureOverrides: Per-role temperature settings (optional)
+//   - Strictness: "strict" (cite every fact) or "balanced" (allow synthesis)
+//
+// # Examples
+//
+//	config := &VerifiedPipelineConfig{
+//	    TemperatureOverrides: &TemperatureOverrides{Skeptic: ptr(0.1)},
+//	    Strictness: "strict",
+//	}
+type VerifiedPipelineConfig struct {
+	TemperatureOverrides *TemperatureOverrides `json:"temperature_overrides,omitempty"`
+	Strictness           string                `json:"strictness,omitempty"` // "strict" or "balanced"
+}
+
+// ToMap converts TemperatureOverrides to a map for JSON serialization.
+// Only includes non-nil values.
+func (t *TemperatureOverrides) ToMap() map[string]float64 {
+	if t == nil {
+		return nil
+	}
+	result := make(map[string]float64)
+	if t.Optimist != nil {
+		result["optimist"] = *t.Optimist
+	}
+	if t.Skeptic != nil {
+		result["skeptic"] = *t.Skeptic
+	}
+	if t.Refiner != nil {
+		result["refiner"] = *t.Refiner
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// =============================================================================
+// Retrieval-Only Types (for streaming integration)
+// =============================================================================
+
+// RetrievalRequest is the request sent to the Python RAG engine's
+// retrieval-only endpoint. It returns document content without LLM generation.
+//
+// # Description
+//
+// This request type supports the streaming integration where:
+// 1. Python RAG retrieves and reranks documents
+// 2. Go orchestrator receives raw document content
+// 3. Go orchestrator streams LLM response with full document context
+//
+// This fixes the "two-LLM" problem where Python generated an answer,
+// then Go used that answer as "context" for a second LLM that would
+// say "no documents found" even when sources were displayed.
+//
+// # Fields
+//
+//   - Query: The user's query to retrieve documents for.
+//   - Pipeline: The RAG pipeline to use ("reranking" or "verified").
+//   - SessionId: Optional session ID for session-scoped document filtering.
+//   - StrictMode: If true, only return documents above relevance threshold.
+//   - MaxChunks: Maximum number of document chunks to return (default: 5).
+//
+// # Supported Pipelines
+//
+//   - "reranking": Cross-encoder reranking for better relevance ordering.
+//   - "verified": Skeptic/optimist debate for hallucination prevention.
+type RetrievalRequest struct {
+	Query      string `json:"query"`
+	Pipeline   string `json:"pipeline,omitempty"`
+	SessionId  string `json:"session_id,omitempty"`
+	StrictMode bool   `json:"strict_mode"`
+	MaxChunks  int    `json:"max_chunks,omitempty"`
+}
+
+// RetrievalChunk represents a single document chunk from retrieval-only mode.
+//
+// # Description
+//
+// Each chunk contains the document content, source identifier, and optional
+// relevance score from the reranking model.
+//
+// # Fields
+//
+//   - Content: The actual document text.
+//   - Source: Document name, path, or URL identifying the source.
+//   - RerankScore: Relevance score from reranking (higher = more relevant).
+type RetrievalChunk struct {
+	Content     string   `json:"content"`
+	Source      string   `json:"source"`
+	RerankScore *float64 `json:"rerank_score,omitempty"`
+}
+
+// RetrievalResponse is the response from the Python RAG engine's
+// retrieval-only endpoint.
+//
+// # Description
+//
+// Contains the retrieved document chunks, pre-formatted context text
+// for direct use in LLM prompts, and a flag indicating whether
+// relevant documents were found.
+//
+// # Fields
+//
+//   - Chunks: List of retrieved document chunks with content and metadata.
+//   - ContextText: Formatted string with "[Document N: source]" headers
+//     ready for LLM context. This enables clear citation in responses.
+//   - HasRelevantDocs: Boolean indicating if documents above the relevance
+//     threshold were found. Used to determine if "no documents" message
+//     should be shown.
+//
+// # Context Format Example
+//
+//	[Document 1: detroit_history.md]
+//	Detroit was founded in 1701 by French colonists...
+//
+//	[Document 2: detroit_economy.md]
+//	The city's economy was historically based on automotive manufacturing...
+type RetrievalResponse struct {
+	Chunks          []RetrievalChunk `json:"chunks"`
+	ContextText     string           `json:"context_text"`
+	HasRelevantDocs bool             `json:"has_relevant_docs"`
+}
+
+// NewRetrievalRequest creates a new RetrievalRequest with default values.
+//
+// # Description
+//
+// Creates a RetrievalRequest with sensible defaults:
+//   - Pipeline: "reranking" (cross-encoder reranking)
+//   - StrictMode: true (only return relevant documents)
+//   - MaxChunks: 5 (matches top_k_final in reranking pipeline)
+//
+// # Inputs
+//
+//   - query: The user's query to retrieve documents for.
+//   - sessionId: Optional session ID (pass empty string for no session).
+//
+// # Outputs
+//
+//   - *RetrievalRequest: Ready to be sent to the RAG engine.
+//
+// # Examples
+//
+//	req := NewRetrievalRequest("What is Detroit known for?", "sess_abc123")
+//	req := NewRetrievalRequest("authentication", "")  // No session
+//	req := NewRetrievalRequest("query", "").WithPipeline("verified")
+func NewRetrievalRequest(query, sessionId string) *RetrievalRequest {
+	return &RetrievalRequest{
+		Query:      query,
+		Pipeline:   "reranking",
+		SessionId:  sessionId,
+		StrictMode: true,
+		MaxChunks:  5,
+	}
+}
+
+// WithPipeline sets the RAG pipeline and returns the request for chaining.
+//
+// # Description
+//
+// Sets the retrieval pipeline to use. Supported pipelines:
+//   - "reranking": Cross-encoder reranking for better relevance ordering.
+//   - "verified": Skeptic/optimist debate for hallucination prevention.
+//
+// # Inputs
+//
+//   - pipeline: The pipeline name ("reranking" or "verified").
+//
+// # Outputs
+//
+//   - *RetrievalRequest: The modified request for method chaining.
+//
+// # Examples
+//
+//	req := NewRetrievalRequest("query", "sess_123").WithPipeline("verified")
+func (r *RetrievalRequest) WithPipeline(pipeline string) *RetrievalRequest {
+	r.Pipeline = pipeline
+	return r
+}
+
+// WithStrictMode sets the strict mode flag and returns the request for chaining.
+func (r *RetrievalRequest) WithStrictMode(strict bool) *RetrievalRequest {
+	r.StrictMode = strict
+	return r
+}
+
+// WithMaxChunks sets the maximum chunks and returns the request for chaining.
+func (r *RetrievalRequest) WithMaxChunks(max int) *RetrievalRequest {
+	r.MaxChunks = max
+	return r
+}
+
 // SourceInfo represents a retrieved document source from RAG retrieval.
 //
 // # Description
@@ -281,7 +519,10 @@ func (w *WeaviateSchemas) InitializeSchemas() {
 		if err != nil {
 			log.Fatalf("FATAL: Could not send a schema to Weaviate: %v", err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			slog.Warn("Failed to read Weaviate schema response", "class", schema.Class, "error", err)
+		}
 		resp.Body.Close()
 		if resp.StatusCode != 200 {
 			slog.Warn(
@@ -303,17 +544,25 @@ func (w *WeaviateSchemas) InitializeSchemas() {
 // ContentHash contains SHA-256 hash of the message content for integrity
 // verification. The server computes this on receipt and includes it in
 // audit logs.
+//
+// # Verified Pipeline Configuration
+//
+// When Pipeline is "verified", the TemperatureOverrides field can be used
+// to customize the temperature for each debate role (optimist, skeptic, refiner).
+// The Strictness field controls how strictly the optimist must cite sources.
 type ChatRAGRequest struct {
-	Id          string     `json:"id,omitempty"`           // Request ID (server-generated for tracing)
-	CreatedAt   int64      `json:"created_at,omitempty"`   // Unix timestamp when request was created
-	Message     string     `json:"message"`                // Current user message
-	SessionId   string     `json:"session_id,omitempty"`   // Optional: resume session
-	Pipeline    string     `json:"pipeline,omitempty"`     // RAG pipeline (default: reranking)
-	Bearing     string     `json:"bearing,omitempty"`      // Topic filter for retrieval
-	Stream      bool       `json:"stream,omitempty"`       // Enable SSE streaming
-	History     []ChatTurn `json:"history,omitempty"`      // Previous turns (if not using session)
-	ContentHash string     `json:"content_hash,omitempty"` // SHA-256 hash of message for integrity
-	StrictMode  bool       `json:"strict_mode,omitempty"`  // Strict RAG: only answer from docs
+	Id                   string                `json:"id,omitempty"`                    // Request ID (server-generated for tracing)
+	CreatedAt            int64                 `json:"created_at,omitempty"`            // Unix timestamp when request was created
+	Message              string                `json:"message"`                         // Current user message
+	SessionId            string                `json:"session_id,omitempty"`            // Optional: resume session
+	Pipeline             string                `json:"pipeline,omitempty"`              // RAG pipeline (default: reranking)
+	Bearing              string                `json:"bearing,omitempty"`               // Topic filter for retrieval
+	Stream               bool                  `json:"stream,omitempty"`                // Enable SSE streaming
+	History              []ChatTurn            `json:"history,omitempty"`               // Previous turns (if not using session)
+	ContentHash          string                `json:"content_hash,omitempty"`          // SHA-256 hash of message for integrity
+	StrictMode           bool                  `json:"strict_mode,omitempty"`           // Strict RAG: only answer from docs
+	TemperatureOverrides *TemperatureOverrides `json:"temperature_overrides,omitempty"` // Verified pipeline: per-role temps
+	Strictness           string                `json:"strictness,omitempty"`            // Verified pipeline: "strict" or "balanced"
 }
 
 // ChatTurn represents a single turn in a conversation
@@ -415,9 +664,10 @@ func (r *ChatRAGRequest) Validate() error {
 			"graph":     true,
 			"rig":       true,
 			"semantic":  true,
+			"verified":  true, // Skeptic/optimist debate for hallucination prevention
 		}
 		if !validPipelines[r.Pipeline] {
-			return fmt.Errorf("invalid pipeline '%s': must be one of standard, reranking, raptor, graph, rig, semantic", r.Pipeline)
+			return fmt.Errorf("invalid pipeline '%s': must be one of standard, reranking, raptor, graph, rig, semantic, verified", r.Pipeline)
 		}
 	}
 
@@ -687,6 +937,194 @@ func (e *StreamEvent) WithSessionId(sessionId string) *StreamEvent {
 func (e *StreamEvent) WithError(err string) *StreamEvent {
 	e.Error = err
 	return e
+}
+
+// =============================================================================
+// Verified Pipeline Progress Streaming Types (P6)
+// =============================================================================
+
+// ProgressEventType defines the discrete stages of the skeptic/optimist debate.
+//
+// # Description
+//
+// These event types are emitted during the verified RAG pipeline execution
+// and streamed to clients for real-time feedback. Each type corresponds to
+// a specific stage of the debate pattern.
+//
+// # Values
+//
+//   - RetrievalStart: Document retrieval has begun
+//   - RetrievalComplete: Documents retrieved, includes count and sources
+//   - DraftStart: Optimist is generating initial answer
+//   - DraftComplete: Initial draft ready for skeptic review
+//   - SkepticAuditStart: Skeptic is analyzing the draft
+//   - SkepticAuditComplete: Skeptic has rendered verdict
+//   - RefinementStart: Refiner is correcting hallucinations
+//   - RefinementComplete: Refined answer ready for re-audit
+//   - VerificationComplete: Final answer verified, debate concluded
+//   - Error: An error occurred during pipeline execution
+//
+// # Examples
+//
+//	if event.EventType == ProgressEventTypeSkepticAuditComplete {
+//	    if event.AuditDetails != nil && !event.AuditDetails.IsVerified {
+//	        fmt.Printf("Found %d hallucinations\n", len(event.AuditDetails.Hallucinations))
+//	    }
+//	}
+type ProgressEventType string
+
+const (
+	ProgressEventTypeRetrievalStart       ProgressEventType = "retrieval_start"
+	ProgressEventTypeRetrievalComplete    ProgressEventType = "retrieval_complete"
+	ProgressEventTypeDraftStart           ProgressEventType = "draft_start"
+	ProgressEventTypeDraftComplete        ProgressEventType = "draft_complete"
+	ProgressEventTypeSkepticAuditStart    ProgressEventType = "skeptic_audit_start"
+	ProgressEventTypeSkepticAuditComplete ProgressEventType = "skeptic_audit_complete"
+	ProgressEventTypeRefinementStart      ProgressEventType = "refinement_start"
+	ProgressEventTypeRefinementComplete   ProgressEventType = "refinement_complete"
+	ProgressEventTypeVerificationComplete ProgressEventType = "verification_complete"
+	ProgressEventTypeError                ProgressEventType = "error"
+)
+
+// SkepticAuditDetails contains detailed skeptic audit results.
+//
+// # Description
+//
+// This struct is populated during SKEPTIC_AUDIT_COMPLETE events at verbosity
+// level 2. It provides granular information about what the skeptic found,
+// including specific hallucinations and missing evidence.
+//
+// # Fields
+//
+//   - IsVerified: True if all claims are supported by evidence.
+//   - Reasoning: The skeptic's explanation of the verdict.
+//   - Hallucinations: List of specific unsupported claims.
+//   - MissingEvidence: List of facts needing evidence.
+//   - SourcesCited: Indices of sources referenced (0-based).
+//
+// # Examples
+//
+//	if !details.IsVerified {
+//	    for _, h := range details.Hallucinations {
+//	        fmt.Printf("  Unsupported: %s\n", h)
+//	    }
+//	}
+type SkepticAuditDetails struct {
+	IsVerified      bool     `json:"is_verified"`
+	Reasoning       string   `json:"reasoning"`
+	Hallucinations  []string `json:"hallucinations,omitempty"`
+	MissingEvidence []string `json:"missing_evidence,omitempty"`
+	SourcesCited    []int    `json:"sources_cited,omitempty"`
+}
+
+// RetrievalDetails contains document retrieval information.
+//
+// # Description
+//
+// This struct is populated during RETRIEVAL_COMPLETE events at verbosity
+// level 2. It provides information about the documents retrieved for the
+// query before the skeptic/optimist debate begins.
+//
+// # Fields
+//
+//   - DocumentCount: Number of documents retrieved.
+//   - Sources: List of source identifiers (filenames, URLs, etc.).
+//   - HasRelevantDocs: Whether relevant documents were found.
+//
+// # Examples
+//
+//	if details.HasRelevantDocs {
+//	    fmt.Printf("Found %d documents: %v\n", details.DocumentCount, details.Sources)
+//	}
+type RetrievalDetails struct {
+	DocumentCount   int      `json:"document_count"`
+	Sources         []string `json:"sources,omitempty"`
+	HasRelevantDocs bool     `json:"has_relevant_docs"`
+}
+
+// ProgressEvent represents a single progress update during verified pipeline execution.
+//
+// # Description
+//
+// Progress events are streamed via SSE to provide real-time feedback during
+// the skeptic/optimist debate. Each event has a type, message, and optional
+// detailed information depending on the event type and verbosity level.
+//
+// # Fields
+//
+//   - EventType: The type of progress event (from ProgressEventType enum).
+//   - Message: Human-readable summary message (always present).
+//   - Timestamp: ISO 8601 timestamp when the event occurred.
+//   - Attempt: Current verification attempt (1-indexed, max 3).
+//   - TraceID: OpenTelemetry trace ID for debugging (verbosity >= 2).
+//   - RetrievalDetails: Details about retrieval (RETRIEVAL_COMPLETE only).
+//   - AuditDetails: Details about skeptic audit (SKEPTIC_AUDIT_COMPLETE only).
+//   - ErrorMessage: Error description (ERROR event type only).
+//
+// # Verbosity Levels
+//
+// The CLI uses verbosity to control what is displayed:
+//   - Level 0: Silent (no progress shown)
+//   - Level 1: Summary (shows Message only)
+//   - Level 2: Detailed (shows Message + details + trace link)
+//
+// # Examples
+//
+//	// Verbosity 1 display
+//	fmt.Printf("[%s] %s\n", event.EventType, event.Message)
+//
+//	// Verbosity 2 display with OTel link
+//	if event.TraceID != "" {
+//	    fmt.Printf("  View trace: http://localhost:16686/trace/%s\n", event.TraceID)
+//	}
+type ProgressEvent struct {
+	EventType        ProgressEventType    `json:"event_type"`
+	Message          string               `json:"message"`
+	Timestamp        string               `json:"timestamp,omitempty"`
+	Attempt          int                  `json:"attempt,omitempty"`
+	TraceID          string               `json:"trace_id,omitempty"`
+	RetrievalDetails *RetrievalDetails    `json:"retrieval_details,omitempty"`
+	AuditDetails     *SkepticAuditDetails `json:"audit_details,omitempty"`
+	ErrorMessage     string               `json:"error_message,omitempty"`
+}
+
+// VerifiedStreamAnswer is the final answer event from verified streaming.
+//
+// # Description
+//
+// This struct is sent in the "answer" SSE event after the verification
+// process completes. It contains the final verified (or unverified) answer
+// and the sources used.
+//
+// # Fields
+//
+//   - Answer: The final answer text (may include verification warning).
+//   - Sources: List of sources used to generate the answer.
+//   - IsVerified: True if the answer passed skeptic verification.
+//
+// # Examples
+//
+//	if !answer.IsVerified {
+//	    fmt.Println("Warning: Some claims could not be verified")
+//	}
+type VerifiedStreamAnswer struct {
+	Answer     string           `json:"answer"`
+	Sources    []map[string]any `json:"sources,omitempty"`
+	IsVerified bool             `json:"is_verified"`
+}
+
+// VerifiedStreamError represents an error during verified streaming.
+//
+// # Description
+//
+// This struct is sent in the "error" SSE event if the pipeline fails.
+// The stream will close after this event.
+//
+// # Fields
+//
+//   - Error: Description of what went wrong.
+type VerifiedStreamError struct {
+	Error string `json:"error"`
 }
 
 // =============================================================================
