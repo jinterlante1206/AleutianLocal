@@ -704,7 +704,11 @@ func (s *ragStreamingChatService) SendMessage(ctx context.Context, message strin
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		if err := Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}(resp.Body)
 
 	if err := s.validateResponse(requestID, resp); err != nil {
 		return nil, err
@@ -865,7 +869,15 @@ func (s *ragStreamingChatService) postRequest(ctx context.Context, requestID str
 // Response body is readable.
 func (s *ragStreamingChatService) validateResponse(requestID string, resp *http.Response) error {
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			slog.Error("RAG streaming server returned error (failed to read body)",
+				"request_id", requestID,
+				"status_code", resp.StatusCode,
+				"read_error", err,
+			)
+			return fmt.Errorf("server error (%d): failed to read response body", resp.StatusCode)
+		}
 		slog.Error("RAG streaming server returned error",
 			"request_id", requestID,
 			"status_code", resp.StatusCode,
@@ -1181,10 +1193,22 @@ func (s *directStreamingChatService) executeStreamingRequest(ctx context.Context
 		)
 		return nil, fmt.Errorf("http post: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			slog.Error("direct streaming server returned error (failed to read body)",
+				"request_id", requestID,
+				"status_code", resp.StatusCode,
+				"read_error", err,
+			)
+			return nil, fmt.Errorf("server error (%d): failed to read response body", resp.StatusCode)
+		}
 		slog.Error("direct streaming server returned error",
 			"request_id", requestID,
 			"status_code", resp.StatusCode,
@@ -1438,7 +1462,11 @@ func (s *directStreamingChatService) LoadSessionHistory(ctx context.Context, ses
 		)
 		return 0, fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("session history request failed",

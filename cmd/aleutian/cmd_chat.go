@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -99,7 +100,11 @@ func runChatCommand(cmd *cobra.Command, _ []string) {
 			Verbosity:  verbosityLevel,    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
 		})
 	}
-	defer runner.Close()
+	defer func() {
+		if err := runner.Close(); err != nil {
+			slog.Error("failed to close chat runner", "error", err)
+		}
+	}()
 
 	// Set up graceful shutdown with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
@@ -154,16 +159,27 @@ func runTraceCommand(_ *cobra.Command, args []string) {
 		if err != nil {
 			log.Fatalf("Communication failed: %v", err)
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Error("failed to close response body", "error", closeErr)
+			}
+			if err != nil {
+				log.Fatalf("Orchestrator Error: status %d (failed to read body: %v)", resp.StatusCode, err)
+			}
 			log.Fatalf("Orchestrator Error: %s", string(body))
 		}
 
 		var decision datatypes.AgentStepResponse
 		if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Error("failed to close response body", "error", closeErr)
+			}
 			log.Fatalf("Failed to decode decision: %v", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
 		}
 
 		// 2. Act on Decision
@@ -325,9 +341,16 @@ func sendRAGRequest(question string, sessionId string, pipeline string) (RAGResp
 	if err != nil {
 		return ragResp, fmt.Errorf("failed to send question to orchestrator: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ragResp, fmt.Errorf("failed to read orchestrator response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Error: Orchestrator returned status %d. Response Body: %s", resp.StatusCode, string(bodyBytes))
 		return ragResp, fmt.Errorf("orchestrator returned an error (status %d): %s", resp.StatusCode, string(bodyBytes))

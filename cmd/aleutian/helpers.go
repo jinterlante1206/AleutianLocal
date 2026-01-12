@@ -172,7 +172,11 @@ func getLinuxSystemRAM() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			slog.Error("failed to close /proc/meminfo", "error", err)
+		}
+	}()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -416,10 +420,18 @@ func downloadAndExtractStackFiles(targetDir string, versionTag string) error {
 	if err != nil {
 		return fmt.Errorf("failed to download %s: %w", tarballURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			slog.Error("Download failed (could not read error body)", "status", resp.StatusCode, "read_error", err)
+			return fmt.Errorf("download failed with status %d", resp.StatusCode)
+		}
 		slog.Error("Download failed", "status", resp.StatusCode)
 		return fmt.Errorf("download failed: %s", string(bodyBytes))
 	}
@@ -437,7 +449,11 @@ func extractTarGz(gzipStream io.Reader, targetDir string) error {
 	if err != nil {
 		return fmt.Errorf("gzip.NewReader failed: %w", err)
 	}
-	defer uncompressedStream.Close()
+	defer func() {
+		if err := uncompressedStream.Close(); err != nil {
+			slog.Error("failed to close gzip reader", "error", err)
+		}
+	}()
 
 	tarReader := tar.NewReader(uncompressedStream)
 	var rootDirToStrip string = ""
@@ -488,11 +504,17 @@ func extractTarGz(gzipStream io.Reader, targetDir string) error {
 				return err
 			}
 			if _, err := io.Copy(outFile, reader); err != nil {
-				outFile.Close()
+				if closeErr := outFile.Close(); closeErr != nil {
+					slog.Error("failed to close file after copy error", "path", targetPath, "error", closeErr)
+				}
 				return err
 			}
-			outFile.Close()
-			os.Chmod(targetPath, os.FileMode(header.Mode))
+			if err := outFile.Close(); err != nil {
+				slog.Error("failed to close extracted file", "path", targetPath, "error", err)
+			}
+			if err := os.Chmod(targetPath, os.FileMode(header.Mode)); err != nil {
+				slog.Error("failed to chmod extracted file", "path", targetPath, "error", err)
+			}
 		}
 		return nil
 	}
@@ -532,9 +554,16 @@ func sendPostRequest(url string, payload interface{}) string {
 		// This error usually happens in tests if the URL is unreachable
 		return fmt.Sprintf("Error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Sprintf("Error reading response: %v", err)
+	}
 
 	// Optional: You might want to capture non-200 statuses clearly
 	if resp.StatusCode >= 400 {

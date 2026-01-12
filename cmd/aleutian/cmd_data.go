@@ -1055,7 +1055,8 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 func runDeleteSession(_ *cobra.Command, args []string) {
 	baseURL := getOrchestratorBaseURL()
 	sessionId := args[0]
-	orchestratorURL := fmt.Sprintf("%s/v1/sessions/%s", baseURL, sessionId)
+	// Escape sessionId to prevent path traversal attacks
+	orchestratorURL := fmt.Sprintf("%s/v1/sessions/%s", baseURL, url.PathEscape(sessionId))
 
 	req, err := http.NewRequest(http.MethodDelete, orchestratorURL, nil)
 	if err != nil {
@@ -1443,7 +1444,10 @@ func runWeaviateBackup(_ *cobra.Command, args []string) {
 		log.Fatalf("Failed to send backup request: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read backup response: %v", err)
+	}
 	fmt.Println("Orchestrator Response:", string(bodyBytes))
 }
 
@@ -1479,7 +1483,10 @@ func runWeaviateDeleteDoc(_ *cobra.Command, args []string) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read delete response: %v", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Orchestrator returned an error: (Status %d) %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -1514,7 +1521,10 @@ func runWeaviateRestore(_ *cobra.Command, args []string) {
 		log.Fatalf("Failed to send restore request: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read restore response: %v", err)
+	}
 	fmt.Println("Orchestrator Response:", string(bodyBytes))
 }
 
@@ -1536,7 +1546,10 @@ func runWeaviateSummary(_ *cobra.Command, _ []string) {
 		log.Fatalf("Failed to send summary request: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read summary response: %v", err)
+	}
 
 	var prettyJSON bytes.Buffer
 	if err := json.Indent(&prettyJSON, bodyBytes, "", "  "); err != nil {
@@ -1587,7 +1600,10 @@ func runWeaviateWipeout(cmd *cobra.Command, _ []string) {
 		log.Fatalf("Failed to send wipe request: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read wipe response: %v", err)
+	}
 	fmt.Println("Orchestrator Response:", string(bodyBytes))
 }
 
