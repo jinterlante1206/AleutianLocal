@@ -70,6 +70,12 @@ services:
       RERANKER_MODEL: cross-encoder/ms-marco-MiniLM-L-6-v2
       RERANK_INITIAL_K: 20
       RERANK_FINAL_K: 5
+      # Verified Pipeline Role Temperatures (uncomment to override defaults)
+      # Lower = more deterministic, Higher = more creative
+      # All default to 0.6 for model compatibility (some models fail below 0.5)
+      # VERIFIED_OPTIMIST_TEMPERATURE: 0.6  # Draft generation (creative)
+      # VERIFIED_SKEPTIC_TEMPERATURE: 0.6   # Verification audit (deterministic)
+      # VERIFIED_REFINER_TEMPERATURE: 0.6   # Hallucination correction (balanced)
     volumes:
       - models_cache:/root/.cache/huggingface
     networks:

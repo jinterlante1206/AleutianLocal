@@ -225,6 +225,19 @@ class BaseRAGPipeline:
         self.openai_api_key = self._read_secret("openai_api_key")
         self.anthropic_api_key = self._read_secret("anthropic_api_key")
 
+        # --- Thinking Mode Configuration (Anthropic only) ---
+        # Parse once at init to avoid repeated env lookups and potential crashes
+        self.enable_thinking = os.getenv("ENABLE_THINKING", "false").lower() == "true"
+        try:
+            self.thinking_budget = int(os.getenv("THINKING_BUDGET", "2048"))
+            if self.thinking_budget <= 0:
+                logger.warning("THINKING_BUDGET must be positive. Using default 2048.")
+                self.thinking_budget = 2048
+        except ValueError:
+            raw_value = os.getenv("THINKING_BUDGET")
+            logger.error(f"Invalid THINKING_BUDGET value '{raw_value}'. Using default 2048.")
+            self.thinking_budget = 2048
+
         # --- Validation ---
         if not self.embedding_url:
             raise ValueError("Embedding service URL not configured.")
@@ -445,17 +458,22 @@ class BaseRAGPipeline:
             # the 'context' out into a 'system' block here.
             payload = {
                 "model": effective_model,
-                "max_tokens": self.default_llm_params["max_tokens"],
+                "max_tokens": generation_params["max_tokens"],
                 "messages": [{"role": "user", "content": prompt}]
             }
 
-            # Example: Basic "Thinking" support for RAG
-            if os.getenv("ENABLE_THINKING") == "true":
+            # Handle temperature based on thinking mode (A1 fix)
+            # When thinking mode is enabled, temperature must be None (API requirement)
+            # When thinking mode is disabled, use the generation_params temperature
+            if self.enable_thinking:
                 payload["thinking"] = {
                     "type": "enabled",
-                    "budget_tokens": int(os.getenv("THINKING_BUDGET", 2048))
+                    "budget_tokens": self.thinking_budget
                 }
                 payload["temperature"] = None  # Required for thinking
+            else:
+                # Apply temperature override when thinking is disabled
+                payload["temperature"] = generation_params["temperature"]
         elif self.llm_backend == "ollama":
             api_url = f"{self.llm_url}/api/generate"
             # Use model_override if provided, otherwise use default ollama_model
@@ -486,10 +504,10 @@ class BaseRAGPipeline:
             payload = {
                 "model": effective_model,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.default_llm_params["temperature"],
-                "max_tokens": self.default_llm_params["max_tokens"],
-                "top_p": self.default_llm_params["top_p"],
-                "stop": self.default_llm_params["stop"]
+                "temperature": generation_params["temperature"],
+                "max_tokens": generation_params["max_tokens"],
+                "top_p": generation_params["top_p"],
+                "stop": generation_params["stop"]
             }
         elif self.llm_backend == "local":
             api_url = f"{self.llm_url}/completion"
@@ -499,11 +517,11 @@ class BaseRAGPipeline:
                 logger.debug(f"Local backend model_override specified: {model_override}")
             payload = {
                 "prompt": prompt,
-                "n_predict": self.default_llm_params["max_tokens"],
-                "temperature": self.default_llm_params["temperature"],
-                "top_k": self.default_llm_params["top_k"],
-                "top_p": self.default_llm_params["top_p"],
-                "stop": self.default_llm_params["stop"]
+                "n_predict": generation_params["max_tokens"],
+                "temperature": generation_params["temperature"],
+                "top_k": generation_params["top_k"],
+                "top_p": generation_params["top_p"],
+                "stop": generation_params["stop"]
             }
             # Add model to payload if override specified (llama.cpp server format)
             if model_override:

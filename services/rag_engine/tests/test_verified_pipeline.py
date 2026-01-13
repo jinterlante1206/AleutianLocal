@@ -1,7 +1,13 @@
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, AsyncMock
+
+# Import from the package structure that works with pytest
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from pipelines.verified import VerifiedRAGPipeline
-from datatypes.verified import SkepticAuditResult, SkepticAuditRequest, RefinerRequest
+from datatypes.verified import SkepticAuditResult
 
 
 @pytest.fixture
@@ -21,9 +27,10 @@ def verified_pipeline(mock_weaviate_client):
     # Mock the inherited Reranking/Base methods to avoid external calls
     pipeline._get_embedding = AsyncMock(return_value=[0.1, 0.2])
     pipeline._search_weaviate_initial = AsyncMock(return_value=[])
+    # Note: metadata must include rerank_score above threshold (0.3) for strict mode
     pipeline._rerank_docs = AsyncMock(return_value=[
         {"properties": {"content": "The sky is blue.", "source": "test.txt"},
-         "metadata": MagicMock()}
+         "metadata": {"rerank_score": 0.9}}  # Score above RERANK_SCORE_THRESHOLD (0.3)
     ])
     pipeline._call_llm = AsyncMock()  # Default mock for LLM calls
     return pipeline
