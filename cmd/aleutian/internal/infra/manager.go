@@ -1472,7 +1472,7 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 		if configDir, ok := machine["ConfigDir"].(map[string]interface{}); ok {
 			if configPath, ok := configDir["Path"].(string); ok {
 				configFile := filepath.Join(configPath, filepath.Base(machineName)+".json")
-				if configMounts, err := readMountsFromConfigFile(configFile); err == nil {
+				if configMounts, err := readMountsFromConfigFile(ctx, configFile); err == nil {
 					mounts = configMounts
 				} else {
 					slog.Debug("Could not read mounts from config file", "path", configFile, "error", err)
@@ -1500,16 +1500,57 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 // This function reads the mounts directly from the machine config file
 // at ~/.config/containers/podman/machine/{provider}/{machineName}.json.
 //
+// # Security
+//
+// This function validates that the config file path is within the expected
+// Podman machine configuration directory (~/.config/containers/podman/machine)
+// to prevent path traversal attacks. Paths outside this directory are rejected.
+//
 // # Inputs
 //
-//   - configFile: Path to the machine config JSON file.
+//   - ctx: Context for cancellation and timeout of file I/O operations.
+//   - configFile: Path to the machine config JSON file. Must be within the
+//     expected Podman config directory.
 //
 // # Outputs
 //
 //   - []MountInfo: List of configured mounts.
-//   - error: Non-nil if file cannot be read or parsed.
-func readMountsFromConfigFile(configFile string) ([]MountInfo, error) {
-	data, err := os.ReadFile(configFile)
+//   - error: Non-nil if path validation fails, file cannot be read, or parsing fails.
+//
+// # Limitations
+//
+//   - Only reads from files within ~/.config/containers/podman/machine.
+//   - Does not validate the actual contents of mount paths.
+//
+// # Assumptions
+//
+//   - The user's config directory is accessible via os.UserConfigDir().
+//   - The config file follows Podman's expected JSON schema.
+func readMountsFromConfigFile(ctx context.Context, configFile string) ([]MountInfo, error) {
+	// Security: Validate path is within expected Podman config directory
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not get user config directory: %w", err)
+	}
+	expectedBaseDir := filepath.Join(userConfigDir, "containers", "podman", "machine")
+
+	// Clean and resolve the path to prevent traversal attacks (e.g., ../)
+	absConfigFile, err := filepath.Abs(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute path for %s: %w", configFile, err)
+	}
+
+	// Verify the resolved path is within the allowed directory
+	if !strings.HasPrefix(absConfigFile, expectedBaseDir+string(filepath.Separator)) && absConfigFile != expectedBaseDir {
+		return nil, fmt.Errorf("path rejected for security reasons: %s is outside of allowed directory %s", configFile, expectedBaseDir)
+	}
+
+	// Check context before I/O operation
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	data, err := os.ReadFile(absConfigFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
