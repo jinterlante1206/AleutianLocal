@@ -1444,7 +1444,7 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 		}
 	}
 
-	// Extract mounts
+	// Extract mounts from inspect output
 	var mounts []MountInfo
 	if mountsInterface, ok := machine["Mounts"]; ok {
 		if mountsList, ok := mountsInterface.([]interface{}); ok {
@@ -1466,6 +1466,20 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 		}
 	}
 
+	// Podman 5.x doesn't return mounts in inspect output - read from config file as fallback
+	if len(mounts) == 0 {
+		if configDir, ok := machine["ConfigDir"].(map[string]interface{}); ok {
+			if configPath, ok := configDir["Path"].(string); ok {
+				configFile := fmt.Sprintf("%s/%s.json", configPath, machineName)
+				if configMounts, err := readMountsFromConfigFile(configFile); err == nil {
+					mounts = configMounts
+				} else {
+					slog.Debug("Could not read mounts from config file", "path", configFile, "error", err)
+				}
+			}
+		}
+	}
+
 	return &MachineStatus{
 		Name:     machineName,
 		Exists:   true,
@@ -1475,6 +1489,52 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 		MemoryMB: memoryMB,
 		Mounts:   mounts,
 	}, nil
+}
+
+// readMountsFromConfigFile reads mount configuration from Podman machine config file.
+//
+// # Description
+//
+// Podman 5.x doesn't return mounts in `podman machine inspect` output.
+// This function reads the mounts directly from the machine config file
+// at ~/.config/containers/podman/machine/{provider}/{machineName}.json.
+//
+// # Inputs
+//
+//   - configFile: Path to the machine config JSON file.
+//
+// # Outputs
+//
+//   - []MountInfo: List of configured mounts.
+//   - error: Non-nil if file cannot be read or parsed.
+func readMountsFromConfigFile(configFile string) ([]MountInfo, error) {
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// Parse the config file - it has a "Mounts" array
+	var config struct {
+		Mounts []struct {
+			Source   string `json:"Source"`
+			Target   string `json:"Target"`
+			ReadOnly bool   `json:"ReadOnly"`
+		} `json:"Mounts"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	var mounts []MountInfo
+	for _, m := range config.Mounts {
+		mounts = append(mounts, MountInfo{
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		})
+	}
+
+	return mounts, nil
 }
 
 // ValidateMounts checks mount paths for security violations.

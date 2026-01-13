@@ -85,6 +85,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/conversation"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/observability"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
@@ -380,12 +381,15 @@ type StreamingChatHandler interface {
 //   - Dependencies are non-nil and properly configured
 //   - LLM client supports streaming
 type streamingChatHandler struct {
-	llmClient      llm.LLMClient
-	policyEngine   *policy_engine.PolicyEngine
-	ragService     *services.ChatRAGService
-	weaviateClient *weaviate.Client
-	tracer         trace.Tracer
+	llmClient          llm.LLMClient
+	policyEngine       *policy_engine.PolicyEngine
+	ragService         *services.ChatRAGService
+	weaviateClient     *weaviate.Client
+	tracer             trace.Tracer
+	queryExpander      conversation.QueryExpander
+	contextualEmbedder conversation.ContextBuilder
 }
+
 
 // =============================================================================
 // Constructor
@@ -440,12 +444,47 @@ func NewStreamingChatHandler(
 		panic("NewStreamingChatHandler: policyEngine must not be nil")
 	}
 
+	// Create generate function for conversation components (P8)
+	// Using a closure eliminates the need for adapter structs
+	generateFunc := func(ctx context.Context, prompt string, maxTokens int) (string, error) {
+		temp := float32(0.2) // Low temperature for deterministic expansion/summarization
+		params := llm.GenerationParams{
+			Temperature: &temp,
+			MaxTokens:   &maxTokens,
+		}
+		return llmClient.Generate(ctx, prompt, params)
+	}
+
+	// Initialize query expander (P8 - conversational context enhancement)
+	var queryExpander conversation.QueryExpander
+	expansionConfig := conversation.DefaultExpansionConfig()
+	if expansionConfig.Enabled {
+		queryExpander = conversation.NewLLMQueryExpander(generateFunc, expansionConfig)
+		slog.Info("Query expansion enabled",
+			"timeout_ms", expansionConfig.TimeoutMs,
+			"max_tokens", expansionConfig.MaxTokens,
+		)
+	}
+
+	// Initialize contextual embedder (P8 - embedding with history context)
+	var contextualEmbedder conversation.ContextBuilder
+	contextConfig := conversation.DefaultContextConfig()
+	if contextConfig.Enabled {
+		contextualEmbedder = conversation.NewContextualEmbedder(generateFunc, contextConfig)
+		slog.Info("Contextual embedding enabled",
+			"summarization", contextConfig.SummarizationEnabled,
+			"max_chars", contextConfig.MaxChars,
+		)
+	}
+
 	return &streamingChatHandler{
-		llmClient:      llmClient,
-		policyEngine:   policyEngine,
-		ragService:     ragService,
-		weaviateClient: weaviateClient,
-		tracer:         otel.Tracer("aleutian.orchestrator.handlers.chat_streaming"),
+		llmClient:          llmClient,
+		policyEngine:       policyEngine,
+		ragService:         ragService,
+		weaviateClient:     weaviateClient,
+		tracer:             otel.Tracer("aleutian.orchestrator.handlers.chat_streaming"),
+		queryExpander:      queryExpander,
+		contextualEmbedder: contextualEmbedder,
 	}
 }
 
@@ -1279,8 +1318,102 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 		sessionID = req.Id
 	}
 
+	// Step 5.5: Get turn count ONCE to avoid race condition
+	// This value is used for both history search and persistence
+	currentTurnCount, countErr := h.getTurnCount(ctx, sessionID)
+	if countErr != nil {
+		slog.Warn("failed to get turn count, proceeding with turn 1",
+			"requestId", req.Id,
+			"sessionId", sessionID,
+			"error", countErr,
+		)
+		currentTurnCount = 0
+	}
+	// Pre-compute next turn number to use consistently throughout
+	nextTurnNumber := currentTurnCount + 1
+
+	// Step 5.6: Search for relevant conversation history (P7)
+	var relevantHistory []conversation.RelevantTurn
+	if currentTurnCount > 0 {
+		// Create conversation searcher
+		embedder := conversation.NewDatatypesEmbedder()
+		searcher := conversation.NewWeaviateConversationSearcher(h.weaviateClient, embedder, conversation.DefaultSearchConfig())
+
+		// Search for relevant history
+		history, searchErr := searcher.GetHybridContext(ctx, sessionID, req.Message, currentTurnCount)
+		if searchErr != nil {
+			slog.Warn("failed to search conversation history, proceeding without history",
+				"requestId", req.Id,
+				"sessionId", sessionID,
+				"error", searchErr,
+			)
+		} else {
+			relevantHistory = history
+			span.SetAttributes(attribute.Int("conversation.history_count", len(relevantHistory)))
+			slog.Info("retrieved relevant conversation history",
+				"requestId", req.Id,
+				"sessionId", sessionID,
+				"historyCount", len(relevantHistory),
+			)
+		}
+	}
+
+	// Step 5.7: Query Expansion (P8 - conversational context enhancement)
+	// Expand ambiguous queries like "tell me more" using conversation history
+	var expandedQuery *conversation.ExpandedQuery
+	if h.queryExpander != nil && len(relevantHistory) > 0 {
+		if h.queryExpander.NeedsExpansion(req.Message) {
+			expanded, expandErr := h.queryExpander.Expand(ctx, req.Message, relevantHistory)
+			if expandErr != nil {
+				slog.Warn("query expansion failed, using original query",
+					"requestId", req.Id,
+					"query", req.Message,
+					"error", expandErr,
+				)
+				// Fall back to original query
+				expandedQuery = &conversation.ExpandedQuery{
+					Original: req.Message,
+					Queries:  []string{req.Message},
+					Expanded: false,
+				}
+			} else {
+				expandedQuery = expanded
+				span.SetAttributes(
+					attribute.Bool("query.expanded", expanded.Expanded),
+					attribute.Int("query.variation_count", len(expanded.Queries)),
+				)
+				slog.Info("query expanded",
+					"requestId", req.Id,
+					"original", req.Message,
+					"expanded", expanded.Queries,
+				)
+			}
+		} else if h.queryExpander.DetectsTopicSwitch(req.Message) {
+			// Topic switch detected - clear history context
+			slog.Info("topic switch detected, clearing history context",
+				"requestId", req.Id,
+				"query", req.Message,
+			)
+			relevantHistory = nil
+			span.SetAttributes(attribute.Bool("query.topic_switch", true))
+		}
+	}
+
+	// Step 5.8: Build contextual query for embedding (P8)
+	// This would be used if we re-embed the query with context, but currently
+	// we pass the context to Python for use in prompts/reranking
+	var contextualQuery string
+	if h.contextualEmbedder != nil && len(relevantHistory) > 0 {
+		queryForContext := req.Message
+		if expandedQuery != nil && len(expandedQuery.Queries) > 0 {
+			queryForContext = expandedQuery.Queries[0] // Use primary expanded query
+		}
+		contextualQuery = h.contextualEmbedder.BuildContextualQuery(ctx, queryForContext, relevantHistory)
+		span.SetAttributes(attribute.Int("query.contextual_length", len(contextualQuery)))
+	}
+
 	// Step 6: Call Python's verified streaming endpoint
-	result, err := h.streamFromVerifiedPipeline(ctx, &req, sseWriter, verbosity, sessionID, span)
+	result, err := h.streamFromVerifiedPipeline(ctx, &req, sseWriter, verbosity, sessionID, relevantHistory, expandedQuery, contextualQuery, span)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Verified streaming failed")
@@ -1319,23 +1452,15 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 				"findingsCount", len(piiFindings),
 			)
 		} else {
-			// Get current turn count to determine next turn number
-			currentTurnCount, countErr := h.getTurnCount(persistCtx, sessionID)
-			if countErr != nil {
-				slog.Warn("failed to get turn count, using turn number 1",
-					"requestId", req.Id,
-					"sessionId", sessionID,
-					"error", countErr,
-				)
-				currentTurnCount = 0
-			}
-			turnNumber := currentTurnCount + 1
+			// Use pre-computed nextTurnNumber from Step 5.5 to avoid race condition
+			// Note: Concurrent requests may still get same turn number - for strict ordering,
+			// database-level locking or atomic increment would be needed.
 
 			// Persist the conversation turn
 			persistErr := h.persistConversationTurn(
 				persistCtx,
 				sessionID,
-				turnNumber,
+				nextTurnNumber,
 				req.Message, // The user's question
 				result.Answer,
 				answerHash,
@@ -1344,21 +1469,24 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 				slog.Error("failed to persist conversation turn",
 					"requestId", req.Id,
 					"sessionId", sessionID,
-					"turnNumber", turnNumber,
+					"turnNumber", nextTurnNumber,
 					"error", persistErr,
 				)
 			} else {
 				span.SetAttributes(
-					attribute.Int("turn.number", turnNumber),
+					attribute.Int("turn.number", nextTurnNumber),
 					attribute.String("turn.hash", answerHash[:16]+"..."), // Truncate for logging
 					attribute.Bool("turn.is_verified", result.IsVerified),
 				)
 				slog.Info("verified conversation turn persisted successfully",
 					"requestId", req.Id,
 					"sessionId", sessionID,
-					"turnNumber", turnNumber,
+					"turnNumber", nextTurnNumber,
 					"isVerified", result.IsVerified,
 				)
+
+				// Save to semantic memory for future context retrieval (P7)
+				go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, result.Answer, nextTurnNumber)
 			}
 		}
 	}
@@ -1432,6 +1560,9 @@ func (h *streamingChatHandler) getVerbosityLevel(c *gin.Context) int {
 //   - writer: SSE writer for output.
 //   - verbosity: Output detail level (0=silent, 1=summary, 2=detailed).
 //   - sessionID: The session ID for the conversation (for done event).
+//   - relevantHistory: Relevant conversation turns from P7 semantic memory.
+//   - expandedQuery: Expanded query from P8 (nil if not expanded).
+//   - contextualQuery: Query with history context for embedding (empty if not used).
 //   - span: OTel span for tracing.
 //
 // # Outputs
@@ -1441,7 +1572,7 @@ func (h *streamingChatHandler) getVerbosityLevel(c *gin.Context) int {
 //
 // # Examples
 //
-//	result, err := h.streamFromVerifiedPipeline(ctx, req, writer, 2, sessionID, span)
+//	result, err := h.streamFromVerifiedPipeline(ctx, req, writer, 2, sessionID, history, expanded, contextual, span)
 //
 // # Limitations
 //
@@ -1457,6 +1588,9 @@ func (h *streamingChatHandler) streamFromVerifiedPipeline(
 	writer SSEWriter,
 	verbosity int,
 	sessionID string,
+	relevantHistory []conversation.RelevantTurn,
+	expandedQuery *conversation.ExpandedQuery,
+	contextualQuery string,
 	span trace.Span,
 ) (*verifiedStreamResult, error) {
 	// Get RAG engine URL
@@ -1468,6 +1602,41 @@ func (h *streamingChatHandler) streamFromVerifiedPipeline(
 
 	// Build request body
 	requestBody := h.buildVerifiedStreamRequest(req)
+
+	// Add relevant conversation history (P7)
+	if len(relevantHistory) > 0 {
+		historyList := make([]map[string]interface{}, len(relevantHistory))
+		for i, turn := range relevantHistory {
+			historyList[i] = map[string]interface{}{
+				"question":         turn.Question,
+				"answer":           turn.Answer,
+				"turn_number":      turn.TurnNumber,
+				"similarity_score": turn.SimilarityScore,
+			}
+		}
+		requestBody["relevant_history"] = historyList
+	}
+
+	// Add expanded query (P8 - query expansion)
+	if expandedQuery != nil && expandedQuery.Expanded {
+		requestBody["expanded_query"] = map[string]interface{}{
+			"original": expandedQuery.Original,
+			"queries":  expandedQuery.Queries,
+			"expanded": expandedQuery.Expanded,
+		}
+		// Use the first expanded query as the primary query for Python
+		// Python will use this for document search and reranking
+		if len(expandedQuery.Queries) > 0 {
+			requestBody["query"] = expandedQuery.Queries[0]
+			requestBody["original_query"] = expandedQuery.Original
+		}
+	}
+
+	// Add contextual query for embedding (P8)
+	if contextualQuery != "" {
+		requestBody["contextual_query"] = contextualQuery
+	}
+
 	reqJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		_ = writer.WriteError("Failed to prepare request")

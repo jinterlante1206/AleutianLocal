@@ -20,57 +20,92 @@ import (
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
-// SaveMemoryChunk runs in a goroutine to save a chat turn as a searchable Document.
-// It does the "slow" work (embedding) without blocking the main chat response.
-func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string) {
-	slog.Info("Saving chat turn to Document class for RAG memory", "sessionId", sessionId)
+// memoryChunkTimeout is the maximum time allowed for SaveMemoryChunk operations.
+// This prevents goroutine accumulation if embedding or Weaviate is slow.
+const memoryChunkTimeout = 60 * time.Second
 
-	sessionUUID, err := datatypes.FindOrCreateSessionUUID(context.Background(), client, sessionId)
+// SaveMemoryChunk runs in a goroutine to save a chat turn as a searchable Document.
+//
+// # Description
+//
+// Saves a conversation turn to the Document class with the version_tag "chat_memory"
+// for semantic search during follow-up queries. The turn is embedded and stored
+// with a vector for similarity search.
+//
+// # Inputs
+//
+//   - client: Weaviate client for database access.
+//   - sessionId: The session ID to associate with this memory chunk.
+//   - question: The user's question for this turn.
+//   - answer: The AI's response for this turn.
+//   - turnNumber: The sequential turn number within the session (1-indexed).
+//
+// # Thread Safety
+//
+// This function is safe to call from a goroutine. It does not block the caller.
+// Operations are bounded by memoryChunkTimeout (60s) to prevent goroutine leaks.
+//
+// # Example
+//
+//	go SaveMemoryChunk(client, "sess_123", "What is Chrysler?", "Chrysler is...", 5)
+func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string, turnNumber int) {
+	// Create a bounded context to prevent goroutine accumulation
+	ctx, cancel := context.WithTimeout(context.Background(), memoryChunkTimeout)
+	defer cancel()
+
+	slog.Info("Saving chat turn to Document class for RAG memory",
+		"sessionId", sessionId,
+		"turnNumber", turnNumber)
+
+	sessionUUID, err := datatypes.FindOrCreateSessionUUID(ctx, client, sessionId)
 	if err != nil {
-		slog.Error("Failed to find parent session for memory chunk, aborting save.", "sessionId", sessionId, "error", err)
+		slog.Error("Failed to find parent session for memory chunk, aborting save.",
+			"sessionId", sessionId, "error", err)
 		return
 	}
+
 	// 1. Format the content just like your RAG pipeline would expect.
 	content := fmt.Sprintf("User: %s\nAI: %s", question, answer)
 
-	// 2. Get the embedding for this Q&A content.
-	// We re-use the EmbeddingResponse.Get method from rag.go
+	// 2. Get the embedding for this Q&A content (with context for timeout).
 	var embResp datatypes.EmbeddingResponse
-	if err := embResp.Get(content); err != nil {
-		// Log the error but don't crash. This is a background task.
-		slog.Error("Failed to get embedding for chat memory", "sessionId", sessionId, "error", err)
+	if err := embResp.GetWithContext(ctx, content); err != nil {
+		slog.Error("Failed to get embedding for chat memory",
+			"sessionId", sessionId, "error", err)
 		return
 	}
 
-	// 3. Define the properties for the "Document" object.
-	// We use the existing Document schema fields
+	// 3. Define the properties using typed struct
 	parentSource := fmt.Sprintf("session_memory_%s", sessionId)
-	source := fmt.Sprintf("%s_ts_%d", parentSource, time.Now().UnixMilli())
-	beacon := map[string]interface{}{
-		"beacon": fmt.Sprintf("weaviate://localhost/Session/%s", sessionUUID),
-	}
+	source := fmt.Sprintf("%s_turn_%d", parentSource, turnNumber)
 
-	properties := map[string]interface{}{
-		"content":       content,
-		"source":        source,
-		"parent_source": parentSource,
-		"data_space":    sessionId,
-		"version_tag":   "chat_memory",
-		"ingested_at":   time.Now().UnixMilli(),
-		"inSession":     beacon,
+	props := datatypes.DocumentProperties{
+		Content:      content,
+		Source:       source,
+		ParentSource: parentSource,
+		DataSpace:    sessionId,
+		VersionTag:   "chat_memory",
+		TurnNumber:   turnNumber,
+		IngestedAt:   time.Now().UnixMilli(),
 	}
+	properties := props.ToMap()
+	datatypes.WithBeacon(properties, sessionUUID)
 
 	// 4. Save to Weaviate *with* the vector.
 	_, err = client.Data().Creator().
 		WithClassName("Document").
 		WithProperties(properties).
 		WithVector(embResp.Vector).
-		Do(context.Background())
+		Do(ctx)
 
 	if err != nil {
-		slog.Error("Failed to save chat memory chunk to Weaviate", "sessionId", sessionId, "error", err)
+		slog.Error("Failed to save chat memory chunk to Weaviate",
+			"sessionId", sessionId, "error", err)
 		return
 	}
 
-	slog.Info("Successfully saved chat memory chunk", "sessionId", sessionId, "source", source)
+	slog.Info("Successfully saved chat memory chunk",
+		"sessionId", sessionId,
+		"turnNumber", turnNumber,
+		"source", source)
 }

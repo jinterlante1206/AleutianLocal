@@ -78,6 +78,12 @@ func GetDocumentSchema() *models.Class {
 				IndexFilterable: indexFilterable,
 			},
 			{
+				Name:            "turn_number",
+				DataType:        []string{"int"},
+				Description:     "Turn number within conversation (for chat_memory filtering).",
+				IndexFilterable: indexFilterable,
+			},
+			{
 				Name:     "inSession",
 				DataType: []string{"Session"},
 				Description: "A direct graph link to the parent Session object (" +

@@ -37,6 +37,7 @@ func TestGetDocumentSchema_HasRequiredProperties(t *testing.T) {
 		"version_tag",
 		"data_space",
 		"ingested_at",
+		"turn_number",
 		"inSession",
 	}
 

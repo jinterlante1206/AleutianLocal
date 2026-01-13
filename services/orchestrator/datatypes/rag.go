@@ -12,6 +12,7 @@ package datatypes
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +34,18 @@ type embeddingServiceResponse struct {
 	Dim       int         `json:"dim"`
 	Timestamp int64       `json:"timestamp"`
 	Id        string      `json:"id"`
+}
+
+// ollamaEmbedRequest is the request format for Ollama's /api/embed endpoint.
+type ollamaEmbedRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+// ollamaEmbedResponse is the response format from Ollama's /api/embed endpoint.
+type ollamaEmbedResponse struct {
+	Model      string      `json:"model"`
+	Embeddings [][]float32 `json:"embeddings"`
 }
 
 type EmbeddingRequest struct {
@@ -440,14 +453,29 @@ func (e *EmbeddingResponse) Get(text string) error {
 		return fmt.Errorf("EMBEDDING_SERVICE_URL not set")
 	}
 
-	// Use the correct request struct: {"texts": ["..."]}
-	embReq := embeddingServiceRequest{Texts: []string{text}}
-	reqBody, err := json.Marshal(embReq)
+	// Detect if we're using Ollama based on URL pattern
+	isOllama := strings.Contains(embeddingServiceURL, "/api/embed")
+
+	var reqBody []byte
+	var err error
+
+	if isOllama {
+		// Ollama format: {"model": "...", "input": "..."}
+		embeddingModel := os.Getenv("EMBEDDING_MODEL")
+		if embeddingModel == "" {
+			embeddingModel = "nomic-embed-text-v2-moe" // Default
+		}
+		embReq := ollamaEmbedRequest{Model: embeddingModel, Input: text}
+		reqBody, err = json.Marshal(embReq)
+	} else {
+		// Legacy format: {"texts": ["..."]}
+		embReq := embeddingServiceRequest{Texts: []string{text}}
+		reqBody, err = json.Marshal(embReq)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to marshal embedding request: %w", err)
 	}
 
-	// This part is unchanged
 	req, err := http.NewRequest(http.MethodPost, embeddingServiceURL, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return fmt.Errorf("failed to setup a new request: %w", err)
@@ -471,7 +499,23 @@ func (e *EmbeddingResponse) Get(text string) error {
 		return fmt.Errorf("embedding service returned non-200 status: %s, %d", string(bodyBytes), resp.StatusCode)
 	}
 
-	// Use the correct response struct to parse: {"vectors": [[...]]}
+	if isOllama {
+		// Parse Ollama response: {"model": "...", "embeddings": [[...]]}
+		var ollamaResp ollamaEmbedResponse
+		if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
+			return fmt.Errorf("failed to parse Ollama embedding response: %w", err)
+		}
+		if len(ollamaResp.Embeddings) == 0 || len(ollamaResp.Embeddings[0]) == 0 {
+			return fmt.Errorf("Ollama returned no embeddings")
+		}
+		e.Vector = ollamaResp.Embeddings[0]
+		e.Dim = len(e.Vector)
+		e.Text = text
+		e.Timestamp = int(time.Now().Unix())
+		return nil
+	}
+
+	// Parse legacy response: {"vectors": [[...]]}
 	var serviceResp embeddingServiceResponse
 	if err := json.Unmarshal(bodyBytes, &serviceResp); err != nil {
 		slog.Warn("Failed to parse embedding service response as batch, trying single", "error", err)
@@ -489,7 +533,127 @@ func (e *EmbeddingResponse) Get(text string) error {
 	e.Vector = serviceResp.Vectors[0]
 	e.Dim = len(e.Vector)
 	e.Text = text
-	e.Timestamp = int(time.Now().Unix()) // Use current time
+	e.Timestamp = int(time.Now().Unix())
+	e.Id = serviceResp.Id
+
+	return nil
+}
+
+// GetWithContext fetches embeddings with context support for cancellation and timeout.
+//
+// # Description
+//
+// This is a context-aware version of Get() that respects cancellation signals.
+// Use this when the embedding call is part of an HTTP request handler or other
+// cancelable operation.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout.
+//   - text: The text to embed.
+//
+// # Outputs
+//
+//   - error: Non-nil if context is canceled, timed out, or embedding fails.
+//
+// # Example
+//
+//	var emb EmbeddingResponse
+//	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+//	defer cancel()
+//	if err := emb.GetWithContext(ctx, "What is AI?"); err != nil { ... }
+func (e *EmbeddingResponse) GetWithContext(ctx context.Context, text string) error {
+	embeddingServiceURL := os.Getenv("EMBEDDING_SERVICE_URL")
+	if embeddingServiceURL == "" {
+		return fmt.Errorf("EMBEDDING_SERVICE_URL not set")
+	}
+
+	// Detect if we're using Ollama based on URL pattern
+	isOllama := strings.Contains(embeddingServiceURL, "/api/embed")
+
+	var reqBody []byte
+	var err error
+
+	if isOllama {
+		// Ollama format: {"model": "...", "input": "..."}
+		embeddingModel := os.Getenv("EMBEDDING_MODEL")
+		if embeddingModel == "" {
+			embeddingModel = "nomic-embed-text-v2-moe" // Default
+		}
+		embReq := ollamaEmbedRequest{Model: embeddingModel, Input: text}
+		reqBody, err = json.Marshal(embReq)
+	} else {
+		// Legacy format: {"texts": ["..."]}
+		embReq := embeddingServiceRequest{Texts: []string{text}}
+		reqBody, err = json.Marshal(embReq)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to marshal embedding request: %w", err)
+	}
+
+	// Create request with context for cancellation support
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, embeddingServiceURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to setup a new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		// Check if context was canceled
+		if ctx.Err() != nil {
+			return fmt.Errorf("embedding request canceled: %w", ctx.Err())
+		}
+		return fmt.Errorf("failed to make the request to the embedding service: %w", err)
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Println("Failed to close out the body on func close")
+		}
+	}(resp.Body)
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("embedding service returned non-200 status: %s, %d", string(bodyBytes), resp.StatusCode)
+	}
+
+	if isOllama {
+		// Parse Ollama response: {"model": "...", "embeddings": [[...]]}
+		var ollamaResp ollamaEmbedResponse
+		if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
+			return fmt.Errorf("failed to parse Ollama embedding response: %w", err)
+		}
+		if len(ollamaResp.Embeddings) == 0 || len(ollamaResp.Embeddings[0]) == 0 {
+			return fmt.Errorf("Ollama returned no embeddings")
+		}
+		e.Vector = ollamaResp.Embeddings[0]
+		e.Dim = len(e.Vector)
+		e.Text = text
+		e.Timestamp = int(time.Now().Unix())
+		return nil
+	}
+
+	// Parse legacy response: {"vectors": [[...]]}
+	var serviceResp embeddingServiceResponse
+	if err := json.Unmarshal(bodyBytes, &serviceResp); err != nil {
+		slog.Warn("Failed to parse embedding service response as batch, trying single", "error", err)
+		if err := json.Unmarshal(bodyBytes, &e); err != nil {
+			return fmt.Errorf("failed to parse response from embedding service in any format: %w", err)
+		}
+		return nil
+	}
+
+	// Check that we got at least one vector back
+	if len(serviceResp.Vectors) == 0 || len(serviceResp.Vectors[0]) == 0 {
+		return fmt.Errorf("embedding service returned no vectors")
+	}
+
+	e.Vector = serviceResp.Vectors[0]
+	e.Dim = len(e.Vector)
+	e.Text = text
+	e.Timestamp = int(time.Now().Unix())
 	e.Id = serviceResp.Id
 
 	return nil

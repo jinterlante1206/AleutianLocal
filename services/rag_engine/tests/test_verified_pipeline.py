@@ -127,11 +127,194 @@ async def test_max_retries_exceeded(verified_pipeline):
 
 @pytest.mark.asyncio
 async def test_no_documents_found(verified_pipeline):
-    """Scenario: Reranker returns empty list."""
+    """Scenario: Reranker returns empty list.
+
+    When no relevant documents are found and the relevance gate (P8) is enabled,
+    the pipeline returns a user-friendly message asking for clarification.
+    """
     # Override the reranker mock to return empty
     verified_pipeline._rerank_docs = AsyncMock(return_value=[])
 
     answer, sources = await verified_pipeline.run("Unrelated question")
 
-    assert "No relevant documents" in answer
+    # P8 relevance gate returns LOW_RELEVANCE_MESSAGE when no docs are found
+    assert "couldn't find relevant information" in answer
     assert sources == []
+
+
+# =============================================================================
+# P7: Conversation History Tests
+# =============================================================================
+
+class TestConversationHistory:
+    """Tests for P7 semantic conversation memory integration."""
+
+    def test_optimist_prompt_includes_history_strict_mode(self, verified_pipeline):
+        """
+        Verify that _build_optimist_prompt includes history when provided (strict mode).
+
+        P7 Requirement: History should appear in a distinct "CONVERSATION HISTORY" section
+        to help the LLM understand follow-up queries like "tell me more".
+        """
+        context_docs = [{"content": "Chrysler was founded in 1925.", "source": "cars.txt"}]
+        history = [
+            {
+                "question": "What is Chrysler?",
+                "answer": "Chrysler is an American automotive company.",
+                "turn_number": 5,
+                "similarity_score": 0.87
+            }
+        ]
+
+        # Call the prompt builder directly
+        prompt = verified_pipeline._build_optimist_prompt("Tell me more", context_docs, history)
+
+        # Assertions
+        assert "CONVERSATION HISTORY (Memory)" in prompt
+        assert "What is Chrysler?" in prompt
+        assert "Chrysler is an American automotive company" in prompt
+        assert "[Turn 5]" in prompt
+        assert "UPLOADED KNOWLEDGE BASE (Facts)" in prompt
+        assert "cars.txt" in prompt
+
+    def test_optimist_prompt_includes_history_balanced_mode(self, verified_pipeline):
+        """
+        Verify that _build_optimist_prompt includes history when provided (balanced mode).
+        """
+        # Set balanced mode
+        verified_pipeline.optimist_strictness = "balanced"
+
+        context_docs = [{"content": "Ford was founded in 1903.", "source": "cars.txt"}]
+        history = [
+            {
+                "question": "What companies make cars?",
+                "answer": "Ford, GM, and Chrysler are major US automakers.",
+                "turn_number": 3,
+                "similarity_score": 0.75
+            }
+        ]
+
+        prompt = verified_pipeline._build_optimist_prompt("Tell me about Ford", context_docs, history)
+
+        # Assertions
+        assert "CONVERSATION HISTORY (Memory)" in prompt
+        assert "What companies make cars?" in prompt
+        assert "[Turn 3]" in prompt
+
+    def test_optimist_prompt_works_without_history(self, verified_pipeline):
+        """
+        Verify backward compatibility: prompt works when no history is provided.
+
+        P7 Requirement: The history parameter is optional. When None or empty,
+        the prompt should work as before without a history section.
+        """
+        context_docs = [{"content": "The sky is blue.", "source": "nature.txt"}]
+
+        # Call without history (default None)
+        prompt = verified_pipeline._build_optimist_prompt("What color is the sky?", context_docs)
+
+        # Should NOT contain history section
+        assert "CONVERSATION HISTORY" not in prompt
+        # Should still contain sources
+        assert "nature.txt" in prompt
+        assert "The sky is blue" in prompt
+
+    def test_optimist_prompt_with_empty_history(self, verified_pipeline):
+        """
+        Verify that empty history list behaves same as None.
+        """
+        context_docs = [{"content": "Water is H2O.", "source": "chemistry.txt"}]
+
+        # Call with empty list
+        prompt = verified_pipeline._build_optimist_prompt("What is water?", context_docs, [])
+
+        # Should NOT contain history section
+        assert "CONVERSATION HISTORY" not in prompt
+        assert "chemistry.txt" in prompt
+
+    def test_optimist_prompt_truncates_long_answers(self, verified_pipeline):
+        """
+        Verify that very long answers in history are truncated to prevent context overflow.
+
+        P7 Requirement: Answers longer than 500 chars should be truncated with "..."
+        """
+        context_docs = [{"content": "Brief fact.", "source": "test.txt"}]
+        long_answer = "A" * 600  # 600 characters, should be truncated
+        history = [
+            {
+                "question": "Long question?",
+                "answer": long_answer,
+                "turn_number": 1,
+                "similarity_score": 0.9
+            }
+        ]
+
+        prompt = verified_pipeline._build_optimist_prompt("Follow up", context_docs, history)
+
+        # Should contain truncated answer (500 chars + "...")
+        assert "A" * 500 in prompt
+        assert "..." in prompt
+        # Should NOT contain full 600 chars
+        assert long_answer not in prompt
+
+    def test_optimist_prompt_handles_none_turn_number(self, verified_pipeline):
+        """
+        Verify that None turn_number displays as '?' not 'None'.
+
+        Edge case: RelevantHistoryItem allows turn_number: None for legacy data.
+        The prompt should display [Turn ?] not [Turn None].
+        """
+        context_docs = [{"content": "Some fact.", "source": "test.txt"}]
+        history = [
+            {
+                "question": "Earlier question?",
+                "answer": "Earlier answer.",
+                "turn_number": None,  # Explicit None
+                "similarity_score": 0.8
+            }
+        ]
+
+        prompt = verified_pipeline._build_optimist_prompt("Follow up", context_docs, history)
+
+        # Should contain [Turn ?] for None turn_number
+        assert "[Turn ?]" in prompt
+        # Should NOT contain [Turn None]
+        assert "[Turn None]" not in prompt
+        assert "Earlier question?" in prompt
+
+    @pytest.mark.asyncio
+    async def test_run_passes_history_to_optimist(self, verified_pipeline):
+        """
+        Integration test: verify run() passes history through to _build_optimist_prompt.
+        """
+        # Setup mocks
+        verified_pipeline._call_llm.return_value = "Chrysler merged with Fiat."
+        verified_pipeline._execute_skeptic_scan = AsyncMock(return_value=SkepticAuditResult(
+            is_verified=True,
+            reasoning="Verified",
+            hallucinations=[]
+        ))
+
+        history = [
+            {
+                "question": "What is Chrysler?",
+                "answer": "Chrysler is an American automotive company.",
+                "turn_number": 5,
+                "similarity_score": 0.87
+            }
+        ]
+
+        # Run with history
+        answer, sources = await verified_pipeline.run(
+            "Tell me more about their recent history",
+            relevant_history=history
+        )
+
+        # Verify answer returned
+        assert answer == "Chrysler merged with Fiat."
+
+        # Verify _call_llm was called with a prompt containing history
+        call_args = verified_pipeline._call_llm.call_args_list[0]
+        prompt_used = call_args[0][0]  # First positional arg is the prompt
+        assert "What is Chrysler?" in prompt_used
+        assert "CONVERSATION HISTORY" in prompt_used

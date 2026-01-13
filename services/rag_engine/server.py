@@ -32,7 +32,7 @@ from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 
 from pipelines import standard, reranking, agent, verified
 from datatypes.agent import AgentStepResponse, AgentStepRequest
-from datatypes.verified import ProgressEvent
+from datatypes.verified import ProgressEvent, RelevantHistoryItem, ExpandedQueryItem
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -187,6 +187,7 @@ class RAGEngineRequest(BaseModel):
     query: str
     session_id: str | None = None
     strict_mode: bool = True  # Strict RAG: only answer from docs (no LLM fallback)
+    relevant_history: list[RelevantHistoryItem] | None = None  # P8: Conversation history for context
 
 
 class TemperatureOverrides(BaseModel):
@@ -200,7 +201,8 @@ class VerifiedRAGRequest(RAGEngineRequest):
     """Extended request model for verified pipeline with configurability.
 
     Supports request-level temperature overrides for fine-grained control
-    over the skeptic/optimist debate behavior.
+    over the skeptic/optimist debate behavior, and conversation history
+    for context in follow-up queries.
 
     Examples
     --------
@@ -212,8 +214,32 @@ class VerifiedRAGRequest(RAGEngineRequest):
             "query": "What is X?",
             "temperature_overrides": {"optimist": 0.7, "skeptic": 0.1}
         }
+
+    With conversation history (for follow-up queries):
+        {
+            "query": "Tell me more",
+            "relevant_history": [
+                {"question": "What is Chrysler?", "answer": "Chrysler is...", "turn_number": 5}
+            ]
+        }
+
+    With P8 query expansion:
+        {
+            "query": "History of Motown Records founding",
+            "original_query": "tell me more",
+            "expanded_query": {
+                "original": "tell me more",
+                "queries": ["History of Motown Records founding", "Motown artists", "Berry Gordy Detroit"],
+                "expanded": true
+            }
+        }
     """
     temperature_overrides: TemperatureOverrides | None = None
+    relevant_history: list[RelevantHistoryItem] | None = None
+    # P8: Query expansion fields from Go orchestrator
+    expanded_query: ExpandedQueryItem | None = None
+    original_query: str | None = None  # Original query before expansion
+    contextual_query: str | None = None  # Query with history context for embedding
 
 
 pipeline_config = {
@@ -236,7 +262,16 @@ async def run_standard_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = standard.StandardRAGPipeline(weaviate_client, pipeline_config)
-        answer, source_docs = await pipeline.run(request.query, request.session_id, request.strict_mode)
+        # Extract relevant history for conversation context (P8)
+        history_dicts = None
+        if request.relevant_history:
+            history_dicts = [item.model_dump() for item in request.relevant_history]
+        answer, source_docs = await pipeline.run(
+            request.query,
+            request.session_id,
+            request.strict_mode,
+            relevant_history=history_dicts
+        )
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in standard RAG pipeline: {e}", exc_info=True)
@@ -250,7 +285,16 @@ async def run_reranking_rag(request: RAGEngineRequest):
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
         pipeline = reranking.RerankingPipeline(weaviate_client, pipeline_config)
-        answer, source_docs = await pipeline.run(request.query, request.session_id, request.strict_mode)
+        # Extract relevant history for conversation context (P8)
+        history_dicts = None
+        if request.relevant_history:
+            history_dicts = [item.model_dump() for item in request.relevant_history]
+        answer, source_docs = await pipeline.run(
+            request.query,
+            request.session_id,
+            request.strict_mode,
+            relevant_history=history_dicts
+        )
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
         logger.error(f"Error in reranking RAG pipeline: {e}", exc_info=True)
@@ -409,12 +453,18 @@ async def run_verified_rag(request: VerifiedRAGRequest):
             if request.temperature_overrides.refiner is not None:
                 temp_overrides["refiner"] = request.temperature_overrides.refiner
 
-        # Run with optional temperature overrides
+        # Extract relevant history for conversation context (P7)
+        history_dicts = None
+        if request.relevant_history:
+            history_dicts = [item.model_dump() for item in request.relevant_history]
+
+        # Run with optional temperature overrides and history
         answer, source_docs = await pipeline.run(
             request.query,
             request.session_id,
             request.strict_mode,
-            temperature_overrides=temp_overrides
+            temperature_overrides=temp_overrides,
+            relevant_history=history_dicts
         )
 
         return RAGEngineResponse(answer=answer, sources=source_docs)
@@ -513,15 +563,29 @@ async def run_verified_rag_streaming(request: VerifiedRAGRequest):
                 if request.temperature_overrides.refiner is not None:
                     temp_overrides["refiner"] = request.temperature_overrides.refiner
 
+            # Extract relevant history for conversation context (P7)
+            history_dicts = None
+            if request.relevant_history:
+                history_dicts = [item.model_dump() for item in request.relevant_history]
+
             # Run pipeline with progress callback in a background task
             async def run_pipeline():
                 try:
+                    # Convert P8 expanded_query model to dict if present
+                    expanded_query_dict = None
+                    if request.expanded_query:
+                        expanded_query_dict = request.expanded_query.model_dump()
+
                     answer, sources = await pipeline.run_with_progress(
                         request.query,
                         progress_callback=progress_callback,
                         session_id=request.session_id,
                         strict_mode=request.strict_mode,
-                        temperature_overrides=temp_overrides
+                        temperature_overrides=temp_overrides,
+                        relevant_history=history_dicts,
+                        expanded_query=expanded_query_dict,
+                        original_query=request.original_query,
+                        contextual_query=request.contextual_query
                     )
                     # Signal completion with final answer
                     await event_queue.put({

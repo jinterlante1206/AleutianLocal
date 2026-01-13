@@ -41,7 +41,7 @@ from opentelemetry import trace
 from sentence_transformers import CrossEncoder
 
 # Import the base class and strict mode constants
-from .base import BaseRAGPipeline, RERANK_SCORE_THRESHOLD, NO_RELEVANT_DOCS_MESSAGE
+from .base import BaseRAGPipeline, RERANK_SCORE_THRESHOLD, NO_RELEVANT_DOCS_MESSAGE, validate_document_format
 # Import Weaviate classes needed for search override
 import weaviate
 import weaviate.classes as wvc
@@ -210,6 +210,17 @@ class RerankingPipeline(BaseRAGPipeline):
             # Return top N of the initial results if reranker isn't available
             return initial_docs_with_meta[:self.top_k_final]
 
+        # Validate document format (P8 contract enforcement)
+        # This catches format coupling issues early rather than failing silently
+        for i, doc in enumerate(initial_docs_with_meta):
+            try:
+                validate_document_format(doc, context=f"_rerank_docs[{i}]")
+            except ValueError as e:
+                logger.error(f"Document format validation failed: {e}")
+                # Log the offending document structure for debugging
+                logger.debug(f"Invalid document keys: {doc.keys() if isinstance(doc, dict) else type(doc)}")
+                raise
+
         logger.debug(f"Preparing {len(initial_docs_with_meta)} passages for reranking...")
         passages = [d["properties"].get("content", "") for d in initial_docs_with_meta]
         query_passage_pairs = [[query, passage] for passage in passages if passage]
@@ -246,7 +257,13 @@ class RerankingPipeline(BaseRAGPipeline):
                 logger.debug(f"Doc {i}: raw_score={score:.4f} -> normalized={normalized_score:.4f}")
         return reranked_docs_with_meta
 
-    async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
+    async def run(
+        self,
+        query: str,
+        session_id: str | None = None,
+        strict_mode: bool = True,
+        relevant_history: list[dict] | None = None,
+    ) -> tuple[str, list[dict]]:
         """Executes the RAG pipeline with reranking.
 
         Parameters
@@ -259,6 +276,10 @@ class RerankingPipeline(BaseRAGPipeline):
             If True, only answer from documents. If no relevant docs (rerank score < threshold),
             return NO_RELEVANT_DOCS_MESSAGE instead of using LLM fallback.
             Default: True (strict mode).
+        relevant_history : list[dict] | None
+            Relevant conversation history from P7 semantic memory. Each dict contains
+            'question', 'answer', 'turn_number', and 'similarity_score'. If provided,
+            history turns are injected as pseudo-documents before reranking.
         """
         tracer = trace.get_tracer("aleutian.rag.reranking")
         with tracer.start_as_current_span("reranking_pipeline.run") as span:
@@ -275,6 +296,15 @@ class RerankingPipeline(BaseRAGPipeline):
                 initial_docs_with_meta = await self._search_weaviate_initial(query_vector,
                                                                              session_id)
                 span.set_attribute("retrieved.initial_count", len(initial_docs_with_meta))
+
+            # P8: Inject conversation history as pseudo-documents before reranking
+            # History competes with retrieved docs during reranking
+            if relevant_history:
+                initial_docs_with_meta = self._inject_history_as_documents(
+                    initial_docs_with_meta, relevant_history
+                )
+                span.set_attribute("history.injected_count", len(relevant_history))
+                logger.info(f"Injected {len(relevant_history)} history turns into document pool for reranking")
 
             with tracer.start_as_current_span("rerank_docs"):
                 context_docs_with_meta = await self._rerank_docs(query, initial_docs_with_meta)
