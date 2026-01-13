@@ -1492,6 +1492,51 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 	}, nil
 }
 
+// readFileWithContext reads a file while respecting context cancellation.
+//
+// # Description
+//
+// Wraps os.ReadFile in a goroutine to enable context-aware file reading.
+// This prevents blocking indefinitely on slow or hung filesystems (e.g., NFS).
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout.
+//   - path: Absolute path to the file to read.
+//
+// # Outputs
+//
+//   - []byte: File contents if read successfully.
+//   - error: Non-nil if context is cancelled/times out or file read fails.
+//
+// # Limitations
+//
+//   - The underlying goroutine may continue running briefly after context
+//     cancellation since os.ReadFile cannot be interrupted mid-operation.
+//
+// # Assumptions
+//
+//   - Path has already been validated for security (path traversal, symlinks).
+func readFileWithContext(ctx context.Context, path string) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	resultChan := make(chan result, 1)
+
+	go func() {
+		data, err := os.ReadFile(path)
+		resultChan <- result{data: data, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-resultChan:
+		return res.data, res.err
+	}
+}
+
 // readMountsFromConfigFile reads mount configuration from Podman machine config file.
 //
 // # Description
@@ -1502,15 +1547,18 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 //
 // # Security
 //
-// This function validates that the config file path is within the expected
-// Podman machine configuration directory (~/.config/containers/podman/machine)
-// to prevent path traversal attacks. Paths outside this directory are rejected.
+// This function implements defense-in-depth path validation:
+//   - Resolves symbolic links in both the input path and base directory
+//     to prevent symlink-based path traversal attacks.
+//   - Validates that the fully resolved path is within the expected
+//     Podman machine configuration directory.
+//   - Uses context-aware file reading to prevent indefinite blocking.
 //
 // # Inputs
 //
 //   - ctx: Context for cancellation and timeout of file I/O operations.
-//   - configFile: Path to the machine config JSON file. Must be within the
-//     expected Podman config directory.
+//   - configFile: Path to the machine config JSON file. Must resolve to
+//     a location within the expected Podman config directory.
 //
 // # Outputs
 //
@@ -1521,6 +1569,7 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 //
 //   - Only reads from files within ~/.config/containers/podman/machine.
 //   - Does not validate the actual contents of mount paths.
+//   - Rejects paths containing symlinks that point outside allowed directory.
 //
 // # Assumptions
 //
@@ -1534,23 +1583,34 @@ func readMountsFromConfigFile(ctx context.Context, configFile string) ([]MountIn
 	}
 	expectedBaseDir := filepath.Join(userConfigDir, "containers", "podman", "machine")
 
-	// Clean and resolve the path to prevent traversal attacks (e.g., ../)
+	// Security: Resolve symlinks in the base path to get canonical representation
+	realExpectedBaseDir, err := filepath.EvalSymlinks(expectedBaseDir)
+	if err != nil {
+		// Base directory may not exist yet; fall back to the unresolved path
+		// but log the issue for debugging
+		slog.Debug("Could not resolve symlinks for base directory", "path", expectedBaseDir, "error", err)
+		realExpectedBaseDir = expectedBaseDir
+	}
+
+	// Clean and resolve the input path to prevent traversal attacks (e.g., ../)
 	absConfigFile, err := filepath.Abs(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve absolute path for %s: %w", configFile, err)
 	}
 
-	// Verify the resolved path is within the allowed directory
-	if !strings.HasPrefix(absConfigFile, expectedBaseDir+string(filepath.Separator)) && absConfigFile != expectedBaseDir {
-		return nil, fmt.Errorf("path rejected for security reasons: %s is outside of allowed directory %s", configFile, expectedBaseDir)
+	// Security: Resolve symlinks in the input path to get the final, real path
+	realConfigFile, err := filepath.EvalSymlinks(absConfigFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve symlinks for config file path %s: %w", absConfigFile, err)
 	}
 
-	// Check context before I/O operation
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	// Verify the fully resolved path is within the allowed canonical directory
+	if !strings.HasPrefix(realConfigFile, realExpectedBaseDir+string(filepath.Separator)) && realConfigFile != realExpectedBaseDir {
+		return nil, fmt.Errorf("path rejected for security reasons: %s resolves to %s which is outside of allowed directory %s", configFile, realConfigFile, realExpectedBaseDir)
 	}
 
-	data, err := os.ReadFile(absConfigFile)
+	// Read file with context awareness to handle slow/hung filesystems
+	data, err := readFileWithContext(ctx, realConfigFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
