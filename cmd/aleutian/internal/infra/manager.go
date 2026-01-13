@@ -51,6 +51,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1470,7 +1471,7 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 	if len(mounts) == 0 {
 		if configDir, ok := machine["ConfigDir"].(map[string]interface{}); ok {
 			if configPath, ok := configDir["Path"].(string); ok {
-				configFile := fmt.Sprintf("%s/%s.json", configPath, machineName)
+				configFile := filepath.Join(configPath, filepath.Base(machineName)+".json")
 				if configMounts, err := readMountsFromConfigFile(configFile); err == nil {
 					mounts = configMounts
 				} else {
