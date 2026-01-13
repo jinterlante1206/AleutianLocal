@@ -225,6 +225,19 @@ class BaseRAGPipeline:
         self.openai_api_key = self._read_secret("openai_api_key")
         self.anthropic_api_key = self._read_secret("anthropic_api_key")
 
+        # --- Thinking Mode Configuration (Anthropic only) ---
+        # Parse once at init to avoid repeated env lookups and potential crashes
+        self.enable_thinking = os.getenv("ENABLE_THINKING", "false").lower() == "true"
+        try:
+            self.thinking_budget = int(os.getenv("THINKING_BUDGET", "2048"))
+            if self.thinking_budget <= 0:
+                logger.warning("THINKING_BUDGET must be positive. Using default 2048.")
+                self.thinking_budget = 2048
+        except ValueError:
+            raw_value = os.getenv("THINKING_BUDGET")
+            logger.error(f"Invalid THINKING_BUDGET value '{raw_value}'. Using default 2048.")
+            self.thinking_budget = 2048
+
         # --- Validation ---
         if not self.embedding_url:
             raise ValueError("Embedding service URL not configured.")
@@ -452,10 +465,10 @@ class BaseRAGPipeline:
             # Handle temperature based on thinking mode (A1 fix)
             # When thinking mode is enabled, temperature must be None (API requirement)
             # When thinking mode is disabled, use the generation_params temperature
-            if os.getenv("ENABLE_THINKING") == "true":
+            if self.enable_thinking:
                 payload["thinking"] = {
                     "type": "enabled",
-                    "budget_tokens": int(os.getenv("THINKING_BUDGET", 2048))
+                    "budget_tokens": self.thinking_budget
                 }
                 payload["temperature"] = None  # Required for thinking
             else:

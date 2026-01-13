@@ -254,7 +254,7 @@ class TestAnthropicBackendTemperature:
         self, anthropic_pipeline: BaseRAGPipeline
     ) -> None:
         """
-        Verify Anthropic uses temperature when ENABLE_THINKING is not set.
+        Verify Anthropic uses temperature when thinking mode is disabled.
 
         This was added as part of A1 fix - previously temperature was only
         set when thinking mode was enabled (to None).
@@ -270,9 +270,9 @@ class TestAnthropicBackendTemperature:
         anthropic_pipeline.http_client = MagicMock()
         anthropic_pipeline.http_client.post = AsyncMock(side_effect=capture_post)
 
-        # Ensure thinking mode is disabled
-        with patch.dict(os.environ, {"ENABLE_THINKING": "false"}, clear=False):
-            await anthropic_pipeline._call_llm("Test prompt", temperature=0.3)
+        # Ensure thinking mode is disabled (now an instance attribute)
+        anthropic_pipeline.enable_thinking = False
+        await anthropic_pipeline._call_llm("Test prompt", temperature=0.3)
 
         assert len(captured) == 1
         payload = captured[0]
@@ -299,9 +299,10 @@ class TestAnthropicBackendTemperature:
         anthropic_pipeline.http_client = MagicMock()
         anthropic_pipeline.http_client.post = AsyncMock(side_effect=capture_post)
 
-        # Enable thinking mode
-        with patch.dict(os.environ, {"ENABLE_THINKING": "true", "THINKING_BUDGET": "2048"}, clear=False):
-            await anthropic_pipeline._call_llm("Test prompt", temperature=0.5)
+        # Enable thinking mode (now instance attributes, set at init)
+        anthropic_pipeline.enable_thinking = True
+        anthropic_pipeline.thinking_budget = 2048
+        await anthropic_pipeline._call_llm("Test prompt", temperature=0.5)
 
         assert len(captured) == 1
         payload = captured[0]
