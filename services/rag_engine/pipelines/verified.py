@@ -125,6 +125,12 @@ DEFAULT_OPTIMIST_STRICTNESS = _get_env_str("VERIFIED_OPTIMIST_STRICTNESS", OPTIM
 # If set, loads custom few-shot examples from this YAML file
 DEFAULT_SKEPTIC_EXAMPLES_PATH = _get_env_str("VERIFIED_SKEPTIC_EXAMPLES_PATH", "")
 
+# --- History Answer Truncation (P7) ---
+# Environment: VERIFIED_HISTORY_ANSWER_MAX_LENGTH
+# Maximum characters for previous answers in conversation history.
+# Longer answers are truncated with "..." to prevent context overflow.
+DEFAULT_HISTORY_ANSWER_MAX_LENGTH = _get_env_int("VERIFIED_HISTORY_ANSWER_MAX_LENGTH", 500)
+
 # =============================================================================
 # HARDCODED FEW-SHOT EXAMPLES (Fallback if no file configured)
 # =============================================================================
@@ -623,7 +629,12 @@ class VerifiedRAGPipeline(RerankingPipeline):
 
         return True, "valid"
 
-    def _build_optimist_prompt(self, query: str, context_docs: list[dict]) -> str:
+    def _build_optimist_prompt(
+        self,
+        query: str,
+        context_docs: list[dict],
+        relevant_history: list[dict] | None = None
+    ) -> str:
         """
         Builds an enhanced prompt for the optimist (draft generation) role.
 
@@ -638,6 +649,11 @@ class VerifiedRAGPipeline(RerankingPipeline):
             The original query from the user.
         context_docs : list[dict]
             A list of document dictionaries with 'content' and 'source' keys.
+        relevant_history : list[dict] | None
+            Optional conversation history for follow-up context. Each dict:
+            - "question": str - previous user query
+            - "answer": str - previous AI response
+            - "turn_number": int | None - turn number
 
         Returns
         -------
@@ -650,6 +666,10 @@ class VerifiedRAGPipeline(RerankingPipeline):
         - Cite source numbers for each fact
         - Be conservative and only claim what's directly stated
         - Flag uncertainty when evidence is partial
+
+        P7 Enhancement: Adds conversation history section to provide context
+        for follow-up queries like "tell me more". History is clearly labeled
+        as "Conversation History (Memory)" to distinguish from "Knowledge Base (Facts)".
 
         Strictness modes (configurable via VERIFIED_OPTIMIST_STRICTNESS):
         - "strict": Every claim MUST have explicit source citation
@@ -666,38 +686,83 @@ class VerifiedRAGPipeline(RerankingPipeline):
                 context_parts.append(f"[Source {i}] ({source}):\n{content}")
             context_str = "\n\n---\n\n".join(context_parts)
 
+        # Format conversation history if provided (P7)
+        history_str = ""
+        if relevant_history:
+            history_parts = []
+            for turn in relevant_history:
+                # Use 'or' to handle both missing key AND explicit None value
+                turn_num = turn.get('turn_number') or '?'
+                question = turn.get('question', '')
+                answer = turn.get('answer', '')
+                # Truncate long answers to avoid overwhelming context
+                max_len = DEFAULT_HISTORY_ANSWER_MAX_LENGTH
+                if len(answer) > max_len:
+                    answer = answer[:max_len] + "..."
+                history_parts.append(f"[Turn {turn_num}] User: {question}\n[Turn {turn_num}] AI: {answer}")
+            history_str = "\n\n".join(history_parts)
+
         # Select prompt based on strictness mode
         if self.optimist_strictness == OPTIMIST_STRICTNESS_BALANCED:
+            history_section = ""
+            if history_str:
+                history_section = f"""
+# CONVERSATION HISTORY (Memory)
+Use this to understand context and resolve pronouns (e.g., "it", "more", "that").
+Do NOT cite conversation history as a source - only cite [Source N] from the Knowledge Base.
+
+{history_str}
+
+"""
             return f"""You are a helpful assistant. Answer the user's question based primarily on the provided sources.
 
-INSTRUCTIONS:
+# INSTRUCTIONS
 1. Base your answer on the provided sources and cite them as [Source N] where applicable.
 2. You may synthesize information across sources to provide a coherent answer.
 3. If sources provide conflicting information, note the discrepancy.
 4. If the sources don't fully address the question, you may provide context but clearly distinguish it from sourced facts.
 5. Prefer explicit source citations when possible.
+6. Use conversation history to understand what the user is referring to, but cite facts from sources.
 
-SOURCES:
+# UPLOADED KNOWLEDGE BASE (Facts)
+Use these sources for factual claims. Cite as [Source N].
+
 {context_str}
-
-QUESTION: {query}
+{history_section}
+# CURRENT QUESTION
+{query}
 
 Write a helpful answer that references sources where applicable:"""
 
         # Default: STRICT mode
+        history_section = ""
+        if history_str:
+            history_section = f"""
+# CONVERSATION HISTORY (Memory)
+Use this ONLY to understand what the user is referring to (e.g., "tell me more" refers to previous topic).
+Do NOT cite conversation history as a source - ONLY cite [Source N] from the Knowledge Base.
+Do NOT repeat information already provided in conversation history.
+
+{history_str}
+
+"""
         return f"""You are a CAREFUL, GROUNDED assistant. Answer the user's question using ONLY the provided sources.
 
-CRITICAL INSTRUCTIONS:
+# CRITICAL INSTRUCTIONS
 1. Every fact you state MUST be directly supported by a source - cite it as [Source N].
 2. If a source doesn't explicitly state something, DON'T infer or assume it.
 3. If sources provide conflicting information, note the discrepancy.
 4. If the sources don't contain enough information to fully answer, say so clearly.
 5. DO NOT use any prior knowledge - ONLY the sources below.
+6. Use conversation history to understand context, but cite facts from sources.
 
-SOURCES:
+# UPLOADED KNOWLEDGE BASE (Facts)
+Use these sources for factual claims. Cite as [Source N].
+
 {context_str}
-
-QUESTION: {query}
+{history_section}
+# CURRENT QUESTION
+{query}
 
 Write a helpful answer that cites [Source N] for each claim:"""
 
@@ -1225,7 +1290,11 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
         query: str,
         session_id: str | None = None,
         strict_mode: bool = True,
-        temperature_overrides: dict | None = None
+        temperature_overrides: dict | None = None,
+        relevant_history: list[dict] | None = None,
+        expanded_query: dict | None = None,
+        original_query: str | None = None,
+        contextual_query: str | None = None
     ) -> tuple[str, list[dict]]:
         """
         Execute the verified RAG pipeline with skeptic/optimist debate.
@@ -1255,6 +1324,21 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             - "skeptic": float (0.0-2.0) for audits
             - "refiner": float (0.0-2.0) for refinement
             Example: {"optimist": 0.7, "skeptic": 0.1}
+        relevant_history : list[dict] | None
+            Optional conversation history for follow-up context. Each dict:
+            - "question": str - previous user query
+            - "answer": str - previous AI response
+            - "turn_number": int | None - turn number
+            - "similarity_score": float | None - relevance score
+        expanded_query : dict | None
+            P8 expanded query from Go orchestrator. Keys:
+            - "original": str - original user query
+            - "queries": list[str] - expanded query variations
+            - "expanded": bool - whether expansion occurred
+        original_query : str | None
+            The original query before expansion (for logging/tracing).
+        contextual_query : str | None
+            Query with history context for embedding (P8).
 
         Returns
         -------
@@ -1294,6 +1378,13 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
 
             # A. Retrieve Data
             with tracer.start_as_current_span("verified_pipeline.retrieve") as retrieve_span:
+                # Log P8 expansion info
+                if expanded_query and expanded_query.get("expanded"):
+                    retrieve_span.set_attribute("query.expanded", True)
+                    retrieve_span.set_attribute("query.variation_count", len(expanded_query.get("queries", [])))
+                    retrieve_span.set_attribute("query.original", original_query or query)
+                    logger.info(f"Using expanded query: {expanded_query.get('queries', [query])[:3]}")
+
                 query_vector = await self._get_embedding(query)
                 retrieve_span.set_attribute("embedding.dimensions", len(query_vector) if query_vector else 0)
 
@@ -1301,17 +1392,57 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
                 initial_docs = await self._search_weaviate_initial(query_vector, session_id)
                 retrieve_span.set_attribute("retrieved.initial_count", len(initial_docs))
 
-                context_docs = await self._rerank_docs(query, initial_docs)
+                # P8: Inject history as pseudo-documents for unified reranking
+                if relevant_history:
+                    initial_docs_with_history = self._inject_history_as_documents(
+                        [{"properties": d["properties"], "metadata": d.get("metadata", {})} for d in initial_docs],
+                        relevant_history
+                    )
+                    retrieve_span.set_attribute("history.injected_count", len(relevant_history))
+                    logger.info(f"Injected {len(relevant_history)} history turns into document pool")
+                else:
+                    initial_docs_with_history = initial_docs
+
+                # Use expanded query for reranking if available (P8)
+                rerank_query = query
+                if expanded_query and expanded_query.get("queries"):
+                    rerank_query = expanded_query["queries"][0]
+                    retrieve_span.set_attribute("rerank.query", rerank_query[:100])
+
+                context_docs = await self._rerank_docs(rerank_query, initial_docs_with_history)
                 retrieve_span.set_attribute("retrieved.reranked_count", len(context_docs))
 
+                # P8: Apply relevance gate to prevent hallucination on garbage retrieval
+                has_history = bool(relevant_history)
+                context_docs, gate_passed, gate_message = self._check_relevance_gate(
+                    context_docs, has_history=has_history
+                )
+                retrieve_span.set_attribute("relevance_gate.passed", gate_passed)
+
+                if not gate_passed and gate_message:
+                    # Gate failed - return low-relevance message instead of hallucinating
+                    logger.info("Relevance gate failed, returning low-relevance message")
+                    root_span.set_attribute("result", "relevance_gate_failed")
+                    root_span.set_status(Status(StatusCode.OK))
+                    return gate_message, []
+
                 # Apply relevance threshold filtering in strict mode
+                # Note: History documents are exempt from score threshold since they
+                # were already validated by the relevance gate
                 if strict_mode:
+                    def _is_history_doc(d: dict) -> bool:
+                        """Check if doc is a history pseudo-document."""
+                        props = d.get("properties", {})
+                        if isinstance(props, dict) and props.get("is_history"):
+                            return True
+                        return False
+
                     relevant_docs = [
                         d for d in context_docs
-                        if self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
+                        if _is_history_doc(d) or self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
                     ]
                     retrieve_span.set_attribute("retrieved.relevant_count", len(relevant_docs))
-                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold {RERANK_SCORE_THRESHOLD}")
+                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold (history exempt)")
 
                     if not relevant_docs:
                         logger.info("No relevant documents found in strict mode, returning message")
@@ -1332,7 +1463,7 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
 
             # B. Initial "Optimist" Draft (P4-3: Enhanced optimist prompt)
             with tracer.start_as_current_span("verified_pipeline.draft_generation") as draft_span:
-                draft_prompt = self._build_optimist_prompt(query, context_props)
+                draft_prompt = self._build_optimist_prompt(query, context_props, relevant_history)
                 draft_span.set_attribute("llm.system", "optimist")
                 draft_span.set_attribute("llm.provider", self.llm_backend)
                 draft_span.set_attribute("llm.model", self.ollama_model)
@@ -1477,7 +1608,11 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
         progress_callback: Callable[[ProgressEvent], Awaitable[None]],
         session_id: str | None = None,
         strict_mode: bool = True,
-        temperature_overrides: dict | None = None
+        temperature_overrides: dict | None = None,
+        relevant_history: list[dict] | None = None,
+        expanded_query: dict | None = None,
+        original_query: str | None = None,
+        contextual_query: str | None = None
     ) -> tuple[str, list[dict]]:
         """
         Execute verified RAG pipeline with real-time progress streaming.
@@ -1498,6 +1633,13 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
         - session_id (str | None): Optional session ID for document filtering.
         - strict_mode (bool): If True, only answer from documents.
         - temperature_overrides (dict | None): Per-request temperature overrides.
+        - relevant_history (list[dict] | None): Conversation history for context.
+        - expanded_query (dict | None): P8 expanded query from Go with keys:
+          - "original": str - original user query
+          - "queries": list[str] - list of expanded query variations
+          - "expanded": bool - whether expansion occurred
+        - original_query (str | None): Original query if expanded (for logging).
+        - contextual_query (str | None): Query with history context for embedding.
 
         # Returns
 
@@ -1577,23 +1719,86 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             ))
 
             with tracer.start_as_current_span("verified_pipeline.retrieve") as retrieve_span:
+                # Log P8 expansion info
+                if expanded_query and expanded_query.get("expanded"):
+                    retrieve_span.set_attribute("query.expanded", True)
+                    retrieve_span.set_attribute("query.variation_count", len(expanded_query.get("queries", [])))
+                    retrieve_span.set_attribute("query.original", original_query or query)
+                    logger.info(f"Using expanded query: {expanded_query.get('queries', [query])[:3]}")
+
                 query_vector = await self._get_embedding(query)
                 retrieve_span.set_attribute("embedding.dimensions", len(query_vector) if query_vector else 0)
 
                 initial_docs = await self._search_weaviate_initial(query_vector, session_id)
                 retrieve_span.set_attribute("retrieved.initial_count", len(initial_docs))
 
-                context_docs = await self._rerank_docs(query, initial_docs)
+                # P8: Inject history as pseudo-documents for unified reranking
+                # History competes with documents - reranker determines relevance
+                if relevant_history:
+                    initial_docs_with_history = self._inject_history_as_documents(
+                        [{"properties": d["properties"], "metadata": d.get("metadata", {})} for d in initial_docs],
+                        relevant_history
+                    )
+                    retrieve_span.set_attribute("history.injected_count", len(relevant_history))
+                    logger.info(f"Injected {len(relevant_history)} history turns into document pool")
+                else:
+                    initial_docs_with_history = initial_docs
+
+                # Use expanded query for reranking if available
+                rerank_query = query
+                if expanded_query and expanded_query.get("queries"):
+                    # Use the first (most specific) expanded query for reranking
+                    rerank_query = expanded_query["queries"][0]
+                    retrieve_span.set_attribute("rerank.query", rerank_query[:100])
+
+                context_docs = await self._rerank_docs(rerank_query, initial_docs_with_history)
                 retrieve_span.set_attribute("retrieved.reranked_count", len(context_docs))
 
+                # P8: Apply relevance gate to prevent hallucination on garbage retrieval
+                has_history = bool(relevant_history)
+                context_docs, gate_passed, gate_message = self._check_relevance_gate(
+                    context_docs, has_history=has_history
+                )
+                retrieve_span.set_attribute("relevance_gate.passed", gate_passed)
+
+                if not gate_passed and gate_message:
+                    # Gate failed - return low-relevance message instead of hallucinating
+                    logger.info("Relevance gate failed, returning low-relevance message")
+                    root_span.set_attribute("result", "relevance_gate_failed")
+                    root_span.set_status(Status(StatusCode.OK))
+
+                    # Emit completion event for gate failure
+                    await emit(ProgressEvent(
+                        event_type=ProgressEventType.RETRIEVAL_COMPLETE,
+                        message="Retrieved documents below relevance threshold.",
+                        attempt=1,
+                        trace_id=trace_id,
+                        retrieval_details=RetrievalDetails(
+                            document_count=0,
+                            sources=[],
+                            has_relevant_docs=False
+                        )
+                    ))
+
+                    return gate_message, []
+
                 # Apply relevance threshold in strict mode
+                # Note: History documents are exempt from score threshold since they
+                # were already validated by the relevance gate
                 if strict_mode:
+                    def _is_history_doc(d: dict) -> bool:
+                        """Check if doc is a history pseudo-document."""
+                        props = d.get("properties", {})
+                        if isinstance(props, dict) and props.get("is_history"):
+                            return True
+                        return False
+
                     relevant_docs = [
                         d for d in context_docs
-                        if self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
+                        if _is_history_doc(d) or self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
                     ]
                     retrieve_span.set_attribute("retrieved.relevant_count", len(relevant_docs))
-                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold")
+                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold (history exempt)")
 
                     if not relevant_docs:
                         logger.info("No relevant documents found in strict mode")
@@ -1654,7 +1859,7 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             ))
 
             with tracer.start_as_current_span("verified_pipeline.draft_generation") as draft_span:
-                draft_prompt = self._build_optimist_prompt(query, context_props)
+                draft_prompt = self._build_optimist_prompt(query, context_props, relevant_history)
                 draft_span.set_attribute("llm.system", "optimist")
                 draft_span.set_attribute("llm.provider", self.llm_backend)
                 draft_span.set_attribute("llm.model", self.ollama_model)

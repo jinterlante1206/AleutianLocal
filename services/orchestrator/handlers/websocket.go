@@ -125,6 +125,7 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 		// --- WebSocket Connection State ---
 		sessionID := uuid.New().String()
 		isFirstTurn := true
+		turnNumber := 0 // Incremented before each turn save
 		slog.Info("New websocket session started", "sessionID", sessionID)
 
 		// --- Send Session ID to client immediately on connect ---
@@ -275,8 +276,12 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 				}
 			}
 			if resp.Error == "" {
+				// Increment turn number before saving
+				turnNumber++
+				currentTurn := turnNumber // Capture for goroutine
+
 				// Save conversation turn in background
-				go func(isFirstTurn bool) {
+				go func(isFirstTurn bool, turnNum int) {
 					turn := datatypes.Conversation{
 						SessionId: sessionID,
 						Question:  req.Query,
@@ -285,12 +290,12 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 					if err := turn.Save(client); err != nil {
 						slog.Warn("Failed to save non-RAG conversation turn", "error", err, "sessionID", sessionID)
 					} else {
-						go SaveMemoryChunk(client, sessionID, req.Query, resp.Answer)
+						go SaveMemoryChunk(client, sessionID, req.Query, resp.Answer, turnNum)
 					}
 					if isFirstTurn {
 						SummarizeAndSaveSession(llmClient, client, sessionID, req.Query, resp.Answer)
 					}
-				}(isFirstTurn)
+				}(isFirstTurn, currentTurn)
 			}
 			if resp.Error == "" && strings.TrimSpace(resp.Answer) == "" {
 				resp.Answer = "(The model returned an empty response. This may be because 'no RAG' mode is active and the model has no context.)"

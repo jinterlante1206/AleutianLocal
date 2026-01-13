@@ -320,3 +320,83 @@ class VerificationState(BaseModel):
     def add_audit(self, audit: SkepticAuditResult):
         self.history.append(audit)
         self.attempt_count += 1
+
+
+class RelevantHistoryItem(BaseModel):
+    """A conversation turn retrieved from semantic memory search.
+
+    # Description
+
+    RelevantHistoryItem represents a past conversation turn that has been
+    identified as relevant to the current query, either by recency or
+    semantic similarity. This is passed from Go orchestrator to Python
+    RAG engine to provide conversation context.
+
+    # Fields
+
+    - question: The user's original query for this turn.
+    - answer: The AI's response for this turn.
+    - turn_number: Sequential turn number within the session (None if unknown).
+    - similarity_score: Cosine similarity from vector search (None if retrieved by recency).
+
+    # Example
+
+    ```python
+    item = RelevantHistoryItem(
+        question="What is Chrysler?",
+        answer="Chrysler is an American automotive company...",
+        turn_number=5,
+        similarity_score=0.87
+    )
+    ```
+
+    # Assumptions
+
+    - JSON field names match Go struct tags exactly.
+    - Fields are optional to support legacy data without turn_number.
+    """
+    question: str = Field(..., description="The user's original query for this turn.")
+    answer: str = Field(..., description="The AI's response for this turn.")
+    turn_number: int | None = Field(default=None, description="Sequential turn number (None if unknown).")
+    similarity_score: float | None = Field(default=None, description="Cosine similarity score (None if retrieved by recency).")
+
+
+class ExpandedQueryItem(BaseModel):
+    """P8: Query expansion result from Go orchestrator.
+
+    # Description
+
+    ExpandedQueryItem contains the results of the P8 query expansion phase.
+    When a user submits an ambiguous query like "tell me more", the Go
+    orchestrator uses an LLM to generate multiple expanded query variations
+    that capture the intent based on conversation history.
+
+    # Fields
+
+    - original: The user's original query before expansion.
+    - queries: List of expanded query variations (SPECIFIC, BROAD, CONTEXTUAL).
+    - expanded: Whether expansion actually occurred (False if original was clear).
+
+    # Examples
+
+    ```python
+    # User said "tell me more" after asking about Motown
+    item = ExpandedQueryItem(
+        original="tell me more",
+        queries=[
+            "History of Motown Records founding by Berry Gordy",
+            "Motown Records artists and musical influence",
+            "Berry Gordy Detroit music label soul artists"
+        ],
+        expanded=True
+    )
+    ```
+
+    # Assumptions
+
+    - If expanded is False, queries list will contain just the original query.
+    - First query in the list is the most specific/preferred for reranking.
+    """
+    original: str = Field(..., description="The user's original query before expansion.")
+    queries: list[str] = Field(default_factory=list, description="Expanded query variations.")
+    expanded: bool = Field(default=False, description="Whether expansion actually occurred.")

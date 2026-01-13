@@ -41,7 +41,7 @@ from opentelemetry import trace
 from sentence_transformers import CrossEncoder
 
 # Import the base class and strict mode constants
-from .base import BaseRAGPipeline, RERANK_SCORE_THRESHOLD, NO_RELEVANT_DOCS_MESSAGE
+from .base import BaseRAGPipeline, RERANK_SCORE_THRESHOLD, NO_RELEVANT_DOCS_MESSAGE, validate_document_format
 # Import Weaviate classes needed for search override
 import weaviate
 import weaviate.classes as wvc
@@ -148,6 +148,24 @@ class RerankingPipeline(BaseRAGPipeline):
         if not self.reranker:
             logger.warning("Reranker model is not available, reranking step will be skipped.")
 
+    def _get_rerank_score(self, doc: dict) -> float | None:
+        """Get rerank_score from document metadata, handling both object and dict formats.
+
+        Weaviate returns metadata as an object with attributes, while history pseudo-docs
+        created by _inject_history_as_documents have plain dict metadata. This helper
+        provides consistent access regardless of the metadata format.
+        """
+        metadata = doc.get("metadata")
+        if metadata is None:
+            return None
+        # Handle object metadata (from Weaviate)
+        if hasattr(metadata, "rerank_score"):
+            return metadata.rerank_score
+        # Handle dict metadata (from history injection)
+        if isinstance(metadata, dict):
+            return metadata.get("rerank_score")
+        return None
+
     async def _search_weaviate_initial(self, query_vector: list[float], session_id: str | None = None) -> list[dict]:
         """
         Performs Parent Document Retrieval with session-aware filtering.
@@ -210,6 +228,17 @@ class RerankingPipeline(BaseRAGPipeline):
             # Return top N of the initial results if reranker isn't available
             return initial_docs_with_meta[:self.top_k_final]
 
+        # Validate document format (P8 contract enforcement)
+        # This catches format coupling issues early rather than failing silently
+        for i, doc in enumerate(initial_docs_with_meta):
+            try:
+                validate_document_format(doc, context=f"_rerank_docs[{i}]")
+            except ValueError as e:
+                logger.error(f"Document format validation failed: {e}")
+                # Log the offending document structure for debugging
+                logger.debug(f"Invalid document keys: {doc.keys() if isinstance(doc, dict) else type(doc)}")
+                raise
+
         logger.debug(f"Preparing {len(initial_docs_with_meta)} passages for reranking...")
         passages = [d["properties"].get("content", "") for d in initial_docs_with_meta]
         query_passage_pairs = [[query, passage] for passage in passages if passage]
@@ -242,11 +271,23 @@ class RerankingPipeline(BaseRAGPipeline):
                 # Normalize raw logit score to 0-1 range using sigmoid
                 # MS-MARCO cross-encoder returns logits, not probabilities
                 normalized_score = _sigmoid(score)
-                reranked_docs_with_meta[i]["metadata"].rerank_score = normalized_score
+                # Handle both Weaviate metadata (object with attributes) and
+                # history pseudo-documents (plain dict metadata)
+                meta = reranked_docs_with_meta[i]["metadata"]
+                if isinstance(meta, dict):
+                    meta["rerank_score"] = normalized_score
+                else:
+                    meta.rerank_score = normalized_score
                 logger.debug(f"Doc {i}: raw_score={score:.4f} -> normalized={normalized_score:.4f}")
         return reranked_docs_with_meta
 
-    async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
+    async def run(
+        self,
+        query: str,
+        session_id: str | None = None,
+        strict_mode: bool = True,
+        relevant_history: list[dict] | None = None,
+    ) -> tuple[str, list[dict]]:
         """Executes the RAG pipeline with reranking.
 
         Parameters
@@ -259,6 +300,10 @@ class RerankingPipeline(BaseRAGPipeline):
             If True, only answer from documents. If no relevant docs (rerank score < threshold),
             return NO_RELEVANT_DOCS_MESSAGE instead of using LLM fallback.
             Default: True (strict mode).
+        relevant_history : list[dict] | None
+            Relevant conversation history from P7 semantic memory. Each dict contains
+            'question', 'answer', 'turn_number', and 'similarity_score'. If provided,
+            history turns are injected as pseudo-documents before reranking.
         """
         tracer = trace.get_tracer("aleutian.rag.reranking")
         with tracer.start_as_current_span("reranking_pipeline.run") as span:
@@ -276,6 +321,15 @@ class RerankingPipeline(BaseRAGPipeline):
                                                                              session_id)
                 span.set_attribute("retrieved.initial_count", len(initial_docs_with_meta))
 
+            # P8: Inject conversation history as pseudo-documents before reranking
+            # History competes with retrieved docs during reranking
+            if relevant_history:
+                initial_docs_with_meta = self._inject_history_as_documents(
+                    initial_docs_with_meta, relevant_history
+                )
+                span.set_attribute("history.injected_count", len(relevant_history))
+                logger.info(f"Injected {len(relevant_history)} history turns into document pool for reranking")
+
             with tracer.start_as_current_span("rerank_docs"):
                 context_docs_with_meta = await self._rerank_docs(query, initial_docs_with_meta)
                 span.set_attribute("retrieved.reranked_count", len(context_docs_with_meta))
@@ -284,8 +338,8 @@ class RerankingPipeline(BaseRAGPipeline):
             if strict_mode:
                 relevant_docs = [
                     d for d in context_docs_with_meta
-                    if d.get("metadata") and hasattr(d["metadata"], "rerank_score")
-                    and d["metadata"].rerank_score >= RERANK_SCORE_THRESHOLD
+                    if (score := self._get_rerank_score(d)) is not None
+                    and score >= RERANK_SCORE_THRESHOLD
                 ]
                 span.set_attribute("retrieved.relevant_count", len(relevant_docs))
                 logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs_with_meta)} docs above threshold {RERANK_SCORE_THRESHOLD}")
@@ -312,10 +366,8 @@ class RerankingPipeline(BaseRAGPipeline):
             sources = [
                 {
                     "source": d["properties"].get("source", "Unknown"),
-                    "distance": d["metadata"].distance if d.get("metadata") else None,
-                    "score": d["metadata"].rerank_score if (
-                                d.get("metadata") and hasattr(d["metadata"],
-                                                              "rerank_score")) else None,
+                    "distance": getattr(d.get("metadata"), "distance", None) if d.get("metadata") and not isinstance(d.get("metadata"), dict) else d.get("metadata", {}).get("distance") if isinstance(d.get("metadata"), dict) else None,
+                    "score": self._get_rerank_score(d),
                 } for d in context_docs_with_meta
             ]
 
@@ -391,8 +443,8 @@ class RerankingPipeline(BaseRAGPipeline):
             if strict_mode:
                 relevant_docs = [
                     d for d in reranked_docs
-                    if d.get("metadata") and hasattr(d["metadata"], "rerank_score")
-                    and d["metadata"].rerank_score >= RERANK_SCORE_THRESHOLD
+                    if (score := self._get_rerank_score(d)) is not None
+                    and score >= RERANK_SCORE_THRESHOLD
                 ]
                 span.set_attribute("retrieved.relevant_count", len(relevant_docs))
                 logger.info(
@@ -419,8 +471,9 @@ class RerankingPipeline(BaseRAGPipeline):
                     "content": doc["properties"].get("content", ""),
                     "source": doc["properties"].get("source", "Unknown"),
                 }
-                if doc.get("metadata") and hasattr(doc["metadata"], "rerank_score"):
-                    chunk["rerank_score"] = doc["metadata"].rerank_score
+                score = self._get_rerank_score(doc)
+                if score is not None:
+                    chunk["rerank_score"] = score
                 chunks.append(chunk)
 
             # Step 7: Format context text with [Document N: source] headers

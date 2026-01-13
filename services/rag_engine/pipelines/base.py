@@ -63,6 +63,164 @@ RERANK_SCORE_THRESHOLD = 0.3  # Minimum rerank score to consider relevant
 DISTANCE_THRESHOLD = 0.8      # Maximum distance to consider relevant (lower is better)
 NO_RELEVANT_DOCS_MESSAGE = "No relevant documents found. Use `aleutian populate vectordb <file>` to add documents."
 
+# --- P8: History Injection Constants ---
+# Maximum characters for answer content in history pseudo-documents
+# Semantic meaning is usually in the first paragraph - truncate to reduce reranking cost
+HISTORY_ANSWER_MAX_CHARS = int(os.getenv("HISTORY_ANSWER_MAX_CHARS", "300"))
+
+# --- P8: Relevance Gate Constants ---
+# Relevance gate prevents hallucination by checking if retrieved content is actually relevant.
+# If the best reranked document scores below this threshold, we don't trust the results.
+# 0.5 = strict (better to say "I don't know" than hallucinate)
+RELEVANCE_GATE_THRESHOLD = float(os.getenv("RELEVANCE_GATE_THRESHOLD", "0.5"))
+RELEVANCE_GATE_ENABLED = os.getenv("RELEVANCE_GATE_ENABLED", "true").lower() == "true"
+LOW_RELEVANCE_MESSAGE = "I checked my knowledge base but couldn't find relevant information for your question. Could you rephrase or provide more context?"
+
+
+# =============================================================================
+# Document Format Contract (P8)
+# =============================================================================
+# This defines the explicit contract for document format used across the pipeline.
+# Both _inject_history_as_documents and _rerank_docs must follow this contract.
+#
+# IMPORTANT: If you change this format, you MUST update both:
+#   1. _inject_history_as_documents() - creates documents in this format
+#   2. _rerank_docs() in reranking.py - consumes documents in this format
+#
+# Document Format:
+# {
+#     "properties": {
+#         "content": str,     # Main text content
+#         "source": str,      # Source identifier
+#         "is_history": bool, # True if from conversation history (optional)
+#         "turn_number": int, # Turn number for history docs (optional)
+#         ...                 # Other properties allowed
+#     },
+#     "metadata": {
+#         ...                 # Metadata fields (rerank_score, distance, etc.)
+#     }
+# }
+
+def validate_document_format(doc: dict, context: str = "") -> bool:
+    """
+    Validates that a document matches the expected format contract.
+
+    What it Does:
+    Checks that the document has the required structure for reranking.
+    This ensures format coupling issues are caught early.
+
+    Parameters
+    ----------
+    doc : dict
+        The document to validate.
+    context : str
+        Optional context for error messages (e.g., "history injection").
+
+    Returns
+    -------
+    bool
+        True if valid, raises ValueError if invalid.
+
+    Raises
+    ------
+    ValueError
+        If document doesn't match the expected format.
+
+    Examples
+    --------
+    >>> doc = {"properties": {"content": "text", "source": "file.txt"}, "metadata": {}}
+    >>> validate_document_format(doc)
+    True
+    """
+    if not isinstance(doc, dict):
+        raise ValueError(f"[{context}] Document must be dict, got {type(doc)}")
+
+    if "properties" not in doc:
+        raise ValueError(f"[{context}] Document missing 'properties' key: {doc.keys()}")
+
+    props = doc["properties"]
+    if not isinstance(props, dict):
+        raise ValueError(f"[{context}] 'properties' must be dict, got {type(props)}")
+
+    if "content" not in props:
+        raise ValueError(f"[{context}] 'properties' missing 'content' key")
+
+    return True
+
+
+def create_document(
+    content: str,
+    source: str,
+    metadata: dict | None = None,
+    is_history: bool = False,
+    turn_number: int | None = None,
+    **extra_properties
+) -> dict:
+    """
+    Factory function to create a document in the standard format.
+
+    What it Does:
+    Creates a document dict with the correct structure that both
+    _inject_history_as_documents and _rerank_docs expect.
+
+    Why it Exists:
+    This function enforces the document format contract. Using this factory
+    instead of manually constructing dicts ensures consistency and catches
+    format changes at compile time rather than runtime.
+
+    Parameters
+    ----------
+    content : str
+        The main text content of the document.
+    source : str
+        Source identifier (filename, URL, or "conversation_history_turn_N").
+    metadata : dict | None
+        Optional metadata dict (will be created if None).
+    is_history : bool
+        True if this is a conversation history pseudo-document.
+    turn_number : int | None
+        Turn number for history documents.
+    **extra_properties
+        Additional properties to include in the document.
+
+    Returns
+    -------
+    dict
+        Document in the standard format.
+
+    Examples
+    --------
+    >>> doc = create_document(
+    ...     content="User asked about Motown...",
+    ...     source="conversation_history_turn_1",
+    ...     is_history=True,
+    ...     turn_number=1
+    ... )
+    >>> doc["properties"]["content"]
+    'User asked about Motown...'
+    """
+    props = {
+        "content": content,
+        "source": source,
+        **extra_properties
+    }
+
+    if is_history:
+        props["is_history"] = True
+        if turn_number is not None:
+            props["turn_number"] = turn_number
+
+    meta = metadata if metadata is not None else {}
+    if is_history:
+        meta["is_history"] = True
+        if turn_number is not None:
+            meta["turn_number"] = turn_number
+
+    return {
+        "properties": props,
+        "metadata": meta
+    }
+
 # --- Default Configurable Parameters ---
 # Prompt Template
 DEFAULT_PROMPT_TEMPLATE = """You are a helpful assistant. Answer the user's question based *only* on the provided context. If the context does not contain the answer, state that you don't have enough information from the provided documents. Do not use any prior knowledge.
@@ -818,3 +976,288 @@ class BaseRAGPipeline:
             "Subclasses must implement 'retrieve_only' for retrieval-only mode. "
             "Currently only RerankingPipeline supports this."
         )
+
+    def _inject_history_as_documents(
+        self,
+        documents: list[dict],
+        relevant_history: list[dict] | None
+    ) -> list[dict]:
+        """
+        Converts conversation history turns into pseudo-documents for unified reranking.
+
+        What it Does:
+        Takes the relevant conversation history from P7 semantic memory and formats
+        each turn as a "pseudo-document" that can compete with real documents in
+        reranking. This allows the cross-encoder reranker to evaluate whether the
+        user's previous conversation is more relevant than retrieved documents.
+
+        How it Fits:
+        This is part of the P8 conversational context enhancement. It happens AFTER
+        initial document retrieval and BEFORE reranking. The history pseudo-documents
+        are added to the document pool, then the reranker scores all sources equally.
+
+        Why it Does This:
+        For follow-up queries like "tell me more", the previous conversation turn
+        may be the most relevant context. By injecting history into the reranking
+        pool, we let the cross-encoder determine if history is more relevant than
+        documents, rather than treating them separately.
+
+        Parameters
+        ----------
+        documents : list[dict]
+            The list of retrieved documents from Weaviate. Each dict contains
+            'content', 'source', and optionally 'rerank_score'.
+        relevant_history : list[dict] | None
+            The relevant conversation history from P7 semantic memory. Each dict
+            contains 'question', 'answer', 'turn_number', and 'similarity_score'.
+            May be None or empty if no history is available.
+
+        Returns
+        -------
+        list[dict]
+            The combined list of documents and history pseudo-documents.
+            History documents have:
+            - content: "Previous conversation:\\nQ: {question}\\nA: {truncated_answer}"
+            - source: "conversation_history_turn_{N}"
+            - is_history: True
+            - turn_number: The original turn number
+            - similarity_score: The P7 similarity score
+
+        Notes
+        -----
+        - Answers are truncated to HISTORY_ANSWER_MAX_CHARS (default 300) to
+          reduce reranking cost and prevent history from dominating.
+        - History documents are clearly marked with is_history=True for
+          downstream processing (e.g., citation formatting).
+
+        Examples
+        --------
+        >>> history = [{"question": "What is Motown?", "answer": "Motown was...", "turn_number": 1}]
+        >>> docs = [{"content": "Document about music", "source": "music.md"}]
+        >>> combined = pipeline._inject_history_as_documents(docs, history)
+        >>> len(combined)
+        2
+        >>> combined[1]["is_history"]
+        True
+        """
+        if not relevant_history:
+            return documents
+
+        history_docs = []
+        for turn in relevant_history:
+            # Truncate long answers - semantic meaning is usually in first paragraph
+            answer = turn.get("answer", "")
+            if len(answer) > HISTORY_ANSWER_MAX_CHARS:
+                answer = answer[:HISTORY_ANSWER_MAX_CHARS] + "..."
+
+            question = turn.get("question", "")
+            turn_number = turn.get("turn_number")
+
+            # Format as pseudo-document using the factory function
+            # This ensures format consistency with _rerank_docs expectations
+            content = f"Previous conversation:\nQ: {question}\nA: {answer}"
+
+            history_doc = create_document(
+                content=content,
+                source=f"conversation_history_turn_{turn_number or 'unknown'}",
+                metadata={"similarity_score": turn.get("similarity_score", 0.0)},
+                is_history=True,
+                turn_number=turn_number
+            )
+            history_docs.append(history_doc)
+
+        logger.debug(
+            f"Injected {len(history_docs)} history pseudo-documents into pool of {len(documents)} documents"
+        )
+
+        return documents + history_docs
+
+    def _format_sources_with_history(self, documents: list[dict]) -> str:
+        """
+        Formats document sources with special handling for history pseudo-documents.
+
+        What it Does:
+        Creates a formatted string of sources where history pseudo-documents are
+        marked as "[Conversation Turn N]" and regular documents are marked as
+        "[Document N: source]".
+
+        How it Fits:
+        This is called when building the LLM prompt after reranking. It ensures
+        that sources from conversation history are clearly distinguished from
+        retrieved documents in the final answer.
+
+        Why it Does This:
+        Users need to understand which parts of the answer come from their previous
+        conversation vs. retrieved documents. Clear citation formatting prevents
+        confusion and enables proper attribution.
+
+        Parameters
+        ----------
+        documents : list[dict]
+            The reranked list of documents, potentially including history
+            pseudo-documents (marked with is_history=True).
+
+        Returns
+        -------
+        str
+            A formatted string with all sources, suitable for inclusion in the
+            LLM prompt or response metadata.
+
+        Examples
+        --------
+        >>> docs = [
+        ...     {"content": "Doc content", "source": "file.md"},
+        ...     {"content": "History content", "source": "turn_1", "is_history": True, "turn_number": 1}
+        ... ]
+        >>> formatted = pipeline._format_sources_with_history(docs)
+        >>> print(formatted)
+        [Document 1: file.md]
+        Doc content
+
+        ---
+
+        [Conversation Turn 1]
+        History content
+        """
+        formatted_parts = []
+
+        doc_counter = 1
+        for doc in documents:
+            # Handle both flat and nested structures
+            props = doc.get("properties", doc)
+            meta = doc.get("metadata", {})
+
+            is_history = props.get("is_history") or meta.get("is_history", False)
+            content = props.get("content", "")
+            source = props.get("source", "Unknown")
+            turn_num = props.get("turn_number") or meta.get("turn_number", "?")
+
+            if is_history:
+                formatted_parts.append(
+                    f"[Conversation Turn {turn_num}]\n{content}"
+                )
+            else:
+                formatted_parts.append(
+                    f"[Document {doc_counter}: {source}]\n{content}"
+                )
+                doc_counter += 1
+
+        return "\n\n---\n\n".join(formatted_parts)
+
+    def _check_relevance_gate(
+        self,
+        reranked_docs: list[dict],
+        has_history: bool = False
+    ) -> tuple[list[dict], bool, str | None]:
+        """
+        Checks if reranked documents pass the relevance threshold gate.
+
+        What it Does:
+        Examines the rerank scores of the top documents. If the best score is below
+        the RELEVANCE_GATE_THRESHOLD (default 0.5), the documents are considered
+        "garbage" and we shouldn't use them to generate an answer.
+
+        How it Fits:
+        This is called AFTER reranking and BEFORE generation. It acts as a safety
+        valve to prevent hallucination when retrieval fails to find relevant content.
+
+        Why it Does This:
+        Without this check, the LLM might hallucinate an answer based on irrelevant
+        documents that happened to be the "best" matches in a bad retrieval. Better
+        to honestly say "I don't know" than to confidently provide wrong information.
+
+        Parameters
+        ----------
+        reranked_docs : list[dict]
+            The reranked documents with metadata containing rerank_score.
+        has_history : bool
+            True if conversation history is available as fallback context.
+
+        Returns
+        -------
+        tuple[list[dict], bool, str | None]
+            - filtered_docs: Documents above threshold (may be empty)
+            - passed_gate: True if at least one doc passed the threshold
+            - message: If gate failed, a user-friendly message; else None
+
+        Notes
+        -----
+        - If RELEVANCE_GATE_ENABLED is False, always passes.
+        - If has_history is True and gate fails, we still allow proceeding
+          (history provides context even if documents don't).
+
+        Examples
+        --------
+        >>> docs = [{"metadata": {"rerank_score": 0.3}}]  # Below 0.5 threshold
+        >>> filtered, passed, msg = pipeline._check_relevance_gate(docs, has_history=False)
+        >>> passed
+        False
+        >>> msg
+        "I checked my knowledge base but couldn't find relevant information..."
+        """
+        if not RELEVANCE_GATE_ENABLED:
+            return reranked_docs, True, None
+
+        if not reranked_docs:
+            if has_history:
+                # No docs but we have history - proceed with history only
+                logger.info("Relevance gate: no documents, but history available")
+                return [], True, None
+            else:
+                logger.info("Relevance gate: no documents and no history")
+                return [], False, LOW_RELEVANCE_MESSAGE
+
+        def _get_score(doc: dict) -> float:
+            """Get rerank_score handling both Weaviate metadata objects and plain dicts."""
+            meta = doc.get("metadata")
+            if meta is None:
+                return 0.0
+            # Try attribute access first (Weaviate MetadataReturn objects)
+            if hasattr(meta, "rerank_score"):
+                return meta.rerank_score or 0.0
+            # Fall back to dict access (history pseudo-documents)
+            if isinstance(meta, dict):
+                return meta.get("rerank_score", 0.0)
+            return 0.0
+
+        def _is_history(doc: dict) -> bool:
+            """Check if doc is a history pseudo-document, handling both metadata formats."""
+            props = doc.get("properties", {})
+            if isinstance(props, dict) and props.get("is_history"):
+                return True
+            meta = doc.get("metadata")
+            if meta is None:
+                return False
+            # Try attribute access first (Weaviate MetadataReturn objects)
+            if hasattr(meta, "is_history"):
+                return bool(getattr(meta, "is_history", False))
+            # Fall back to dict access (history pseudo-documents)
+            if isinstance(meta, dict):
+                return bool(meta.get("is_history", False))
+            return False
+
+        # Get the best rerank score
+        best_score = 0.0
+        for doc in reranked_docs:
+            score = _get_score(doc)
+            if score > best_score:
+                best_score = score
+
+        logger.debug(f"Relevance gate: best_score={best_score:.3f}, threshold={RELEVANCE_GATE_THRESHOLD}")
+
+        if best_score < RELEVANCE_GATE_THRESHOLD:
+            if has_history:
+                # Below threshold but we have history - proceed cautiously
+                logger.info(f"Relevance gate: below threshold ({best_score:.3f} < {RELEVANCE_GATE_THRESHOLD}), but history available")
+                # Filter to only include history docs (if any)
+                history_only = [d for d in reranked_docs if _is_history(d)]
+                return history_only if history_only else reranked_docs, True, None
+            else:
+                logger.info(f"Relevance gate FAILED: best_score={best_score:.3f} < threshold={RELEVANCE_GATE_THRESHOLD}")
+                return [], False, LOW_RELEVANCE_MESSAGE
+
+        # Filter docs to only those above threshold
+        filtered = [doc for doc in reranked_docs if _get_score(doc) >= RELEVANCE_GATE_THRESHOLD]
+
+        logger.debug(f"Relevance gate passed: {len(filtered)}/{len(reranked_docs)} docs above threshold")
+        return filtered if filtered else reranked_docs, True, None

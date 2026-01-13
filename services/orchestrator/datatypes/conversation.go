@@ -12,7 +12,6 @@ package datatypes
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -25,17 +24,6 @@ import (
 )
 
 var convTracer = otel.Tracer("aleutian.orchestrator.datatypes")
-
-// This struct is used to parse the UUID from a Weaviate query
-type sessionQueryResponse struct {
-	Get struct {
-		Session []struct {
-			Additional struct {
-				ID string `json:"id"`
-			} `json:"_additional"`
-		} `json:"Session"`
-	} `json:"Get"`
-}
 
 // FindOrCreateSessionUUID finds a session by its session_id and returns its Weaviate UUID
 // If it doesn't exist, it creates one and returns the new UUID
@@ -66,10 +54,9 @@ func FindOrCreateSessionUUID(ctx context.Context, client *weaviate.Client,
 		return "", fmt.Errorf("error querying for session: %w", err)
 	}
 
-	// 2. Parse the response
-	var queryResp sessionQueryResponse
-	respBytes, _ := json.Marshal(resp.Data)
-	if err := json.Unmarshal(respBytes, &queryResp); err != nil {
+	// 2. Parse the response using generic parser
+	queryResp, err := ParseGraphQLResponse[SessionQueryResponse](resp)
+	if err != nil {
 		return "", fmt.Errorf("error parsing session query response: %w", err)
 	}
 
@@ -79,18 +66,17 @@ func FindOrCreateSessionUUID(ctx context.Context, client *weaviate.Client,
 		return uuid, nil
 	}
 
-	// 3. Not found, so create it
+	// 3. Not found, so create it using typed properties
 	slog.Info("No existing session found, creating a new one with pending summary...", "sessionId", sessionID)
-	properties := map[string]interface{}{
-		"session_id": sessionID,
-		"summary":    "(Summary pending...)", // Placeholder
-		"timestamp":  time.Now().UnixMilli(),
+	props := SessionProperties{
+		SessionId: sessionID,
+		Summary:   "(Summary pending...)",
+		Timestamp: time.Now().UnixMilli(),
 	}
 
-	// --- FIX 2: Correctly access the ID from result.Object.ID ---
 	result, err := client.Data().Creator().
 		WithClassName("Session").
-		WithProperties(properties).
+		WithProperties(props.ToMap()).
 		Do(ctx)
 
 	if err != nil {
@@ -126,22 +112,18 @@ func (c *Conversation) Save(client *weaviate.Client) error {
 			"error", err)
 	}
 
-	properties := map[string]interface{}{
-		"session_id": c.SessionId,
-		"question":   c.Question,
-		"answer":     c.Answer,
-		"timestamp":  time.Now().UnixMilli(),
+	// Use typed properties struct
+	props := ConversationProperties{
+		SessionId: c.SessionId,
+		Question:  c.Question,
+		Answer:    c.Answer,
+		Timestamp: time.Now().UnixMilli(),
 	}
+	properties := props.ToMap()
 
-	// Create the "beacon" (the graph link)
-	// This is the format Weaviate requires for a cross-reference
-	beacon := map[string]interface{}{
-		"beacon": fmt.Sprintf("weaviate://localhost/Session/%s", sessionUUID),
-	}
-
-	// Add the beacon to the 'inSession' property
-	if err == nil { // Only add the link if we successfully got the UUID
-		properties["inSession"] = []map[string]interface{}{beacon}
+	// Add the beacon link if we have a valid session UUID
+	if err == nil {
+		WithBeacon(properties, sessionUUID)
 	}
 
 	// Create the Conversation object

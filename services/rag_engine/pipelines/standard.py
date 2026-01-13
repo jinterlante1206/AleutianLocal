@@ -90,7 +90,13 @@ class StandardRAGPipeline(BaseRAGPipeline):
             raise RuntimeError(f"Weaviate interaction failed: {e}")
 
 
-    async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:
+    async def run(
+        self,
+        query: str,
+        session_id: str | None = None,
+        strict_mode: bool = True,
+        relevant_history: list[dict] | None = None,
+    ) -> tuple[str, list[dict]]:
         """Executes the standard RAG pipeline.
 
         Parameters
@@ -103,6 +109,10 @@ class StandardRAGPipeline(BaseRAGPipeline):
             If True, only answer from documents. If no relevant docs (distance > threshold),
             return NO_RELEVANT_DOCS_MESSAGE instead of using LLM fallback.
             Default: True (strict mode).
+        relevant_history : list[dict] | None
+            Relevant conversation history from P7 semantic memory. Each dict contains
+            'question', 'answer', 'turn_number', and 'similarity_score'. If provided,
+            history turns are injected as pseudo-documents before generation.
         """
         logger.info(f"Standard RAG run started (strict_mode={strict_mode}) for query: {query[:50]}...")
 
@@ -130,6 +140,13 @@ class StandardRAGPipeline(BaseRAGPipeline):
                 return NO_RELEVANT_DOCS_MESSAGE, []
 
             context_docs_with_meta = relevant_docs
+
+        # P8: Inject conversation history as pseudo-documents
+        if relevant_history:
+            context_docs_with_meta = self._inject_history_as_documents(
+                context_docs_with_meta, relevant_history
+            )
+            logger.info(f"Injected {len(relevant_history)} history turns into document pool")
 
         context_docs_props = [d["properties"] for d in context_docs_with_meta]
         logger.debug(f"Using {len(context_docs_props)} context documents for prompt.")

@@ -51,6 +51,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1444,7 +1445,7 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 		}
 	}
 
-	// Extract mounts
+	// Extract mounts from inspect output
 	var mounts []MountInfo
 	if mountsInterface, ok := machine["Mounts"]; ok {
 		if mountsList, ok := mountsInterface.([]interface{}); ok {
@@ -1466,6 +1467,20 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 		}
 	}
 
+	// Podman 5.x doesn't return mounts in inspect output - read from config file as fallback
+	if len(mounts) == 0 {
+		if configDir, ok := machine["ConfigDir"].(map[string]interface{}); ok {
+			if configPath, ok := configDir["Path"].(string); ok {
+				configFile := filepath.Join(configPath, filepath.Base(machineName)+".json")
+				if configMounts, err := readMountsFromConfigFile(ctx, configFile); err == nil {
+					mounts = configMounts
+				} else {
+					slog.Debug("Could not read mounts from config file", "path", configFile, "error", err)
+				}
+			}
+		}
+	}
+
 	return &MachineStatus{
 		Name:     machineName,
 		Exists:   true,
@@ -1475,6 +1490,153 @@ func (m *DefaultInfrastructureManager) GetMachineStatus(ctx context.Context, mac
 		MemoryMB: memoryMB,
 		Mounts:   mounts,
 	}, nil
+}
+
+// readFileWithContext reads a file while respecting context cancellation.
+//
+// # Description
+//
+// Wraps os.ReadFile in a goroutine to enable context-aware file reading.
+// This prevents blocking indefinitely on slow or hung filesystems (e.g., NFS).
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout.
+//   - path: Absolute path to the file to read.
+//
+// # Outputs
+//
+//   - []byte: File contents if read successfully.
+//   - error: Non-nil if context is cancelled/times out or file read fails.
+//
+// # Limitations
+//
+//   - The underlying goroutine may continue running briefly after context
+//     cancellation since os.ReadFile cannot be interrupted mid-operation.
+//
+// # Assumptions
+//
+//   - Path has already been validated for security (path traversal, symlinks).
+func readFileWithContext(ctx context.Context, path string) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	resultChan := make(chan result, 1)
+
+	go func() {
+		data, err := os.ReadFile(path)
+		resultChan <- result{data: data, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-resultChan:
+		return res.data, res.err
+	}
+}
+
+// readMountsFromConfigFile reads mount configuration from Podman machine config file.
+//
+// # Description
+//
+// Podman 5.x doesn't return mounts in `podman machine inspect` output.
+// This function reads the mounts directly from the machine config file
+// at ~/.config/containers/podman/machine/{provider}/{machineName}.json.
+//
+// # Security
+//
+// This function implements defense-in-depth path validation:
+//   - Resolves symbolic links in both the input path and base directory
+//     to prevent symlink-based path traversal attacks.
+//   - Validates that the fully resolved path is within the expected
+//     Podman machine configuration directory.
+//   - Uses context-aware file reading to prevent indefinite blocking.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout of file I/O operations.
+//   - configFile: Path to the machine config JSON file. Must resolve to
+//     a location within the expected Podman config directory.
+//
+// # Outputs
+//
+//   - []MountInfo: List of configured mounts.
+//   - error: Non-nil if path validation fails, file cannot be read, or parsing fails.
+//
+// # Limitations
+//
+//   - Only reads from files within ~/.config/containers/podman/machine.
+//   - Does not validate the actual contents of mount paths.
+//   - Rejects paths containing symlinks that point outside allowed directory.
+//
+// # Assumptions
+//
+//   - The user's config directory is accessible via os.UserConfigDir().
+//   - The config file follows Podman's expected JSON schema.
+func readMountsFromConfigFile(ctx context.Context, configFile string) ([]MountInfo, error) {
+	// Security: Validate path is within expected Podman config directory
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not get user config directory: %w", err)
+	}
+	expectedBaseDir := filepath.Join(userConfigDir, "containers", "podman", "machine")
+
+	// Security: Resolve symlinks in the base path to get canonical representation
+	realExpectedBaseDir, err := filepath.EvalSymlinks(expectedBaseDir)
+	if err != nil {
+		// Base directory may not exist yet; fall back to the unresolved path
+		// but log the issue for debugging
+		slog.Debug("Could not resolve symlinks for base directory", "path", expectedBaseDir, "error", err)
+		realExpectedBaseDir = expectedBaseDir
+	}
+
+	// Clean and resolve the input path to prevent traversal attacks (e.g., ../)
+	absConfigFile, err := filepath.Abs(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute path for %s: %w", configFile, err)
+	}
+
+	// Security: Resolve symlinks in the input path to get the final, real path
+	realConfigFile, err := filepath.EvalSymlinks(absConfigFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve symlinks for config file path %s: %w", absConfigFile, err)
+	}
+
+	// Verify the fully resolved path is within the allowed canonical directory
+	if !strings.HasPrefix(realConfigFile, realExpectedBaseDir+string(filepath.Separator)) && realConfigFile != realExpectedBaseDir {
+		return nil, fmt.Errorf("path rejected for security reasons: %s resolves to %s which is outside of allowed directory %s", configFile, realConfigFile, realExpectedBaseDir)
+	}
+
+	// Read file with context awareness to handle slow/hung filesystems
+	data, err := readFileWithContext(ctx, realConfigFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// Parse the config file - it has a "Mounts" array
+	var config struct {
+		Mounts []struct {
+			Source   string `json:"Source"`
+			Target   string `json:"Target"`
+			ReadOnly bool   `json:"ReadOnly"`
+		} `json:"Mounts"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	var mounts []MountInfo
+	for _, m := range config.Mounts {
+		mounts = append(mounts, MountInfo{
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		})
+	}
+
+	return mounts, nil
 }
 
 // ValidateMounts checks mount paths for security violations.
