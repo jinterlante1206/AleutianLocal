@@ -1207,11 +1207,39 @@ class BaseRAGPipeline:
                 logger.info("Relevance gate: no documents and no history")
                 return [], False, LOW_RELEVANCE_MESSAGE
 
+        def _get_score(doc: dict) -> float:
+            """Get rerank_score handling both Weaviate metadata objects and plain dicts."""
+            meta = doc.get("metadata")
+            if meta is None:
+                return 0.0
+            # Try attribute access first (Weaviate MetadataReturn objects)
+            if hasattr(meta, "rerank_score"):
+                return meta.rerank_score or 0.0
+            # Fall back to dict access (history pseudo-documents)
+            if isinstance(meta, dict):
+                return meta.get("rerank_score", 0.0)
+            return 0.0
+
+        def _is_history(doc: dict) -> bool:
+            """Check if doc is a history pseudo-document, handling both metadata formats."""
+            props = doc.get("properties", {})
+            if isinstance(props, dict) and props.get("is_history"):
+                return True
+            meta = doc.get("metadata")
+            if meta is None:
+                return False
+            # Try attribute access first (Weaviate MetadataReturn objects)
+            if hasattr(meta, "is_history"):
+                return bool(getattr(meta, "is_history", False))
+            # Fall back to dict access (history pseudo-documents)
+            if isinstance(meta, dict):
+                return bool(meta.get("is_history", False))
+            return False
+
         # Get the best rerank score
         best_score = 0.0
         for doc in reranked_docs:
-            meta = doc.get("metadata", {})
-            score = getattr(meta, "rerank_score", None) or meta.get("rerank_score", 0.0)
+            score = _get_score(doc)
             if score > best_score:
                 best_score = score
 
@@ -1222,22 +1250,14 @@ class BaseRAGPipeline:
                 # Below threshold but we have history - proceed cautiously
                 logger.info(f"Relevance gate: below threshold ({best_score:.3f} < {RELEVANCE_GATE_THRESHOLD}), but history available")
                 # Filter to only include history docs (if any)
-                history_only = [
-                    d for d in reranked_docs
-                    if d.get("properties", {}).get("is_history") or d.get("metadata", {}).get("is_history")
-                ]
+                history_only = [d for d in reranked_docs if _is_history(d)]
                 return history_only if history_only else reranked_docs, True, None
             else:
                 logger.info(f"Relevance gate FAILED: best_score={best_score:.3f} < threshold={RELEVANCE_GATE_THRESHOLD}")
                 return [], False, LOW_RELEVANCE_MESSAGE
 
         # Filter docs to only those above threshold
-        filtered = []
-        for doc in reranked_docs:
-            meta = doc.get("metadata", {})
-            score = getattr(meta, "rerank_score", None) or meta.get("rerank_score", 0.0)
-            if score >= RELEVANCE_GATE_THRESHOLD:
-                filtered.append(doc)
+        filtered = [doc for doc in reranked_docs if _get_score(doc) >= RELEVANCE_GATE_THRESHOLD]
 
         logger.debug(f"Relevance gate passed: {len(filtered)}/{len(reranked_docs)} docs above threshold")
         return filtered if filtered else reranked_docs, True, None

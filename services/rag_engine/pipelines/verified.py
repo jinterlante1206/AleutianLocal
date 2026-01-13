@@ -1427,13 +1427,22 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
                     return gate_message, []
 
                 # Apply relevance threshold filtering in strict mode
+                # Note: History documents are exempt from score threshold since they
+                # were already validated by the relevance gate
                 if strict_mode:
+                    def _is_history_doc(d: dict) -> bool:
+                        """Check if doc is a history pseudo-document."""
+                        props = d.get("properties", {})
+                        if isinstance(props, dict) and props.get("is_history"):
+                            return True
+                        return False
+
                     relevant_docs = [
                         d for d in context_docs
-                        if self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
+                        if _is_history_doc(d) or self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
                     ]
                     retrieve_span.set_attribute("retrieved.relevant_count", len(relevant_docs))
-                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold {RERANK_SCORE_THRESHOLD}")
+                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold (history exempt)")
 
                     if not relevant_docs:
                         logger.info("No relevant documents found in strict mode, returning message")
@@ -1774,13 +1783,22 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
                     return gate_message, []
 
                 # Apply relevance threshold in strict mode
+                # Note: History documents are exempt from score threshold since they
+                # were already validated by the relevance gate
                 if strict_mode:
+                    def _is_history_doc(d: dict) -> bool:
+                        """Check if doc is a history pseudo-document."""
+                        props = d.get("properties", {})
+                        if isinstance(props, dict) and props.get("is_history"):
+                            return True
+                        return False
+
                     relevant_docs = [
                         d for d in context_docs
-                        if self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
+                        if _is_history_doc(d) or self._has_valid_score(d, threshold=RERANK_SCORE_THRESHOLD)
                     ]
                     retrieve_span.set_attribute("retrieved.relevant_count", len(relevant_docs))
-                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold")
+                    logger.info(f"Strict mode: {len(relevant_docs)} of {len(context_docs)} docs above threshold (history exempt)")
 
                     if not relevant_docs:
                         logger.info("No relevant documents found in strict mode")

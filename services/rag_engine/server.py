@@ -23,12 +23,12 @@ from contextlib import asynccontextmanager
 from opentelemetry import trace, metrics
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from prometheus_client import start_http_server as start_prometheus_server
 
 from pipelines import standard, reranking, agent, verified
 from datatypes.agent import AgentStepResponse, AgentStepRequest
@@ -73,10 +73,21 @@ processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_URL, insecure=True
 provider.add_span_processor(processor)
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
-reader = PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=OTEL_URL, insecure=True))
-meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
+
+# Metrics: Use Prometheus pull-based model instead of OTLP push
+# Prometheus scrapes the /metrics endpoint exposed on port 9464
+PROMETHEUS_METRICS_PORT = int(os.getenv("PROMETHEUS_METRICS_PORT", "9464"))
+prometheus_reader = PrometheusMetricReader()
+meter_provider = MeterProvider(resource=resource, metric_readers=[prometheus_reader])
 metrics.set_meter_provider(meter_provider)
 meter = metrics.get_meter(__name__)
+
+# Start Prometheus metrics server on separate port
+try:
+    start_prometheus_server(PROMETHEUS_METRICS_PORT)
+    logger.info(f"Prometheus metrics available at http://0.0.0.0:{PROMETHEUS_METRICS_PORT}/metrics")
+except OSError as e:
+    logger.warning(f"Could not start Prometheus metrics server on port {PROMETHEUS_METRICS_PORT}: {e}")
 
 rag_request_counter = meter.create_counter(
     name="rag.requests.total",
