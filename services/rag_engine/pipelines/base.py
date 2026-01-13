@@ -445,17 +445,22 @@ class BaseRAGPipeline:
             # the 'context' out into a 'system' block here.
             payload = {
                 "model": effective_model,
-                "max_tokens": self.default_llm_params["max_tokens"],
+                "max_tokens": generation_params["max_tokens"],
                 "messages": [{"role": "user", "content": prompt}]
             }
 
-            # Example: Basic "Thinking" support for RAG
+            # Handle temperature based on thinking mode (A1 fix)
+            # When thinking mode is enabled, temperature must be None (API requirement)
+            # When thinking mode is disabled, use the generation_params temperature
             if os.getenv("ENABLE_THINKING") == "true":
                 payload["thinking"] = {
                     "type": "enabled",
                     "budget_tokens": int(os.getenv("THINKING_BUDGET", 2048))
                 }
                 payload["temperature"] = None  # Required for thinking
+            else:
+                # Apply temperature override when thinking is disabled
+                payload["temperature"] = generation_params["temperature"]
         elif self.llm_backend == "ollama":
             api_url = f"{self.llm_url}/api/generate"
             # Use model_override if provided, otherwise use default ollama_model
@@ -486,10 +491,10 @@ class BaseRAGPipeline:
             payload = {
                 "model": effective_model,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.default_llm_params["temperature"],
-                "max_tokens": self.default_llm_params["max_tokens"],
-                "top_p": self.default_llm_params["top_p"],
-                "stop": self.default_llm_params["stop"]
+                "temperature": generation_params["temperature"],
+                "max_tokens": generation_params["max_tokens"],
+                "top_p": generation_params["top_p"],
+                "stop": generation_params["stop"]
             }
         elif self.llm_backend == "local":
             api_url = f"{self.llm_url}/completion"
@@ -499,11 +504,11 @@ class BaseRAGPipeline:
                 logger.debug(f"Local backend model_override specified: {model_override}")
             payload = {
                 "prompt": prompt,
-                "n_predict": self.default_llm_params["max_tokens"],
-                "temperature": self.default_llm_params["temperature"],
-                "top_k": self.default_llm_params["top_k"],
-                "top_p": self.default_llm_params["top_p"],
-                "stop": self.default_llm_params["stop"]
+                "n_predict": generation_params["max_tokens"],
+                "temperature": generation_params["temperature"],
+                "top_k": generation_params["top_k"],
+                "top_p": generation_params["top_p"],
+                "stop": generation_params["stop"]
             }
             # Add model to payload if override specified (llama.cpp server format)
             if model_override:
