@@ -2340,18 +2340,3 @@ Aleutian treats "Agent Observability" as a first-class citizen. Because LLM appl
     * **URL:** `http://localhost:9090`
     * **Use Case:** Advanced query debugging and target verification. Use this to ensure that all containers are successfully being scraped.
 
----
-
-## Planned Features (Roadmap)
-
-Future development focuses on enhancing usability, integration, and core MLOps capabilities:
-
-* **Aleutian Control Panel UI:** A lightweight web interface for viewing stack status, managing configuration, and browsing ingested documents without using the CLI.
-* **Native Data Parsing:** Integrated support for PDF, DOCX, and Excel parsing within the `populate` command workflow (removing the need for external parsing containers).
-* **Client-Side Agent Tools (v0.4.0):** Moving agent tool execution (`read_file`, `list_files`) from the container to the CLI. This ensures true air-gapping, as the LLM container will have zero direct file system access and must "ask" the CLI to perform actions.
-* **Expanded Cloud Clients:** Native Go client implementations for the Anthropic (Claude) and Google (Gemini) APIs directly within the Orchestrator.
-* **Semantic Search:** Advanced search pipelines beyond vector similarity (Raptor, GraphRAG).
-* **Binary Distribution:** Simplified installation via Homebrew Taps and downloadable binaries via GitHub Releases (moving away from `go build`).
-* **Model Evaluation Framework:** Built-in tools for benchmarking RAG accuracy (integrating tools like `ragas`) to quantitatively measure if your answers are improving.
-* **Advanced RAG Pipelines:** Implementation of **Raptor** (Recursive Summarization), **GraphRAG** (Knowledge Graph extraction), and **Semantic Search** strategies.
----
