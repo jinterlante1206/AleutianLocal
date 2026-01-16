@@ -2327,7 +2327,7 @@ Aleutian treats "Agent Observability" as a first-class citizen. Because LLM appl
     * **Scenario:** If a chat response takes 10 seconds, go here to see the "Waterfalls." You can visually see that the *Vector Search* took 50ms, the *Reranking* took 200ms, but the *LLM Generation* took 9.75 seconds. This proves the bottleneck is the model, not the database.
 
 2.  **Grafana UI (Dashboards)**
-    * **URL:** `http://localhost:3000`
+    * **URL:** `http://localhost:3000` (Configurable)
     * **Login:** `admin` / `admin`
     * **Use Case:** System Health & Business Metrics.
     * **Dashboards:** Aleutian comes with pre-configured data sources. You can build dashboards to track:
