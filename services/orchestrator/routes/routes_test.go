@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
@@ -31,16 +32,16 @@ func init() {
 // mockLLMClient is a minimal mock for llm.LLMClient
 type mockLLMClient struct{}
 
-func (m *mockLLMClient) Generate(ctx context.Context, prompt string, params llm.GenerationParams) (string, error) {
+func (m *mockLLMClient) Generate(_ context.Context, _ string, _ llm.GenerationParams) (string, error) {
 	return "mock response", nil
 }
 
-func (m *mockLLMClient) Chat(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams) (string, error) {
+func (m *mockLLMClient) Chat(_ context.Context, _ []datatypes.Message, _ llm.GenerationParams) (string, error) {
 	return "mock chat response", nil
 }
 
-func (m *mockLLMClient) ChatStream(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams, callback llm.StreamCallback) error {
-	callback(llm.StreamEvent{Type: llm.StreamEventToken, Content: "mock stream"})
+func (m *mockLLMClient) ChatStream(_ context.Context, _ []datatypes.Message, _ llm.GenerationParams, callback llm.StreamCallback) error {
+	_ = callback(llm.StreamEvent{Type: llm.StreamEventToken, Content: "mock stream"})
 	return nil
 }
 
@@ -54,7 +55,7 @@ func TestSetupRoutes_WithoutWeaviateClient(t *testing.T) {
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
 	// Should not panic when weaviate client is nil
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	// Verify core routes are registered
 	coreRoutes := []struct {
@@ -93,7 +94,7 @@ func TestSetupRoutes_VectorDBRoutesNotRegisteredWithoutClient(t *testing.T) {
 	mockLLM := &mockLLMClient{}
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	// These routes should NOT be registered when weaviate client is nil
 	vectorDBRoutes := []struct {
@@ -141,7 +142,7 @@ func TestSetupRoutes_HealthEndpoint(t *testing.T) {
 	mockLLM := &mockLLMClient{}
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/health", nil)
@@ -157,7 +158,7 @@ func TestSetupRoutes_ChatRedirect(t *testing.T) {
 	mockLLM := &mockLLMClient{}
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/chat", nil)
@@ -179,7 +180,7 @@ func TestSetupRoutes_MetricsEndpoint(t *testing.T) {
 	mockLLM := &mockLLMClient{}
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/metrics", nil)
@@ -206,7 +207,7 @@ func TestSetupRoutes_RouteCountWithoutWeaviate(t *testing.T) {
 	mockLLM := &mockLLMClient{}
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	routes := router.Routes()
 
@@ -256,7 +257,7 @@ func TestSetupRoutes_NilPolicyEngine_Panics(t *testing.T) {
 		}
 	}()
 
-	SetupRoutes(router, nil, mockLLM, nil)
+	SetupRoutes(router, nil, mockLLM, nil, extensions.DefaultOptions())
 }
 
 func TestSetupRoutes_NilLLMClient_Panics(t *testing.T) {
@@ -274,7 +275,7 @@ func TestSetupRoutes_NilLLMClient_Panics(t *testing.T) {
 		// Panic recovered, which is expected
 	}()
 
-	SetupRoutes(router, nil, nil, policyEng)
+	SetupRoutes(router, nil, nil, policyEng, extensions.DefaultOptions())
 }
 
 // ============================================================================
@@ -286,7 +287,7 @@ func TestSetupRoutes_StaticFS(t *testing.T) {
 	mockLLM := &mockLLMClient{}
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	// StaticFS should be registered for /ui
 	routes := router.Routes()
@@ -312,7 +313,7 @@ func TestSetupRoutes_V1GroupExists(t *testing.T) {
 	mockLLM := &mockLLMClient{}
 	policyEng, _ := policy_engine.NewPolicyEngine()
 
-	SetupRoutes(router, nil, mockLLM, policyEng)
+	SetupRoutes(router, nil, mockLLM, policyEng, extensions.DefaultOptions())
 
 	routes := router.Routes()
 	v1Routes := 0

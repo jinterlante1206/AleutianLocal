@@ -25,6 +25,8 @@
 //   - auth.go: Authentication and authorization (AuthProvider, AuthzProvider)
 //   - audit.go: Compliance audit logging (AuditLogger)
 //   - filter.go: Message transformation and PII redaction (MessageFilter)
+//   - classifier.go: Data sensitivity classification (DataClassifier)
+//   - request_auditor.go: Tamper-evident hash chain logging (RequestAuditor)
 //
 // # Usage in AleutianLocal (Open Source)
 //
@@ -86,6 +88,14 @@ type ServiceOptions struct {
 	// MessageFilter transforms messages before/after processing.
 	// Default: NopMessageFilter (passes through unchanged)
 	MessageFilter MessageFilter
+
+	// DataClassifier determines data sensitivity classification.
+	// Default: NopDataClassifier (always returns PUBLIC)
+	DataClassifier DataClassifier
+
+	// RequestAuditor provides tamper-evident hash chain logging.
+	// Default: NopRequestAuditor (discards entries, always valid)
+	RequestAuditor RequestAuditor
 }
 
 // DefaultOptions returns ServiceOptions with no-op defaults.
@@ -97,10 +107,12 @@ type ServiceOptions struct {
 //   - ServiceOptions with all fields set to no-op implementations
 func DefaultOptions() ServiceOptions {
 	return ServiceOptions{
-		AuthProvider:  &NopAuthProvider{},
-		AuthzProvider: &NopAuthzProvider{},
-		AuditLogger:   &NopAuditLogger{},
-		MessageFilter: &NopMessageFilter{},
+		AuthProvider:   &NopAuthProvider{},
+		AuthzProvider:  &NopAuthzProvider{},
+		AuditLogger:    &NopAuditLogger{},
+		MessageFilter:  &NopMessageFilter{},
+		DataClassifier: &NopDataClassifier{},
+		RequestAuditor: &NopRequestAuditor{},
 	}
 }
 
@@ -126,5 +138,17 @@ func (opts ServiceOptions) WithAudit(logger AuditLogger) ServiceOptions {
 // WithFilter returns a copy of opts with the given MessageFilter.
 func (opts ServiceOptions) WithFilter(filter MessageFilter) ServiceOptions {
 	opts.MessageFilter = filter
+	return opts
+}
+
+// WithClassifier returns a copy of opts with the given DataClassifier.
+func (opts ServiceOptions) WithClassifier(classifier DataClassifier) ServiceOptions {
+	opts.DataClassifier = classifier
+	return opts
+}
+
+// WithRequestAuditor returns a copy of opts with the given RequestAuditor.
+func (opts ServiceOptions) WithRequestAuditor(auditor RequestAuditor) ServiceOptions {
+	opts.RequestAuditor = auditor
 	return opts
 }

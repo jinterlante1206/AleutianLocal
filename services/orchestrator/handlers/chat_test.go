@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
@@ -55,18 +56,18 @@ type MockLLMClient struct {
 }
 
 // Chat implements llm.LLMClient.Chat for testing.
-func (m *MockLLMClient) Chat(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams) (string, error) {
+func (m *MockLLMClient) Chat(_ context.Context, _ []datatypes.Message, _ llm.GenerationParams) (string, error) {
 	return m.ChatResponse, m.ChatError
 }
 
 // Generate implements llm.LLMClient.Generate for testing.
-func (m *MockLLMClient) Generate(ctx context.Context, prompt string, params llm.GenerationParams) (string, error) {
+func (m *MockLLMClient) Generate(_ context.Context, _ string, _ llm.GenerationParams) (string, error) {
 	return "", nil
 }
 
 // ChatStream implements llm.LLMClient.ChatStream for testing.
 // Returns an error indicating streaming is not implemented in mock.
-func (m *MockLLMClient) ChatStream(ctx context.Context, messages []datatypes.Message, params llm.GenerationParams, callback llm.StreamCallback) error {
+func (m *MockLLMClient) ChatStream(_ context.Context, _ []datatypes.Message, _ llm.GenerationParams, callback llm.StreamCallback) error {
 	// For testing, emit the ChatResponse as a single token if set
 	if m.ChatResponse != "" {
 		if err := callback(llm.StreamEvent{Type: llm.StreamEventToken, Content: m.ChatResponse}); err != nil {
@@ -93,7 +94,7 @@ func createTestChatHandler(t *testing.T, mockLLM *MockLLMClient, ragService *ser
 	pe, err := policy_engine.NewPolicyEngine()
 	require.NoError(t, err, "policy engine should initialize")
 
-	return NewChatHandler(mockLLM, pe, ragService)
+	return NewChatHandler(mockLLM, pe, ragService, extensions.DefaultOptions())
 }
 
 // createTestRouter creates a Gin router with the specified handler for testing.
@@ -152,7 +153,7 @@ func TestNewChatHandler_PanicsOnNilLLMClient(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Panics(t, func() {
-		NewChatHandler(nil, pe, nil)
+		NewChatHandler(nil, pe, nil, extensions.DefaultOptions())
 	}, "should panic on nil llmClient")
 }
 
@@ -162,7 +163,7 @@ func TestNewChatHandler_PanicsOnNilPolicyEngine(t *testing.T) {
 	mockLLM := &MockLLMClient{}
 
 	assert.Panics(t, func() {
-		NewChatHandler(mockLLM, nil, nil)
+		NewChatHandler(mockLLM, nil, nil, extensions.DefaultOptions())
 	}, "should panic on nil policyEngine")
 }
 
@@ -174,7 +175,7 @@ func TestNewChatHandler_AcceptsNilRAGService(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotPanics(t, func() {
-		NewChatHandler(mockLLM, pe, nil)
+		NewChatHandler(mockLLM, pe, nil, extensions.DefaultOptions())
 	}, "should accept nil ragService")
 }
 
@@ -225,7 +226,7 @@ func TestHandleDirectChat_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Contains(t, response["error"], "invalid request body")
 }
 
@@ -250,7 +251,7 @@ func TestHandleDirectChat_MissingRequestID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Contains(t, response["error"], "validation failed")
 }
 
@@ -275,7 +276,7 @@ func TestHandleDirectChat_MissingTimestamp(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Contains(t, response["error"], "validation failed")
 }
 
@@ -298,7 +299,7 @@ func TestHandleDirectChat_EmptyMessages(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Contains(t, response["error"], "validation failed")
 }
 
@@ -316,7 +317,7 @@ func TestHandleDirectChat_PolicyViolation(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Contains(t, response["error"], "Policy Violation")
 	assert.NotNil(t, response["findings"])
 }
@@ -337,7 +338,7 @@ func TestHandleDirectChat_LLMError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	// SEC-005: Error should be sanitized, no internal details
 	assert.Equal(t, "Failed to process request", response["error"])
 	assert.Nil(t, response["details"], "should not leak error details")
@@ -366,7 +367,7 @@ func TestHandleDirectChat_WithGenerationParams(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var response datatypes.DirectChatResponse
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Equal(t, "Response with thinking", response.Answer)
 }
 
@@ -412,7 +413,7 @@ func TestHandleChatRAG_NilService(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Equal(t, "RAG service not available", response["error"])
 }
 
@@ -441,7 +442,7 @@ func TestHandleChatRAG_InvalidJSON(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Equal(t, "invalid request body", response["error"])
 }
 
@@ -468,7 +469,7 @@ func TestHandleChatRAG_ValidationFailure(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	// SEC-005: Error should be sanitized
 	assert.Equal(t, "Failed to process request", response["error"])
 	assert.Nil(t, response["details"], "should not leak error details")
@@ -497,7 +498,7 @@ func TestHandleChatRAG_PolicyViolation(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Contains(t, response["error"], "Policy Violation")
 	assert.NotNil(t, response["findings"])
 }
@@ -513,7 +514,7 @@ func TestHandleChatRAG_Success(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer mockRAGServer.Close()
 
@@ -553,7 +554,7 @@ func TestHandleChatRAG_WithExistingSession(t *testing.T) {
 			Sources: nil,
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer mockRAGServer.Close()
 
@@ -574,7 +575,7 @@ func TestHandleChatRAG_WithExistingSession(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var response datatypes.ChatRAGResponse
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.Equal(t, existingSessionId, response.SessionId)
 }
 
@@ -583,7 +584,7 @@ func TestHandleChatRAG_WithExistingSession(t *testing.T) {
 func TestHandleChatRAG_RAGEngineError(t *testing.T) {
 	mockRAGServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error": "RAG engine failed"}`))
+		_, _ = w.Write([]byte(`{"error": "RAG engine failed"}`))
 	}))
 	defer mockRAGServer.Close()
 
@@ -602,7 +603,7 @@ func TestHandleChatRAG_RAGEngineError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 
 	var response map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &response)
+	_ = json.Unmarshal(w.Body.Bytes(), &response)
 	// SEC-005: Error should be sanitized
 	assert.Equal(t, "Failed to process request", response["error"])
 	assert.Nil(t, response["details"], "should not leak error details")

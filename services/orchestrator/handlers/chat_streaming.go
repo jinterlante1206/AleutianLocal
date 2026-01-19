@@ -84,9 +84,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/conversation"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/middleware"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/observability"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
@@ -388,8 +390,8 @@ type streamingChatHandler struct {
 	tracer             trace.Tracer
 	queryExpander      conversation.QueryExpander
 	contextualEmbedder conversation.ContextBuilder
+	opts               extensions.ServiceOptions
 }
-
 
 // =============================================================================
 // Constructor
@@ -411,6 +413,7 @@ type streamingChatHandler struct {
 //   - ragService: RAG chat service. May be nil if RAG is not used.
 //   - weaviateClient: Weaviate client for session history. May be nil if
 //     session resume is not needed.
+//   - opts: Extension options for enterprise features (auth, audit, filter).
 //
 // # Outputs
 //
@@ -418,7 +421,7 @@ type streamingChatHandler struct {
 //
 // # Examples
 //
-//	handler := handlers.NewStreamingChatHandler(llmClient, policyEngine, ragService, weaviateClient)
+//	handler := handlers.NewStreamingChatHandler(llmClient, policyEngine, ragService, weaviateClient, opts)
 //	router.POST("/v1/chat/direct/stream", handler.HandleDirectChatStream)
 //	router.POST("/v1/chat/rag/stream", handler.HandleChatRAGStream)
 //
@@ -436,6 +439,7 @@ func NewStreamingChatHandler(
 	policyEngine *policy_engine.PolicyEngine,
 	ragService *services.ChatRAGService,
 	weaviateClient *weaviate.Client,
+	opts extensions.ServiceOptions,
 ) StreamingChatHandler {
 	if llmClient == nil {
 		panic("NewStreamingChatHandler: llmClient must not be nil")
@@ -485,6 +489,7 @@ func NewStreamingChatHandler(
 		tracer:             otel.Tracer("aleutian.orchestrator.handlers.chat_streaming"),
 		queryExpander:      queryExpander,
 		contextualEmbedder: contextualEmbedder,
+		opts:               opts,
 	}
 }
 
@@ -595,6 +600,23 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 		}
 	}()
 
+	// Step 0: Get authenticated user from context (FOSS-003)
+	// Auth middleware has already validated the token and stored AuthInfo
+	authInfo := middleware.GetAuthInfo(c)
+	userID := "anonymous"
+	if authInfo != nil {
+		userID = authInfo.UserID
+	}
+	span.SetAttributes(attribute.String("user.id", userID))
+
+	// Step 0.5: Read raw body for enterprise request capture (FOSS-008)
+	rawBody, bodyErr := io.ReadAll(c.Request.Body)
+	if bodyErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request"})
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(rawBody))
+
 	// Step 1: Parse request body
 	var req datatypes.DirectChatRequest
 	if err := c.BindJSON(&req); err != nil {
@@ -630,11 +652,50 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 		return
 	}
 
+	// Step 2.5: Authorization check (FOSS-004)
+	// Enterprise can restrict who can send streaming chat messages
+	if err := h.opts.AuthzProvider.Authorize(ctx, extensions.AuthzRequest{
+		User:         authInfo,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "direct/stream",
+	}); err != nil {
+		span.SetStatus(codes.Error, "authorization denied")
+		// Log unauthorized attempt (FOSS-005)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "authz.denied",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			ResourceID:   "direct/stream",
+			Outcome:      "denied",
+			Metadata: map[string]any{
+				"request_id": req.RequestID,
+				"reason":     err.Error(),
+			},
+		})
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	// Step 2.6: Capture request for enterprise audit (FOSS-008)
+	auditID, _ := h.opts.RequestAuditor.CaptureRequest(ctx, &extensions.AuditableRequest{
+		Method:    c.Request.Method,
+		Path:      c.Request.URL.Path,
+		Headers:   extractHeaders(c),
+		Body:      rawBody,
+		UserID:    userID,
+		Timestamp: startTime,
+	})
+
 	// Step 3: Scan last user message for policy violations (OUTBOUND protection)
 	// This prevents users from sending sensitive data OUT to the LLM
-	if len(req.Messages) > 0 {
-		lastMsg := req.Messages[len(req.Messages)-1]
+	lastIdx := len(req.Messages) - 1
+	if lastIdx >= 0 {
+		lastMsg := req.Messages[lastIdx]
 		if lastMsg.Role == "user" {
+			// Step 3a: Policy engine scan
 			findings := h.policyEngine.ScanFileContent(lastMsg.Content)
 			if len(findings) > 0 {
 				span.SetAttributes(attribute.Int("policy.findings_count", len(findings)))
@@ -651,6 +712,43 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 				})
 				return
 			}
+
+			// Step 3b: Apply message filter (FOSS-006)
+			// Enterprise can implement custom filtering (PII redaction, etc.)
+			filterResult, filterErr := h.opts.MessageFilter.FilterInput(ctx, lastMsg.Content)
+			if filterErr != nil {
+				slog.Error("Message filter failed", "error", filterErr, "requestId", req.RequestID)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "message processing failed"})
+				return
+			}
+
+			// Check if message was blocked by filter
+			if filterResult.WasBlocked {
+				_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+					EventType:    "chat.blocked",
+					Timestamp:    time.Now().UTC(),
+					UserID:       userID,
+					Action:       "send",
+					ResourceType: "chat",
+					ResourceID:   "direct/stream",
+					Outcome:      "blocked",
+					Metadata: map[string]any{
+						"request_id": req.RequestID,
+						"reason":     filterResult.BlockReason,
+					},
+				})
+				if m := observability.DefaultMetrics; m != nil {
+					m.RecordError(endpoint, observability.ErrorCodePolicyViolation)
+				}
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":  "Message blocked by content filter",
+					"reason": filterResult.BlockReason,
+				})
+				return
+			}
+
+			// Use filtered content (may have PII redacted)
+			req.Messages[lastIdx].Content = filterResult.Filtered
 		}
 	}
 
@@ -695,9 +793,20 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 		ToolDefinitions: req.Tools,
 	}
 
+	// Step 7.5: Create accumulator for enterprise response capture (FOSS-008)
+	accumulator, accErr := NewSecureTokenAccumulator()
+	if accErr != nil {
+		slog.Debug("failed to create token accumulator for capture", "error", accErr)
+	}
+	defer func() {
+		if accumulator != nil {
+			accumulator.Destroy()
+		}
+	}()
+
 	var tokenCount int32
 	firstTokenTime := time.Time{}
-	streamErr := h.streamFromLLMWithMetrics(ctx, req.RequestID, req.Messages, params, sseWriter, endpoint, &tokenCount, &firstTokenTime, nil)
+	streamErr := h.streamFromLLMWithMetrics(ctx, req.RequestID, req.Messages, params, sseWriter, endpoint, &tokenCount, &firstTokenTime, accumulator)
 
 	// Stop heartbeat
 	close(heartbeatDone)
@@ -711,6 +820,22 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 			"requestId", req.RequestID,
 			"tokenCount", tokenCount,
 		)
+
+		// Log failed streaming attempt (FOSS-005)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "chat.stream",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			ResourceID:   "direct/stream",
+			Outcome:      "failed",
+			Metadata: map[string]any{
+				"request_id":  req.RequestID,
+				"error":       streamErr.Error(),
+				"token_count": fmt.Sprintf("%d", tokenCount),
+			},
+		})
 
 		// Categorize error for metrics
 		if errors.Is(streamErr, context.Canceled) {
@@ -747,6 +872,35 @@ func (h *streamingChatHandler) HandleDirectChatStream(c *gin.Context) {
 		)
 		return
 	}
+
+	// Step 8.5: Capture response for enterprise audit (FOSS-008)
+	if accumulator != nil {
+		answer, _, _ := accumulator.Finalize()
+		_ = h.opts.RequestAuditor.CaptureResponse(ctx, auditID, &extensions.AuditableResponse{
+			StatusCode: http.StatusOK,
+			Headers:    extensions.HTTPHeaders{"Content-Type": "text/event-stream"},
+			Body:       []byte(answer),
+			Timestamp:  time.Now().UTC(),
+		})
+	}
+
+	// Step 9: Log successful streaming (FOSS-005)
+	processingTime := time.Since(startTime).Milliseconds()
+	_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+		EventType:    "chat.stream",
+		Timestamp:    time.Now().UTC(),
+		UserID:       userID,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "direct/stream",
+		Outcome:      "success",
+		Metadata: map[string]any{
+			"request_id":       req.RequestID,
+			"token_count":      fmt.Sprintf("%d", tokenCount),
+			"processing_ms":    fmt.Sprintf("%d", processingTime),
+			"thinking_enabled": fmt.Sprintf("%t", req.EnableThinking),
+		},
+	})
 
 	success = true
 	span.SetStatus(codes.Ok, "stream completed successfully")
@@ -862,6 +1016,15 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 		}
 	}()
 
+	// Step 0: Get authenticated user from context (FOSS-003)
+	// Auth middleware has already validated the token and stored AuthInfo
+	authInfo := middleware.GetAuthInfo(c)
+	userID := "anonymous"
+	if authInfo != nil {
+		userID = authInfo.UserID
+	}
+	span.SetAttributes(attribute.String("user.id", userID))
+
 	// Check if RAG service is available
 	if h.ragService == nil {
 		slog.Error("RAG service not configured for streaming")
@@ -871,6 +1034,14 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "RAG service not available"})
 		return
 	}
+
+	// Step 0.5: Read raw body for enterprise request capture (FOSS-008)
+	rawBody, bodyErr := io.ReadAll(c.Request.Body)
+	if bodyErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request"})
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(rawBody))
 
 	// Step 1: Parse request body
 	var req datatypes.ChatRAGRequest
@@ -892,8 +1063,46 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 		attribute.String("request.session_id", req.SessionId),
 	)
 
+	// Step 1.5: Authorization check (FOSS-004)
+	// Enterprise can restrict who can send streaming RAG messages
+	if err := h.opts.AuthzProvider.Authorize(ctx, extensions.AuthzRequest{
+		User:         authInfo,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "rag/stream",
+	}); err != nil {
+		span.SetStatus(codes.Error, "authorization denied")
+		// Log unauthorized attempt (FOSS-005)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "authz.denied",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			ResourceID:   "rag/stream",
+			Outcome:      "denied",
+			Metadata: map[string]any{
+				"request_id": req.Id,
+				"reason":     err.Error(),
+			},
+		})
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	// Step 1.6: Capture request for enterprise audit (FOSS-008)
+	auditID, _ := h.opts.RequestAuditor.CaptureRequest(ctx, &extensions.AuditableRequest{
+		Method:    c.Request.Method,
+		Path:      c.Request.URL.Path,
+		Headers:   extractHeaders(c),
+		Body:      rawBody,
+		UserID:    userID,
+		Timestamp: startTime,
+	})
+
 	// Step 2: Scan user message for policy violations (OUTBOUND protection)
 	// This prevents users from sending sensitive data OUT
+	// Step 2a: Policy engine scan
 	findings := h.policyEngine.ScanFileContent(req.Message)
 	if len(findings) > 0 {
 		span.SetAttributes(attribute.Int("policy.findings_count", len(findings)))
@@ -909,6 +1118,45 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 			"findings": findings,
 		})
 		return
+	}
+
+	// Step 2b: Apply message filter (FOSS-006)
+	// Enterprise can implement custom filtering (PII redaction, etc.)
+	if req.Message != "" {
+		filterResult, filterErr := h.opts.MessageFilter.FilterInput(ctx, req.Message)
+		if filterErr != nil {
+			slog.Error("Message filter failed", "error", filterErr, "requestId", req.Id)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "message processing failed"})
+			return
+		}
+
+		// Check if message was blocked by filter
+		if filterResult.WasBlocked {
+			_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+				EventType:    "chat.blocked",
+				Timestamp:    time.Now().UTC(),
+				UserID:       userID,
+				Action:       "send",
+				ResourceType: "chat",
+				ResourceID:   "rag/stream",
+				Outcome:      "blocked",
+				Metadata: map[string]any{
+					"request_id": req.Id,
+					"reason":     filterResult.BlockReason,
+				},
+			})
+			if m := observability.DefaultMetrics; m != nil {
+				m.RecordError(endpoint, observability.ErrorCodePolicyViolation)
+			}
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":  "Message blocked by content filter",
+				"reason": filterResult.BlockReason,
+			})
+			return
+		}
+
+		// Use filtered content (may have PII redacted)
+		req.Message = filterResult.Filtered
 	}
 
 	// Step 2.5: Load session history for session resume
@@ -1042,6 +1290,23 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 			"tokenCount", tokenCount,
 		)
 
+		// Log failed streaming attempt (FOSS-005)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "chat.stream",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			ResourceID:   "rag/stream",
+			Outcome:      "failed",
+			Metadata: map[string]any{
+				"request_id":  req.Id,
+				"session_id":  req.SessionId,
+				"error":       streamErr.Error(),
+				"token_count": fmt.Sprintf("%d", tokenCount),
+			},
+		})
+
 		// Categorize error for metrics
 		if errors.Is(streamErr, context.Canceled) {
 			if m := observability.DefaultMetrics; m != nil {
@@ -1078,6 +1343,15 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 	if accumulator != nil {
 		// Finalize accumulator to get answer and hash
 		answer, turnHash, finalizeErr := accumulator.Finalize()
+
+		// Step 10.6.1: Capture response for enterprise audit (FOSS-008)
+		_ = h.opts.RequestAuditor.CaptureResponse(ctx, auditID, &extensions.AuditableResponse{
+			StatusCode: http.StatusOK,
+			Headers:    extensions.HTTPHeaders{"Content-Type": "text/event-stream"},
+			Body:       []byte(answer),
+			Timestamp:  time.Now().UTC(),
+		})
+
 		if finalizeErr != nil {
 			slog.Warn("failed to finalize accumulator, turn will not be persisted",
 				"requestId", req.Id,
@@ -1148,6 +1422,25 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 		)
 		return
 	}
+
+	// Step 12: Log successful streaming (FOSS-005)
+	processingTime := time.Since(startTime).Milliseconds()
+	_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+		EventType:    "chat.stream",
+		Timestamp:    time.Now().UTC(),
+		UserID:       userID,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "rag/stream",
+		Outcome:      "success",
+		Metadata: map[string]any{
+			"request_id":    req.Id,
+			"session_id":    sessionID,
+			"token_count":   fmt.Sprintf("%d", tokenCount),
+			"processing_ms": fmt.Sprintf("%d", processingTime),
+			"pipeline":      req.Pipeline,
+		},
+	})
 
 	success = true
 	span.SetStatus(codes.Ok, "stream completed successfully")
@@ -1250,6 +1543,23 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 		}
 	}()
 
+	// Step 0: Get authenticated user from context (FOSS-003)
+	// Auth middleware has already validated the token and stored AuthInfo
+	authInfo := middleware.GetAuthInfo(c)
+	userID := "anonymous"
+	if authInfo != nil {
+		userID = authInfo.UserID
+	}
+	span.SetAttributes(attribute.String("user.id", userID))
+
+	// Step 0.5: Read raw body for enterprise request capture (FOSS-008)
+	rawBody, bodyErr := io.ReadAll(c.Request.Body)
+	if bodyErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request"})
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(rawBody))
+
 	// Step 1: Parse request body
 	var req datatypes.ChatRAGRequest
 	if err := c.BindJSON(&req); err != nil {
@@ -1273,7 +1583,45 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 		attribute.String("request.session_id", req.SessionId),
 	)
 
+	// Step 1.5: Authorization check (FOSS-004)
+	// Enterprise can restrict who can send verified streaming messages
+	if err := h.opts.AuthzProvider.Authorize(ctx, extensions.AuthzRequest{
+		User:         authInfo,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "rag/verified/stream",
+	}); err != nil {
+		span.SetStatus(codes.Error, "authorization denied")
+		// Log unauthorized attempt (FOSS-005)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "authz.denied",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			ResourceID:   "rag/verified/stream",
+			Outcome:      "denied",
+			Metadata: map[string]any{
+				"request_id": req.Id,
+				"reason":     err.Error(),
+			},
+		})
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	// Step 1.6: Capture request for enterprise audit (FOSS-008)
+	auditID, _ := h.opts.RequestAuditor.CaptureRequest(ctx, &extensions.AuditableRequest{
+		Method:    c.Request.Method,
+		Path:      c.Request.URL.Path,
+		Headers:   extractHeaders(c),
+		Body:      rawBody,
+		UserID:    userID,
+		Timestamp: startTime,
+	})
+
 	// Step 2: Scan user message for policy violations (OUTBOUND protection)
+	// Step 2a: Policy engine scan
 	findings := h.policyEngine.ScanFileContent(req.Message)
 	if len(findings) > 0 {
 		span.SetAttributes(attribute.Int("policy.findings_count", len(findings)))
@@ -1289,6 +1637,45 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 			"findings": findings,
 		})
 		return
+	}
+
+	// Step 2b: Apply message filter (FOSS-006)
+	// Enterprise can implement custom filtering (PII redaction, etc.)
+	if req.Message != "" {
+		filterResult, filterErr := h.opts.MessageFilter.FilterInput(ctx, req.Message)
+		if filterErr != nil {
+			slog.Error("Message filter failed", "error", filterErr, "requestId", req.Id)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "message processing failed"})
+			return
+		}
+
+		// Check if message was blocked by filter
+		if filterResult.WasBlocked {
+			_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+				EventType:    "chat.blocked",
+				Timestamp:    time.Now().UTC(),
+				UserID:       userID,
+				Action:       "send",
+				ResourceType: "chat",
+				ResourceID:   "rag/verified/stream",
+				Outcome:      "blocked",
+				Metadata: map[string]any{
+					"request_id": req.Id,
+					"reason":     filterResult.BlockReason,
+				},
+			})
+			if m := observability.DefaultMetrics; m != nil {
+				m.RecordError(endpoint, observability.ErrorCodePolicyViolation)
+			}
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":  "Message blocked by content filter",
+				"reason": filterResult.BlockReason,
+			})
+			return
+		}
+
+		// Use filtered content (may have PII redacted)
+		req.Message = filterResult.Filtered
 	}
 
 	// Step 3: Get verbosity level from header (default: 2 for development)
@@ -1421,6 +1808,23 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 			"error", err,
 			"requestId", req.Id,
 		)
+
+		// Log failed streaming attempt (FOSS-005)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "chat.stream",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			ResourceID:   "rag/verified/stream",
+			Outcome:      "failed",
+			Metadata: map[string]any{
+				"request_id": req.Id,
+				"session_id": sessionID,
+				"error":      err.Error(),
+			},
+		})
+
 		if m := observability.DefaultMetrics; m != nil {
 			m.RecordError(endpoint, observability.ErrorCodeRAGError)
 		}
@@ -1433,6 +1837,14 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 	// NOTE: Use a detached context for persistence because the HTTP request
 	// context may be canceled after the stream completes (client disconnects).
 	if result != nil && result.Answer != "" {
+		// Step 7.0: Capture response for enterprise audit (FOSS-008)
+		_ = h.opts.RequestAuditor.CaptureResponse(ctx, auditID, &extensions.AuditableResponse{
+			StatusCode: http.StatusOK,
+			Headers:    extensions.HTTPHeaders{"Content-Type": "text/event-stream"},
+			Body:       []byte(result.Answer),
+			Timestamp:  time.Now().UTC(),
+		})
+
 		// Create a detached context with timeout for persistence
 		// This ensures persistence completes even if client disconnects
 		persistCtx, persistCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1490,6 +1902,25 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 			}
 		}
 	}
+
+	// Step 8: Log successful streaming (FOSS-005)
+	processingTime := time.Since(startTime).Milliseconds()
+	_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+		EventType:    "chat.stream",
+		Timestamp:    time.Now().UTC(),
+		UserID:       userID,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "rag/verified/stream",
+		Outcome:      "success",
+		Metadata: map[string]any{
+			"request_id":    req.Id,
+			"session_id":    sessionID,
+			"processing_ms": fmt.Sprintf("%d", processingTime),
+			"pipeline":      "verified",
+			"is_verified":   fmt.Sprintf("%t", result != nil && result.IsVerified),
+		},
+	})
 
 	success = true
 	span.SetStatus(codes.Ok, "verified stream completed successfully")
@@ -1659,7 +2090,7 @@ func (h *streamingChatHandler) streamFromVerifiedPipeline(
 		_ = writer.WriteError("Failed to connect to RAG engine")
 		return nil, fmt.Errorf("execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		_ = writer.WriteError("RAG engine returned an error")

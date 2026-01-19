@@ -23,6 +23,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
@@ -83,7 +84,7 @@ func createTestStreamingChatHandler(t *testing.T, mockLLM *StreamingMockLLMClien
 	pe, err := policy_engine.NewPolicyEngine()
 	require.NoError(t, err, "policy engine should initialize")
 
-	return NewStreamingChatHandler(mockLLM, pe, nil, nil)
+	return NewStreamingChatHandler(mockLLM, pe, nil, nil, extensions.DefaultOptions())
 }
 
 // =============================================================================
@@ -97,7 +98,7 @@ func TestNewStreamingChatHandler_PanicsOnNilLLMClient(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Panics(t, func() {
-		NewStreamingChatHandler(nil, pe, nil, nil)
+		NewStreamingChatHandler(nil, pe, nil, nil, extensions.DefaultOptions())
 	}, "should panic on nil llmClient")
 }
 
@@ -107,7 +108,7 @@ func TestNewStreamingChatHandler_PanicsOnNilPolicyEngine(t *testing.T) {
 	mockLLM := &StreamingMockLLMClient{}
 
 	assert.Panics(t, func() {
-		NewStreamingChatHandler(mockLLM, nil, nil, nil)
+		NewStreamingChatHandler(mockLLM, nil, nil, nil, extensions.DefaultOptions())
 	}, "should panic on nil policyEngine")
 }
 
@@ -118,7 +119,7 @@ func TestNewStreamingChatHandler_Success(t *testing.T) {
 	pe, err := policy_engine.NewPolicyEngine()
 	require.NoError(t, err)
 
-	handler := NewStreamingChatHandler(mockLLM, pe, nil, nil)
+	handler := NewStreamingChatHandler(mockLLM, pe, nil, nil, extensions.DefaultOptions())
 
 	assert.NotNil(t, handler, "handler should not be nil")
 }
@@ -280,7 +281,7 @@ func TestHandleChatRAGStream_NoRAGService(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create handler WITHOUT RAG service
-	handler := NewStreamingChatHandler(mockLLM, pe, nil, nil)
+	handler := NewStreamingChatHandler(mockLLM, pe, nil, nil, extensions.DefaultOptions())
 
 	router := gin.New()
 	router.POST("/v1/chat/rag/stream", handler.HandleChatRAGStream)
@@ -307,7 +308,7 @@ func TestHandleChatRAGStream_InvalidRequestBody(t *testing.T) {
 	require.NoError(t, err)
 
 	// Without RAG service, should return 500 before parsing body
-	handler := NewStreamingChatHandler(mockLLM, pe, nil, nil)
+	handler := NewStreamingChatHandler(mockLLM, pe, nil, nil, extensions.DefaultOptions())
 
 	router := gin.New()
 	router.POST("/v1/chat/rag/stream", handler.HandleChatRAGStream)
