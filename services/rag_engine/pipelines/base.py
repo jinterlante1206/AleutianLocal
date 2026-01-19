@@ -779,10 +779,9 @@ class BaseRAGPipeline:
         What it Does:
         Constructs a dynamic `wvc.query.Filter` object that searches
         for documents that are EITHER:
-        1. **Global**: The `inSession` property is `None` (null).
+        1. **Global**: The `inSession` reference has no links (ref count = 0).
         2. **Session-Scoped**: The `inSession` property links to a
-           `Session` object whose internal `id` (UUID) matches the
-           provided `session_uuid`.
+           `Session` object whose `session_id` matches the provided value.
 
 
 
@@ -802,9 +801,9 @@ class BaseRAGPipeline:
         Parameters
         ----------
         session_uuid : str | None
-            The internal Weaviate UUID for the *current* session, as
-            retrieved by `_get_session_uuid`. If None, the filter
-            will *only* return global documents.
+            The human-readable session ID (e.g., "my-chat-session").
+            This is matched against Session.session_id. If None, the
+            filter will *only* return global documents.
 
         Returns
         -------
@@ -818,8 +817,11 @@ class BaseRAGPipeline:
             Logs any exception during filter creation and gracefully
             defaults to the "global-only" filter.
         """
-        # 1. Filter for GLOBAL documents (where inSession is null)
-        global_filter = wvc.query.Filter.by_property("inSession").is_none(True)
+        # 1. Filter for GLOBAL documents (where inSession has no references)
+        # NOTE: inSession is a cross-reference, not a scalar property.
+        # For references, use by_ref_count() instead of is_none().
+        # Documents without inSession set have a reference count of 0.
+        global_filter = wvc.query.Filter.by_ref_count("inSession").equal(0)
 
         if not session_uuid:
             # If no session, only return global docs
