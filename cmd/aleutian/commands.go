@@ -223,12 +223,12 @@ Previous versions are preserved and can be queried using --doc-version in chat.
 Example:
   aleutian docs versions report.md
   aleutian docs versions ./path/to/notes.txt`,
-		Run: runDocsVersions, // Defined in cmd_data.go
+		RunE: runDocsVersions, // Defined in cmd_data.go
 	}
 	docsListCmd = &cobra.Command{
 		Use:   "list",
 		Short: "List all ingested documents",
-		Run:   runDocsList, // Defined in cmd_data.go
+		RunE:  runDocsList, // Defined in cmd_data.go
 	}
 
 	// --- GCS ---

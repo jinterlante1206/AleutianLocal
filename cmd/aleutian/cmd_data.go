@@ -1691,12 +1691,13 @@ var docsHTTPClient = &http.Client{
 // # Outputs
 //
 // Prints a formatted table of documents to stdout.
+// Returns an error if the API call fails.
 //
 // # Limitations
 //
 //   - Requires orchestrator to be running
 //   - Uses 30-second timeout for API calls
-func runDocsList(_ *cobra.Command, _ []string) {
+func runDocsList(_ *cobra.Command, _ []string) error {
 	// Create context with timeout for cancellation
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1708,29 +1709,21 @@ func runDocsList(_ *cobra.Command, _ []string) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orchestratorURL, nil)
 	if err != nil {
-		slog.Error("Failed to create request", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	resp, err := docsHTTPClient.Do(req)
 	if err != nil {
-		slog.Error("Failed to fetch documents", "error", err, "url", orchestratorURL)
-		os.Exit(1)
+		return fmt.Errorf("failed to fetch documents from %s: %w", orchestratorURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			slog.Error("Failed to fetch documents",
-				"status_code", resp.StatusCode,
-				"read_error", readErr)
-		} else {
-			slog.Error("Failed to fetch documents",
-				"status_code", resp.StatusCode,
-				"response", string(bodyBytes))
+			return fmt.Errorf("failed to fetch documents (status %d, body read error: %v)", resp.StatusCode, readErr)
 		}
-		os.Exit(1)
+		return fmt.Errorf("failed to fetch documents (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var result struct {
@@ -1744,13 +1737,12 @@ func runDocsList(_ *cobra.Command, _ []string) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		slog.Error("Failed to decode response", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	if len(result.Documents) == 0 {
 		fmt.Println("No documents found.")
-		return
+		return nil
 	}
 
 	// Print formatted table
@@ -1772,7 +1764,12 @@ func runDocsList(_ *cobra.Command, _ []string) {
 	}
 	fmt.Println()
 	fmt.Printf("Total: %d documents\n", len(result.Documents))
+	return nil
 }
+
+// maxDocumentNameLength is the maximum allowed length for a document name.
+// This prevents potential DoS from extremely long input strings.
+const maxDocumentNameLength = 512
 
 // runDocsVersions lists all versions of a specific document.
 //
@@ -1788,17 +1785,29 @@ func runDocsList(_ *cobra.Command, _ []string) {
 // # Outputs
 //
 // Prints a formatted version history table to stdout.
+// Returns an error if validation or API call fails.
 //
 // # Limitations
 //
 //   - Requires orchestrator to be running
 //   - Document must have been ingested at least once
 //   - Uses 30-second timeout for API calls
-func runDocsVersions(_ *cobra.Command, args []string) {
+//   - Document name limited to 512 characters
+func runDocsVersions(_ *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		fmt.Println("Error: please specify a document name")
-		fmt.Println("Usage: aleutian docs versions <document-name>")
-		return
+		return fmt.Errorf("please specify a document name\nUsage: aleutian docs versions <document-name>")
+	}
+
+	parentSource := args[0]
+
+	// Input validation: check length
+	if len(parentSource) > maxDocumentNameLength {
+		return fmt.Errorf("document name is too long (max %d characters, got %d)", maxDocumentNameLength, len(parentSource))
+	}
+
+	// Input validation: check for empty or whitespace-only
+	if strings.TrimSpace(parentSource) == "" {
+		return fmt.Errorf("document name cannot be empty or whitespace-only")
 	}
 
 	// Create context with timeout for cancellation
@@ -1806,52 +1815,42 @@ func runDocsVersions(_ *cobra.Command, args []string) {
 	defer cancel()
 
 	baseURL := getOrchestratorBaseURL()
-	parentSource := args[0]
 
 	encodedSource := url.QueryEscape(parentSource)
 	orchestratorURL := fmt.Sprintf("%s/v1/document/versions?source=%s", baseURL, encodedSource)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orchestratorURL, nil)
 	if err != nil {
-		slog.Error("Failed to create request", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	resp, err := docsHTTPClient.Do(req)
 	if err != nil {
-		slog.Error("Failed to fetch document versions", "error", err, "url", orchestratorURL)
-		os.Exit(1)
+		return fmt.Errorf("failed to fetch document versions from %s: %w", orchestratorURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		fmt.Printf("No versions found for document: %s\n", parentSource)
-		return
+		return nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			slog.Error("Failed to fetch versions",
-				"status_code", resp.StatusCode,
-				"read_error", readErr)
-		} else {
-			slog.Error("Failed to fetch versions",
-				"status_code", resp.StatusCode,
-				"response", string(bodyBytes))
+			return fmt.Errorf("failed to fetch versions (status %d, body read error: %v)", resp.StatusCode, readErr)
 		}
-		os.Exit(1)
+		return fmt.Errorf("failed to fetch versions (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var result DocVersionsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		slog.Error("Failed to decode response", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	if len(result.Versions) == 0 {
 		fmt.Printf("No versions found for document: %s\n", parentSource)
-		return
+		return nil
 	}
 
 	// Print formatted version history
@@ -1874,4 +1873,5 @@ func runDocsVersions(_ *cobra.Command, args []string) {
 			status)
 	}
 	fmt.Println()
+	return nil
 }
