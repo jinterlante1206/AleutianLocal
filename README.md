@@ -224,7 +224,7 @@ Ingest documents into the Vector Database (Institutional Memory) with a security
 * **The "Firewall" Scan:** Before ingestion, files are scanned locally for secrets/PII. The CLI pauses for approval if findings are detected.
 * **Flags:**
     * `--force`: Skip the interactive confirmation prompt (files with findings are logged but ingested).
-    * `--data-space <name>`: Segregate data into logical namespaces (e.g., `aleutian populate vectordb ./docs --data-space engineering`).
+    * `--dataspace <name>`: Segregate data into logical namespaces (e.g., `aleutian populate vectordb ./docs --dataspace engineering`).
     * `--version <tag>`: Tag ingested data with a specific version string.
 
 ---
@@ -377,7 +377,7 @@ Scan and add local files or directories to the Weaviate vector database. This co
        - **Batch Storage:** Imports chunks, vectors, and parent-child metadata into Weaviate in a single transaction.
 * **Flags:**
     * `--force`: Force ingestion, skipping policy/secret checks. Files with findings are logged but ingested.
-    * `--data-space <name>`: The logical data space to ingest into (e.g., `work`, `personal`, `project-x`). Default: `default`.
+    * `--dataspace <name>`: The logical data space to ingest into (e.g., `work`, `personal`, `project-x`). Default: `default`.
     * `--version <tag>`: A version tag for this ingestion (e.g., `v1.1`, `2025-Q4`). Default: `latest`.
 * **Auto-Versioning:** When you re-ingest a document that already exists, Aleutian automatically:
     1. Detects the existing document by its `parent_source` identifier
@@ -387,7 +387,7 @@ Scan and add local files or directories to the Weaviate vector database. This co
 
     Old versions are preserved and can be queried using `--doc-version`. Use `aleutian docs versions <file>` to see all versions.
 * **Examples:**
-    * `aleutian populate vectordb ./docs --data-space engineering --version v2.0`
+    * `aleutian populate vectordb ./docs --dataspace engineering --version v2.0`
     * `aleutian populate vectordb ./src --force` (skip security prompts)
     * `aleutian populate vectordb ./report.md` (re-ingest creates v2 if v1 exists)
 
