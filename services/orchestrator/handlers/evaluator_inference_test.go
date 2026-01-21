@@ -146,7 +146,9 @@ func TestCallInferenceService_Success(t *testing.T) {
 		// Return success response
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(validInferenceTestResponse())
+		if err := json.NewEncoder(w).Encode(validInferenceTestResponse()); err != nil {
+			t.Logf("Warning: failed to encode response: %v", err)
+		}
 	}
 
 	evaluator, mockServer := createInferenceTestEvaluator(handler)
@@ -230,13 +232,17 @@ func TestCallInferenceService_RetryOn5xx(t *testing.T) {
 		if count < 3 {
 			// First two calls return 500
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error": "internal error"}`))
+			if _, err := w.Write([]byte(`{"error": "internal error"}`)); err != nil {
+				t.Logf("Warning: failed to write response: %v", err)
+			}
 			return
 		}
 		// Third call succeeds
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(validInferenceTestResponse())
+		if err := json.NewEncoder(w).Encode(validInferenceTestResponse()); err != nil {
+			t.Logf("Warning: failed to encode response: %v", err)
+		}
 	}
 
 	evaluator, mockServer := createInferenceTestEvaluator(handler)
@@ -264,7 +270,9 @@ func TestCallInferenceService_4xxError(t *testing.T) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&callCount, 1)
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error": "invalid model"}`))
+		if _, err := w.Write([]byte(`{"error": "invalid model"}`)); err != nil {
+			t.Logf("Warning: failed to write response: %v", err)
+		}
 	}
 
 	evaluator, mockServer := createInferenceTestEvaluator(handler)
@@ -317,7 +325,9 @@ func TestCallInferenceService_InvalidJSONResponse(t *testing.T) {
 		atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("not valid json{{{"))
+		if _, err := w.Write([]byte("not valid json{{{")); err != nil {
+			t.Logf("Warning: failed to write response: %v", err)
+		}
 	}
 
 	evaluator, mockServer := createInferenceTestEvaluator(handler)
@@ -346,7 +356,9 @@ func TestCallInferenceService_AuthHeader(t *testing.T) {
 		receivedAuthHeader = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(validInferenceTestResponse())
+		if err := json.NewEncoder(w).Encode(validInferenceTestResponse()); err != nil {
+			t.Logf("Warning: failed to encode response: %v", err)
+		}
 	}
 
 	evaluator, mockServer := createInferenceTestEvaluator(handler)
@@ -374,7 +386,9 @@ func TestCallInferenceService_NoAuthHeaderWhenKeyNotSet(t *testing.T) {
 		receivedAuthHeader = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(validInferenceTestResponse())
+		if err := json.NewEncoder(w).Encode(validInferenceTestResponse()); err != nil {
+			t.Logf("Warning: failed to encode response: %v", err)
+		}
 	}
 
 	evaluator, mockServer := createInferenceTestEvaluator(handler)
@@ -403,7 +417,9 @@ func TestCallInferenceService_WithQuantilesResponse(t *testing.T) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(responseWithQuantiles)
+		if err := json.NewEncoder(w).Encode(responseWithQuantiles); err != nil {
+			t.Logf("Warning: failed to encode response: %v", err)
+		}
 	}
 
 	evaluator, mockServer := createInferenceTestEvaluator(handler)

@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func runEvaluation(cmd *cobra.Command, args []string) {
+func runEvaluation(cmd *cobra.Command, _ []string) {
 	// 1. Get the config file path from flags
 	configPath, _ := cmd.Flags().GetString("config")
 	if configPath == "" {
@@ -130,7 +130,11 @@ func runEvaluation(cmd *cobra.Command, args []string) {
 		slog.Error("Failed to create evaluator", "error", err)
 		return
 	}
-	defer evaluator.Close()
+	defer func() {
+		if closeErr := evaluator.Close(); closeErr != nil {
+			slog.Warn("Failed to close evaluator", "error", closeErr)
+		}
+	}()
 
 	// 6. Execute the Run using RunScenario
 	ctx := context.Background()
@@ -203,7 +207,11 @@ func runExport(cmd *cobra.Command, args []string) {
 		slog.Error("Failed to create output file", "error", err)
 		return
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			slog.Warn("Failed to close output file", "error", closeErr)
+		}
+	}()
 
 	writer := csv.NewWriter(f)
 	defer writer.Flush()
@@ -251,7 +259,10 @@ func runExport(cmd *cobra.Command, args []string) {
 			fmt.Sprintf("%.2f", r.ValueByKey("available_cash").(float64)+(r.ValueByKey("position_after").(float64)*r.ValueByKey("current_price").(float64))),
 			getString("reason"),
 		}
-		writer.Write(row)
+		if err := writer.Write(row); err != nil {
+			slog.Error("Failed to write CSV row", "error", err)
+			return
+		}
 		count++
 	}
 

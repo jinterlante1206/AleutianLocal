@@ -64,15 +64,21 @@ func clearRoutingEnvVars(t *testing.T) {
 		if val, exists := os.LookupEnv(key); exists {
 			originalValues[key] = val
 		}
-		os.Unsetenv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("Failed to unset env var %s: %v", key, err)
+		}
 	}
 
 	// Restore original values on cleanup
 	t.Cleanup(func() {
 		for _, key := range envVars {
-			os.Unsetenv(key)
+			if err := os.Unsetenv(key); err != nil {
+				t.Logf("Warning: failed to unset env var %s during cleanup: %v", key, err)
+			}
 			if val, exists := originalValues[key]; exists {
-				os.Setenv(key, val)
+				if err := os.Setenv(key, val); err != nil {
+					t.Logf("Warning: failed to restore env var %s during cleanup: %v", key, err)
+				}
 			}
 		}
 	})
@@ -112,7 +118,9 @@ func TestDefaultServiceRouter_GetOrchestrationURL_PreferredEnvVar(t *testing.T) 
 	clearRoutingEnvVars(t)
 
 	expected := "http://sapheneia-custom:9000"
-	os.Setenv("SAPHENEIA_ORCHESTRATION_URL", expected)
+	if err := os.Setenv("SAPHENEIA_ORCHESTRATION_URL", expected); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
 
 	router := NewDefaultServiceRouter("standalone")
 	actual := router.GetOrchestrationURL()
@@ -151,7 +159,9 @@ func TestDefaultServiceRouter_GetOrchestrationURL_LegacyEnvVar(t *testing.T) {
 	clearRoutingEnvVars(t)
 
 	expected := "http://legacy-orchestrator:7000"
-	os.Setenv("ORCHESTRATOR_URL", expected)
+	if err := os.Setenv("ORCHESTRATOR_URL", expected); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
 
 	router := NewDefaultServiceRouter("standalone")
 	actual := router.GetOrchestrationURL()
@@ -194,8 +204,12 @@ func TestDefaultServiceRouter_GetOrchestrationURL_PreferredOverLegacy(t *testing
 
 	preferred := "http://preferred:8000"
 	legacy := "http://legacy:8000"
-	os.Setenv("SAPHENEIA_ORCHESTRATION_URL", preferred)
-	os.Setenv("ORCHESTRATOR_URL", legacy)
+	if err := os.Setenv("SAPHENEIA_ORCHESTRATION_URL", preferred); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
+	if err := os.Setenv("ORCHESTRATOR_URL", legacy); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
 
 	router := NewDefaultServiceRouter("standalone")
 	actual := router.GetOrchestrationURL()
@@ -354,7 +368,9 @@ func TestDefaultServiceRouter_GetTradingURL_PreferredEnvVar(t *testing.T) {
 	clearRoutingEnvVars(t)
 
 	expected := "http://sapheneia-trading:9000"
-	os.Setenv("SAPHENEIA_TRADING_URL", expected)
+	if err := os.Setenv("SAPHENEIA_TRADING_URL", expected); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
 
 	router := NewDefaultServiceRouter("standalone")
 	actual := router.GetTradingURL()
@@ -393,7 +409,9 @@ func TestDefaultServiceRouter_GetTradingURL_LegacyEnvVar(t *testing.T) {
 	clearRoutingEnvVars(t)
 
 	expected := "http://legacy-trading:7000"
-	os.Setenv("SAPHENEIA_TRADING_SERVICE_URL", expected)
+	if err := os.Setenv("SAPHENEIA_TRADING_SERVICE_URL", expected); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
 
 	router := NewDefaultServiceRouter("standalone")
 	actual := router.GetTradingURL()
@@ -436,8 +454,12 @@ func TestDefaultServiceRouter_GetTradingURL_PreferredOverLegacy(t *testing.T) {
 
 	preferred := "http://preferred-trading:8000"
 	legacy := "http://legacy-trading:8000"
-	os.Setenv("SAPHENEIA_TRADING_URL", preferred)
-	os.Setenv("SAPHENEIA_TRADING_SERVICE_URL", legacy)
+	if err := os.Setenv("SAPHENEIA_TRADING_URL", preferred); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
+	if err := os.Setenv("SAPHENEIA_TRADING_SERVICE_URL", legacy); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
 
 	router := NewDefaultServiceRouter("standalone")
 	actual := router.GetTradingURL()
@@ -517,7 +539,9 @@ func TestDefaultServiceRouter_GetInfluxDBURL_EnvVar(t *testing.T) {
 	clearRoutingEnvVars(t)
 
 	expected := "http://influxdb-custom:8086"
-	os.Setenv("INFLUXDB_URL", expected)
+	if err := os.Setenv("INFLUXDB_URL", expected); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
 
 	router := NewDefaultServiceRouter("standalone")
 	actual := router.GetInfluxDBURL()

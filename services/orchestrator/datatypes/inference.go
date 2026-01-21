@@ -192,6 +192,21 @@ const (
 	FieldVolume   DataField = "volume"
 )
 
+// validDataFields contains all valid DataField values for validation.
+var validDataFields = map[DataField]bool{
+	FieldOpen:     true,
+	FieldHigh:     true,
+	FieldLow:      true,
+	FieldClose:    true,
+	FieldAdjClose: true,
+	FieldVolume:   true,
+}
+
+// IsValid checks if the DataField is a valid value.
+func (f DataField) IsValid() bool {
+	return validDataFields[f]
+}
+
 // =============================================================================
 // REQUEST STRUCTURES
 // =============================================================================

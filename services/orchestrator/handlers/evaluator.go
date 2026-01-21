@@ -36,6 +36,25 @@ const (
 	maxRetryDelay  = 10 * time.Second
 )
 
+// forecastServiceRequest is the typed request for the legacy forecast service.
+// This replaces map[string]interface{} to avoid runtime type errors.
+type forecastServiceRequest struct {
+	Name               string    `json:"name"`
+	ContextPeriodSize  int       `json:"context_period_size"`
+	ForecastPeriodSize int       `json:"forecast_period_size"`
+	Model              string    `json:"model"`
+	AsOfDate           string    `json:"as_of_date,omitempty"`
+	RecentData         []float64 `json:"recent_data,omitempty"`
+}
+
+// dataFetchRequest is the typed request for the data fetcher service.
+type dataFetchRequest struct {
+	Names     []string `json:"names"`
+	StartDate string   `json:"start_date"`
+	EndDate   string   `json:"end_date"`
+	Interval  string   `json:"interval"`
+}
+
 // Evaluator handles the logic of running forecasts and checking trading signals
 type Evaluator struct {
 	httpClient        *http.Client
@@ -709,24 +728,27 @@ func (e *Evaluator) CallForecastServiceAsOf(
 	err := retryWithBackoff(ctx, "forecast", func() error {
 		url := fmt.Sprintf("%s/v1/timeseries/forecast", e.orchestratorURL)
 
-		payload := map[string]interface{}{
-			"name":                 ticker,
-			"context_period_size":  contextSize,
-			"forecast_period_size": horizonSize,
-			"model":                model,
+		payload := forecastServiceRequest{
+			Name:               ticker,
+			ContextPeriodSize:  contextSize,
+			ForecastPeriodSize: horizonSize,
+			Model:              model,
 		}
 
 		// Add as_of_date for metadata/logging
 		if asOfDate != nil {
-			payload["as_of_date"] = asOfDate.Format("2006-01-02")
+			payload.AsOfDate = asOfDate.Format("2006-01-02")
 		}
 
 		// Add the explicit historical data
 		if len(contextData) > 0 {
-			payload["recent_data"] = contextData
+			payload.RecentData = contextData
 		}
 
-		reqBody, _ := json.Marshal(payload)
+		reqBody, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal forecast request: %w", err)
+		}
 		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 		if err != nil {
 			return err
@@ -737,10 +759,17 @@ func (e *Evaluator) CallForecastServiceAsOf(
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("Failed to close response body", "error", closeErr)
+			}
+		}()
 
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				body = []byte("(failed to read body)")
+			}
 			// Don't retry on 4xx errors (client errors)
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 				return fmt.Errorf("forecast error status %d: %s (not retryable)", resp.StatusCode, string(body))
@@ -844,10 +873,17 @@ func (e *Evaluator) CallInferenceService(
 		if err != nil {
 			return fmt.Errorf("request failed: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("Failed to close response body", "error", closeErr)
+			}
+		}()
 
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				body = []byte("(failed to read body)")
+			}
 			// Don't retry on 4xx errors (client errors)
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 				return fmt.Errorf("inference error status %d: %s (not retryable)", resp.StatusCode, string(body))
@@ -907,8 +943,14 @@ func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.Tradin
 	for key, value := range req.StrategyParams {
 		flatReq[key] = value
 	}
-	reqBody, _ := json.Marshal(flatReq)
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	reqBody, err := json.Marshal(flatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal trading request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create trading request: %w", err)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	apiKey := os.Getenv("SAPHENEIA_TRADING_API_KEY")
@@ -920,10 +962,17 @@ func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.Tradin
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			b = []byte("(failed to read body)")
+		}
 		return nil, fmt.Errorf("trading error: %s", string(b))
 	}
 
@@ -1162,15 +1211,21 @@ func (e *Evaluator) FetchMissingData(ctx context.Context, ticker string, startDa
 
 	url := fmt.Sprintf("%s/v1/data/fetch", e.orchestratorURL)
 
-	payload := map[string]interface{}{
-		"names":      []string{ticker},
-		"start_date": startDate.Format("2006-01-02"),
-		"end_date":   endDate.Format("2006-01-02"),
-		"interval":   "1d",
+	payload := dataFetchRequest{
+		Names:     []string{ticker},
+		StartDate: startDate.Format("2006-01-02"),
+		EndDate:   endDate.Format("2006-01-02"),
+		Interval:  "1d",
 	}
 
-	reqBody, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal data fetch request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create data fetch request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	slog.Info("Fetching missing data from external source",
@@ -1182,10 +1237,17 @@ func (e *Evaluator) FetchMissingData(ctx context.Context, ticker string, startDa
 	if err != nil {
 		return fmt.Errorf("data fetch request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			body = []byte("(failed to read body)")
+		}
 		return fmt.Errorf("data fetch failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
