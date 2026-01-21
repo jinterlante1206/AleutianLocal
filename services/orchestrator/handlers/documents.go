@@ -242,6 +242,353 @@ func ListDocuments(client *weaviate.Client) gin.HandlerFunc {
 	}
 }
 
+// DocVersionInfo represents version metadata for a single document version.
+type DocVersionInfo struct {
+	VersionTag    string `json:"version_tag"`
+	VersionNumber int    `json:"version_number"`
+	ChunkCount    int    `json:"chunk_count"`
+	IngestedAt    int64  `json:"ingested_at"`
+	IsCurrent     bool   `json:"is_current"`
+}
+
+// GetDocumentVersions returns the version history for a specific document.
+//
+// # Description
+//
+// Queries Weaviate for all versions of a document identified by parent_source.
+// Returns version metadata including version tags, timestamps, and current status.
+//
+// # Inputs
+//
+//   - source: Query parameter specifying the parent_source to look up
+//
+// # Outputs
+//
+//   - 200 OK: JSON with parent_source and array of version info
+//   - 400 Bad Request: Missing source parameter
+//   - 404 Not Found: No versions found for the document
+//
+// # Example
+//
+//	GET /v1/document/versions?source=report.md
+func GetDocumentVersions(client *weaviate.Client) gin.HandlerFunc {
+	tracer := otel.Tracer("aleutian.orchestrator.handlers")
+	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "GetDocumentVersions.handler")
+		defer span.End()
+
+		source := c.Query("source")
+		if source == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "source parameter is required"})
+			return
+		}
+
+		slog.Info("Fetching document versions", "source", source)
+
+		// Query for all versions of this document grouped by version_number
+		where := filters.Where().
+			WithPath([]string{"parent_source"}).
+			WithOperator(filters.Equal).
+			WithValueText(source)
+
+		resp, err := client.GraphQL().Aggregate().
+			WithClassName("Document").
+			WithWhere(where).
+			WithGroupBy("version_number").
+			WithFields(
+				graphql.Field{
+					Name: "meta",
+					Fields: []graphql.Field{
+						{Name: "count"},
+					},
+				},
+				graphql.Field{
+					Name: "version_tag",
+					Fields: []graphql.Field{
+						{Name: "topOccurrences", Fields: []graphql.Field{{Name: "value"}}},
+					},
+				},
+				graphql.Field{
+					Name: "is_current",
+					Fields: []graphql.Field{
+						{Name: "totalTrue"},
+					},
+				},
+				graphql.Field{
+					Name: "ingested_at",
+					Fields: []graphql.Field{
+						{Name: "maximum"},
+					},
+				},
+			).
+			Do(ctx)
+
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			slog.Error("Failed to query document versions", "source", source, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Parse aggregation response
+		type aggregateResponse struct {
+			Aggregate struct {
+				Document []struct {
+					GroupedBy struct {
+						Value int `json:"value"`
+					} `json:"groupedBy"`
+					Meta struct {
+						Count float64 `json:"count"`
+					} `json:"meta"`
+					VersionTag struct {
+						TopOccurrences []struct {
+							Value string `json:"value"`
+						} `json:"topOccurrences"`
+					} `json:"version_tag"`
+					IsCurrent struct {
+						TotalTrue float64 `json:"totalTrue"`
+					} `json:"is_current"`
+					IngestedAt struct {
+						Maximum float64 `json:"maximum"`
+					} `json:"ingested_at"`
+				} `json:"Document"`
+			} `json:"Aggregate"`
+		}
+
+		jsonBytes, err := json.Marshal(resp.Data)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response"})
+			return
+		}
+
+		var aggResp aggregateResponse
+		if err := json.Unmarshal(jsonBytes, &aggResp); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode response"})
+			return
+		}
+
+		if len(aggResp.Aggregate.Document) == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no versions found for document"})
+			return
+		}
+
+		// Build version list
+		versions := make([]DocVersionInfo, 0, len(aggResp.Aggregate.Document))
+		for _, doc := range aggResp.Aggregate.Document {
+			versionTag := ""
+			if len(doc.VersionTag.TopOccurrences) > 0 {
+				versionTag = doc.VersionTag.TopOccurrences[0].Value
+			}
+			versions = append(versions, DocVersionInfo{
+				VersionTag:    versionTag,
+				VersionNumber: doc.GroupedBy.Value,
+				ChunkCount:    int(doc.Meta.Count),
+				IngestedAt:    int64(doc.IngestedAt.Maximum),
+				IsCurrent:     doc.IsCurrent.TotalTrue > 0,
+			})
+		}
+
+		slog.Info("Found document versions", "source", source, "version_count", len(versions))
+		c.JSON(http.StatusOK, gin.H{
+			"parent_source": source,
+			"versions":      versions,
+		})
+	}
+}
+
+// getMaxVersionForParentSource queries Weaviate for the highest version_number
+// of documents with the given parent_source and data_space.
+//
+// # Description
+//
+// Used during ingestion to determine the next version number for a document.
+// Returns 0 if no existing versions are found.
+//
+// # Inputs
+//
+//   - ctx: Context for the query (supports cancellation/timeout)
+//   - client: Weaviate client instance
+//   - parentSource: The parent_source field to filter on
+//   - dataSpace: The data_space field to filter on
+//
+// # Outputs
+//
+//   - int: The maximum version_number found, or 0 if none exist
+//   - error: Any error encountered during the query
+//
+// # Assumptions
+//
+//   - The Document class exists in Weaviate with version_number property
+//   - version_number is indexed for efficient aggregation
+func getMaxVersionForParentSource(ctx context.Context, client *weaviate.Client, parentSource, dataSpace string) (int, error) {
+	// Build filter for parent_source AND data_space
+	where := filters.Where().
+		WithOperator(filters.And).
+		WithOperands([]*filters.WhereBuilder{
+			filters.Where().
+				WithPath([]string{"parent_source"}).
+				WithOperator(filters.Equal).
+				WithValueText(parentSource),
+			filters.Where().
+				WithPath([]string{"data_space"}).
+				WithOperator(filters.Equal).
+				WithValueText(dataSpace),
+		})
+
+	// Query for max version_number using aggregate
+	result, err := client.GraphQL().Aggregate().
+		WithClassName("Document").
+		WithWhere(where).
+		WithFields(graphql.Field{
+			Name: "version_number",
+			Fields: []graphql.Field{
+				{Name: "maximum"},
+			},
+		}).
+		Do(ctx)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to query max version: %w", err)
+	}
+
+	// Parse the aggregate result
+	if result.Data == nil {
+		return 0, nil
+	}
+
+	aggregate, ok := result.Data["Aggregate"].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	docs, ok := aggregate["Document"].([]interface{})
+	if !ok || len(docs) == 0 {
+		return 0, nil
+	}
+
+	doc, ok := docs[0].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	versionField, ok := doc["version_number"].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	maxVersion, ok := versionField["maximum"].(float64)
+	if !ok {
+		return 0, nil
+	}
+
+	return int(maxVersion), nil
+}
+
+// markOldVersionsNotCurrent updates all existing document chunks with the given
+// parent_source and data_space to have is_current = false.
+//
+// # Description
+//
+// Called before inserting a new version to mark previous versions as non-current.
+// This ensures only the latest version is returned in default queries.
+//
+// # Inputs
+//
+//   - ctx: Context for the operation (supports cancellation/timeout)
+//   - client: Weaviate client instance
+//   - parentSource: The parent_source field to filter on
+//   - dataSpace: The data_space field to filter on
+//
+// # Outputs
+//
+//   - int: Number of objects updated
+//   - error: Any error encountered during the update
+//
+// # Limitations
+//
+//   - Uses batch update which may be slow for documents with many chunks
+func markOldVersionsNotCurrent(ctx context.Context, client *weaviate.Client, parentSource, dataSpace string) (int, error) {
+	// First, find all current document IDs
+	where := filters.Where().
+		WithOperator(filters.And).
+		WithOperands([]*filters.WhereBuilder{
+			filters.Where().
+				WithPath([]string{"parent_source"}).
+				WithOperator(filters.Equal).
+				WithValueText(parentSource),
+			filters.Where().
+				WithPath([]string{"data_space"}).
+				WithOperator(filters.Equal).
+				WithValueText(dataSpace),
+			filters.Where().
+				WithPath([]string{"is_current"}).
+				WithOperator(filters.Equal).
+				WithValueBoolean(true),
+		})
+
+	result, err := client.GraphQL().Get().
+		WithClassName("Document").
+		WithWhere(where).
+		WithFields(graphql.Field{Name: "_additional { id }"},
+			graphql.Field{Name: "source"}).
+		Do(ctx)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to query existing documents: %w", err)
+	}
+
+	if result.Data == nil {
+		return 0, nil
+	}
+
+	getResult, ok := result.Data["Get"].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	docs, ok := getResult["Document"].([]interface{})
+	if !ok || len(docs) == 0 {
+		return 0, nil
+	}
+
+	// Update each document to set is_current = false
+	updatedCount := 0
+	for _, doc := range docs {
+		docMap, ok := doc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		additional, ok := docMap["_additional"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, ok := additional["id"].(string)
+		if !ok {
+			continue
+		}
+
+		err := client.Data().Updater().
+			WithClassName("Document").
+			WithID(id).
+			WithMerge().
+			WithProperties(map[string]interface{}{
+				"is_current": false,
+			}).
+			Do(ctx)
+
+		if err != nil {
+			slog.Warn("Failed to update is_current for document", "id", id, "error", err)
+			continue
+		}
+		updatedCount++
+	}
+
+	slog.Info("Marked old versions as not current", "parent_source", parentSource, "count", updatedCount)
+	return updatedCount, nil
+}
+
 // RunIngestion is the refactored, reusable logic for ingesting a document.
 func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocumentRequest) (int, error) {
 	embeddingServiceURL := os.Getenv("EMBEDDING_SERVICE_URL")
@@ -270,6 +617,28 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 	}
 	slog.Info("Split document into chunks", "source", req.Source, "chunk_count", len(chunks))
 
+	// --- VERSION MANAGEMENT ---
+	// Get the current max version for this document
+	maxVersion, err := getMaxVersionForParentSource(ctx, client, req.Source, req.DataSpace)
+	if err != nil {
+		slog.Warn("Failed to get max version, assuming first version", "error", err)
+		maxVersion = 0
+	}
+	newVersion := maxVersion + 1
+	versionTag := fmt.Sprintf("v%d", newVersion)
+	slog.Info("Document versioning", "parent_source", req.Source, "previous_version", maxVersion, "new_version", newVersion)
+
+	// Mark old versions as not current (if any exist)
+	if maxVersion > 0 {
+		updatedCount, err := markOldVersionsNotCurrent(ctx, client, req.Source, req.DataSpace)
+		if err != nil {
+			slog.Warn("Failed to mark old versions as not current", "error", err)
+			// Continue anyway - this is not fatal
+		} else {
+			slog.Info("Updated old version chunks", "count", updatedCount)
+		}
+	}
+
 	vectors, err := callOllamaEmbed(embeddingServiceURL, embeddingModel, chunks)
 	if err != nil {
 		slog.Error("Failed to get batch embeddings", "source", req.Source, "error", err)
@@ -284,20 +653,25 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 	// --- Batch Weaviate Import in one request ---
 	batcher := client.Batch().ObjectsBatcher()
 	objects := make([]*models.Object, len(chunks))
+	ingestedAt := time.Now().UnixMilli()
 
-	// Get embeddings
+	// Build objects with version-aware UUIDs
 	for i, chunk := range chunks {
 		chunkSource := fmt.Sprintf("%s_part_%d", req.Source, i+1)
-		hash := sha256.Sum256([]byte(chunk))
+		// Include version in hash to ensure each version has unique UUIDs
+		hashInput := fmt.Sprintf("%s:%s:%d", chunk, req.Source, newVersion)
+		hash := sha256.Sum256([]byte(hashInput))
 		docUUID, _ := uuid.FromBytes(hash[:16])
 		docId := docUUID.String()
 		properties := map[string]interface{}{
-			"content":       chunk,
-			"source":        chunkSource,
-			"parent_source": req.Source,
-			"data_space":    req.DataSpace,
-			"version_tag":   req.VersionTag,
-			"ingested_at":   time.Now().UnixMilli(),
+			"content":        chunk,
+			"source":         chunkSource,
+			"parent_source":  req.Source,
+			"data_space":     req.DataSpace,
+			"version_tag":    versionTag,
+			"version_number": newVersion,
+			"is_current":     true,
+			"ingested_at":    ingestedAt,
 		}
 		if req.SessionUUID != "" {
 			beacon := map[string]interface{}{

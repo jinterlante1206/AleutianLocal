@@ -101,6 +101,7 @@ type RAGRequest struct {
 	SessionId string `json:"session_id"`
 	Pipeline  string `json:"pipeline"`
 	NoRag     bool   `json:"no_rag"`
+	DataSpace string `json:"data_space,omitempty"` // Data space to filter queries by (e.g., "work", "personal")
 }
 
 // =============================================================================
@@ -221,6 +222,7 @@ type RetrievalRequest struct {
 	SessionId  string `json:"session_id,omitempty"`
 	StrictMode bool   `json:"strict_mode"`
 	MaxChunks  int    `json:"max_chunks,omitempty"`
+	DataSpace  string `json:"data_space,omitempty"` // Data space to filter queries by
 }
 
 // RetrievalChunk represents a single document chunk from retrieval-only mode.
@@ -341,6 +343,30 @@ func (r *RetrievalRequest) WithMaxChunks(max int) *RetrievalRequest {
 	return r
 }
 
+// WithDataSpace sets the data space filter and returns the request for chaining.
+//
+// # Description
+//
+// Sets the data space for query isolation. Documents are filtered to only
+// include those from the specified data space (e.g., "work" or "personal").
+// If not set or empty, searches across ALL data spaces (no isolation).
+//
+// # Inputs
+//
+//   - dataSpace: The data space name to filter by.
+//
+// # Outputs
+//
+//   - *RetrievalRequest: The modified request for method chaining.
+//
+// # Examples
+//
+//	req := NewRetrievalRequest("query", "sess_123").WithDataSpace("work")
+func (r *RetrievalRequest) WithDataSpace(dataSpace string) *RetrievalRequest {
+	r.DataSpace = dataSpace
+	return r
+}
+
 // SourceInfo represents a retrieved document source from RAG retrieval.
 //
 // # Description
@@ -364,12 +390,14 @@ func (r *RetrievalRequest) WithMaxChunks(max int) *RetrievalRequest {
 // Distance and Score are mutually exclusive - only one will be set
 // depending on the RAG pipeline used.
 type SourceInfo struct {
-	Id        string  `json:"id,omitempty"`
-	CreatedAt int64   `json:"created_at,omitempty"`
-	Source    string  `json:"source"`
-	Distance  float64 `json:"distance,omitempty"`
-	Score     float64 `json:"score,omitempty"`
-	Hash      string  `json:"hash,omitempty"`
+	Id            string  `json:"id,omitempty"`
+	CreatedAt     int64   `json:"created_at,omitempty"`
+	Source        string  `json:"source"`
+	Distance      float64 `json:"distance,omitempty"`
+	Score         float64 `json:"score,omitempty"`
+	Hash          string  `json:"hash,omitempty"`
+	VersionNumber *int    `json:"version_number,omitempty"` // Document version (1, 2, 3...)
+	IsCurrent     *bool   `json:"is_current,omitempty"`     // True if this is the latest version
 }
 
 type RAGResponse struct {
@@ -727,6 +755,8 @@ type ChatRAGRequest struct {
 	StrictMode           bool                  `json:"strict_mode,omitempty"`           // Strict RAG: only answer from docs
 	TemperatureOverrides *TemperatureOverrides `json:"temperature_overrides,omitempty"` // Verified pipeline: per-role temps
 	Strictness           string                `json:"strictness,omitempty"`            // Verified pipeline: "strict" or "balanced"
+	DataSpace            string                `json:"data_space,omitempty"`            // Data space to filter queries by (e.g., "work", "personal")
+	VersionTag           string                `json:"version_tag,omitempty"`           // Specific version to query (e.g., "v1"); empty = current
 }
 
 // ChatTurn represents a single turn in a conversation

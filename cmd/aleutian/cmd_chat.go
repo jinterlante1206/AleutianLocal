@@ -98,6 +98,8 @@ func runChatCommand(cmd *cobra.Command, _ []string) {
 			SessionID:  resumeID,
 			StrictMode: !unrestrictedMode, // Strict by default (only answer from RAG docs)
 			Verbosity:  verbosityLevel,    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
+			DataSpace:  dataSpaceFlag,     // Filter queries to specific data space
+			DocVersion: docVersionFlag,    // Query specific document version (e.g., "v1")
 		})
 	}
 	defer func() {

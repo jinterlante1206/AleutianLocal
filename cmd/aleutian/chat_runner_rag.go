@@ -150,6 +150,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		Personality: personality,
 		StrictMode:  config.StrictMode,
 		Verbosity:   config.Verbosity,
+		DataSpace:   config.DataSpace,
 	})
 
 	ui := ux.NewChatUI()

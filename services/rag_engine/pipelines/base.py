@@ -772,9 +772,14 @@ class BaseRAGPipeline:
             logger.error(f"An unexpected error occurred during prompt formatting: {e}", exc_info=True)
             return f"Context:\n{context_str}\n\nQuestion: {query}\nAnswer:" # Fallback
 
-    def _get_session_aware_filter(self, session_uuid: str | None) -> wvc.query.Filter:
+    def _get_session_aware_filter(
+        self,
+        session_uuid: str | None,
+        data_space: str | None = None,
+        version_tag: str | None = None,
+    ) -> wvc.query.Filter:
         """
-        Builds the session-aware filter for Weaviate queries.
+        Builds the session-aware, data-space-aware, and version-aware filter for Weaviate queries.
 
         What it Does:
         Constructs a dynamic `wvc.query.Filter` object that searches
@@ -783,7 +788,11 @@ class BaseRAGPipeline:
         2. **Session-Scoped**: The `inSession` property links to a
            `Session` object whose `session_id` matches the provided value.
 
-
+        Additionally:
+        - If a `data_space` is specified, results are filtered to only include
+          documents from that data space (query isolation).
+        - By default, only returns current versions (is_current = true).
+        - If a `version_tag` is specified, queries that specific version instead.
 
         How it Fits:
         This is the core of the data-scoping feature. This function is
@@ -796,7 +805,8 @@ class BaseRAGPipeline:
         This allows a *single* RAG query to seamlessly retrieve context
         from both the "global" pool of documents (available to all users)
         and the "session-scoped" documents that the user just
-        uploaded in their current chat.
+        uploaded in their current chat, while respecting data space boundaries
+        and document versioning.
 
         Parameters
         ----------
@@ -804,6 +814,12 @@ class BaseRAGPipeline:
             The human-readable session ID (e.g., "my-chat-session").
             This is matched against Session.session_id. If None, the
             filter will *only* return global documents.
+        data_space : str | None
+            The data space to filter by (e.g., "work", "personal").
+            If None, searches ALL data spaces (no isolation).
+        version_tag : str | None
+            Specific version to query (e.g., "v1", "v5").
+            If None, queries current versions only (is_current = true).
 
         Returns
         -------
@@ -823,30 +839,63 @@ class BaseRAGPipeline:
         # Documents without inSession set have a reference count of 0.
         global_filter = wvc.query.Filter.by_ref_count("inSession").equal(0)
 
+        # Build session scope filter
         if not session_uuid:
             # If no session, only return global docs
-            logger.info("Querying with scope: global-only (no session_id)")
-            return global_filter
+            scope_filter = global_filter
+            scope_desc = "global-only"
+        else:
+            try:
+                # 2. Filter for SESSION-SCOPED documents
+                # This looks for a reference link on the 'inSession' property
+                # that contains the target session's internal UUID.
+                session_filter = wvc.query.Filter.by_ref("inSession").by_property("session_id").equal(
+                    session_uuid
+                )
 
-        try:
-            # 2. Filter for SESSION-SCOPED documents
-            # This looks for a reference link on the 'inSession' property
-            # that contains the target session's internal UUID.
-            session_filter = wvc.query.Filter.by_ref("inSession").by_property("session_id").equal(
-                session_uuid
-            )
+                # 3. Combine them: (GLOBAL) OR (SESSION-SCOPED)
+                scope_filter = wvc.query.Filter.any_of([
+                    global_filter,
+                    session_filter
+                ])
+                scope_desc = f"global+session:{session_uuid}"
 
-            # 3. Combine them: (GLOBAL) OR (SESSION-SCOPED)
-            final_filter = wvc.query.Filter.any_of([
-                global_filter,
-                session_filter
-            ])
-            logger.info(f"Querying with scope: global AND session UUID {session_uuid}")
-            return final_filter
+            except Exception as e:
+                logger.error(f"Failed to build session filter, defaulting to global-only: {e}")
+                scope_filter = global_filter
+                scope_desc = "global-only (fallback)"
 
-        except Exception as e:
-            logger.error(f"Failed to build session filter, defaulting to global-only: {e}")
-            return global_filter
+        # 4. Apply data_space filter if specified (CRITICAL for isolation)
+        if data_space:
+            data_space_filter = wvc.query.Filter.by_property("data_space").equal(data_space)
+            final_filter = scope_filter & data_space_filter
+            logger.info(f"Querying with scope: {scope_desc}, data_space: {data_space}")
+        else:
+            final_filter = scope_filter
+            logger.info(f"Querying with scope: {scope_desc}, data_space: ALL (no isolation)")
+
+        # 5. Apply version filter (default: current versions only)
+        if version_tag:
+            # Query specific version by version_tag
+            version_filter = wvc.query.Filter.by_property("version_tag").equal(version_tag)
+            final_filter = final_filter & version_filter
+            logger.info(f"Querying specific version: {version_tag}")
+        else:
+            # Default: only query current versions (is_current = true)
+            # Note: For backwards compatibility, we also accept documents
+            # where is_current is not set (older documents before versioning)
+            try:
+                current_filter = wvc.query.Filter.by_property("is_current").equal(True)
+                # Also include documents where is_current is null (legacy docs)
+                legacy_filter = wvc.query.Filter.by_property("is_current").is_none(True)
+                version_filter = wvc.query.Filter.any_of([current_filter, legacy_filter])
+                final_filter = final_filter & version_filter
+                logger.info("Querying current versions only (is_current=true or legacy)")
+            except Exception as e:
+                # If is_current filter fails, continue without it (backwards compatibility)
+                logger.warning(f"Failed to apply is_current filter, querying all versions: {e}")
+
+        return final_filter
 
 
     async def run(self, query: str, session_id: str | None = None, strict_mode: bool = True) -> tuple[str, list[dict]]:

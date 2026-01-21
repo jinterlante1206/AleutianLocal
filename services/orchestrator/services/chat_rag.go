@@ -373,6 +373,12 @@ func (s *ChatRAGService) callRAGEngine(ctx context.Context, req *datatypes.ChatR
 		span.SetAttributes(attribute.String("rag.bearing", req.Bearing))
 	}
 
+	// Add data space filter if specified (for query isolation)
+	if req.DataSpace != "" {
+		ragPayload["data_space"] = req.DataSpace
+		span.SetAttributes(attribute.String("rag.data_space", req.DataSpace))
+	}
+
 	// Add conversation history if provided
 	if len(req.History) > 0 {
 		ragPayload["history"] = req.History
@@ -577,6 +583,10 @@ func (s *ChatRAGService) RetrieveDocuments(
 
 	if req.SessionId != "" {
 		span.SetAttributes(attribute.String("session_id", req.SessionId))
+	}
+
+	if req.DataSpace != "" {
+		span.SetAttributes(attribute.String("data_space", req.DataSpace))
 	}
 
 	// Retry loop with exponential backoff

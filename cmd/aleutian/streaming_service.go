@@ -231,6 +231,8 @@ type RAGStreamingChatServiceConfig struct {
 	Timeout     time.Duration       // HTTP timeout (optional)
 	StrictMode  bool                // Strict RAG mode: only answer from docs (optional)
 	Verbosity   int                 // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (optional)
+	DataSpace   string              // Data space to filter queries by (optional, e.g., "work", "personal")
+	DocVersion  string              // Specific document version to query (optional, e.g., "v1")
 }
 
 // DirectStreamingChatServiceConfig holds configuration for direct streaming chat service.
@@ -322,8 +324,10 @@ type ragStreamingChatService struct {
 	pipeline    string
 	writer      io.Writer
 	personality ux.PersonalityLevel
-	strictMode  bool // Strict RAG mode: only answer from docs
-	verbosity   int  // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed
+	strictMode  bool   // Strict RAG mode: only answer from docs
+	verbosity   int    // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed
+	dataSpace   string // Data space to filter queries by
+	docVersion  string // Specific document version to query
 	mu          sync.Mutex
 }
 
@@ -447,6 +451,8 @@ func NewRAGStreamingChatService(config RAGStreamingChatServiceConfig) StreamingC
 		personality: personality,
 		strictMode:  config.StrictMode,
 		verbosity:   verbosity,
+		dataSpace:   config.DataSpace,
+		docVersion:  config.DocVersion,
 	}
 }
 
@@ -508,6 +514,7 @@ func NewRAGStreamingChatServiceWithClient(client HTTPClient, config RAGStreaming
 		personality: personality,
 		strictMode:  config.StrictMode,
 		verbosity:   verbosity,
+		dataSpace:   config.DataSpace,
 	}
 }
 
@@ -782,6 +789,8 @@ func (s *ragStreamingChatService) buildRAGRequest(requestID, message, sessionID 
 		SessionId:  sessionID,
 		Pipeline:   s.pipeline,
 		StrictMode: s.strictMode,
+		DataSpace:  s.dataSpace,
+		VersionTag: s.docVersion,
 	}
 }
 

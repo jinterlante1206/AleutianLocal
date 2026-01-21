@@ -166,10 +166,16 @@ class RerankingPipeline(BaseRAGPipeline):
             return metadata.get("rerank_score")
         return None
 
-    async def _search_weaviate_initial(self, query_vector: list[float], session_id: str | None = None) -> list[dict]:
+    async def _search_weaviate_initial(
+        self,
+        query_vector: list[float],
+        session_id: str | None = None,
+        data_space: str | None = None,
+        version_tag: str | None = None,
+    ) -> list[dict]:
         """
-        Performs Parent Document Retrieval with session-aware filtering.
-            1. Creates a filter for "Global" docs OR "Session" docs.
+        Performs Parent Document Retrieval with session-aware, data-space, and version filtering.
+            1. Creates a filter for "Global" docs OR "Session" docs, scoped to data_space and version.
             2. Finds the most relevant child chunks using this filter.
             3. Gets their unique parent_source ID.
             4. Retrieves all chunks for those parent documents for the full context.
@@ -177,7 +183,7 @@ class RerankingPipeline(BaseRAGPipeline):
         if not query_vector: return []
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
-            combined_filter = self._get_session_aware_filter(session_id)
+            combined_filter = self._get_session_aware_filter(session_id, data_space, version_tag)
             # 1. Find the most relevant child chunks
             response = documents_collection.query.near_vector(
                 near_vector=query_vector,
@@ -287,6 +293,8 @@ class RerankingPipeline(BaseRAGPipeline):
         session_id: str | None = None,
         strict_mode: bool = True,
         relevant_history: list[dict] | None = None,
+        data_space: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[str, list[dict]]:
         """Executes the RAG pipeline with reranking.
 
@@ -304,6 +312,12 @@ class RerankingPipeline(BaseRAGPipeline):
             Relevant conversation history from P7 semantic memory. Each dict contains
             'question', 'answer', 'turn_number', and 'similarity_score'. If provided,
             history turns are injected as pseudo-documents before reranking.
+        data_space : str | None
+            The data space to filter queries by (e.g., "work", "personal").
+            If None, searches ALL data spaces (no isolation).
+        version_tag : str | None
+            Specific document version to query (e.g., "v1").
+            If None, queries current versions only (is_current = true).
         """
         tracer = trace.get_tracer("aleutian.rag.reranking")
         with tracer.start_as_current_span("reranking_pipeline.run") as span:
@@ -311,14 +325,19 @@ class RerankingPipeline(BaseRAGPipeline):
             span.set_attribute("strict_mode", strict_mode)
             if session_id:
                 span.set_attribute("session.id", session_id)
-            logger.info(f"Reranking RAG run started (strict_mode={strict_mode})...")
+            if data_space:
+                span.set_attribute("data_space", data_space)
+            if version_tag:
+                span.set_attribute("version_tag", version_tag)
+            logger.info(f"Reranking RAG run started (strict_mode={strict_mode}, data_space={data_space}, version_tag={version_tag})...")
 
             with tracer.start_as_current_span("get_embedding"):
                 query_vector = await self._get_embedding(query)
 
             with tracer.start_as_current_span("initial_search"):
-                initial_docs_with_meta = await self._search_weaviate_initial(query_vector,
-                                                                             session_id)
+                initial_docs_with_meta = await self._search_weaviate_initial(
+                    query_vector, session_id, data_space, version_tag
+                )
                 span.set_attribute("retrieved.initial_count", len(initial_docs_with_meta))
 
             # P8: Inject conversation history as pseudo-documents before reranking
@@ -368,6 +387,8 @@ class RerankingPipeline(BaseRAGPipeline):
                     "source": d["properties"].get("source", "Unknown"),
                     "distance": getattr(d.get("metadata"), "distance", None) if d.get("metadata") and not isinstance(d.get("metadata"), dict) else d.get("metadata", {}).get("distance") if isinstance(d.get("metadata"), dict) else None,
                     "score": self._get_rerank_score(d),
+                    "version_number": d["properties"].get("version_number"),
+                    "is_current": d["properties"].get("is_current"),
                 } for d in context_docs_with_meta
             ]
 
@@ -378,7 +399,9 @@ class RerankingPipeline(BaseRAGPipeline):
         query: str,
         session_id: str | None = None,
         strict_mode: bool = True,
-        max_chunks: int = 5
+        max_chunks: int = 5,
+        data_space: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[list[dict], str, bool]:
         """
         Retrieval-only mode: returns documents without LLM generation.
@@ -397,6 +420,12 @@ class RerankingPipeline(BaseRAGPipeline):
             If True, only return documents above relevance threshold.
         max_chunks : int
             Maximum number of document chunks to return.
+        data_space : str | None
+            The data space to filter queries by (e.g., "work", "personal").
+            If None, searches ALL data spaces (no isolation).
+        version_tag : str | None
+            Specific document version to query (e.g., "v1").
+            If None, queries current versions only (is_current = true).
 
         Returns
         -------
@@ -412,7 +441,11 @@ class RerankingPipeline(BaseRAGPipeline):
             span.set_attribute("max_chunks", max_chunks)
             if session_id:
                 span.set_attribute("session.id", session_id)
-            logger.info(f"Retrieval-only mode started (strict_mode={strict_mode}, max_chunks={max_chunks})...")
+            if data_space:
+                span.set_attribute("data_space", data_space)
+            if version_tag:
+                span.set_attribute("version_tag", version_tag)
+            logger.info(f"Retrieval-only mode started (strict_mode={strict_mode}, max_chunks={max_chunks}, data_space={data_space}, version_tag={version_tag})...")
 
             # Step 1: Get query embedding
             with tracer.start_as_current_span("get_embedding"):
@@ -422,10 +455,10 @@ class RerankingPipeline(BaseRAGPipeline):
                 logger.warning("Empty query vector, returning no documents")
                 return [], "", False
 
-            # Step 2: Initial search
+            # Step 2: Initial search (with data_space and version filtering)
             with tracer.start_as_current_span("initial_search"):
                 initial_docs_with_meta = await self._search_weaviate_initial(
-                    query_vector, session_id
+                    query_vector, session_id, data_space, version_tag
                 )
                 span.set_attribute("retrieved.initial_count", len(initial_docs_with_meta))
 

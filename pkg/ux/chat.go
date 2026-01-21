@@ -66,13 +66,17 @@ type SessionStats struct {
 //   - Distance: Vector distance (lower = more similar). Used by some pipelines.
 //   - Score: Relevance score (higher = more relevant). Used by reranking pipelines.
 //   - Hash: SHA-256 hash of source content for tamper detection.
+//   - VersionNumber: Document version (1, 2, 3...). Nil for legacy docs.
+//   - IsCurrent: True if this is the latest version. Nil for legacy docs.
 type SourceInfo struct {
-	Id        string
-	CreatedAt int64
-	Source    string
-	Distance  float64
-	Score     float64
-	Hash      string
+	Id            string  `json:"id,omitempty"`
+	CreatedAt     int64   `json:"created_at,omitempty"`
+	Source        string  `json:"source"`
+	Distance      float64 `json:"distance,omitempty"`
+	Score         float64 `json:"score,omitempty"`
+	Hash          string  `json:"hash,omitempty"`
+	VersionNumber *int    `json:"version_number,omitempty"`
+	IsCurrent     *bool   `json:"is_current,omitempty"`
 }
 
 // ChatUI defines the interface for chat user interface operations.

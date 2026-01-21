@@ -2138,6 +2138,16 @@ func (h *streamingChatHandler) buildVerifiedStreamRequest(req *datatypes.ChatRAG
 		}
 	}
 
+	// Add data_space filter if provided
+	if req.DataSpace != "" {
+		body["data_space"] = req.DataSpace
+	}
+
+	// Add version_tag filter if provided (for querying specific document versions)
+	if req.VersionTag != "" {
+		body["version_tag"] = req.VersionTag
+	}
+
 	return body
 }
 

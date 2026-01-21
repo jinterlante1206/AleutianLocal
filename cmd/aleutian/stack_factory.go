@@ -158,7 +158,7 @@ func (f *DefaultStackFactory) CreateStackManager(cfg *config.AleutianConfig, sta
 	secretsMgr := f.createSecretsManager(cfg, metrics)
 	cacheMgr := f.createCachePathResolver(cfg, stackDir, proc, prompter)
 
-	composeMgr, err := f.createComposeExecutor(stackDir, proc)
+	composeMgr, err := f.createComposeExecutor(cfg, stackDir, proc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create compose executor: %w", err)
 	}
@@ -395,9 +395,12 @@ func (f *DefaultStackFactory) createCachePathResolver(
 // # Description
 //
 // Creates executor for running podman-compose operations (up, down, logs, ps).
+// When ForecastMode is "sapheneia", includes podman-compose.timeseries.yml
+// to start InfluxDB and data-fetcher services for timeseries forecasting.
 //
 // # Inputs
 //
+//   - cfg: Configuration containing ForecastMode setting.
 //   - stackDir: Directory containing compose files.
 //   - proc: process.Manager for executing compose commands.
 //
@@ -414,6 +417,7 @@ func (f *DefaultStackFactory) createCachePathResolver(
 //
 //   - Stack directory contains valid compose files.
 func (f *DefaultStackFactory) createComposeExecutor(
+	cfg *config.AleutianConfig,
 	stackDir string,
 	proc process.Manager,
 ) (compose.ComposeExecutor, error) {
@@ -421,6 +425,14 @@ func (f *DefaultStackFactory) createComposeExecutor(
 		StackDir:    stackDir,
 		ProjectName: "aleutian",
 	}
+
+	// When using Sapheneia integration, include the timeseries compose file
+	// which provides InfluxDB and data-fetcher services for forecast data
+	if cfg.Forecast.Mode == config.ForecastModeSapheneia {
+		composeConfig.ExtensionFiles = append(composeConfig.ExtensionFiles,
+			"podman-compose.timeseries.yml")
+	}
+
 	return compose.NewDefaultComposeExecutor(composeConfig, proc)
 }
 

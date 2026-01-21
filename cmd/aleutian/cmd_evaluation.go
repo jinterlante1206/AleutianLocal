@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
@@ -25,16 +29,10 @@ func runEvaluation(cmd *cobra.Command, _ []string) {
 		return
 	}
 
-	// 2. Read and Parse the Scenario File
-	data, err := os.ReadFile(configPath)
+	// 2. Read and Parse the Scenario File (supports local files and URLs)
+	scenario, err := loadScenario(configPath)
 	if err != nil {
-		slog.Error("Failed to read config file", "path", configPath, "error", err)
-		return
-	}
-
-	var scenario datatypes.BacktestScenario
-	if err := yaml.Unmarshal(data, &scenario); err != nil {
-		slog.Error("Failed to parse YAML config", "error", err)
+		slog.Error("Failed to load scenario", "source", configPath, "error", err)
 		return
 	}
 
@@ -138,7 +136,7 @@ func runEvaluation(cmd *cobra.Command, _ []string) {
 
 	// 6. Execute the Run using RunScenario
 	ctx := context.Background()
-	if err := evaluator.RunScenario(ctx, &scenario, runID); err != nil {
+	if err := evaluator.RunScenario(ctx, scenario, runID); err != nil {
 		slog.Error("Evaluation failed", "error", err)
 		return
 	}
@@ -272,4 +270,161 @@ func runExport(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Printf("✅ Export complete: %d rows written to %s\n", count, outputFile)
+}
+
+// loadScenario loads a BacktestScenario from either a local file path or a URL.
+//
+// Description:
+//
+//	loadScenario is the entry point for scenario loading that routes to the
+//	appropriate loader based on the source prefix. It detects URLs by checking
+//	for "http://" or "https://" prefixes.
+//
+// Inputs:
+//   - source: Either a local file path (e.g., "strategies/spy.yaml") or
+//     an HTTP(S) URL (e.g., "http://localhost:12210/strategies/spy")
+//
+// Outputs:
+//   - *datatypes.BacktestScenario: Parsed scenario configuration on success
+//   - error: Non-nil if loading or parsing fails
+//
+// Example:
+//
+//	// Load from local YAML file
+//	scenario, err := loadScenario("strategies/spy_threshold_v1.yaml")
+//
+//	// Load from remote URL (JSON response)
+//	scenario, err := loadScenario("http://localhost:12210/strategies/spy_threshold_v1")
+//
+// Limitations:
+//   - URL detection is prefix-based only; malformed URLs pass to HTTP client
+//   - No support for other schemes (file://, ftp://, etc.)
+//
+// Assumptions:
+//   - Local files are YAML format
+//   - Remote URLs return JSON format
+//   - Source string is non-empty (caller should validate)
+func loadScenario(source string) (*datatypes.BacktestScenario, error) {
+	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		return loadScenarioFromURL(source)
+	}
+	return loadScenarioFromFile(source)
+}
+
+// loadScenarioFromFile reads and parses a YAML scenario file from the local filesystem.
+//
+// Description:
+//
+//	loadScenarioFromFile reads a YAML file from the local filesystem and
+//	unmarshals it into a BacktestScenario struct. This is the default loading
+//	method for locally-defined strategy configurations.
+//
+// Inputs:
+//   - path: Local file path (relative or absolute) to a YAML scenario file
+//
+// Outputs:
+//   - *datatypes.BacktestScenario: Parsed scenario configuration on success
+//   - error: Wrapped os.ReadFile error if file cannot be read, or
+//     wrapped yaml.Unmarshal error if YAML is invalid
+//
+// Example:
+//
+//	scenario, err := loadScenarioFromFile("strategies/spy_threshold_v1.yaml")
+//	if err != nil {
+//	    log.Fatalf("Failed to load scenario: %v", err)
+//	}
+//	fmt.Printf("Loaded strategy: %s v%s\n", scenario.Metadata.ID, scenario.Metadata.Version)
+//
+// Limitations:
+//   - YAML format only; does not support JSON local files
+//   - No path validation; relies on OS error handling
+//   - No file size limits; large files loaded entirely into memory
+//
+// Assumptions:
+//   - File exists and is readable by the current user
+//   - File contains valid YAML matching the BacktestScenario schema
+//   - File encoding is UTF-8
+func loadScenarioFromFile(path string) (*datatypes.BacktestScenario, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	var scenario datatypes.BacktestScenario
+	if err := yaml.Unmarshal(data, &scenario); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	return &scenario, nil
+}
+
+// loadScenarioFromURL fetches and parses a JSON scenario from a remote URL.
+//
+// Description:
+//
+//	loadScenarioFromURL makes an HTTP GET request to the specified URL and
+//	parses the JSON response into a BacktestScenario struct. This enables
+//	loading strategy configurations hosted by Sapheneia's /strategies endpoint
+//	or any other service that returns compatible JSON.
+//
+// Inputs:
+//   - url: HTTP or HTTPS URL to fetch (e.g., "http://localhost:12210/strategies/spy")
+//
+// Outputs:
+//   - *datatypes.BacktestScenario: Parsed scenario configuration on success
+//   - error: Network error, HTTP error (non-200), or JSON parse error
+//
+// Example:
+//
+//	scenario, err := loadScenarioFromURL("http://localhost:12210/strategies/spy_threshold_v1")
+//	if err != nil {
+//	    log.Fatalf("Failed to fetch scenario: %v", err)
+//	}
+//	fmt.Printf("Loaded strategy: %s v%s\n", scenario.Metadata.ID, scenario.Metadata.Version)
+//
+// Limitations:
+//   - JSON format only; does not support YAML responses
+//   - No retry logic; single attempt with 30-second timeout
+//   - No authentication; cannot access protected endpoints
+//   - No caching; fetches fresh on every call
+//   - Timeout is hardcoded at 30 seconds
+//
+// Assumptions:
+//   - URL is well-formed and reachable
+//   - Server returns HTTP 200 with Content-Type: application/json
+//   - Response body contains valid JSON matching BacktestScenario schema
+//   - Network latency is acceptable within 30-second timeout
+func loadScenarioFromURL(url string) (*datatypes.BacktestScenario, error) {
+	slog.Info("Loading scenario from URL", "url", url)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch URL: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("Failed to close response body", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			body = []byte("(failed to read body)")
+		}
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var scenario datatypes.BacktestScenario
+	if err := json.NewDecoder(resp.Body).Decode(&scenario); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
+	}
+
+	slog.Info("Scenario loaded from URL",
+		"id", scenario.Metadata.ID,
+		"version", scenario.Metadata.Version,
+		"ticker", scenario.Evaluation.Ticker)
+
+	return &scenario, nil
 }

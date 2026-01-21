@@ -1577,19 +1577,24 @@ func readFileWithContext(ctx context.Context, path string) ([]byte, error) {
 //   - The config file follows Podman's expected JSON schema.
 func readMountsFromConfigFile(ctx context.Context, configFile string) ([]MountInfo, error) {
 	// Security: Validate path is within expected Podman config directory
-	userConfigDir, err := os.UserConfigDir()
-	if err != nil {
-		return nil, fmt.Errorf("could not get user config directory: %w", err)
-	}
-	expectedBaseDir := filepath.Join(userConfigDir, "containers", "podman", "machine")
+	// Podman may use either:
+	// 1. os.UserConfigDir() - system standard (~/Library/Application Support on macOS)
+	// 2. ~/.config - XDG_CONFIG_HOME style (what Podman actually uses on macOS)
+	var allowedBaseDirs []string
 
-	// Security: Resolve symlinks in the base path to get canonical representation
-	realExpectedBaseDir, err := filepath.EvalSymlinks(expectedBaseDir)
-	if err != nil {
-		// Base directory may not exist yet; fall back to the unresolved path
-		// but log the issue for debugging
-		slog.Debug("Could not resolve symlinks for base directory", "path", expectedBaseDir, "error", err)
-		realExpectedBaseDir = expectedBaseDir
+	// Add system config directory
+	if userConfigDir, err := os.UserConfigDir(); err == nil {
+		allowedBaseDirs = append(allowedBaseDirs, filepath.Join(userConfigDir, "containers", "podman", "machine"))
+	}
+
+	// Add XDG_CONFIG_HOME style directory (Podman uses this on macOS)
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		xdgConfigDir := filepath.Join(homeDir, ".config", "containers", "podman", "machine")
+		allowedBaseDirs = append(allowedBaseDirs, xdgConfigDir)
+	}
+
+	if len(allowedBaseDirs) == 0 {
+		return nil, fmt.Errorf("could not determine allowed config directories")
 	}
 
 	// Clean and resolve the input path to prevent traversal attacks (e.g., ../)
@@ -1604,9 +1609,24 @@ func readMountsFromConfigFile(ctx context.Context, configFile string) ([]MountIn
 		return nil, fmt.Errorf("failed to resolve symlinks for config file path %s: %w", absConfigFile, err)
 	}
 
-	// Verify the fully resolved path is within the allowed canonical directory
-	if !strings.HasPrefix(realConfigFile, realExpectedBaseDir+string(filepath.Separator)) && realConfigFile != realExpectedBaseDir {
-		return nil, fmt.Errorf("path rejected for security reasons: %s resolves to %s which is outside of allowed directory %s", configFile, realConfigFile, realExpectedBaseDir)
+	// Check if the path is within any of the allowed directories
+	pathAllowed := false
+	for _, baseDir := range allowedBaseDirs {
+		// Resolve symlinks in each base path
+		realBaseDir, resolveErr := filepath.EvalSymlinks(baseDir)
+		if resolveErr != nil {
+			// Base directory may not exist; use unresolved path
+			realBaseDir = baseDir
+		}
+
+		if strings.HasPrefix(realConfigFile, realBaseDir+string(filepath.Separator)) || realConfigFile == realBaseDir {
+			pathAllowed = true
+			break
+		}
+	}
+
+	if !pathAllowed {
+		return nil, fmt.Errorf("path rejected for security reasons: %s resolves to %s which is outside of allowed directories %v", configFile, realConfigFile, allowedBaseDirs)
 	}
 
 	// Read file with context awareness to handle slow/hung filesystems

@@ -885,9 +885,9 @@ func TestE2E_IngestCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("ingest with data-space", func(t *testing.T) {
+	t.Run("ingest with dataspace", func(t *testing.T) {
 		result, err := testHarness.RunWithOptions(CLIRunOptions{
-			Args:    []string{"ingest", "--data-space", "test-space", testFixtures.Files["clean_doc.txt"]},
+			Args:    []string{"ingest", "--dataspace", "test-space", testFixtures.Files["clean_doc.txt"]},
 			Timeout: 120 * time.Second,
 		})
 		if err != nil {
@@ -1235,7 +1235,7 @@ func TestE2E_ChatCommands(t *testing.T) {
 		}
 	})
 
-	// Note: --model and --data-space flags are not implemented for chat command
+	// Note: --model and --dataspace flags are not implemented for chat command
 
 	// Interactive tests require stack
 	if isStackRunning() {
@@ -1286,9 +1286,9 @@ func TestE2E_ChatCommands(t *testing.T) {
 			_ = result
 		})
 
-		t.Run("chat with data-space", func(t *testing.T) {
+		t.Run("chat with dataspace", func(t *testing.T) {
 			result, err := testHarness.RunWithOptions(CLIRunOptions{
-				Args:    []string{"chat", "--data-space", "test"},
+				Args:    []string{"chat", "--dataspace", "test"},
 				Stdin:   "/quit\n",
 				Timeout: 60 * time.Second,
 			})
@@ -1342,9 +1342,9 @@ func TestE2E_AskCommands(t *testing.T) {
 			_ = result
 		})
 
-		t.Run("ask with data-space", func(t *testing.T) {
+		t.Run("ask with dataspace", func(t *testing.T) {
 			result, err := testHarness.RunWithOptions(CLIRunOptions{
-				Args:    []string{"ask", "--data-space", "test", "Hello"},
+				Args:    []string{"ask", "--dataspace", "test", "Hello"},
 				Timeout: 120 * time.Second,
 			})
 			if err != nil {
@@ -1431,15 +1431,15 @@ func TestE2E_AskCommands(t *testing.T) {
 		_ = result
 	})
 
-	t.Run("ask invalid data-space", func(t *testing.T) {
+	t.Run("ask invalid dataspace", func(t *testing.T) {
 		result, err := testHarness.RunWithOptions(CLIRunOptions{
-			Args:    []string{"ask", "--data-space", "", "Hello"},
+			Args:    []string{"ask", "--dataspace", "", "Hello"},
 			Timeout: 60 * time.Second,
 		})
 		if err != nil {
 			t.Fatalf("Run failed: %v", err)
 		}
-		// Should handle empty data-space
+		// Should handle empty dataspace
 		_ = result
 	})
 }

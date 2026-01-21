@@ -106,6 +106,7 @@ func TestSetupRoutes_VectorDBRoutesNotRegisteredWithoutClient(t *testing.T) {
 		{"POST", "/v1/chat/rag/stream"},
 		{"POST", "/v1/documents"},
 		{"GET", "/v1/documents"},
+		{"GET", "/v1/document/versions"},
 		{"DELETE", "/v1/document"},
 		{"POST", "/v1/rag"},
 		{"GET", "/v1/sessions"},

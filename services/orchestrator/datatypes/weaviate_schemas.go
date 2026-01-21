@@ -60,9 +60,21 @@ func GetDocumentSchema() *models.Class {
 			{
 				Name:            "version_tag",
 				DataType:        []string{"text"},
-				Description:     "A version tag (e.g., git hash, 'v1.0') for this document.",
+				Description:     "A version tag (e.g., 'v1', 'v2') for this document.",
 				IndexFilterable: indexFilterable,
 				Tokenization:    "field",
+			},
+			{
+				Name:            "version_number",
+				DataType:        []string{"int"},
+				Description:     "Numeric version for ordering (1, 2, 3...). Auto-incremented on re-ingest.",
+				IndexFilterable: indexFilterable,
+			},
+			{
+				Name:            "is_current",
+				DataType:        []string{"boolean"},
+				Description:     "True if this is the latest version of the document.",
+				IndexFilterable: indexFilterable,
 			},
 			{
 				Name:            "data_space",

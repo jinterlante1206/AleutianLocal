@@ -102,6 +102,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 			v1.POST("/chat/rag/verified/stream", streamingHandler.HandleVerifiedRAGStream) // Verified pipeline streaming
 			v1.POST("/documents", handlers.CreateDocument(client))
 			v1.GET("/documents", handlers.ListDocuments(client))
+			v1.GET("/document/versions", handlers.GetDocumentVersions(client)) // Document version history
 			v1.DELETE("/document", handlers.DeleteBySource(client))
 			v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient)) // Single-shot RAG (aleutian ask)
 

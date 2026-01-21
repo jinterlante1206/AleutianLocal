@@ -35,6 +35,8 @@ func TestGetDocumentSchema_HasRequiredProperties(t *testing.T) {
 		"source",
 		"parent_source",
 		"version_tag",
+		"version_number",
+		"is_current",
 		"data_space",
 		"ingested_at",
 		"turn_number",
@@ -58,13 +60,15 @@ func TestGetDocumentSchema_PropertyDataTypes(t *testing.T) {
 	schema := GetDocumentSchema()
 
 	propertyDataTypes := map[string]string{
-		"content":       "text",
-		"source":        "text",
-		"parent_source": "text",
-		"version_tag":   "text",
-		"data_space":    "text",
-		"ingested_at":   "number",
-		"inSession":     "Session",
+		"content":        "text",
+		"source":         "text",
+		"parent_source":  "text",
+		"version_tag":    "text",
+		"version_number": "int",
+		"is_current":     "boolean",
+		"data_space":     "text",
+		"ingested_at":    "number",
+		"inSession":      "Session",
 	}
 
 	for _, prop := range schema.Properties {

@@ -526,6 +526,11 @@ type StartOptions struct {
 	// AutoApprove automatically accepts prompts (like --yes flag).
 	// Corresponds to --yes CLI flag.
 	AutoApprove bool
+
+	// Services limits operations to specific services.
+	// If empty, all services are affected.
+	// Corresponds to --service CLI flag (can be specified multiple times).
+	Services []string
 }
 
 // StackStatus represents the current state of the stack.
@@ -1519,6 +1524,19 @@ func (s *DefaultStackManager) resolveEnvironment(ctx context.Context, opts Start
 
 	if opts.ForecastMode != "" {
 		env["FORECAST_MODE"] = opts.ForecastMode
+
+		// When using sapheneia mode, ensure InfluxDB token is configured
+		// This token is required by data-fetcher and orchestrator to connect to InfluxDB
+		if opts.ForecastMode == "sapheneia" {
+			influxToken := os.Getenv("INFLUXDB_TOKEN")
+			if influxToken == "" {
+				// Use a default development token if not set
+				influxToken = "aleutian-dev-influxdb-token"
+				slog.Info("Using default InfluxDB token for development")
+			}
+			env["INFLUXDB_TOKEN"] = influxToken
+			env["DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"] = influxToken
+		}
 	}
 
 	// Log resolved profile
@@ -1617,6 +1635,7 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 		ForceBuild: opts.ForceBuild,
 		Env:        env,
 		Detach:     true,
+		Services:   opts.Services,
 	}
 
 	var result *compose.ComposeResult
