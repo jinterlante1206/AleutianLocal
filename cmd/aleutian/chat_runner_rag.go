@@ -151,6 +151,7 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		StrictMode:  config.StrictMode,
 		Verbosity:   config.Verbosity,
 		DataSpace:   config.DataSpace,
+		DocVersion:  config.DocVersion,
 	})
 
 	ui := ux.NewChatUI()

@@ -1675,6 +1675,12 @@ type DocVersionsResponse struct {
 	Versions     []DocVersionInfo `json:"versions"`
 }
 
+// docsHTTPClient is a shared HTTP client with timeout for docs commands.
+// Using a shared client enables connection pooling and consistent timeout behavior.
+var docsHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
 // runDocsList lists all ingested documents in the knowledge base.
 //
 // # Description
@@ -1689,20 +1695,42 @@ type DocVersionsResponse struct {
 // # Limitations
 //
 //   - Requires orchestrator to be running
+//   - Uses 30-second timeout for API calls
 func runDocsList(_ *cobra.Command, _ []string) {
+	// Create context with timeout for cancellation
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	baseURL := getOrchestratorBaseURL()
 	fmt.Println("Fetching document list...")
 
 	orchestratorURL := fmt.Sprintf("%s/v1/documents", baseURL)
-	resp, err := http.Get(orchestratorURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orchestratorURL, nil)
 	if err != nil {
-		log.Fatalf("Failed to fetch documents: %v", err)
+		slog.Error("Failed to create request", "error", err)
+		os.Exit(1)
+	}
+
+	resp, err := docsHTTPClient.Do(req)
+	if err != nil {
+		slog.Error("Failed to fetch documents", "error", err, "url", orchestratorURL)
+		os.Exit(1)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Fatalf("Failed to fetch documents: %s", string(bodyBytes))
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			slog.Error("Failed to fetch documents",
+				"status_code", resp.StatusCode,
+				"read_error", readErr)
+		} else {
+			slog.Error("Failed to fetch documents",
+				"status_code", resp.StatusCode,
+				"response", string(bodyBytes))
+		}
+		os.Exit(1)
 	}
 
 	var result struct {
@@ -1716,7 +1744,8 @@ func runDocsList(_ *cobra.Command, _ []string) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Fatalf("Failed to decode response: %v", err)
+		slog.Error("Failed to decode response", "error", err)
+		os.Exit(1)
 	}
 
 	if len(result.Documents) == 0 {
@@ -1764,6 +1793,7 @@ func runDocsList(_ *cobra.Command, _ []string) {
 //
 //   - Requires orchestrator to be running
 //   - Document must have been ingested at least once
+//   - Uses 30-second timeout for API calls
 func runDocsVersions(_ *cobra.Command, args []string) {
 	if len(args) == 0 {
 		fmt.Println("Error: please specify a document name")
@@ -1771,15 +1801,26 @@ func runDocsVersions(_ *cobra.Command, args []string) {
 		return
 	}
 
+	// Create context with timeout for cancellation
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	baseURL := getOrchestratorBaseURL()
 	parentSource := args[0]
 
 	encodedSource := url.QueryEscape(parentSource)
 	orchestratorURL := fmt.Sprintf("%s/v1/document/versions?source=%s", baseURL, encodedSource)
 
-	resp, err := http.Get(orchestratorURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orchestratorURL, nil)
 	if err != nil {
-		log.Fatalf("Failed to fetch document versions: %v", err)
+		slog.Error("Failed to create request", "error", err)
+		os.Exit(1)
+	}
+
+	resp, err := docsHTTPClient.Do(req)
+	if err != nil {
+		slog.Error("Failed to fetch document versions", "error", err, "url", orchestratorURL)
+		os.Exit(1)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1789,13 +1830,23 @@ func runDocsVersions(_ *cobra.Command, args []string) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Fatalf("Failed to fetch versions: %s", string(bodyBytes))
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			slog.Error("Failed to fetch versions",
+				"status_code", resp.StatusCode,
+				"read_error", readErr)
+		} else {
+			slog.Error("Failed to fetch versions",
+				"status_code", resp.StatusCode,
+				"response", string(bodyBytes))
+		}
+		os.Exit(1)
 	}
 
 	var result DocVersionsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Fatalf("Failed to decode response: %v", err)
+		slog.Error("Failed to decode response", "error", err)
+		os.Exit(1)
 	}
 
 	if len(result.Versions) == 0 {
