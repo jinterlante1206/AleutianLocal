@@ -35,6 +35,10 @@ var (
 	personalityLevel string // UX personality level (full/standard/minimal/machine)
 	verbosityLevel   int    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
 
+	// Evaluation command flags (Phase 2 Sapheneia Integration)
+	evalAPIVersion     string // API version: "legacy" (default) or "unified" (new tracing API)
+	evalDeploymentMode string // Deployment mode: "standalone" (localhost) or "distributed" (k8s)
+
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
 		Short: "A cli to manage the Aleutian FOSS private AI appliance",
@@ -386,6 +390,11 @@ func init() {
 	runEvaluationCmd.Flags().String("date", "", "Evaluation date (YYYYMMDD, default: today)")
 	runEvaluationCmd.Flags().String("ticker", "", "Single ticker to evaluate (default: all)")
 	runEvaluationCmd.Flags().String("model", "", "Single model to evaluate (default: all)")
+	runEvaluationCmd.Flags().String("compute-mode", "", "DEPRECATED: Use --api-version instead. API mode: 'legacy' or 'unified'")
+	runEvaluationCmd.Flags().StringVar(&evalAPIVersion, "api-version", "legacy",
+		"Sapheneia API version: 'legacy' (v1/timeseries/forecast) or 'unified' (orchestration/v1/predict with tracing)")
+	runEvaluationCmd.Flags().StringVar(&evalDeploymentMode, "deployment-mode", "standalone",
+		"Service deployment mode: 'standalone' (localhost ports) or 'distributed' (k8s service names)")
 	evaluationCmd.AddCommand(exportEvaluationCmd)
 	exportEvaluationCmd.Flags().StringP("output", "o", "", "Output filename (default: backtest_{RunID}.csv)")
 

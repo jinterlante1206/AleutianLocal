@@ -62,7 +62,28 @@ type TradingSignalResponse struct {
 	Ticker        string  `json:"ticker"`         // Ticker symbol
 }
 
-// EvaluationResult is the final data point stored in InfluxDB
+// EvaluationResult is the final data point stored in InfluxDB.
+//
+// Description:
+//
+//	EvaluationResult contains all information about a single evaluation point,
+//	including forecast data, trading signal results, and inference metadata.
+//	This struct is persisted to InfluxDB for analysis and reporting.
+//
+// Fields:
+//   - Core fields: Ticker, Model, EvaluationDate, RunID, ForecastHorizon, StrategyType
+//   - Forecast fields: ForecastPrice, CurrentPrice
+//   - Trading fields: Action, Size, Value, Reason, AvailableCash, PositionAfter, Stopped
+//   - Strategy params: ThresholdValue, ExecutionSize
+//   - Metadata fields: RequestID, ResponseID, InferenceTimeMs, Device, ModelFamily
+//
+// Limitations:
+//   - Metadata fields are only populated when using unified compute mode
+//   - Legacy mode leaves metadata fields empty/zero
+//
+// Assumptions:
+//   - Timestamp is set by the caller at evaluation time
+//   - RequestID and ResponseID are UUIDs when populated
 type EvaluationResult struct {
 	Ticker          string
 	Model           string
@@ -84,6 +105,13 @@ type EvaluationResult struct {
 	ExecutionSize  float64
 
 	Timestamp time.Time
+
+	// Inference metadata (populated only in unified compute mode)
+	RequestID       string // Request tracing ID (empty in legacy mode)
+	ResponseID      string // Response tracing ID (empty in legacy mode)
+	InferenceTimeMs int    // Model inference time in milliseconds (0 in legacy mode)
+	Device          string // Compute device: "cpu", "cuda:0", "mps" (empty in legacy mode)
+	ModelFamily     string // Model family: "chronos", "timesfm", etc. (empty in legacy mode)
 }
 
 // ScenarioMetadata tracks the identity of the strategy being tested
@@ -107,9 +135,11 @@ type BacktestScenario struct {
 	} `yaml:"evaluation" json:"evaluation"`
 
 	Forecast struct {
-		Model       string `yaml:"model" json:"model"`
-		ContextSize int    `yaml:"context_size" json:"context_size"`
-		HorizonSize int    `yaml:"horizon_size" json:"horizon_size"`
+		Model       string    `yaml:"model" json:"model"`
+		ContextSize int       `yaml:"context_size" json:"context_size"`
+		HorizonSize int       `yaml:"horizon_size" json:"horizon_size"`
+		ComputeMode string    `yaml:"compute_mode" json:"compute_mode"` // "legacy" (default) or "unified"
+		Quantiles   []float64 `yaml:"quantiles" json:"quantiles"`       // Optional quantiles (e.g., [0.1, 0.5, 0.9])
 	} `yaml:"forecast" json:"forecast"`
 
 	Trading struct {

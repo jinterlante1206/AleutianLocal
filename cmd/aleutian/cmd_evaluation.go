@@ -38,16 +38,84 @@ func runEvaluation(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	// 2b. Apply CLI overrides
+	// Priority: --api-version (new) > --compute-mode (deprecated) > YAML config > default
+	computeMode, _ := cmd.Flags().GetString("compute-mode")
+	if computeMode != "" {
+		slog.Warn("--compute-mode is deprecated, use --api-version instead")
+	}
+
+	// Use evalAPIVersion if set to non-default, otherwise fall back to compute-mode
+	effectiveAPIVersion := evalAPIVersion
+	if effectiveAPIVersion == "" || effectiveAPIVersion == "legacy" {
+		// Check if deprecated compute-mode was explicitly set
+		if computeMode != "" && computeMode != "legacy" {
+			effectiveAPIVersion = computeMode
+		}
+	}
+
+	// Validate API version
+	if effectiveAPIVersion != "" && effectiveAPIVersion != "legacy" && effectiveAPIVersion != "unified" {
+		slog.Error("Invalid --api-version. Must be 'legacy' or 'unified'", "value", effectiveAPIVersion)
+		return
+	}
+	if effectiveAPIVersion != "" {
+		scenario.Forecast.ComputeMode = effectiveAPIVersion
+		slog.Info("CLI override applied", "api-version", effectiveAPIVersion)
+	}
+
+	// 2c. Configure service URLs based on deployment mode
+	// This sets environment variables that NewEvaluator() reads
+	if evalDeploymentMode != "" {
+		if evalDeploymentMode != "standalone" && evalDeploymentMode != "distributed" {
+			slog.Error("Invalid --deployment-mode. Must be 'standalone' or 'distributed'", "value", evalDeploymentMode)
+			return
+		}
+		slog.Info("Deployment mode configured", "mode", evalDeploymentMode)
+
+		// Set orchestration URL based on deployment mode if not already set
+		if os.Getenv("SAPHENEIA_ORCHESTRATION_URL") == "" {
+			switch evalDeploymentMode {
+			case "standalone":
+				_ = os.Setenv("SAPHENEIA_ORCHESTRATION_URL", "http://localhost:12210")
+			case "distributed":
+				_ = os.Setenv("SAPHENEIA_ORCHESTRATION_URL", "http://sapheneia-orchestration:8000")
+			}
+		}
+
+		// Set trading URL based on deployment mode if not already set
+		if os.Getenv("SAPHENEIA_TRADING_URL") == "" {
+			switch evalDeploymentMode {
+			case "standalone":
+				_ = os.Setenv("SAPHENEIA_TRADING_URL", "http://localhost:12132")
+			case "distributed":
+				_ = os.Setenv("SAPHENEIA_TRADING_URL", "http://sapheneia-trading:8000")
+			}
+		}
+	}
+
 	// 3. Generate a Unique Run ID
 	// Format: {ScenarioID}_v{Version}_{Timestamp}
 	timestamp := time.Now().Format("20060102_150405")
 	runID := fmt.Sprintf("%s_v%s_%s", scenario.Metadata.ID, scenario.Metadata.Version, timestamp)
 
+	// Determine effective modes for display
+	effectiveMode := scenario.Forecast.ComputeMode
+	if effectiveMode == "" {
+		effectiveMode = "legacy"
+	}
+	effectiveDeployment := evalDeploymentMode
+	if effectiveDeployment == "" {
+		effectiveDeployment = "standalone"
+	}
+
 	fmt.Printf("\nStarting Evaluation Run: %s\n", runID)
-	fmt.Printf("   Strategy: %s (v%s)\n", scenario.Metadata.ID, scenario.Metadata.Version)
-	fmt.Printf("   Model:    %s\n", scenario.Forecast.Model)
-	fmt.Printf("   Ticker:   %s\n", scenario.Evaluation.Ticker)
-	fmt.Printf("   Range:    %s to %s\n", scenario.Evaluation.StartDate, scenario.Evaluation.EndDate)
+	fmt.Printf("   Strategy:       %s (v%s)\n", scenario.Metadata.ID, scenario.Metadata.Version)
+	fmt.Printf("   Model:          %s\n", scenario.Forecast.Model)
+	fmt.Printf("   Ticker:         %s\n", scenario.Evaluation.Ticker)
+	fmt.Printf("   Range:          %s to %s\n", scenario.Evaluation.StartDate, scenario.Evaluation.EndDate)
+	fmt.Printf("   API Version:    %s\n", effectiveMode)
+	fmt.Printf("   Deployment:     %s\n", effectiveDeployment)
 	fmt.Println("---------------------------------------------------")
 
 	// 4. Ensure API Key is set

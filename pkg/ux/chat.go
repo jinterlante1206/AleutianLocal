@@ -530,7 +530,8 @@ func (u *terminalChatUI) sessionEndRichFull(sessionID string, stats *SessionStat
 	}
 
 	// Render the styled box
-	boxStyle := Styles.Box.Width(60)
+	// Width 68 accommodates the resume command (25 chars + 36 char UUID + padding)
+	boxStyle := Styles.Box.Width(68)
 	fmt.Fprintln(u.writer, boxStyle.Render(content.String()))
 	fmt.Fprintln(u.writer)
 	fmt.Fprintln(u.writer, Styles.Highlight.Render("Goodbye! 👋"))
