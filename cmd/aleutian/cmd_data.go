@@ -767,7 +767,9 @@ func (p *IngestPipeline) ingestFiles(ctx context.Context, files []scanResult) (
 				}
 
 				bodyBytes, readErr := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					slog.Debug("response body close error", "error", closeErr)
+				}
 				if readErr != nil {
 					resultChan <- ingestResult{
 						FilePath: file.FilePath,
@@ -1067,7 +1069,11 @@ func runDeleteSession(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Orchestrator returned an error: %s", resp.Status)
@@ -1168,7 +1174,11 @@ func runVerifySession(cmd *cobra.Command, args []string) {
 		}
 		os.Exit(1)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	// Parse response
 	var result VerifySessionResponse
@@ -1429,7 +1439,11 @@ func runListSessions(_ *cobra.Command, _ []string) {
 	if err != nil {
 		log.Fatalf("Failed to connect to orchestrator: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Orchestrator returned an error: %s", resp.Status)
@@ -1474,7 +1488,11 @@ func runWeaviateBackup(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send backup request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read backup response: %v", err)
@@ -1512,7 +1530,11 @@ func runWeaviateDeleteDoc(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1551,7 +1573,11 @@ func runWeaviateRestore(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send restore request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read restore response: %v", err)
@@ -1576,7 +1602,11 @@ func runWeaviateSummary(_ *cobra.Command, _ []string) {
 	if err != nil {
 		log.Fatalf("Failed to send summary request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read summary response: %v", err)
@@ -1630,7 +1660,11 @@ func runWeaviateWipeout(cmd *cobra.Command, _ []string) {
 	if err != nil {
 		log.Fatalf("Failed to send wipe request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read wipe response: %v", err)
@@ -1703,9 +1737,9 @@ func runDocsList(_ *cobra.Command, _ []string) error {
 	defer cancel()
 
 	baseURL := getOrchestratorBaseURL()
-	fmt.Println("Fetching document list...")
-
 	orchestratorURL := fmt.Sprintf("%s/v1/documents", baseURL)
+
+	slog.Info("fetching document list", "url", orchestratorURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orchestratorURL, nil)
 	if err != nil {
@@ -1716,7 +1750,11 @@ func runDocsList(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch documents from %s: %w", orchestratorURL, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
@@ -1828,7 +1866,11 @@ func runDocsVersions(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch document versions from %s: %w", orchestratorURL, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode == http.StatusNotFound {
 		fmt.Printf("No versions found for document: %s\n", parentSource)
