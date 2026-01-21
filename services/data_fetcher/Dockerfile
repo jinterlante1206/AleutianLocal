@@ -1,5 +1,5 @@
 # Build stage - use Go 1.25+ to match go.mod requirements
-FROM --platform=linux/arm64 golang:1.25-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
 
@@ -12,10 +12,10 @@ COPY services/data_fetcher/ ./services/data_fetcher/
 COPY pkg/ ./pkg/
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /data-fetcher ./services/data_fetcher
+RUN CGO_ENABLED=0 GOOS=linux go build -o /data-fetcher ./services/data_fetcher
 
 # Runtime stage
-FROM --platform=linux/arm64 alpine:latest
+FROM alpine:latest
 
 RUN apk add --no-cache ca-certificates curl
 
