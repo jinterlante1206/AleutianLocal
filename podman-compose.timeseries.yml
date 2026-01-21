@@ -306,14 +306,18 @@ services:
       # Forecast/Timeseries Config (set by aleutian stack based on config)
       # standalone mode: points to local forecast-service (default)
       # sapheneia mode: points to external Sapheneia containers
-      ALEUTIAN_TIMESERIES_TOOL: ${ALEUTIAN_TIMESERIES_TOOL:-http://forecast-service:8000}
+      ALEUTIAN_TIMESERIES_TOOL: ${ALEUTIAN_TIMESERIES_TOOL:-http://sapheneia-forecast:8000}
+      # Sapheneia orchestrator URL for unified API calls (compute_mode: unified)
+      # When running evaluations in unified mode, the evaluator calls Sapheneia's
+      # /orchestration/v1/predict endpoint directly for inference requests.
+      ORCHESTRATOR_URL: ${ORCHESTRATOR_URL:-http://sapheneia-forecast:8000}
       ALEUTIAN_FORECAST_MODE: ${ALEUTIAN_FORECAST_MODE:-standalone}
       ALEUTIAN_DATA_FETCHER_URL: ${ALEUTIAN_DATA_FETCHER_URL:-http://data-fetcher:8001}
       SAPHENEIA_TRADING_SERVICE_URL: ${SAPHENEIA_TRADING_SERVICE_URL:-http://host.containers.internal:12132}
       SAPHENEIA_TRADING_API_KEY: ${SAPHENEIA_TRADING_API_KEY:-default_trading_api_key_please_change}
-      # InfluxDB Config (token injected by aleutian stack start)
+      # InfluxDB Config
       INFLUXDB_URL: http://influxdb:8086
-      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN}
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-aleutian-dev-token-2026}
       INFLUXDB_ORG: aleutian-finance
       INFLUXDB_BUCKET: financial-data
       # Observability
@@ -355,8 +359,8 @@ services:
       - DOCKER_INFLUXDB_INIT_PASSWORD=adminadmin
       - DOCKER_INFLUXDB_INIT_ORG=aleutian-finance
       - DOCKER_INFLUXDB_INIT_BUCKET=financial-data
-      # Token injected by aleutian stack start (auto-generated if not exists)
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      # Default token for development - override in production
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${DOCKER_INFLUXDB_INIT_ADMIN_TOKEN:-aleutian-dev-token-2026}
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8086/health" ]
       interval: 10s
@@ -374,7 +378,7 @@ services:
     environment:
       PORT: 8001
       INFLUXDB_URL: http://influxdb:8086
-      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN}
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-aleutian-dev-token-2026}
       INFLUXDB_ORG: aleutian-finance
       INFLUXDB_BUCKET: financial-data
     networks:

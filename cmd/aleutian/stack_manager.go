@@ -1531,7 +1531,8 @@ func (s *DefaultStackManager) resolveEnvironment(ctx context.Context, opts Start
 			influxToken := os.Getenv("INFLUXDB_TOKEN")
 			if influxToken == "" {
 				// Use a default development token if not set
-				influxToken = "aleutian-dev-influxdb-token"
+				// Must match podman-compose.timeseries.yml and cmd_evaluation.go defaults
+				influxToken = "aleutian-dev-token-2026"
 				slog.Info("Using default InfluxDB token for development")
 			}
 			env["INFLUXDB_TOKEN"] = influxToken
@@ -2006,13 +2007,18 @@ func (s *DefaultStackManager) isStackRunning(ctx context.Context) (bool, error) 
 	return status.Running > 0, nil
 }
 
-// stopContainersGracefully stops all containers with a graceful timeout.
+// stopContainersGracefully stops and removes all containers with a graceful timeout.
 //
 // # Description
 //
-// Executes a two-phase stop:
+// Executes a three-phase stop and cleanup:
 //  1. Graceful stop with SIGTERM (10 second timeout)
 //  2. Force stop with SIGKILL if containers don't respond
+//  3. Force cleanup to remove stopped containers
+//
+// The cleanup phase ensures containers are fully removed, not just stopped.
+// This prevents issues with `podman compose down` failing due to container
+// dependencies or stale container state.
 //
 // Logs progress and any warnings from the stop operation.
 //
@@ -2050,7 +2056,7 @@ func (s *DefaultStackManager) stopContainersGracefully(ctx context.Context) erro
 	var result *compose.StopResult
 	var stopErr error
 
-	// Use spinner for visual feedback during stop
+	// Phase 1: Use spinner for visual feedback during stop
 	spinErr := util.SpinWhileContext(ctx, "Stopping containers...", func() error {
 		var err error
 		result, err = s.compose.Stop(ctx, stopOpts)
@@ -2067,6 +2073,29 @@ func (s *DefaultStackManager) stopContainersGracefully(ctx context.Context) erro
 	}
 
 	s.logStopResult(result)
+
+	// Phase 2: Force cleanup to remove stopped containers
+	// This ensures a clean state and prevents dependency issues on next start
+	var cleanupResult *compose.CleanupResult
+	var cleanupErr error
+
+	spinErr = util.SpinWhileContext(ctx, "Removing containers...", func() error {
+		var err error
+		cleanupResult, err = s.compose.ForceCleanup(ctx)
+		cleanupErr = err
+		return nil // Don't fail on cleanup errors, just log them
+	})
+
+	if spinErr != nil {
+		// Context cancelled during cleanup
+		return spinErr
+	}
+
+	// Log cleanup errors as debug (non-fatal)
+	if cleanupErr != nil {
+		slog.Debug("cleanup completed with errors", "error", cleanupErr)
+	}
+	s.logCleanupResult(cleanupResult)
 	return nil
 }
 
