@@ -1,7 +1,7 @@
 # Use a multi-stage build for a small, secure final image.
 
 # --- Build Stage ---
-FROM --platform=linux/arm64 golang:1.25-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Set the working directory to the project root inside the container
 WORKDIR /src
@@ -18,9 +18,9 @@ COPY pkg/ ./pkg/
 COPY cmd/ ./cmd/
 
 # Build the orchestrator binary, pointing to the cmd entry point
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /app/orchestrator ./cmd/orchestrator
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/orchestrator ./cmd/orchestrator
 # --- Final Stage ---
-FROM --platform=linux/arm64 alpine:latest
+FROM alpine:latest
 WORKDIR /app
 
 RUN apk update && \
