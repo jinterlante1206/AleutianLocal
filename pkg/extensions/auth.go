@@ -42,10 +42,9 @@ var ErrUnauthorized = errors.New("unauthorized")
 //	    UserID: "user-123",
 //	    Email:  "user@example.com",
 //	    Roles:  []string{"analyst", "viewer"},
-//	    Metadata: map[string]any{
-//	        "department": "engineering",
-//	        "mfa_verified": true,
-//	    },
+//	    Metadata: NewMetadata().
+//	        Set("department", "engineering").
+//	        Set("mfa_verified", true),
 //	}
 type AuthInfo struct {
 	// UserID is the unique identifier for the authenticated user.
@@ -69,7 +68,13 @@ type AuthInfo struct {
 	//   - "department": organizational unit
 	//   - "mfa_verified": whether MFA was used
 	//   - "session_id": identity provider session ID
-	Metadata map[string]any
+	//
+	// Use NewMetadata() and type-safe accessors:
+	//
+	//   Metadata: NewMetadata().
+	//       Set("department", "engineering").
+	//       Set("mfa_verified", true),
+	Metadata Metadata
 }
 
 // HasRole checks if the user has a specific role.
@@ -232,7 +237,7 @@ type NopAuthProvider struct{}
 // The token parameter is ignored - any value (including empty string)
 // results in successful authentication. This is intentional for local
 // single-user deployments.
-func (p *NopAuthProvider) Validate(ctx context.Context, token string) (*AuthInfo, error) {
+func (p *NopAuthProvider) Validate(_ context.Context, _ string) (*AuthInfo, error) {
 	return &AuthInfo{
 		UserID: "local-user",
 		Email:  "",
@@ -263,7 +268,7 @@ type NopAuthzProvider struct{}
 // The request parameter is ignored - all actions are permitted.
 // This is intentional for local single-user deployments where
 // access control isn't needed.
-func (p *NopAuthzProvider) Authorize(ctx context.Context, req AuthzRequest) error {
+func (p *NopAuthzProvider) Authorize(_ context.Context, _ AuthzRequest) error {
 	return nil
 }
 

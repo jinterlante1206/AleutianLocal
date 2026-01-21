@@ -35,6 +35,22 @@ import (
 )
 
 // =============================================================================
+// Helper Functions
+// =============================================================================
+
+// formatVersionInfo returns a formatted version string for a source document.
+// Returns " v{N} (latest)" if current, " v{N}" if not current, or "" if no version info.
+func formatVersionInfo(versionNumber *int, isCurrent *bool) string {
+	if versionNumber == nil {
+		return ""
+	}
+	if isCurrent != nil && *isCurrent {
+		return fmt.Sprintf(" v%d (latest)", *versionNumber)
+	}
+	return fmt.Sprintf(" v%d", *versionNumber)
+}
+
+// =============================================================================
 // Stream Renderer Interface
 // =============================================================================
 
@@ -442,12 +458,13 @@ func (r *terminalStreamRenderer) OnSources(ctx context.Context, sources []Source
 	if r.personality == PersonalityMachine {
 		// Print sources immediately in machine format
 		for _, src := range sources {
+			versionInfo := formatVersionInfo(src.VersionNumber, src.IsCurrent)
 			if src.Score != 0 {
-				fmt.Fprintf(r.writer, "SOURCE: %s score=%.4f\n", src.Source, src.Score)
+				fmt.Fprintf(r.writer, "SOURCE: %s%s score=%.4f\n", src.Source, versionInfo, src.Score)
 			} else if src.Distance != 0 {
-				fmt.Fprintf(r.writer, "SOURCE: %s distance=%.4f\n", src.Source, src.Distance)
+				fmt.Fprintf(r.writer, "SOURCE: %s%s distance=%.4f\n", src.Source, versionInfo, src.Distance)
 			} else {
-				fmt.Fprintf(r.writer, "SOURCE: %s\n", src.Source)
+				fmt.Fprintf(r.writer, "SOURCE: %s%s\n", src.Source, versionInfo)
 			}
 		}
 		return
@@ -464,7 +481,8 @@ func (r *terminalStreamRenderer) OnSources(ctx context.Context, sources []Source
 		fmt.Fprintln(r.writer)
 		fmt.Fprintln(r.writer, "Sources:")
 		for i, src := range sources {
-			fmt.Fprintf(r.writer, "  %d. %s\n", i+1, src.Source)
+			versionInfo := formatVersionInfo(src.VersionNumber, src.IsCurrent)
+			fmt.Fprintf(r.writer, "  %d. %s%s\n", i+1, src.Source, versionInfo)
 		}
 		fmt.Fprintln(r.writer)
 		return
@@ -474,13 +492,21 @@ func (r *terminalStreamRenderer) OnSources(ctx context.Context, sources []Source
 	fmt.Fprintln(r.writer)
 	var content strings.Builder
 	for i, src := range sources {
+		// Build version info string
+		versionInfo := formatVersionInfo(src.VersionNumber, src.IsCurrent)
+		versionStyled := ""
+		if versionInfo != "" {
+			versionStyled = Styles.Muted.Render(versionInfo)
+		}
+
+		// Build score info string
 		scoreInfo := ""
 		if src.Score != 0 {
 			scoreInfo = Styles.Muted.Render(fmt.Sprintf(" (%.2f)", src.Score))
 		} else if src.Distance != 0 {
 			scoreInfo = Styles.Muted.Render(fmt.Sprintf(" (%.2f)", src.Distance))
 		}
-		content.WriteString(fmt.Sprintf("%d. %s%s", i+1, src.Source, scoreInfo))
+		content.WriteString(fmt.Sprintf("%d. %s%s%s", i+1, src.Source, versionStyled, scoreInfo))
 		if i < len(sources)-1 {
 			content.WriteString("\n")
 		}

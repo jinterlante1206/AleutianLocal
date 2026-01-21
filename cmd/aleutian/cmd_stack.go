@@ -141,6 +141,12 @@ func runStart(cmd *cobra.Command, _ []string) {
 		log.Fatalf("Failed to prepare stack directory: %v", err)
 	}
 
+	// Apply CLI flag overrides to config before creating stack manager
+	// This ensures the compose executor includes correct compose files
+	if forecastMode != "" {
+		config.Global.Forecast.Mode = config.ForecastMode(forecastMode)
+	}
+
 	// Create StackManager with all production dependencies
 	mgr, err := CreateProductionStackManager(&config.Global, stackDir, cliVersion)
 	if err != nil {
@@ -156,6 +162,7 @@ func runStart(cmd *cobra.Command, _ []string) {
 		Profile:         profile,
 		BackendOverride: backendType,
 		ForecastMode:    forecastMode,
+		Services:        targetServices,
 	}
 
 	// Start the stack

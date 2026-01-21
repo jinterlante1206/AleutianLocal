@@ -1294,7 +1294,9 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
         relevant_history: list[dict] | None = None,
         expanded_query: dict | None = None,
         original_query: str | None = None,
-        contextual_query: str | None = None
+        contextual_query: str | None = None,
+        data_space: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Execute the verified RAG pipeline with skeptic/optimist debate.
@@ -1339,6 +1341,12 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             The original query before expansion (for logging/tracing).
         contextual_query : str | None
             Query with history context for embedding (P8).
+        data_space : str | None
+            The data space to filter queries by (e.g., "work", "personal").
+            If None, searches ALL data spaces (no isolation).
+        version_tag : str | None
+            Specific document version to query (e.g., "v1").
+            If None, queries current versions only (is_current = true).
 
         Returns
         -------
@@ -1375,6 +1383,10 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             root_span.set_attribute("temperature.optimist", optimist_temp)
             root_span.set_attribute("temperature.skeptic", skeptic_temp)
             root_span.set_attribute("temperature.refiner", refiner_temp)
+            if data_space:
+                root_span.set_attribute("data_space", data_space)
+            if version_tag:
+                root_span.set_attribute("version_tag", version_tag)
 
             # A. Retrieve Data
             with tracer.start_as_current_span("verified_pipeline.retrieve") as retrieve_span:
@@ -1388,8 +1400,8 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
                 query_vector = await self._get_embedding(query)
                 retrieve_span.set_attribute("embedding.dimensions", len(query_vector) if query_vector else 0)
 
-                # This calls the method from reranking.py (the PDR logic)
-                initial_docs = await self._search_weaviate_initial(query_vector, session_id)
+                # This calls the method from reranking.py (the PDR logic) with data_space and version filtering
+                initial_docs = await self._search_weaviate_initial(query_vector, session_id, data_space, version_tag)
                 retrieve_span.set_attribute("retrieved.initial_count", len(initial_docs))
 
                 # P8: Inject history as pseudo-documents for unified reranking
@@ -1612,7 +1624,9 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
         relevant_history: list[dict] | None = None,
         expanded_query: dict | None = None,
         original_query: str | None = None,
-        contextual_query: str | None = None
+        contextual_query: str | None = None,
+        data_space: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         Execute verified RAG pipeline with real-time progress streaming.
@@ -1640,6 +1654,9 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
           - "expanded": bool - whether expansion occurred
         - original_query (str | None): Original query if expanded (for logging).
         - contextual_query (str | None): Query with history context for embedding.
+        - data_space (str | None): Data space to filter queries by. If None, searches all.
+        - version_tag (str | None): Specific document version to query (e.g., "v1").
+          If None, queries current versions only (is_current = true).
 
         # Returns
 
@@ -1709,6 +1726,8 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             root_span.set_attribute("temperature.skeptic", skeptic_temp)
             root_span.set_attribute("temperature.refiner", refiner_temp)
             root_span.set_attribute("progress_streaming", True)
+            if data_space:
+                root_span.set_attribute("data_space", data_space)
 
             # A. RETRIEVAL PHASE
             await emit(ProgressEvent(
@@ -1729,7 +1748,7 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
                 query_vector = await self._get_embedding(query)
                 retrieve_span.set_attribute("embedding.dimensions", len(query_vector) if query_vector else 0)
 
-                initial_docs = await self._search_weaviate_initial(query_vector, session_id)
+                initial_docs = await self._search_weaviate_initial(query_vector, session_id, data_space, version_tag)
                 retrieve_span.set_attribute("retrieved.initial_count", len(initial_docs))
 
                 # P8: Inject history as pseudo-documents for unified reranking
@@ -2170,7 +2189,9 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
         query: str,
         session_id: str | None = None,
         strict_mode: bool = True,
-        max_chunks: int = 5
+        max_chunks: int = 5,
+        data_space: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[list[dict], str, bool]:
         """
         Retrieval-only mode for the verified pipeline.
@@ -2192,6 +2213,12 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             If True, only return documents above relevance threshold.
         max_chunks : int
             Maximum number of document chunks to return.
+        data_space : str | None
+            The data space to filter queries by (e.g., "work", "personal").
+            If None, searches ALL data spaces (no isolation).
+        version_tag : str | None
+            Specific document version to query (e.g., "v1").
+            If None, queries current versions only (is_current = true).
 
         Returns
         -------
@@ -2228,11 +2255,15 @@ Write ONLY the refined answer below (no JSON, no explanation, no preamble):
             span.set_attribute("max_chunks", max_chunks)
             span.set_attribute("pipeline", "verified")
             span.set_attribute("delegation", "reranking_pipeline")
+            if data_space:
+                span.set_attribute("data_space", data_space)
+            if version_tag:
+                span.set_attribute("version_tag", version_tag)
 
             try:
                 # Delegate to parent implementation
                 chunks, context_text, has_relevant = await super().retrieve_only(
-                    query, session_id, strict_mode, max_chunks
+                    query, session_id, strict_mode, max_chunks, data_space, version_tag
                 )
 
                 # Record results

@@ -460,6 +460,8 @@ type RAGChatRunnerConfig struct {
 	Personality ux.PersonalityLevel // Output styling (optional)
 	StrictMode  bool                // Strict RAG mode: only answer from docs (default: true)
 	Verbosity   int                 // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (optional)
+	DataSpace   string              // Data space to filter queries by (optional, e.g., "work", "personal")
+	DocVersion  string              // Specific document version to query (optional, e.g., "v1", "report.md:v3")
 }
 
 // DirectChatRunnerConfig holds configuration for creating DirectChatRunner.

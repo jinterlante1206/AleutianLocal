@@ -252,7 +252,10 @@ Start a stateful chat session with the configured LLM.
     * `--thinking`: Enables "Extended Thinking" (requires Claude 3.7+ backend or thinking-enabled Ollama models like gpt-oss, DeepSeek-R1) for complex reasoning tasks.
     * `--budget <tokens>`: Token budget for thinking (default: 2048). Higher values allow more complex reasoning but increase latency and cost.
     * `--no-rag`: Skip RAG retrieval and chat directly with the LLM.
+    * `--dataspace <name>`: Filter queries to a specific data space (e.g., `--dataspace engineering`). Only documents ingested with that data space will be searched.
+    * `--doc-version <version>`: Query a specific document version instead of the latest (e.g., `--doc-version v1`). Useful for comparing answers across document revisions.
 * **Example:** `aleutian chat --thinking --budget 4096`
+* **Example with versioning:** `aleutian chat --dataspace work --doc-version v2`
 
 #### Streaming Features (New in v0.3.5)
 
@@ -305,6 +308,60 @@ CONTINUE LATER
 
 ---
 
+### `docs`: Document Version Management
+
+Manage and inspect ingested documents and their version history. Aleutian uses a **Google Docs-style versioning** approach: when you re-ingest a document, the old version is preserved and a new version is created. Queries automatically use the latest version unless you specify otherwise.
+
+#### Commands
+
+* `aleutian docs list` - List all unique documents in the knowledge base
+* `aleutian docs versions <filename>` - Show version history for a specific document
+
+#### Example: View Document Versions
+
+```bash
+$ aleutian docs versions report.md
+
+Document: report.md
+Versions found: 3
+
+  Version  Ingested At           Is Current
+  -------  --------------------  ----------
+  v3       2026-01-21 10:30:00   true (latest)
+  v2       2026-01-15 14:22:00   false
+  v1       2026-01-10 09:15:00   false
+```
+
+#### Version Display in Chat
+
+When RAG retrieves documents during chat, version information is displayed alongside the source:
+
+```
+╭────────────────────────────────────────────────────────────╮
+│ Retrieved Sources                                          │
+│ 1. report.md v3 (latest) (0.95)                           │
+│ 2. architecture.pdf v1 (latest) (0.87)                    │
+╰────────────────────────────────────────────────────────────╯
+```
+
+#### Querying Specific Versions
+
+Use `--doc-version` to query a specific document version:
+
+```bash
+# Query the latest versions (default)
+aleutian chat
+
+# Query version 2 of all documents
+aleutian chat --doc-version v2
+
+# Compare answers between versions
+aleutian chat --doc-version v1  # Ask question
+aleutian chat --doc-version v3  # Ask same question, compare answers
+```
+
+---
+
 ### `populate`: Ingest Documents Securely
 
 Scan and add local files or directories to the Weaviate vector database. This command handles content extraction, security scanning, and vectorization in a single workflow.
@@ -322,9 +379,17 @@ Scan and add local files or directories to the Weaviate vector database. This co
     * `--force`: Force ingestion, skipping policy/secret checks. Files with findings are logged but ingested.
     * `--data-space <name>`: The logical data space to ingest into (e.g., `work`, `personal`, `project-x`). Default: `default`.
     * `--version <tag>`: A version tag for this ingestion (e.g., `v1.1`, `2025-Q4`). Default: `latest`.
+* **Auto-Versioning:** When you re-ingest a document that already exists, Aleutian automatically:
+    1. Detects the existing document by its `parent_source` identifier
+    2. Creates a new version (incrementing `version_number`: v1 → v2 → v3...)
+    3. Marks the old version as `is_current=false`
+    4. Sets the new version as `is_current=true`
+
+    Old versions are preserved and can be queried using `--doc-version`. Use `aleutian docs versions <file>` to see all versions.
 * **Examples:**
     * `aleutian populate vectordb ./docs --data-space engineering --version v2.0`
     * `aleutian populate vectordb ./src --force` (skip security prompts)
+    * `aleutian populate vectordb ./report.md` (re-ingest creates v2 if v1 exists)
 
 ---
 

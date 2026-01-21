@@ -15,6 +15,10 @@
 #   12125 - RAG Engine
 #   12127 - Weaviate
 #   16686 - Jaeger UI (tracing)
+#
+# Network:
+#   Creates "aleutian-shared" network for cross-project connectivity.
+#   Sapheneia and other external projects attach to this network.
 
 secrets:
   aleutian_hf_token:
@@ -23,8 +27,10 @@ secrets:
 services:
   # === Vector Database ===
   # Stores document embeddings for semantic search
+  # Pin to 1.35.1+ for native TTL support (document retention)
+  # See: https://docs.weaviate.io/weaviate/manage-collections/time-to-live
   weaviate:
-    image: cr.weaviate.io/semitechnologies/weaviate:latest
+    image: cr.weaviate.io/semitechnologies/weaviate:1.35.1
     container_name: aleutian-weaviate
     ports:
       - "12127:8080"
@@ -149,10 +155,10 @@ services:
       retries: 5
 
 volumes:
-  weaviate_data:
-  models_cache:
+  weaviate_data: {}
+  models_cache: {}
 
 networks:
   aleutian-network:
     driver: bridge
-    name: aleutian-network
+    name: aleutian-shared

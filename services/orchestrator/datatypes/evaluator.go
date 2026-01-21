@@ -62,7 +62,28 @@ type TradingSignalResponse struct {
 	Ticker        string  `json:"ticker"`         // Ticker symbol
 }
 
-// EvaluationResult is the final data point stored in InfluxDB
+// EvaluationResult is the final data point stored in InfluxDB.
+//
+// Description:
+//
+//	EvaluationResult contains all information about a single evaluation point,
+//	including forecast data, trading signal results, and inference metadata.
+//	This struct is persisted to InfluxDB for analysis and reporting.
+//
+// Fields:
+//   - Core fields: Ticker, Model, EvaluationDate, RunID, ForecastHorizon, StrategyType
+//   - Forecast fields: ForecastPrice, CurrentPrice
+//   - Trading fields: Action, Size, Value, Reason, AvailableCash, PositionAfter, Stopped
+//   - Strategy params: ThresholdValue, ExecutionSize
+//   - Metadata fields: RequestID, ResponseID, InferenceTimeMs, Device, ModelFamily
+//
+// Limitations:
+//   - Metadata fields are only populated when using unified compute mode
+//   - Legacy mode leaves metadata fields empty/zero
+//
+// Assumptions:
+//   - Timestamp is set by the caller at evaluation time
+//   - RequestID and ResponseID are UUIDs when populated
 type EvaluationResult struct {
 	Ticker          string
 	Model           string
@@ -84,6 +105,13 @@ type EvaluationResult struct {
 	ExecutionSize  float64
 
 	Timestamp time.Time
+
+	// Inference metadata (populated only in unified compute mode)
+	RequestID       string // Request tracing ID (empty in legacy mode)
+	ResponseID      string // Response tracing ID (empty in legacy mode)
+	InferenceTimeMs int    // Model inference time in milliseconds (0 in legacy mode)
+	Device          string // Compute device: "cpu", "cuda:0", "mps" (empty in legacy mode)
+	ModelFamily     string // Model family: "chronos", "timesfm", etc. (empty in legacy mode)
 }
 
 // ScenarioMetadata tracks the identity of the strategy being tested
@@ -107,9 +135,11 @@ type BacktestScenario struct {
 	} `yaml:"evaluation" json:"evaluation"`
 
 	Forecast struct {
-		Model       string `yaml:"model" json:"model"`
-		ContextSize int    `yaml:"context_size" json:"context_size"`
-		HorizonSize int    `yaml:"horizon_size" json:"horizon_size"`
+		Model       string    `yaml:"model" json:"model"`
+		ContextSize int       `yaml:"context_size" json:"context_size"`
+		HorizonSize int       `yaml:"horizon_size" json:"horizon_size"`
+		ComputeMode string    `yaml:"compute_mode" json:"compute_mode"` // "legacy" (default) or "unified"
+		Quantiles   []float64 `yaml:"quantiles" json:"quantiles"`       // Optional quantiles (e.g., [0.1, 0.5, 0.9])
 	} `yaml:"forecast" json:"forecast"`
 
 	Trading struct {
@@ -128,62 +158,4 @@ type DataCoverageInfo struct {
 	NewestDate time.Time
 	PointCount int
 	HasData    bool
-}
-
-// --- Defaults ---
-
-var DefaultTickers = []TickerInfo{
-	{Ticker: "SPY", Description: "SPDR S&P 500"},
-	{Ticker: "QQQ", Description: "Invesco QQQ Trust"},
-	{Ticker: "IWM", Description: "iShares Russell 2000"},
-	{Ticker: "BTCUSDT", Description: "BTC Spot"},
-	{Ticker: "ETHUSD", Description: "Ethereum Spot"},
-	{Ticker: "GLD", Description: "SPDR Gold Trust"},
-	{Ticker: "TLT", Description: "iShares 20+ Year Treasury Bond"},
-	{Ticker: "XLE", Description: "Energy"},
-	{Ticker: "XLF", Description: "Financials"},
-	{Ticker: "XLK", Description: "Technology"},
-}
-
-var DefaultModels = []string{
-	// --- Google TimesFM ---
-	"google/timesfm-1.0-200m",
-	"google/timesfm-2.0-500m-pytorch", // Primary Recommendation
-
-	// --- Amazon Chronos (T5) ---
-	"amazon/chronos-t5-tiny",
-	"amazon/chronos-t5-mini",
-	"amazon/chronos-t5-small",
-	"amazon/chronos-t5-base",
-	"amazon/chronos-t5-large",
-
-	// --- Amazon Chronos (Bolt) ---
-	"amazon/chronos-bolt-mini",
-	"amazon/chronos-bolt-small",
-	"amazon/chronos-bolt-base",
-
-	// --- Salesforce Moirai ---
-	"salesforce/moirai-1.1-R-small",
-	"salesforce/moirai-1.1-R-base",
-	"salesforce/moirai-1.1-R-large",
-
-	// --- IBM Granite ---
-	"ibm/granite-ttm-r1",
-	"ibm/granite-ttm-r2",
-
-	// --- AutoLab Moment ---
-	"autonlab/moment-1-small",
-	"autonlab/moment-1-base",
-	"autonlab/moment-1-large",
-
-	// --- Alibaba Yinglong ---
-	"alibaba/yinglong-6m",
-	"alibaba/yinglong-50m",
-	"alibaba/yinglong-300m",
-
-	// --- Specialized / Single Models ---
-	"lag-llama",
-	"unity/kairos-10m",
-	"microsoft/timemoe-200m",
-	"thuml/timer-large",
 }

@@ -36,6 +36,25 @@ const (
 	maxRetryDelay  = 10 * time.Second
 )
 
+// forecastServiceRequest is the typed request for the legacy forecast service.
+// This replaces map[string]interface{} to avoid runtime type errors.
+type forecastServiceRequest struct {
+	Name               string    `json:"name"`
+	ContextPeriodSize  int       `json:"context_period_size"`
+	ForecastPeriodSize int       `json:"forecast_period_size"`
+	Model              string    `json:"model"`
+	AsOfDate           string    `json:"as_of_date,omitempty"`
+	RecentData         []float64 `json:"recent_data,omitempty"`
+}
+
+// dataFetchRequest is the typed request for the data fetcher service.
+type dataFetchRequest struct {
+	Names     []string `json:"names"`
+	StartDate string   `json:"start_date"`
+	EndDate   string   `json:"end_date"`
+	Interval  string   `json:"interval"`
+}
+
 // Evaluator handles the logic of running forecasts and checking trading signals
 type Evaluator struct {
 	httpClient        *http.Client
@@ -69,6 +88,174 @@ func NewEvaluator() (*Evaluator, error) {
 		tradingServiceURL: tradingURL,
 		storage:           storage,
 	}, nil
+}
+
+// forecastJob represents a single forecast task in the worker pool.
+//
+// Description:
+//
+//	forecastJob encapsulates all data needed to generate a forecast for a
+//	specific date in the backtest. Jobs are sent to worker goroutines for
+//	parallel processing.
+//
+// Fields:
+//   - index: Position in the full history array
+//   - date: The evaluation date for this forecast
+//   - price: The actual price on this date (for comparison)
+//   - contextData: Historical values to use as model context
+//
+// Limitations:
+//   - contextData must be populated before sending to workers
+//
+// Assumptions:
+//   - index corresponds to a valid position in fullHistory
+type forecastJob struct {
+	index       int
+	date        time.Time
+	price       float64
+	contextData []float64
+}
+
+// forecastResult holds the output from a forecast worker.
+//
+// Description:
+//
+//	forecastResult captures the result of processing a forecastJob, including
+//	the forecast output or any error that occurred. Results are collected
+//	and processed sequentially after all workers complete.
+//
+// Fields:
+//   - index: Matches the job index for ordering
+//   - date: The evaluation date
+//   - price: The actual price on this date
+//   - output: The forecast output (unified structure for both APIs)
+//   - err: Non-nil if the forecast failed
+//
+// Assumptions:
+//   - Either output is populated OR err is non-nil, never both
+type forecastResult struct {
+	index  int
+	date   time.Time
+	price  float64
+	output ForecastOutput
+	err    error
+}
+
+// ForecastOutput normalizes results from both legacy and unified APIs.
+//
+// Description:
+//
+//	ForecastOutput provides a common structure for processing forecast results
+//	regardless of which API was used to generate them. This enables the trading
+//	loop to remain unchanged while supporting both compute modes.
+//
+// Fields:
+//   - Values: The forecast values (required, always populated)
+//   - RequestID: Request tracing ID (empty for legacy API)
+//   - ResponseID: Response tracing ID (empty for legacy API)
+//   - Metadata: Execution metadata (nil for legacy API)
+//   - Quantiles: Optional quantile forecasts (nil for legacy API or if not requested)
+//
+// Example:
+//
+//	// From legacy API
+//	output := ForecastOutput{Values: legacyResult.Forecast}
+//
+//	// From unified API
+//	output := ForecastOutput{
+//	    Values:     unifiedResult.Forecast.Values,
+//	    RequestID:  unifiedResult.RequestID,
+//	    ResponseID: unifiedResult.ResponseID,
+//	    Metadata:   &unifiedResult.Metadata,
+//	    Quantiles:  unifiedResult.Quantiles,
+//	}
+//
+// Limitations:
+//   - Quantiles are not currently used in trading logic
+//
+// Assumptions:
+//   - Values is never nil after successful API call
+type ForecastOutput struct {
+	Values     []float64
+	RequestID  string
+	ResponseID string
+	Metadata   *datatypes.InferenceMetadata
+	Quantiles  []datatypes.QuantileForecast
+}
+
+// buildInferenceRequestFromJob converts a forecastJob to an InferenceRequest.
+//
+// Description:
+//
+//	buildInferenceRequestFromJob constructs a fully-populated InferenceRequest
+//	from the job data and scenario configuration. It generates a unique
+//	RequestID for tracing and populates all required metadata fields.
+//
+// Inputs:
+//   - job: The forecast job containing date, price, and context slice
+//   - scenario: The backtest scenario with model and ticker info
+//   - runID: The current run ID (used as prefix for request ID)
+//
+// Outputs:
+//   - *datatypes.InferenceRequest: Ready to send to CallInferenceService
+//
+// Example:
+//
+//	req := buildInferenceRequestFromJob(job, scenario, "run-2026-01-20")
+//	resp, err := e.CallInferenceService(ctx, req)
+//
+// Limitations:
+//   - Assumes daily period (Period1d)
+//   - Assumes InfluxDB source
+//   - Assumes close price field
+//
+// Assumptions:
+//   - job.contextData is non-empty
+//   - scenario.Forecast.Model contains "/" (validated elsewhere)
+//   - runID is non-empty
+func buildInferenceRequestFromJob(
+	job forecastJob,
+	scenario *datatypes.BacktestScenario,
+	runID string,
+) *datatypes.InferenceRequest {
+	// Generate unique request ID: {runID}-{ticker}-{dateStr}-{random}
+	requestID := fmt.Sprintf("%s-%s-%s-%d",
+		runID,
+		scenario.Evaluation.Ticker,
+		job.date.Format("20060102"),
+		time.Now().UnixNano()%1000000)
+
+	// Calculate context date range
+	contextDays := len(job.contextData)
+	startDate := job.date.AddDate(0, 0, -(contextDays - 1))
+
+	// Build optional params (only if quantiles specified)
+	var params *datatypes.ModelParams
+	if len(scenario.Forecast.Quantiles) > 0 {
+		params = &datatypes.ModelParams{
+			Quantiles: scenario.Forecast.Quantiles,
+		}
+	}
+
+	return &datatypes.InferenceRequest{
+		RequestID: requestID,
+		Timestamp: time.Now().UTC(),
+		Ticker:    scenario.Evaluation.Ticker,
+		Model:     scenario.Forecast.Model,
+		Context: datatypes.ContextData{
+			Values:    job.contextData,
+			Period:    datatypes.Period1d,
+			Source:    datatypes.SourceInfluxDB,
+			StartDate: startDate.Format("2006-01-02"),
+			EndDate:   job.date.Format("2006-01-02"),
+			Field:     datatypes.FieldClose,
+		},
+		Horizon: datatypes.HorizonSpec{
+			Length: scenario.Forecast.HorizonSize,
+			Period: datatypes.Period1d,
+		},
+		Params: params,
+	}
 }
 
 // RunScenario executes a backtest based on the YAML scenario file
@@ -156,20 +343,14 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 	slog.Info("Backtest range found", "start_date", fullHistory.Time[startIndex], "start_index", startIndex, "days_to_test", totalDays)
 
 	// 3. Pre-fetch all forecasts in parallel
-	type forecastJob struct {
-		index       int
-		date        time.Time
-		price       float64
-		contextData []float64
-	}
+	// (forecastJob and forecastResult types defined at package level)
 
-	type forecastResult struct {
-		index    int
-		date     time.Time
-		price    float64
-		forecast *datatypes.ForecastResult
-		err      error
+	// Log compute mode
+	computeMode := scenario.Forecast.ComputeMode
+	if computeMode == "" {
+		computeMode = "legacy"
 	}
+	slog.Info("Compute mode configured", "mode", computeMode)
 
 	// Build job list
 	jobs := make([]forecastJob, 0, totalDays)
@@ -210,14 +391,67 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 		go func() {
 			defer wg.Done()
 			for job := range jobChan {
-				forecast, err := e.CallForecastServiceAsOf(ctx, ticker, scenario.Forecast.Model,
-					scenario.Forecast.ContextSize, scenario.Forecast.HorizonSize, &job.date, job.contextData)
+				var output ForecastOutput
+				var err error
+
+				if computeMode == "unified" {
+					// Use new unified API
+					req := buildInferenceRequestFromJob(job, scenario, runID)
+
+					// Log request (comprehensive logging)
+					slog.Info("Sending inference request",
+						"request_id", req.RequestID,
+						"date", job.date.Format("2006-01-02"),
+						"ticker", req.Ticker,
+						"model", req.Model,
+						"context_size", len(req.Context.Values),
+						"horizon", req.Horizon.Length)
+
+					resp, callErr := e.CallInferenceService(ctx, req)
+					if callErr != nil {
+						err = callErr
+						slog.Error("Inference request failed",
+							"request_id", req.RequestID,
+							"error", callErr)
+					} else {
+						// Log response (comprehensive logging)
+						slog.Info("Received inference response",
+							"request_id", resp.RequestID,
+							"response_id", resp.ResponseID,
+							"inference_time_ms", resp.Metadata.InferenceTimeMs,
+							"device", resp.Metadata.Device,
+							"model_family", resp.Metadata.ModelFamily,
+							"forecast_length", len(resp.Forecast.Values))
+
+						output = ForecastOutput{
+							Values:     resp.Forecast.Values,
+							RequestID:  resp.RequestID,
+							ResponseID: resp.ResponseID,
+							Metadata:   &resp.Metadata,
+							Quantiles:  resp.Quantiles,
+						}
+					}
+				} else {
+					// Use legacy API (default)
+					result, callErr := e.CallForecastServiceAsOf(
+						ctx, ticker, scenario.Forecast.Model,
+						scenario.Forecast.ContextSize, scenario.Forecast.HorizonSize,
+						&job.date, job.contextData)
+					if callErr != nil {
+						err = callErr
+					} else {
+						output = ForecastOutput{
+							Values: result.Forecast,
+						}
+					}
+				}
+
 				resultChan <- forecastResult{
-					index:    job.index,
-					date:     job.date,
-					price:    job.price,
-					forecast: forecast,
-					err:      err,
+					index:  job.index,
+					date:   job.date,
+					price:  job.price,
+					output: output,
+					err:    err,
 				}
 			}
 		}()
@@ -277,8 +511,8 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 
 		// Use the first forecast value (1-day ahead prediction)
 		var predictedPrice float64
-		if len(fr.forecast.Forecast) > 0 {
-			predictedPrice = fr.forecast.Forecast[0]
+		if len(fr.output.Values) > 0 {
+			predictedPrice = fr.output.Values[0]
 		} else {
 			slog.Warn("Empty forecast returned, skipping", "date", currentDate.Format("2006-01-02"))
 			continue
@@ -306,7 +540,7 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 		currentPosition = signal.PositionAfter
 		currentCash = signal.AvailableCash
 
-		// Store Result
+		// Store Result with metadata (populated only in unified mode)
 		result := datatypes.EvaluationResult{
 			Ticker:          ticker,
 			Model:           scenario.Forecast.Model,
@@ -323,6 +557,16 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 			AvailableCash:   signal.AvailableCash,
 			PositionAfter:   signal.PositionAfter,
 			Timestamp:       currentDate,
+			// Inference metadata (from unified mode)
+			RequestID:  fr.output.RequestID,
+			ResponseID: fr.output.ResponseID,
+		}
+
+		// Populate metadata fields if available (unified mode only)
+		if fr.output.Metadata != nil {
+			result.InferenceTimeMs = fr.output.Metadata.InferenceTimeMs
+			result.Device = fr.output.Metadata.Device
+			result.ModelFamily = fr.output.Metadata.ModelFamily
 		}
 
 		if err := e.storage.StoreResult(ctx, &result); err != nil {
@@ -484,24 +728,27 @@ func (e *Evaluator) CallForecastServiceAsOf(
 	err := retryWithBackoff(ctx, "forecast", func() error {
 		url := fmt.Sprintf("%s/v1/timeseries/forecast", e.orchestratorURL)
 
-		payload := map[string]interface{}{
-			"name":                 ticker,
-			"context_period_size":  contextSize,
-			"forecast_period_size": horizonSize,
-			"model":                model,
+		payload := forecastServiceRequest{
+			Name:               ticker,
+			ContextPeriodSize:  contextSize,
+			ForecastPeriodSize: horizonSize,
+			Model:              model,
 		}
 
 		// Add as_of_date for metadata/logging
 		if asOfDate != nil {
-			payload["as_of_date"] = asOfDate.Format("2006-01-02")
+			payload.AsOfDate = asOfDate.Format("2006-01-02")
 		}
 
 		// Add the explicit historical data
 		if len(contextData) > 0 {
-			payload["recent_data"] = contextData
+			payload.RecentData = contextData
 		}
 
-		reqBody, _ := json.Marshal(payload)
+		reqBody, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal forecast request: %w", err)
+		}
 		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 		if err != nil {
 			return err
@@ -512,10 +759,17 @@ func (e *Evaluator) CallForecastServiceAsOf(
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("Failed to close response body", "error", closeErr)
+			}
+		}()
 
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				body = []byte("(failed to read body)")
+			}
 			// Don't retry on 4xx errors (client errors)
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 				return fmt.Errorf("forecast error status %d: %s (not retryable)", resp.StatusCode, string(body))
@@ -528,6 +782,151 @@ func (e *Evaluator) CallForecastServiceAsOf(
 	})
 
 	return result, err
+}
+
+// CallInferenceService sends a request to Sapheneia's unified predict endpoint.
+//
+// Description:
+//
+//	CallInferenceService constructs and sends an InferenceRequest to the
+//	Sapheneia orchestration gateway's /orchestration/v1/predict endpoint.
+//	It handles retries with exponential backoff for transient failures.
+//	This is the new unified API that provides request/response tracing
+//	and richer metadata compared to the legacy CallForecastService.
+//
+// Inputs:
+//   - ctx: Context for cancellation and timeout (required)
+//   - req: The inference request to send (required, must pass Validate())
+//
+// Outputs:
+//   - *datatypes.InferenceResponse: The forecast response on success
+//   - error: Non-nil on failure (validation, network, HTTP error, or invalid response)
+//
+// Example:
+//
+//	req := &datatypes.InferenceRequest{
+//	    RequestID: uuid.New().String(),
+//	    Timestamp: time.Now().UTC(),
+//	    Ticker:    "SPY",
+//	    Model:     "amazon/chronos-t5-tiny",
+//	    Context: datatypes.ContextData{
+//	        Values:    closeHistory,
+//	        Period:    datatypes.Period1d,
+//	        Source:    datatypes.SourceInfluxDB,
+//	        StartDate: "2025-01-01",
+//	        EndDate:   "2025-12-31",
+//	        Field:     datatypes.FieldClose,
+//	    },
+//	    Horizon: datatypes.HorizonSpec{
+//	        Length: 10,
+//	        Period: datatypes.Period1d,
+//	    },
+//	}
+//
+//	resp, err := evaluator.CallInferenceService(ctx, req)
+//	if err != nil {
+//	    log.Fatalf("Inference failed: %v", err)
+//	}
+//	fmt.Printf("Forecast: %v\n", resp.Forecast.Values)
+//
+// Limitations:
+//   - Timeout is inherited from the http.Client (5 minutes)
+//   - Does not retry on 4xx errors (considered non-retryable)
+//   - Requires Sapheneia /orchestration/v1/predict endpoint to be available
+//
+// Assumptions:
+//   - Sapheneia gateway is running at e.orchestratorURL or SAPHENEIA_GATEWAY_URL
+//   - SAPHENEIA_API_KEY env var is set for authentication (optional)
+//   - Request passes Validate() before network call
+func (e *Evaluator) CallInferenceService(
+	ctx context.Context,
+	req *datatypes.InferenceRequest,
+) (*datatypes.InferenceResponse, error) {
+	// Validate request before making network call
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid inference request: %w", err)
+	}
+
+	var result *datatypes.InferenceResponse
+
+	err := retryWithBackoff(ctx, "inference", func() error {
+		url := buildInferenceURL(e.orchestratorURL)
+
+		reqBody, err := json.Marshal(req)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		// Add API key if configured
+		apiKey := os.Getenv("SAPHENEIA_API_KEY")
+		if apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		resp, err := e.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("Failed to close response body", "error", closeErr)
+			}
+		}()
+
+		if resp.StatusCode != http.StatusOK {
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				body = []byte("(failed to read body)")
+			}
+			// Don't retry on 4xx errors (client errors)
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				return fmt.Errorf("inference error status %d: %s (not retryable)", resp.StatusCode, string(body))
+			}
+			return fmt.Errorf("inference error status %d: %s", resp.StatusCode, string(body))
+		}
+
+		result = &datatypes.InferenceResponse{}
+		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		return nil
+	})
+
+	return result, err
+}
+
+// buildInferenceURL constructs the endpoint URL for the unified inference API.
+//
+// Description:
+//
+//	buildInferenceURL is an internal helper that constructs the full URL
+//	for the inference endpoint from the base orchestrator URL.
+//
+// Inputs:
+//   - baseURL: The orchestrator base URL (e.g., "http://localhost:12700")
+//
+// Outputs:
+//   - string: The full endpoint URL
+//
+// Example:
+//
+//	url := buildInferenceURL("http://localhost:12700")
+//	// Returns: "http://localhost:12700/orchestration/v1/predict"
+//
+// Limitations:
+//   - Does not validate the URL format
+//
+// Assumptions:
+//   - baseURL does not have a trailing slash
+func buildInferenceURL(baseURL string) string {
+	return baseURL + "/orchestration/v1/predict"
 }
 
 func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.TradingSignalRequest) (*datatypes.TradingSignalResponse, error) {
@@ -544,8 +943,14 @@ func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.Tradin
 	for key, value := range req.StrategyParams {
 		flatReq[key] = value
 	}
-	reqBody, _ := json.Marshal(flatReq)
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	reqBody, err := json.Marshal(flatReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal trading request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create trading request: %w", err)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	apiKey := os.Getenv("SAPHENEIA_TRADING_API_KEY")
@@ -557,16 +962,123 @@ func (e *Evaluator) CallTradingService(ctx context.Context, req datatypes.Tradin
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			b = []byte("(failed to read body)")
+		}
 		return nil, fmt.Errorf("trading error: %s", string(b))
 	}
 
 	var result datatypes.TradingSignalResponse
 	err = json.NewDecoder(resp.Body).Decode(&result)
 	return &result, err
+}
+
+// CallTradingServiceV2 sends a V2 trading signal request with inference tracing.
+//
+// Description:
+//
+//	CallTradingServiceV2 accepts the new V2 request format which includes
+//	inference traceability (request/response IDs linking to the forecast).
+//	Since Sapheneia's trading service does not yet support V2 format natively,
+//	this method converts the V2 request to V1 format before making the call.
+//
+//	The V2 format provides:
+//	  - InferenceRef: Links to the forecast that informed this decision
+//	  - Structured PriceInfo: Current and forecast prices with metadata
+//	  - Structured PortfolioState: Position, cash, and initial capital
+//	  - RequestID and Timestamp: For logging and audit trails
+//
+// Inputs:
+//   - ctx: Context for cancellation and timeout (required)
+//   - req: V2 trading signal request (required, must pass Validate())
+//
+// Outputs:
+//   - *datatypes.TradingSignalResponse: Trading decision (buy/sell/hold)
+//   - error: Non-nil on validation failure or service error
+//
+// Example:
+//
+//	// After receiving inference response
+//	v2Req := datatypes.NewTradingSignalRequestV2(
+//	    "SPY", "threshold",
+//	    datatypes.PriceInfo{Current: 450.0, Forecast: 455.0, Period: datatypes.Period1d},
+//	    datatypes.PortfolioState{Position: 0, Cash: 100000, InitialCapital: 100000},
+//	    map[string]interface{}{"threshold_value": 0.02},
+//	)
+//	v2Req.InferenceRef = datatypes.InferenceRef{
+//	    RequestID:  inferenceReq.RequestID,
+//	    ResponseID: inferenceResp.ResponseID,
+//	}
+//
+//	signal, err := evaluator.CallTradingServiceV2(ctx, v2Req)
+//	if err != nil {
+//	    log.Fatalf("Trading failed: %v", err)
+//	}
+//	fmt.Printf("Action: %s, Size: %f\n", signal.Action, signal.Size)
+//
+// Limitations:
+//   - Currently converts to V1 format for compatibility with Sapheneia
+//   - InferenceRef is logged but not sent to Sapheneia (V2 support planned)
+//   - Will be updated to use native V2 when Sapheneia adds support
+//
+// Assumptions:
+//   - Sapheneia trading service is available at e.tradingServiceURL
+//   - V1 format is sufficient for trading logic (V2 adds tracing, not functionality)
+//   - InferenceRef contains valid IDs from a prior inference call
+func (e *Evaluator) CallTradingServiceV2(
+	ctx context.Context,
+	req *datatypes.TradingSignalRequestV2,
+) (*datatypes.TradingSignalResponse, error) {
+	// Validate V2 request before processing
+	if err := req.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid V2 trading request: %w", err)
+	}
+
+	// Log V2 request with tracing info for audit trail
+	slog.Info("Processing V2 trading request",
+		"request_id", req.RequestID,
+		"ticker", req.Ticker,
+		"strategy_type", req.StrategyType,
+		"current_price", req.Prices.Current,
+		"forecast_price", req.Prices.Forecast,
+		"inference_linked", req.InferenceRef.IsSet())
+
+	if req.InferenceRef.IsSet() {
+		slog.Debug("Trading request linked to inference",
+			"trading_request_id", req.RequestID,
+			"inference_request_id", req.InferenceRef.RequestID,
+			"inference_response_id", req.InferenceRef.ResponseID)
+	}
+
+	// Convert V2 to V1 for Sapheneia compatibility
+	// TODO: Remove this conversion when Sapheneia adds native V2 support
+	v1Req := req.ToV1()
+
+	// Call the existing V1 trading service
+	response, err := e.CallTradingService(ctx, v1Req)
+	if err != nil {
+		slog.Error("V2 trading request failed",
+			"request_id", req.RequestID,
+			"error", err)
+		return nil, err
+	}
+
+	// Log successful response
+	slog.Info("V2 trading request completed",
+		"request_id", req.RequestID,
+		"action", response.Action,
+		"size", response.Size,
+		"position_after", response.PositionAfter)
+
+	return response, nil
 }
 
 func (e *Evaluator) GetCurrentPrice(ctx context.Context, ticker string) (float64, error) {
@@ -699,15 +1211,21 @@ func (e *Evaluator) FetchMissingData(ctx context.Context, ticker string, startDa
 
 	url := fmt.Sprintf("%s/v1/data/fetch", e.orchestratorURL)
 
-	payload := map[string]interface{}{
-		"names":      []string{ticker},
-		"start_date": startDate.Format("2006-01-02"),
-		"end_date":   endDate.Format("2006-01-02"),
-		"interval":   "1d",
+	payload := dataFetchRequest{
+		Names:     []string{ticker},
+		StartDate: startDate.Format("2006-01-02"),
+		EndDate:   endDate.Format("2006-01-02"),
+		Interval:  "1d",
 	}
 
-	reqBody, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal data fetch request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed to create data fetch request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	slog.Info("Fetching missing data from external source",
@@ -719,10 +1237,17 @@ func (e *Evaluator) FetchMissingData(ctx context.Context, ticker string, startDa
 	if err != nil {
 		return fmt.Errorf("data fetch request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			body = []byte("(failed to read body)")
+		}
 		return fmt.Errorf("data fetch failed with status %d: %s", resp.StatusCode, string(body))
 	}
 

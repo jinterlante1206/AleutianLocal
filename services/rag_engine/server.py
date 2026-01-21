@@ -104,6 +104,9 @@ ollama_model = os.getenv("OLLAMA_MODEL", "llama3")  # Get ollama model if used
 class SourceDocument(BaseModel):
     source: str
     distance: float | None = None
+    score: float | None = None  # Rerank score (for reranking/verified pipelines)
+    version_number: int | None = None  # Document version (1, 2, 3...)
+    is_current: bool | None = None  # True if this is the latest version
 
 class RAGEngineResponse(BaseModel):
     answer: str
@@ -125,6 +128,8 @@ class RetrievalRequest(BaseModel):
     session_id: str | None = None
     strict_mode: bool = True
     max_chunks: int = 5  # Default matches top_k_final in reranking
+    data_space: str | None = None  # Data space to filter queries by
+    version_tag: str | None = None  # Specific version to query (e.g., "v1"); None = current versions only
 
 
 class RetrievalResponse(BaseModel):
@@ -199,6 +204,8 @@ class RAGEngineRequest(BaseModel):
     session_id: str | None = None
     strict_mode: bool = True  # Strict RAG: only answer from docs (no LLM fallback)
     relevant_history: list[RelevantHistoryItem] | None = None  # P8: Conversation history for context
+    data_space: str | None = None  # Data space to filter queries by (e.g., "work", "personal")
+    version_tag: str | None = None  # Specific version to query (e.g., "v1"); None = current versions only
 
 
 class TemperatureOverrides(BaseModel):
@@ -268,7 +275,7 @@ pipeline_config = {
 @app.post("/rag/standard", response_model=RAGEngineResponse)
 async def run_standard_rag(request: RAGEngineRequest):
     rag_request_counter.add(1, {"pipeline": "standard"})
-    logger.info(f"Running Standard RAG for query: {request.query[:50]}...")
+    logger.info(f"Running Standard RAG for query: {request.query[:50]}... (data_space={request.data_space}, version_tag={request.version_tag})")
     if not weaviate_client or not weaviate_client.is_connected():
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
@@ -281,7 +288,9 @@ async def run_standard_rag(request: RAGEngineRequest):
             request.query,
             request.session_id,
             request.strict_mode,
-            relevant_history=history_dicts
+            relevant_history=history_dicts,
+            data_space=request.data_space,
+            version_tag=request.version_tag,
         )
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
@@ -291,7 +300,7 @@ async def run_standard_rag(request: RAGEngineRequest):
 @app.post("/rag/reranking", response_model=RAGEngineResponse)
 async def run_reranking_rag(request: RAGEngineRequest):
     rag_request_counter.add(1, {"pipeline": "reranking"})
-    logger.info(f"Running Reranking RAG for query: {request.query[:50]}...")
+    logger.info(f"Running Reranking RAG for query: {request.query[:50]}... (data_space={request.data_space}, version_tag={request.version_tag})")
     if not weaviate_client or not weaviate_client.is_connected():
          raise HTTPException(status_code=503, detail="Weaviate client not connected")
     try:
@@ -304,7 +313,9 @@ async def run_reranking_rag(request: RAGEngineRequest):
             request.query,
             request.session_id,
             request.strict_mode,
-            relevant_history=history_dicts
+            relevant_history=history_dicts,
+            data_space=request.data_space,
+            version_tag=request.version_tag,
         )
         return RAGEngineResponse(answer=answer, sources=source_docs)
     except Exception as e:
@@ -354,7 +365,9 @@ async def retrieve_documents(pipeline: str, request: RetrievalRequest):
             request.query,
             request.session_id,
             request.strict_mode,
-            request.max_chunks
+            request.max_chunks,
+            data_space=request.data_space,
+            version_tag=request.version_tag,
         )
 
         return RetrievalResponse(
@@ -469,13 +482,15 @@ async def run_verified_rag(request: VerifiedRAGRequest):
         if request.relevant_history:
             history_dicts = [item.model_dump() for item in request.relevant_history]
 
-        # Run with optional temperature overrides and history
+        # Run with optional temperature overrides, history, data_space, and version_tag
         answer, source_docs = await pipeline.run(
             request.query,
             request.session_id,
             request.strict_mode,
             temperature_overrides=temp_overrides,
-            relevant_history=history_dicts
+            relevant_history=history_dicts,
+            data_space=request.data_space,
+            version_tag=request.version_tag,
         )
 
         return RAGEngineResponse(answer=answer, sources=source_docs)
@@ -596,7 +611,9 @@ async def run_verified_rag_streaming(request: VerifiedRAGRequest):
                         relevant_history=history_dicts,
                         expanded_query=expanded_query_dict,
                         original_query=request.original_query,
-                        contextual_query=request.contextual_query
+                        contextual_query=request.contextual_query,
+                        data_space=request.data_space,
+                        version_tag=request.version_tag,
                     )
                     # Signal completion with final answer
                     await event_queue.put({

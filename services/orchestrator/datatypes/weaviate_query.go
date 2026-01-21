@@ -107,9 +107,9 @@ type SessionQueryResponse struct {
 
 // SessionResult represents a single session from a query.
 type SessionResult struct {
-	SessionID string `json:"session_id"`
-	Summary   string `json:"summary"`
-	Timestamp int64  `json:"timestamp"`
+	SessionID  string `json:"session_id"`
+	Summary    string `json:"summary"`
+	Timestamp  int64  `json:"timestamp"`
 	Additional struct {
 		ID string `json:"id"`
 	} `json:"_additional"`
@@ -148,14 +148,16 @@ type DocumentQueryResponse struct {
 
 // DocumentResult represents a single document from a query.
 type DocumentResult struct {
-	Content      string `json:"content"`
-	Source       string `json:"source"`
-	ParentSource string `json:"parent_source"`
-	DataSpace    string `json:"data_space"`
-	VersionTag   string `json:"version_tag"`
-	TurnNumber   *int   `json:"turn_number"`
-	IngestedAt   int64  `json:"ingested_at"`
-	Additional   struct {
+	Content       string `json:"content"`
+	Source        string `json:"source"`
+	ParentSource  string `json:"parent_source"`
+	DataSpace     string `json:"data_space"`
+	VersionTag    string `json:"version_tag"`
+	VersionNumber *int   `json:"version_number"`
+	IsCurrent     *bool  `json:"is_current"`
+	TurnNumber    *int   `json:"turn_number"`
+	IngestedAt    int64  `json:"ingested_at"`
+	Additional    struct {
 		ID        string   `json:"id"`
 		Distance  *float32 `json:"distance"`
 		Certainty *float32 `json:"certainty"`
@@ -215,25 +217,29 @@ func (p *ConversationProperties) ToMap() map[string]interface{} {
 
 // DocumentProperties represents the properties for creating a Document object.
 type DocumentProperties struct {
-	Content      string `json:"content"`
-	Source       string `json:"source"`
-	ParentSource string `json:"parent_source"`
-	DataSpace    string `json:"data_space"`
-	VersionTag   string `json:"version_tag"`
-	TurnNumber   int    `json:"turn_number"`
-	IngestedAt   int64  `json:"ingested_at"`
+	Content       string `json:"content"`
+	Source        string `json:"source"`
+	ParentSource  string `json:"parent_source"`
+	DataSpace     string `json:"data_space"`
+	VersionTag    string `json:"version_tag"`
+	VersionNumber int    `json:"version_number"`
+	IsCurrent     bool   `json:"is_current"`
+	TurnNumber    int    `json:"turn_number"`
+	IngestedAt    int64  `json:"ingested_at"`
 }
 
 // ToMap converts DocumentProperties to map[string]interface{} for Weaviate.
 func (p *DocumentProperties) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"content":       p.Content,
-		"source":        p.Source,
-		"parent_source": p.ParentSource,
-		"data_space":    p.DataSpace,
-		"version_tag":   p.VersionTag,
-		"turn_number":   p.TurnNumber,
-		"ingested_at":   p.IngestedAt,
+		"content":        p.Content,
+		"source":         p.Source,
+		"parent_source":  p.ParentSource,
+		"data_space":     p.DataSpace,
+		"version_tag":    p.VersionTag,
+		"version_number": p.VersionNumber,
+		"is_current":     p.IsCurrent,
+		"turn_number":    p.TurnNumber,
+		"ingested_at":    p.IngestedAt,
 	}
 }
 
@@ -255,6 +261,7 @@ func (p *DocumentProperties) ToMap() map[string]interface{} {
 //
 //	props := docProps.ToMap()
 //	WithBeacon(props, sessionUUID)
+//
 // BeaconRef represents a Weaviate cross-reference beacon.
 type BeaconRef struct {
 	Beacon string `json:"beacon"`

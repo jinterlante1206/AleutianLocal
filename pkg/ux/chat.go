@@ -66,13 +66,17 @@ type SessionStats struct {
 //   - Distance: Vector distance (lower = more similar). Used by some pipelines.
 //   - Score: Relevance score (higher = more relevant). Used by reranking pipelines.
 //   - Hash: SHA-256 hash of source content for tamper detection.
+//   - VersionNumber: Document version (1, 2, 3...). Nil for legacy docs.
+//   - IsCurrent: True if this is the latest version. Nil for legacy docs.
 type SourceInfo struct {
-	Id        string
-	CreatedAt int64
-	Source    string
-	Distance  float64
-	Score     float64
-	Hash      string
+	Id            string  `json:"id,omitempty"`
+	CreatedAt     int64   `json:"created_at,omitempty"`
+	Source        string  `json:"source"`
+	Distance      float64 `json:"distance,omitempty"`
+	Score         float64 `json:"score,omitempty"`
+	Hash          string  `json:"hash,omitempty"`
+	VersionNumber *int    `json:"version_number,omitempty"`
+	IsCurrent     *bool   `json:"is_current,omitempty"`
 }
 
 // ChatUI defines the interface for chat user interface operations.
@@ -119,6 +123,23 @@ type terminalChatUI struct {
 	personality PersonalityLevel
 }
 
+// write is a helper that writes formatted output and handles errors.
+// Errors are silently ignored as there's no meaningful recovery for terminal output.
+func (u *terminalChatUI) write(format string, args ...interface{}) {
+	if _, err := fmt.Fprintf(u.writer, format, args...); err != nil {
+		// Terminal write errors are non-recoverable; silently ignore
+		return
+	}
+}
+
+// writeln is a helper that writes a line and handles errors.
+func (u *terminalChatUI) writeln(args ...interface{}) {
+	if _, err := fmt.Fprintln(u.writer, args...); err != nil {
+		// Terminal write errors are non-recoverable; silently ignore
+		return
+	}
+}
+
 // NewChatUI creates a new terminal-based ChatUI
 func NewChatUI() ChatUI {
 	return &terminalChatUI{
@@ -139,20 +160,20 @@ func NewChatUIWithWriter(w io.Writer, personality PersonalityLevel) ChatUI {
 func (u *terminalChatUI) Header(mode ChatMode, pipeline, sessionID string) {
 	if u.personality == PersonalityMachine {
 		if mode == ChatModeRAG {
-			fmt.Fprintf(u.writer, "CHAT_START: mode=rag pipeline=%s session=%s\n", pipeline, sessionID)
+			u.write("CHAT_START: mode=rag pipeline=%s session=%s\n", pipeline, sessionID)
 		} else {
-			fmt.Fprintf(u.writer, "CHAT_START: mode=direct session=%s\n", sessionID)
+			u.write("CHAT_START: mode=direct session=%s\n", sessionID)
 		}
 		return
 	}
 
 	if u.personality == PersonalityMinimal {
 		if mode == ChatModeRAG {
-			fmt.Fprintf(u.writer, "RAG Chat (pipeline: %s)\n", pipeline)
+			u.write("RAG Chat (pipeline: %s)\n", pipeline)
 		} else {
-			fmt.Fprintln(u.writer, "Direct Chat (no RAG)")
+			u.writeln("Direct Chat (no RAG)")
 		}
-		fmt.Fprintln(u.writer, "Type 'exit' to end.")
+		u.writeln("Type 'exit' to end.")
 		return
 	}
 
@@ -174,10 +195,10 @@ func (u *terminalChatUI) Header(mode ChatMode, pipeline, sessionID string) {
 	}
 
 	boxStyle := Styles.Box.Width(50)
-	fmt.Fprintln(u.writer, boxStyle.Render(content.String()))
-	fmt.Fprintln(u.writer)
-	fmt.Fprintln(u.writer, Styles.Muted.Render("Type 'exit' to end, '/help' for commands."))
-	fmt.Fprintln(u.writer)
+	u.writeln(boxStyle.Render(content.String()))
+	u.writeln()
+	u.writeln(Styles.Muted.Render("Type 'exit' to end, '/help' for commands."))
+	u.writeln()
 }
 
 // Prompt returns the styled input prompt string
@@ -191,11 +212,11 @@ func (u *terminalChatUI) Prompt() string {
 // Response displays the assistant's response
 func (u *terminalChatUI) Response(answer string) {
 	if u.personality == PersonalityMachine {
-		fmt.Fprintf(u.writer, "RESPONSE: %s\n", answer)
+		u.write("RESPONSE: %s\n", answer)
 		return
 	}
-	fmt.Fprintln(u.writer)
-	fmt.Fprintln(u.writer, answer)
+	u.writeln()
+	u.writeln(answer)
 }
 
 // Sources displays the sources used in a RAG response
@@ -207,21 +228,21 @@ func (u *terminalChatUI) Sources(sources []SourceInfo) {
 	if u.personality == PersonalityMachine {
 		for _, src := range sources {
 			if src.Score != 0 {
-				fmt.Fprintf(u.writer, "SOURCE: %s score=%.4f\n", src.Source, src.Score)
+				u.write("SOURCE: %s score=%.4f\n", src.Source, src.Score)
 			} else if src.Distance != 0 {
-				fmt.Fprintf(u.writer, "SOURCE: %s distance=%.4f\n", src.Source, src.Distance)
+				u.write("SOURCE: %s distance=%.4f\n", src.Source, src.Distance)
 			} else {
-				fmt.Fprintf(u.writer, "SOURCE: %s\n", src.Source)
+				u.write("SOURCE: %s\n", src.Source)
 			}
 		}
 		return
 	}
 
-	fmt.Fprintln(u.writer)
+	u.writeln()
 	if u.personality == PersonalityMinimal {
-		fmt.Fprintln(u.writer, "Sources:")
+		u.writeln("Sources:")
 		for i, src := range sources {
-			fmt.Fprintf(u.writer, "  %d. %s\n", i+1, src.Source)
+			u.write("  %d. %s\n", i+1, src.Source)
 		}
 		return
 	}
@@ -243,36 +264,36 @@ func (u *terminalChatUI) Sources(sources []SourceInfo) {
 
 	boxStyle := Styles.InfoBox.Width(60)
 	titleLine := Styles.Subtitle.Render("Sources")
-	fmt.Fprintln(u.writer, boxStyle.Render(titleLine+"\n"+content.String()))
+	u.writeln(boxStyle.Render(titleLine + "\n" + content.String()))
 }
 
 // NoSources displays a message when no sources were found
 func (u *terminalChatUI) NoSources() {
 	if u.personality == PersonalityMachine {
-		fmt.Fprintln(u.writer, "SOURCES: none")
+		u.writeln("SOURCES: none")
 		return
 	}
 	if u.personality != PersonalityMinimal {
-		fmt.Fprintln(u.writer, Styles.Muted.Render("(No sources from knowledge base)"))
+		u.writeln(Styles.Muted.Render("(No sources from knowledge base)"))
 	}
 }
 
 // Error displays a chat error message
 func (u *terminalChatUI) Error(err error) {
 	if u.personality == PersonalityMachine {
-		fmt.Fprintf(u.writer, "CHAT_ERROR: %v\n", err)
+		u.write("CHAT_ERROR: %v\n", err)
 		return
 	}
-	fmt.Fprintf(u.writer, "%s %s\n", IconError.Render(), Styles.Error.Render(fmt.Sprintf("Chat error: %v", err)))
+	u.write("%s %s\n", IconError.Render(), Styles.Error.Render(fmt.Sprintf("Chat error: %v", err)))
 }
 
 // SessionResume displays session resume information
 func (u *terminalChatUI) SessionResume(sessionID string, turnCount int) {
 	if u.personality == PersonalityMachine {
-		fmt.Fprintf(u.writer, "SESSION_RESUME: session=%s turns=%d\n", sessionID, turnCount)
+		u.write("SESSION_RESUME: session=%s turns=%d\n", sessionID, turnCount)
 		return
 	}
-	fmt.Fprintf(u.writer, "%s %s\n", IconSuccess.Render(),
+	u.write("%s %s\n", IconSuccess.Render(),
 		Styles.Success.Render(fmt.Sprintf("Resumed session %s (%d previous turns)", sessionID, turnCount)))
 }
 
@@ -308,13 +329,13 @@ func (u *terminalChatUI) SessionResume(sessionID string, turnCount int) {
 //   - Writer is available and writable
 func (u *terminalChatUI) SessionEnd(sessionID string) {
 	if u.personality == PersonalityMachine {
-		fmt.Fprintf(u.writer, "CHAT_END: session=%s\n", sessionID)
+		u.write("CHAT_END: session=%s\n", sessionID)
 		return
 	}
 	if sessionID != "" {
-		fmt.Fprintln(u.writer, Styles.Muted.Render(fmt.Sprintf("Session: %s", sessionID)))
+		u.writeln(Styles.Muted.Render(fmt.Sprintf("Session: %s", sessionID)))
 	}
-	fmt.Fprintln(u.writer, "Goodbye!")
+	u.writeln("Goodbye!")
 }
 
 // SessionEndRich displays rich session end information with statistics.
@@ -402,7 +423,7 @@ func (u *terminalChatUI) SessionEndRich(sessionID string, stats *SessionStats) {
 //
 //   - Stats is non-nil (caller validates)
 func (u *terminalChatUI) sessionEndRichMachine(sessionID string, stats *SessionStats) {
-	fmt.Fprintf(u.writer, "CHAT_END: session=%s messages=%d tokens=%d duration=%s\n",
+	u.write("CHAT_END: session=%s messages=%d tokens=%d duration=%s\n",
 		sessionID, stats.MessageCount, stats.TotalTokens, stats.Duration.Round(time.Millisecond))
 }
 
@@ -431,13 +452,13 @@ func (u *terminalChatUI) sessionEndRichMachine(sessionID string, stats *SessionS
 //
 //   - Stats is non-nil (caller validates)
 func (u *terminalChatUI) sessionEndRichMinimal(sessionID string, stats *SessionStats) {
-	fmt.Fprintln(u.writer)
+	u.writeln()
 	if sessionID != "" {
-		fmt.Fprintf(u.writer, "Session: %s\n", sessionID)
+		u.write("Session: %s\n", sessionID)
 	}
-	fmt.Fprintf(u.writer, "Messages: %d | Tokens: %d | Duration: %s\n",
+	u.write("Messages: %d | Tokens: %d | Duration: %s\n",
 		stats.MessageCount, stats.TotalTokens, formatDuration(stats.Duration))
-	fmt.Fprintln(u.writer, "Goodbye!")
+	u.writeln("Goodbye!")
 }
 
 // sessionEndRichFull renders session end with full styling.
@@ -470,7 +491,7 @@ func (u *terminalChatUI) sessionEndRichMinimal(sessionID string, stats *SessionS
 //   - Stats is non-nil (caller validates)
 //   - Terminal supports ANSI color codes
 func (u *terminalChatUI) sessionEndRichFull(sessionID string, stats *SessionStats) {
-	fmt.Fprintln(u.writer)
+	u.writeln()
 
 	var content strings.Builder
 
@@ -530,10 +551,11 @@ func (u *terminalChatUI) sessionEndRichFull(sessionID string, stats *SessionStat
 	}
 
 	// Render the styled box
-	boxStyle := Styles.Box.Width(60)
-	fmt.Fprintln(u.writer, boxStyle.Render(content.String()))
-	fmt.Fprintln(u.writer)
-	fmt.Fprintln(u.writer, Styles.Highlight.Render("Goodbye! 👋"))
+	// Width 68 accommodates the resume command (25 chars + 36 char UUID + padding)
+	boxStyle := Styles.Box.Width(68)
+	u.writeln(boxStyle.Render(content.String()))
+	u.writeln()
+	u.writeln(Styles.Highlight.Render("Goodbye! 👋"))
 }
 
 // formatDuration formats a duration for human-readable display.

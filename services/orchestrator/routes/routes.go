@@ -14,8 +14,10 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/middleware"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -36,6 +38,7 @@ import (
 //   - client: Weaviate client (may be nil if vector DB not available)
 //   - globalLLMClient: LLM client for chat operations
 //   - policyEngine: Policy engine for sensitive data scanning
+//   - opts: Extension options for auth, audit, and filtering (Enterprise features)
 //
 // # Endpoints
 //
@@ -43,8 +46,16 @@ import (
 //   - POST /v1/chat/direct: Direct LLM chat (always available)
 //   - POST /v1/chat/rag: Conversational RAG (requires Weaviate)
 //   - And more (see route registration below)
+//
+// # Enterprise Extensions
+//
+// The opts parameter enables enterprise features:
+//   - AuthProvider: Applied as middleware for authentication
+//   - AuthzProvider: Used in handlers for authorization checks
+//   - AuditLogger: Used in handlers for compliance logging
+//   - MessageFilter: Used in handlers for PII detection/redaction
 func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient llm.LLMClient,
-	policyEngine *policy_engine.PolicyEngine) {
+	policyEngine *policy_engine.PolicyEngine, opts extensions.ServiceOptions) {
 
 	router.GET("/health", handlers.HealthCheck)
 	router.GET("/metrics", gin.WrapH(promhttp.Handler())) // Prometheus metrics
@@ -61,14 +72,17 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 	if client != nil {
 		chatRAGService = services.NewChatRAGService(client, globalLLMClient, policyEngine)
 	}
-	chatHandler := handlers.NewChatHandler(globalLLMClient, policyEngine, chatRAGService)
+	chatHandler := handlers.NewChatHandler(globalLLMClient, policyEngine, chatRAGService, opts)
 
 	// Create StreamingChatHandler for SSE streaming endpoints
 	// Pass Weaviate client for session history loading on resume
-	streamingHandler := handlers.NewStreamingChatHandler(globalLLMClient, policyEngine, chatRAGService, client)
+	streamingHandler := handlers.NewStreamingChatHandler(globalLLMClient, policyEngine, chatRAGService, client, opts)
 
-	// API version 1 group
+	// API version 1 group - protected by auth middleware
+	// NopAuthProvider (default) allows all requests as "local-user"
+	// Enterprise implementations validate tokens against identity providers
 	v1 := router.Group("/v1")
+	v1.Use(middleware.AuthMiddleware(opts.AuthProvider))
 	{
 		// Chat endpoints using the new ChatHandler interface
 		v1.POST("/chat/direct", chatHandler.HandleDirectChat)
@@ -88,6 +102,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 			v1.POST("/chat/rag/verified/stream", streamingHandler.HandleVerifiedRAGStream) // Verified pipeline streaming
 			v1.POST("/documents", handlers.CreateDocument(client))
 			v1.GET("/documents", handlers.ListDocuments(client))
+			v1.GET("/document/versions", handlers.GetDocumentVersions(client)) // Document version history
 			v1.DELETE("/document", handlers.DeleteBySource(client))
 			v1.POST("/rag", handlers.HandleRAGRequest(client, globalLLMClient)) // Single-shot RAG (aleutian ask)
 

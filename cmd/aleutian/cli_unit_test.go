@@ -973,7 +973,7 @@ func TestCLIUnit_Ingest_Help(t *testing.T) {
 		args         []string
 		wantContains []string
 	}{
-		{"ingest help", []string{"ingest", "--help"}, []string{"--force", "--data-space", "--version"}},
+		{"ingest help", []string{"ingest", "--help"}, []string{"--force", "--dataspace", "--version"}},
 		{"populate help", []string{"populate", "--help"}, []string{"vectordb"}},
 		{"populate vectordb help", []string{"populate", "vectordb", "--help"}, []string{"--force"}},
 	}
@@ -1002,9 +1002,9 @@ func TestCLIUnit_Ingest_Flags(t *testing.T) {
 		args []string
 	}{
 		{"force flag", []string{"ingest", "--force", "--help"}},
-		{"data-space flag", []string{"ingest", "--data-space", "test", "--help"}},
+		{"dataspace flag", []string{"ingest", "--dataspace", "test", "--help"}},
 		{"version flag", []string{"ingest", "--version", "v1.0", "--help"}},
-		{"all flags", []string{"ingest", "--force", "--data-space", "test", "--version", "v1", "--help"}},
+		{"all flags", []string{"ingest", "--force", "--dataspace", "test", "--version", "v1", "--help"}},
 	}
 
 	for _, tt := range tests {
@@ -1026,7 +1026,7 @@ func TestCLIUnit_Ingest_DataSpaceValues(t *testing.T) {
 
 	for _, space := range spaces {
 		t.Run("space_"+space, func(t *testing.T) {
-			result, err := unitTestHarness.Run("ingest", "--data-space", space, "--help")
+			result, err := unitTestHarness.Run("ingest", "--dataspace", space, "--help")
 			if err != nil {
 				t.Fatalf("Run failed: %v", err)
 			}

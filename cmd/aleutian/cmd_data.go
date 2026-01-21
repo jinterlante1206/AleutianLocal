@@ -767,7 +767,9 @@ func (p *IngestPipeline) ingestFiles(ctx context.Context, files []scanResult) (
 				}
 
 				bodyBytes, readErr := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					slog.Debug("response body close error", "error", closeErr)
+				}
 				if readErr != nil {
 					resultChan <- ingestResult{
 						FilePath: file.FilePath,
@@ -866,7 +868,7 @@ func (p *IngestPipeline) ingestFiles(ctx context.Context, files []scanResult) (
 //
 // # Workflow
 //
-//  1. Parse command flags (data-space, version, force)
+//  1. Parse command flags (dataspace, version, force)
 //  2. Create audit context with current user identity
 //  3. Discover files matching allowed extensions
 //  4. Scan files for secrets/PII in parallel
@@ -876,7 +878,7 @@ func (p *IngestPipeline) ingestFiles(ctx context.Context, files []scanResult) (
 //
 // # Inputs
 //
-//   - cmd: Cobra command with flags (data-space, version, force)
+//   - cmd: Cobra command with flags (dataspace, version, force)
 //   - args: Directory paths to ingest
 //
 // # Outputs
@@ -897,9 +899,9 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 	defer cancel()
 
 	// Parse flags
-	dataSpace, err := cmd.Flags().GetString("data-space")
+	dataSpace, err := cmd.Flags().GetString("dataspace")
 	if err != nil {
-		ux.Error(fmt.Sprintf("Failed to read 'data-space' flag: %v", err))
+		ux.Error(fmt.Sprintf("Failed to read 'dataspace' flag: %v", err))
 		return
 	}
 	versionTag, err := cmd.Flags().GetString("version")
@@ -1067,7 +1069,11 @@ func runDeleteSession(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Orchestrator returned an error: %s", resp.Status)
@@ -1100,6 +1106,7 @@ type VerifySessionResponse struct {
 	VerifiedAt   int64          `json:"verified_at"`
 	TurnHashes   map[int]string `json:"turn_hashes,omitempty"`
 	ErrorDetails string         `json:"error_details,omitempty"`
+	DataSpace    string         `json:"data_space,omitempty"` // Dataspace used for this session's queries
 }
 
 // runVerifySession verifies the integrity of a session's hash chain.
@@ -1167,7 +1174,11 @@ func runVerifySession(cmd *cobra.Command, args []string) {
 		}
 		os.Exit(1)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	// Parse response
 	var result VerifySessionResponse
@@ -1365,6 +1376,36 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 	fmt.Println()
 
 	fmt.Println(sectionDivider)
+	fmt.Println("DATASPACES & SECURITY")
+	fmt.Println(sectionDivider)
+	fmt.Println()
+
+	// Display dataspace info (from response if available, otherwise show as not tracked)
+	if result.DataSpace != "" {
+		fmt.Printf("  📁  Dataspace:               %s\n", result.DataSpace)
+		fmt.Println()
+		fmt.Printf("  Documents in this session were queried from the '%s' dataspace.\n", result.DataSpace)
+		fmt.Println("  Other dataspaces were NOT searched.")
+	} else {
+		fmt.Println("  📁  Dataspace:               (not tracked for this session)")
+		fmt.Println()
+		fmt.Println("  This session did not specify a dataspace filter.")
+		fmt.Println("  Documents from ALL dataspaces may have been searched.")
+	}
+	fmt.Println()
+
+	// Security status (placeholder for future encryption features)
+	fmt.Println("  🔒  Access Control:          Not configured")
+	fmt.Println("  🔐  Content Encryption:      Not configured")
+	fmt.Println()
+
+	fmt.Println("  Security Features (Coming Soon):")
+	fmt.Println("    • Dataspace locking:      aleutian dataspace lock <name> --set-password")
+	fmt.Println("    • Content encryption:     aleutian ingest ./docs --dataspace <name> --encrypt")
+	fmt.Println("    • Keychain integration:   aleutian dataspace unlock <name> --keychain")
+	fmt.Println()
+
+	fmt.Println(sectionDivider)
 	fmt.Println("LOGS & DEBUGGING")
 	fmt.Println(sectionDivider)
 	fmt.Println()
@@ -1398,7 +1439,11 @@ func runListSessions(_ *cobra.Command, _ []string) {
 	if err != nil {
 		log.Fatalf("Failed to connect to orchestrator: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Orchestrator returned an error: %s", resp.Status)
@@ -1443,7 +1488,11 @@ func runWeaviateBackup(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send backup request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read backup response: %v", err)
@@ -1481,7 +1530,11 @@ func runWeaviateDeleteDoc(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send delete request to orchestrator: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1520,7 +1573,11 @@ func runWeaviateRestore(_ *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatalf("Failed to send restore request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read restore response: %v", err)
@@ -1545,7 +1602,11 @@ func runWeaviateSummary(_ *cobra.Command, _ []string) {
 	if err != nil {
 		log.Fatalf("Failed to send summary request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read summary response: %v", err)
@@ -1599,7 +1660,11 @@ func runWeaviateWipeout(cmd *cobra.Command, _ []string) {
 	if err != nil {
 		log.Fatalf("Failed to send wipe request: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read wipe response: %v", err)
@@ -1623,4 +1688,232 @@ func runUploadLogs(_ *cobra.Command, _ []string) {
 // DISABLED: Temporarily disabled in v0.3.0 pending config migration to aleutian.yaml.
 func runUploadBackups(_ *cobra.Command, _ []string) {
 	fmt.Println("GCS Uploads are temporarily disabled in v0.3.0 pending config migration.")
+}
+
+// =============================================================================
+// Document Management Commands
+// =============================================================================
+
+// DocVersionInfo represents a single version of a document.
+type DocVersionInfo struct {
+	VersionTag    string `json:"version_tag"`
+	VersionNumber int    `json:"version_number"`
+	ChunkCount    int    `json:"chunk_count"`
+	IngestedAt    int64  `json:"ingested_at"`
+	IsCurrent     bool   `json:"is_current"`
+}
+
+// DocVersionsResponse is the response from the document versions endpoint.
+type DocVersionsResponse struct {
+	ParentSource string           `json:"parent_source"`
+	Versions     []DocVersionInfo `json:"versions"`
+}
+
+// docsHTTPClient is a shared HTTP client with timeout for docs commands.
+// Using a shared client enables connection pooling and consistent timeout behavior.
+var docsHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
+// runDocsList lists all ingested documents in the knowledge base.
+//
+// # Description
+//
+// Queries the orchestrator for a list of all ingested documents,
+// grouped by parent_source with chunk counts.
+//
+// # Outputs
+//
+// Prints a formatted table of documents to stdout.
+// Returns an error if the API call fails.
+//
+// # Limitations
+//
+//   - Requires orchestrator to be running
+//   - Uses 30-second timeout for API calls
+func runDocsList(_ *cobra.Command, _ []string) error {
+	// Create context with timeout for cancellation
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	baseURL := getOrchestratorBaseURL()
+	orchestratorURL := fmt.Sprintf("%s/v1/documents", baseURL)
+
+	slog.Info("fetching document list", "url", orchestratorURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orchestratorURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := docsHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to fetch documents from %s: %w", orchestratorURL, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("failed to fetch documents (status %d, body read error: %v)", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("failed to fetch documents (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Documents []struct {
+			ParentSource string `json:"parent_source"`
+			ChunkCount   int    `json:"chunk_count"`
+			DataSpace    string `json:"data_space"`
+			VersionTag   string `json:"version_tag"`
+			IngestedAt   int64  `json:"ingested_at"`
+		} `json:"documents"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(result.Documents) == 0 {
+		fmt.Println("No documents found.")
+		return nil
+	}
+
+	// Print formatted table
+	fmt.Println()
+	fmt.Printf("%-50s %-12s %-10s %-8s %s\n", "DOCUMENT", "DATASPACE", "VERSION", "CHUNKS", "INGESTED")
+	fmt.Println(strings.Repeat("─", 100))
+	for _, doc := range result.Documents {
+		ingestedTime := time.UnixMilli(doc.IngestedAt).Format("2006-01-02 15:04")
+		displayName := doc.ParentSource
+		if len(displayName) > 48 {
+			displayName = "..." + displayName[len(displayName)-45:]
+		}
+		fmt.Printf("%-50s %-12s %-10s %-8d %s\n",
+			displayName,
+			doc.DataSpace,
+			doc.VersionTag,
+			doc.ChunkCount,
+			ingestedTime)
+	}
+	fmt.Println()
+	fmt.Printf("Total: %d documents\n", len(result.Documents))
+	return nil
+}
+
+// maxDocumentNameLength is the maximum allowed length for a document name.
+// This prevents potential DoS from extremely long input strings.
+const maxDocumentNameLength = 512
+
+// runDocsVersions lists all versions of a specific document.
+//
+// # Description
+//
+// Queries the orchestrator for the version history of a document.
+// Shows all versions with timestamps, chunk counts, and current status.
+//
+// # Inputs
+//
+//   - args[0]: The parent_source (filename) to query versions for
+//
+// # Outputs
+//
+// Prints a formatted version history table to stdout.
+// Returns an error if validation or API call fails.
+//
+// # Limitations
+//
+//   - Requires orchestrator to be running
+//   - Document must have been ingested at least once
+//   - Uses 30-second timeout for API calls
+//   - Document name limited to 512 characters
+func runDocsVersions(_ *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("please specify a document name\nUsage: aleutian docs versions <document-name>")
+	}
+
+	parentSource := args[0]
+
+	// Input validation: check length
+	if len(parentSource) > maxDocumentNameLength {
+		return fmt.Errorf("document name is too long (max %d characters, got %d)", maxDocumentNameLength, len(parentSource))
+	}
+
+	// Input validation: check for empty or whitespace-only
+	if strings.TrimSpace(parentSource) == "" {
+		return fmt.Errorf("document name cannot be empty or whitespace-only")
+	}
+
+	// Create context with timeout for cancellation
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	baseURL := getOrchestratorBaseURL()
+
+	encodedSource := url.QueryEscape(parentSource)
+	orchestratorURL := fmt.Sprintf("%s/v1/document/versions?source=%s", baseURL, encodedSource)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, orchestratorURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := docsHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to fetch document versions from %s: %w", orchestratorURL, err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("response body close error", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Printf("No versions found for document: %s\n", parentSource)
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("failed to fetch versions (status %d, body read error: %v)", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("failed to fetch versions (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result DocVersionsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(result.Versions) == 0 {
+		fmt.Printf("No versions found for document: %s\n", parentSource)
+		return nil
+	}
+
+	// Print formatted version history
+	fmt.Println()
+	fmt.Printf("Version history for: %s\n", result.ParentSource)
+	fmt.Println(strings.Repeat("─", 70))
+	fmt.Printf("%-10s %-20s %-10s %s\n", "VERSION", "INGESTED", "CHUNKS", "STATUS")
+	fmt.Println(strings.Repeat("─", 70))
+
+	for _, v := range result.Versions {
+		ingestedTime := time.UnixMilli(v.IngestedAt).Format("2006-01-02 15:04")
+		status := ""
+		if v.IsCurrent {
+			status = "(current)"
+		}
+		fmt.Printf("%-10s %-20s %-10d %s\n",
+			v.VersionTag,
+			ingestedTime,
+			v.ChunkCount,
+			status)
+	}
+	fmt.Println()
+	return nil
 }

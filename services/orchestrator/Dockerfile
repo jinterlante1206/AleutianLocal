@@ -14,8 +14,11 @@ RUN go mod download
 COPY services/ ./services/
 COPY pkg/ ./pkg/
 
-# Build the orchestrator binary, pointing to its package path from the root
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /app/orchestrator ./services/orchestrator
+# Copy the cmd directory for the entry point
+COPY cmd/ ./cmd/
+
+# Build the orchestrator binary, pointing to the cmd entry point
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /app/orchestrator ./cmd/orchestrator
 # --- Final Stage ---
 FROM --platform=linux/arm64 alpine:latest
 WORKDIR /app

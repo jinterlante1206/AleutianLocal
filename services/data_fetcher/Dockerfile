@@ -7,8 +7,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
+# Copy source code (including local pkg dependencies)
 COPY services/data_fetcher/ ./services/data_fetcher/
+COPY pkg/ ./pkg/
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /data-fetcher ./services/data_fetcher

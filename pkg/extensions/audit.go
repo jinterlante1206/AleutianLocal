@@ -43,10 +43,9 @@ import (
 //	    ResourceType: "message",
 //	    ResourceID:   messageID,
 //	    Outcome:      "success",
-//	    Metadata: map[string]any{
-//	        "session_id": sessionID,
-//	        "model":      "claude-3",
-//	    },
+//	    Metadata: NewMetadata().
+//	        Set("session_id", sessionID).
+//	        Set("model", "claude-3"),
 //	}
 type AuditEvent struct {
 	// EventType categorizes the event for filtering and alerting.
@@ -87,7 +86,13 @@ type AuditEvent struct {
 	//   - "duration_ms": operation duration for performance analysis
 	//   - "model": AI model used
 	//   - "session_id": conversation session
-	Metadata map[string]any
+	//
+	// Use NewMetadata() and type-safe accessors:
+	//
+	//   Metadata: NewMetadata().
+	//       Set("session_id", sessionID).
+	//       Set("model", "claude-3"),
+	Metadata Metadata
 }
 
 // AuditFilter defines criteria for querying audit events.
@@ -244,21 +249,21 @@ type NopAuditLogger struct{}
 // Log discards the event without recording it.
 //
 // Always returns nil (success) regardless of event content.
-func (l *NopAuditLogger) Log(ctx context.Context, event AuditEvent) error {
+func (l *NopAuditLogger) Log(_ context.Context, _ AuditEvent) error {
 	return nil
 }
 
 // Query returns an empty slice (no events are stored).
 //
 // Always returns nil error with empty results.
-func (l *NopAuditLogger) Query(ctx context.Context, filter AuditFilter) ([]AuditEvent, error) {
+func (l *NopAuditLogger) Query(_ context.Context, _ AuditFilter) ([]AuditEvent, error) {
 	return []AuditEvent{}, nil
 }
 
 // Flush is a no-op since nothing is buffered.
 //
 // Always returns nil (success).
-func (l *NopAuditLogger) Flush(ctx context.Context) error {
+func (l *NopAuditLogger) Flush(_ context.Context) error {
 	return nil
 }
 

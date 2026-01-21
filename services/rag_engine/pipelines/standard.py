@@ -30,10 +30,16 @@ class StandardRAGPipeline(BaseRAGPipeline):
         self.search_limit = config.get("standard_rag_limit", DEFAULT_SEARCH_LIMIT)
         logger.info("StandardRAGPipeline initialized.")
 
-    async def _search_weaviate_initial(self, query_vector: list[float], session_id: str | None = None) -> list[dict]:
+    async def _search_weaviate_initial(
+        self,
+        query_vector: list[float],
+        session_id: str | None = None,
+        data_space: str | None = None,
+        version_tag: str | None = None,
+    ) -> list[dict]:
         """
-        Performs Parent Document Retrieval with session-aware filtering.
-            1. Creates a filter for "Global" docs OR "Session" docs.
+        Performs Parent Document Retrieval with session-aware, data-space, and version filtering.
+            1. Creates a filter for "Global" docs OR "Session" docs, scoped to data_space and version.
             2. Finds the most relevant child chunks using this filter.
             3. Gets their unique parent_source ID.
             4. Retrieves all chunks for those parent documents for the full context.
@@ -42,8 +48,8 @@ class StandardRAGPipeline(BaseRAGPipeline):
         try:
             documents_collection = self.weaviate_client.collections.get("Document")
 
-            # Get the session-aware filter from the base class
-            combined_filter = self._get_session_aware_filter(session_id)
+            # Get the session-aware, data-space, and version filter from the base class
+            combined_filter = self._get_session_aware_filter(session_id, data_space, version_tag)
 
             # 1. Find the most relevant child chunks
             response = documents_collection.query.near_vector(
@@ -96,6 +102,8 @@ class StandardRAGPipeline(BaseRAGPipeline):
         session_id: str | None = None,
         strict_mode: bool = True,
         relevant_history: list[dict] | None = None,
+        data_space: str | None = None,
+        version_tag: str | None = None,
     ) -> tuple[str, list[dict]]:
         """Executes the standard RAG pipeline.
 
@@ -113,17 +121,23 @@ class StandardRAGPipeline(BaseRAGPipeline):
             Relevant conversation history from P7 semantic memory. Each dict contains
             'question', 'answer', 'turn_number', and 'similarity_score'. If provided,
             history turns are injected as pseudo-documents before generation.
+        data_space : str | None
+            The data space to filter queries by (e.g., "work", "personal").
+            If None, searches ALL data spaces (no isolation).
+        version_tag : str | None
+            Specific document version to query (e.g., "v1").
+            If None, queries current versions only (is_current = true).
         """
-        logger.info(f"Standard RAG run started (strict_mode={strict_mode}) for query: {query[:50]}...")
+        logger.info(f"Standard RAG run started (strict_mode={strict_mode}, data_space={data_space}, version_tag={version_tag}) for query: {query[:50]}...")
 
         # 1. Get query embedding (uses inherited _get_embedding)
         logger.debug("Getting query embedding...")
         query_vector = await self._get_embedding(query)
         logger.debug("Query embedding received.")
 
-        # 2. Search for relevant documents
+        # 2. Search for relevant documents (with data_space and version filtering)
         logger.debug("Searching Weaviate...")
-        context_docs_with_meta = await self._search_weaviate_initial(query_vector, session_id)
+        context_docs_with_meta = await self._search_weaviate_initial(query_vector, session_id, data_space, version_tag)
         logger.debug(f"Found {len(context_docs_with_meta)} context documents.")
 
         # Apply relevance threshold filtering in strict mode
@@ -164,6 +178,8 @@ class StandardRAGPipeline(BaseRAGPipeline):
             {
                 "source": d["properties"].get("source", "Unknown"),
                 "distance": d["metadata"].distance if (d.get("metadata") and hasattr(d["metadata"], "distance")) else None,
+                "version_number": d["properties"].get("version_number"),
+                "is_current": d["properties"].get("is_current"),
             } for d in context_docs_with_meta
         ]
 

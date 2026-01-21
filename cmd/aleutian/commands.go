@@ -20,12 +20,15 @@ var (
 	backendType      string
 	profile          string
 	forceBuild       bool
-	forecastMode     string // CLI override for forecast.mode (standalone/sapheneia)
+	targetServices   []string // Services to target for start/build operations
+	forecastMode     string   // CLI override for forecast.mode (standalone/sapheneia)
 	pipelineType     string
 	noRag            bool
 	unrestrictedMode bool // Allow LLM fallback when no relevant RAG documents found
 	enableThinking   bool
 	budgetTokens     int
+	dataSpaceFlag    string // Data space to filter RAG queries by
+	docVersionFlag   string // Specific document version to query (e.g., "v1", "report.md:v3")
 	quantizeType     string
 	isLocalPath      bool
 	fetchDays        int
@@ -34,6 +37,10 @@ var (
 	forecastContext  int
 	personalityLevel string // UX personality level (full/standard/minimal/machine)
 	verbosityLevel   int    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
+
+	// Evaluation command flags (Phase 2 Sapheneia Integration)
+	evalAPIVersion     string // API version: "legacy" (default) or "unified" (new tracing API)
+	evalDeploymentMode string // Deployment mode: "standalone" (localhost) or "distributed" (k8s)
 
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
@@ -200,6 +207,30 @@ Examples:
 		Run:   runWeaviateDeleteDoc, // Defined in cmd_data.go
 	}
 
+	// --- Document Management ---
+	docsCmd = &cobra.Command{
+		Use:   "docs",
+		Short: "Manage ingested documents and their versions",
+	}
+	docsVersionsCmd = &cobra.Command{
+		Use:   "versions [file-name]",
+		Short: "List all versions of an ingested document",
+		Long: `Shows the version history for a specific document.
+
+Each time a document is re-ingested, a new version is created.
+Previous versions are preserved and can be queried using --doc-version in chat.
+
+Example:
+  aleutian docs versions report.md
+  aleutian docs versions ./path/to/notes.txt`,
+		RunE: runDocsVersions, // Defined in cmd_data.go
+	}
+	docsListCmd = &cobra.Command{
+		Use:   "list",
+		Short: "List all ingested documents",
+		RunE:  runDocsList, // Defined in cmd_data.go
+	}
+
 	// --- GCS ---
 	uploadCmd = &cobra.Command{
 		Use:   "upload",
@@ -297,7 +328,7 @@ func init() {
 	// Simplified ingest alias
 	rootCmd.AddCommand(ingestCmd)
 	ingestCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
-	ingestCmd.Flags().String("data-space", "default", "The logical data space to ingest into")
+	ingestCmd.Flags().String("dataspace", "default", "The logical dataspace to ingest into")
 	ingestCmd.Flags().String("version", "latest", "A version tag for this ingestion")
 
 	rootCmd.AddCommand(askCmd)
@@ -308,7 +339,7 @@ func init() {
 	rootCmd.AddCommand(populateCmd)
 	populateCmd.AddCommand(populateVectorDBCmd)
 	populateVectorDBCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
-	populateVectorDBCmd.Flags().String("data-space", "default", "The logical data space to ingest into (e.g., 'work', 'personal')")
+	populateVectorDBCmd.Flags().String("dataspace", "default", "The logical dataspace to ingest into (e.g., 'work', 'personal')")
 	populateVectorDBCmd.Flags().String("version", "latest", "A version tag for this ingestion (e.g., 'v1.1', '2025-11-01')")
 
 	// --- Local Commands ---
@@ -322,6 +353,7 @@ func init() {
 		"openai, anthropic). Skips local model checks if not 'ollama'.")
 	deployCmd.Flags().StringVar(&profile, "profile", "auto", "Optimization profile: 'auto', 'low', 'standard', 'performance', 'ultra', or 'manual'")
 	deployCmd.Flags().BoolVar(&forceBuild, "build", false, "Force rebuild of container images")
+	deployCmd.Flags().StringSliceVar(&targetServices, "service", nil, "Target specific service(s) for start/build (can be repeated)")
 	deployCmd.Flags().Bool("force-recreate", false,
 		"automatically recreates the podman machine if a drift is detected.")
 	deployCmd.Flags().Bool("fix-mounts", false,
@@ -354,6 +386,8 @@ func init() {
 	chatCmd.Flags().BoolVar(&unrestrictedMode, "unrestricted", false, "Allow LLM to answer when no relevant documents found (default: strict RAG mode)")
 	chatCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking", "RAG pipeline (standard, reranking, raptor, graph, verified)")
 	chatCmd.Flags().IntVarP(&verbosityLevel, "verbosity", "V", 2, "Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (default: 2)")
+	chatCmd.Flags().StringVar(&dataSpaceFlag, "dataspace", "", "Limit RAG search to a specific dataspace (e.g., 'work', 'personal')")
+	chatCmd.Flags().StringVar(&docVersionFlag, "doc-version", "", "Query a specific document version (e.g., 'v1' or 'report.md:v3')")
 
 	rootCmd.AddCommand(traceCmd)
 
@@ -365,6 +399,11 @@ func init() {
 	weaviateCmd.AddCommand(weaviateWipeoutCmd)
 	weaviateWipeoutCmd.Flags().Bool("force", false, "Required to confirm the deletion of all data.")
 	weaviateCmd.AddCommand(weaviateDeleteDocCmd)
+
+	// Document management commands
+	rootCmd.AddCommand(docsCmd)
+	docsCmd.AddCommand(docsVersionsCmd)
+	docsCmd.AddCommand(docsListCmd)
 
 	// GCS data commands
 	rootCmd.AddCommand(uploadCmd)
@@ -386,6 +425,11 @@ func init() {
 	runEvaluationCmd.Flags().String("date", "", "Evaluation date (YYYYMMDD, default: today)")
 	runEvaluationCmd.Flags().String("ticker", "", "Single ticker to evaluate (default: all)")
 	runEvaluationCmd.Flags().String("model", "", "Single model to evaluate (default: all)")
+	runEvaluationCmd.Flags().String("compute-mode", "", "DEPRECATED: Use --api-version instead. API mode: 'legacy' or 'unified'")
+	runEvaluationCmd.Flags().StringVar(&evalAPIVersion, "api-version", "legacy",
+		"Sapheneia API version: 'legacy' (v1/timeseries/forecast) or 'unified' (orchestration/v1/predict with tracing)")
+	runEvaluationCmd.Flags().StringVar(&evalDeploymentMode, "deployment-mode", "standalone",
+		"Service deployment mode: 'standalone' (localhost ports) or 'distributed' (k8s service names)")
 	evaluationCmd.AddCommand(exportEvaluationCmd)
 	exportEvaluationCmd.Flags().StringP("output", "o", "", "Output filename (default: backtest_{RunID}.csv)")
 

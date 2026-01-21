@@ -11,13 +11,19 @@
 package handlers
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
 	"github.com/jinterlante1206/AleutianLocal/services/llm"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/middleware"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"go.opentelemetry.io/otel"
@@ -80,6 +86,7 @@ type ChatHandler interface {
 //   - policyEngine: Policy engine for sensitive data scanning
 //   - ragService: Service for RAG chat processing
 //   - tracer: OpenTelemetry tracer for distributed tracing
+//   - opts: Extension options for enterprise features (auth, audit, filter)
 //
 // # Thread Safety
 //
@@ -98,6 +105,7 @@ type chatHandler struct {
 	policyEngine *policy_engine.PolicyEngine
 	ragService   *services.ChatRAGService
 	tracer       trace.Tracer
+	opts         extensions.ServiceOptions
 }
 
 // =============================================================================
@@ -117,6 +125,7 @@ type chatHandler struct {
 //   - llmClient: LLM client for direct chat. Must not be nil.
 //   - policyEngine: Policy scanner. Must not be nil.
 //   - ragService: RAG chat service. May be nil if RAG is not used.
+//   - opts: Extension options for enterprise features (auth, audit, filter).
 //
 // # Outputs
 //
@@ -124,7 +133,7 @@ type chatHandler struct {
 //
 // # Examples
 //
-//	handler := handlers.NewChatHandler(llmClient, policyEngine, ragService)
+//	handler := handlers.NewChatHandler(llmClient, policyEngine, ragService, opts)
 //	router.POST("/v1/chat/direct", handler.HandleDirectChat)
 //	router.POST("/v1/chat/rag", handler.HandleChatRAG)
 //
@@ -139,6 +148,7 @@ func NewChatHandler(
 	llmClient llm.LLMClient,
 	policyEngine *policy_engine.PolicyEngine,
 	ragService *services.ChatRAGService,
+	opts extensions.ServiceOptions,
 ) ChatHandler {
 	if llmClient == nil {
 		panic("NewChatHandler: llmClient must not be nil")
@@ -152,6 +162,7 @@ func NewChatHandler(
 		policyEngine: policyEngine,
 		ragService:   ragService,
 		tracer:       otel.Tracer("aleutian.orchestrator.handlers.chat"),
+		opts:         opts,
 	}
 }
 
@@ -231,6 +242,35 @@ func (h *chatHandler) HandleDirectChat(c *gin.Context) {
 
 	startTime := time.Now()
 
+	// Step 0: Get authenticated user from context (set by auth middleware)
+	authInfo := middleware.GetAuthInfo(c)
+	userID := "anonymous"
+	if authInfo != nil {
+		userID = authInfo.UserID
+	}
+
+	// Step 0.5: Read raw body for audit capture (FOSS-008)
+	// Enterprise uses this to compute hashes and store the exact request bytes.
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		span.RecordError(err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request"})
+		return
+	}
+	// Reset body so BindJSON can read it
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(rawBody))
+
+	// Capture request for audit (FOSS-008)
+	// Enterprise computes hashes/encrypts; FOSS Nop does nothing.
+	auditID, _ := h.opts.RequestAuditor.CaptureRequest(ctx, &extensions.AuditableRequest{
+		Method:    c.Request.Method,
+		Path:      c.Request.URL.Path,
+		Headers:   extractHeaders(c),
+		Body:      rawBody,
+		UserID:    userID,
+		Timestamp: startTime,
+	})
+
 	// Step 1: Parse request body
 	var req datatypes.DirectChatRequest
 	if err := c.BindJSON(&req); err != nil {
@@ -254,12 +294,76 @@ func (h *chatHandler) HandleDirectChat(c *gin.Context) {
 		return
 	}
 
-	// Step 3: Scan the last user message for policy violations
-	// NOTE: Only scans last message, not full history (performance tradeoff)
+	// Step 2.5: Authorization check (FOSS-004)
+	// Enterprise can restrict who can send chat messages
+	if err := h.opts.AuthzProvider.Authorize(ctx, extensions.AuthzRequest{
+		User:         authInfo,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "direct",
+	}); err != nil {
+		span.SetStatus(codes.Error, "authorization denied")
+		// Log unauthorized attempt
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "authz.denied",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			Outcome:      "denied",
+			Metadata: map[string]any{
+				"request_id": req.RequestID,
+				"reason":     err.Error(),
+			},
+		})
+		if errors.Is(err, extensions.ErrUnauthorized) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{"error": "authorization failed"})
+		}
+		return
+	}
+
+	// Step 3: Filter and scan the last user message (FOSS-006)
+	// Applies PII detection/redaction before sending to LLM
 	if len(req.Messages) > 0 {
-		lastMsg := req.Messages[len(req.Messages)-1]
+		lastIdx := len(req.Messages) - 1
+		lastMsg := req.Messages[lastIdx]
 		if lastMsg.Role == "user" {
-			findings := h.policyEngine.ScanFileContent(lastMsg.Content)
+			// Apply message filter (FOSS-006)
+			filterResult, filterErr := h.opts.MessageFilter.FilterInput(ctx, lastMsg.Content)
+			if filterErr != nil {
+				slog.Error("Message filter failed", "error", filterErr, "requestId", req.RequestID)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "message processing failed"})
+				return
+			}
+
+			// Check if message was blocked by filter
+			if filterResult.WasBlocked {
+				_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+					EventType:    "chat.blocked",
+					Timestamp:    time.Now().UTC(),
+					UserID:       userID,
+					Action:       "send",
+					ResourceType: "message",
+					Outcome:      "blocked",
+					Metadata: map[string]any{
+						"request_id": req.RequestID,
+						"reason":     filterResult.BlockReason,
+					},
+				})
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error":  "message blocked by content filter",
+					"reason": filterResult.BlockReason,
+				})
+				return
+			}
+
+			// Use filtered content (may have PII redacted)
+			req.Messages[lastIdx].Content = filterResult.Filtered
+
+			// Also run policy engine scan on filtered content
+			findings := h.policyEngine.ScanFileContent(filterResult.Filtered)
 			if len(findings) > 0 {
 				slog.Warn("Blocked chat request due to policy violation",
 					"findings", len(findings),
@@ -288,15 +392,61 @@ func (h *chatHandler) HandleDirectChat(c *gin.Context) {
 			"error", err,
 			"requestId", req.RequestID,
 		)
+		// Log failed chat attempt (FOSS-005)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "chat.message",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "message",
+			Outcome:      "error",
+			Metadata: map[string]any{
+				"request_id": req.RequestID,
+			},
+		})
 		// SEC-005: Do NOT expose internal error details to client
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process request"})
 		return
 	}
 
-	// Step 5: Build and return response
+	// Step 4.5: Filter output (FOSS-006)
+	// Apply output filter to LLM response (e.g., remove leaked secrets)
+	outputResult, outputErr := h.opts.MessageFilter.FilterOutput(ctx, answer)
+	if outputErr != nil {
+		slog.Error("Output filter failed", "error", outputErr, "requestId", req.RequestID)
+		// Continue with original answer if filter fails
+	} else {
+		answer = outputResult.Filtered
+	}
+
+	// Step 5: Log successful chat (FOSS-005)
 	processingTime := time.Since(startTime).Milliseconds()
+	_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+		EventType:    "chat.message",
+		Timestamp:    time.Now().UTC(),
+		UserID:       userID,
+		Action:       "send",
+		ResourceType: "message",
+		Outcome:      "success",
+		Metadata: map[string]any{
+			"request_id":         req.RequestID,
+			"processing_time_ms": processingTime,
+		},
+	})
+
+	// Step 6: Build and return response
 	resp := datatypes.NewDirectChatResponse(req.RequestID, answer)
 	resp.ProcessingTimeMs = processingTime
+
+	// Step 6.5: Capture response for audit (FOSS-008)
+	// Enterprise uses this to compute hashes and store the exact response bytes.
+	respBytes, _ := json.Marshal(resp)
+	_ = h.opts.RequestAuditor.CaptureResponse(ctx, auditID, &extensions.AuditableResponse{
+		StatusCode: http.StatusOK,
+		Headers:    extensions.HTTPHeaders{"Content-Type": "application/json"},
+		Body:       respBytes,
+		Timestamp:  time.Now().UTC(),
+	})
 
 	c.JSON(http.StatusOK, resp)
 }
@@ -366,6 +516,34 @@ func (h *chatHandler) HandleChatRAG(c *gin.Context) {
 	ctx, span := h.tracer.Start(c.Request.Context(), "HandleChatRAG")
 	defer span.End()
 
+	startTime := time.Now()
+
+	// Step 0: Get authenticated user from context
+	authInfo := middleware.GetAuthInfo(c)
+	userID := "anonymous"
+	if authInfo != nil {
+		userID = authInfo.UserID
+	}
+
+	// Step 0.5: Read raw body for audit capture (FOSS-008)
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		span.RecordError(err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request"})
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(rawBody))
+
+	// Capture request for audit (FOSS-008)
+	auditID, _ := h.opts.RequestAuditor.CaptureRequest(ctx, &extensions.AuditableRequest{
+		Method:    c.Request.Method,
+		Path:      c.Request.URL.Path,
+		Headers:   extractHeaders(c),
+		Body:      rawBody,
+		UserID:    userID,
+		Timestamp: startTime,
+	})
+
 	// Check if RAG service is available
 	if h.ragService == nil {
 		slog.Error("RAG service not configured")
@@ -383,6 +561,61 @@ func (h *chatHandler) HandleChatRAG(c *gin.Context) {
 			"error": "invalid request body",
 		})
 		return
+	}
+
+	// Step 1.5: Authorization check (FOSS-004)
+	if err := h.opts.AuthzProvider.Authorize(ctx, extensions.AuthzRequest{
+		User:         authInfo,
+		Action:       "send",
+		ResourceType: "chat",
+		ResourceID:   "rag",
+	}); err != nil {
+		span.SetStatus(codes.Error, "authorization denied")
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "authz.denied",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "chat",
+			Outcome:      "denied",
+			Metadata: map[string]any{
+				"request_id": req.Id,
+				"session_id": req.SessionId,
+			},
+		})
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+
+	// Step 1.6: Filter input message (FOSS-006)
+	if req.Message != "" {
+		filterResult, filterErr := h.opts.MessageFilter.FilterInput(ctx, req.Message)
+		if filterErr != nil {
+			slog.Error("Message filter failed", "error", filterErr, "requestId", req.Id)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "message processing failed"})
+			return
+		}
+		if filterResult.WasBlocked {
+			_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+				EventType:    "chat.blocked",
+				Timestamp:    time.Now().UTC(),
+				UserID:       userID,
+				Action:       "send",
+				ResourceType: "message",
+				Outcome:      "blocked",
+				Metadata: map[string]any{
+					"request_id": req.Id,
+					"session_id": req.SessionId,
+					"reason":     filterResult.BlockReason,
+				},
+			})
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":  "message blocked by content filter",
+				"reason": filterResult.BlockReason,
+			})
+			return
+		}
+		req.Message = filterResult.Filtered
 	}
 
 	// Step 2: Call service layer
@@ -413,12 +646,99 @@ func (h *chatHandler) HandleChatRAG(c *gin.Context) {
 			"requestId", req.Id,
 			"sessionId", req.SessionId,
 		)
+		_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+			EventType:    "chat.message",
+			Timestamp:    time.Now().UTC(),
+			UserID:       userID,
+			Action:       "send",
+			ResourceType: "message",
+			Outcome:      "error",
+			Metadata: map[string]any{
+				"request_id": req.Id,
+				"session_id": req.SessionId,
+			},
+		})
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to process request",
 		})
 		return
 	}
 
-	// Step 3: Return successful response
+	// Step 2.5: Filter output (FOSS-006)
+	if resp.Answer != "" {
+		outputResult, outputErr := h.opts.MessageFilter.FilterOutput(ctx, resp.Answer)
+		if outputErr != nil {
+			slog.Error("Output filter failed", "error", outputErr, "requestId", req.Id)
+		} else {
+			resp.Answer = outputResult.Filtered
+		}
+	}
+
+	// Step 3: Log successful chat (FOSS-005)
+	processingTime := time.Since(startTime).Milliseconds()
+	_ = h.opts.AuditLogger.Log(ctx, extensions.AuditEvent{
+		EventType:    "chat.message",
+		Timestamp:    time.Now().UTC(),
+		UserID:       userID,
+		Action:       "send",
+		ResourceType: "message",
+		Outcome:      "success",
+		Metadata: map[string]any{
+			"request_id":         req.Id,
+			"session_id":         resp.SessionId,
+			"processing_time_ms": processingTime,
+			"turn_count":         resp.TurnCount,
+		},
+	})
+
+	// Step 4: Capture and return successful response
+	// Capture response for audit (FOSS-008)
+	respBytes, _ := json.Marshal(resp)
+	_ = h.opts.RequestAuditor.CaptureResponse(ctx, auditID, &extensions.AuditableResponse{
+		StatusCode: http.StatusOK,
+		Headers:    extensions.HTTPHeaders{"Content-Type": "application/json"},
+		Body:       respBytes,
+		Timestamp:  time.Now().UTC(),
+	})
+
 	c.JSON(http.StatusOK, resp)
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+// extractHeaders converts Gin request headers to HTTPHeaders for audit capture.
+//
+// # Description
+//
+// Extracts relevant headers from the Gin context for audit logging.
+// Sensitive headers like Authorization are intentionally excluded to
+// avoid storing credentials in audit logs.
+//
+// # Inputs
+//
+//   - c: Gin context with HTTP request
+//
+// # Outputs
+//
+//   - extensions.HTTPHeaders: Extracted headers safe for audit storage
+func extractHeaders(c *gin.Context) extensions.HTTPHeaders {
+	headers := extensions.HTTPHeaders{}
+
+	// Extract safe headers (exclude Authorization to avoid credential logging)
+	if ct := c.GetHeader("Content-Type"); ct != "" {
+		headers["Content-Type"] = ct
+	}
+	if ua := c.GetHeader("User-Agent"); ua != "" {
+		headers["User-Agent"] = ua
+	}
+	if xfwd := c.GetHeader("X-Forwarded-For"); xfwd != "" {
+		headers["X-Forwarded-For"] = xfwd
+	}
+	if reqID := c.GetHeader("X-Request-ID"); reqID != "" {
+		headers["X-Request-ID"] = reqID
+	}
+
+	return headers
 }
