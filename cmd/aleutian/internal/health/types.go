@@ -172,6 +172,11 @@ type ServiceDefinition struct {
 	// If a critical service fails, WaitForServices returns an error.
 	Critical bool
 
+	// Skip indicates this service should not be checked at all.
+	// Skipped services are reported with HealthStateSkipped.
+	// Use this when a service is not applicable in the current mode.
+	Skip bool
+
 	// Timeout overrides default per-check timeout.
 	// Zero means use default.
 	Timeout time.Duration
@@ -629,6 +634,51 @@ func DefaultServiceDefinitions() []ServiceDefinition {
 			UpdatedAt:     now,
 		},
 	}
+}
+
+// ServiceDefinitionsForMode returns service definitions appropriate for the forecast mode.
+//
+// # Description
+//
+// Returns service definitions adjusted based on forecast mode.
+// When using "sapheneia" mode, Ollama is skipped entirely since
+// Sapheneia provides its own inference capabilities.
+//
+// # Inputs
+//
+//   - forecastMode: The forecast mode ("standalone" or "sapheneia")
+//
+// # Outputs
+//
+//   - []ServiceDefinition: Service definitions with appropriate settings
+//
+// # Examples
+//
+//	services := ServiceDefinitionsForMode("sapheneia")
+//	// Ollama.Skip == true (not checked, reported as HealthStateSkipped)
+//
+// # Limitations
+//
+//   - Only recognizes "standalone" and "sapheneia" modes
+//
+// # Assumptions
+//
+//   - Services run on localhost
+//   - Ports match podman-compose.yaml configuration
+func ServiceDefinitionsForMode(forecastMode string) []ServiceDefinition {
+	services := DefaultServiceDefinitions()
+
+	// When using Sapheneia mode, skip Ollama entirely since
+	// Sapheneia provides its own inference capabilities
+	if forecastMode == "sapheneia" {
+		for i := range services {
+			if services[i].Name == "Ollama" {
+				services[i].Skip = true
+			}
+		}
+	}
+
+	return services
 }
 
 // GenerateID creates a unique identifier for health check entities.

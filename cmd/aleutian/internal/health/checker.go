@@ -792,17 +792,19 @@ func (h *DefaultHealthChecker) IsContainerRunning(ctx context.Context, container
 //
 //   - result is non-nil
 func (h *DefaultHealthChecker) filterServicesForWait(services []ServiceDefinition, opts WaitOptions, result *WaitResult) []ServiceDefinition {
-	if !opts.SkipOptional {
-		return services
-	}
-
 	filtered := make([]ServiceDefinition, 0)
 	for _, svc := range services {
-		if svc.Critical {
-			filtered = append(filtered, svc)
-		} else {
+		// Always skip services explicitly marked as Skip
+		if svc.Skip {
 			result.Skipped = append(result.Skipped, svc.Name)
+			continue
 		}
+		// When SkipOptional is set, also skip non-critical services
+		if opts.SkipOptional && !svc.Critical {
+			result.Skipped = append(result.Skipped, svc.Name)
+			continue
+		}
+		filtered = append(filtered, svc)
 	}
 	return filtered
 }
@@ -867,7 +869,8 @@ func (h *DefaultHealthChecker) isContextDone(ctx context.Context) bool {
 func (h *DefaultHealthChecker) buildTimeoutResult(result *WaitResult, statuses []HealthStatus, services []ServiceDefinition, healthy map[string]bool, startTime time.Time, ctx context.Context) (*WaitResult, error) {
 	result.Duration = time.Since(startTime)
 	result.CompletedAt = time.Now()
-	result.Services = statuses
+	// Include checked services and add skipped services with HealthStateSkipped
+	result.Services = h.appendSkippedStatuses(statuses, result.Skipped)
 	result.Success = false
 
 	for _, svc := range services {
@@ -908,9 +911,25 @@ func (h *DefaultHealthChecker) buildTimeoutResult(result *WaitResult, statuses [
 func (h *DefaultHealthChecker) buildSuccessResult(result *WaitResult, statuses []HealthStatus, startTime time.Time) *WaitResult {
 	result.Duration = time.Since(startTime)
 	result.CompletedAt = time.Now()
-	result.Services = statuses
+	// Include checked services and add skipped services with HealthStateSkipped
+	result.Services = h.appendSkippedStatuses(statuses, result.Skipped)
 	result.Success = true
 	return result
+}
+
+// appendSkippedStatuses adds HealthStatus entries for skipped services.
+func (h *DefaultHealthChecker) appendSkippedStatuses(statuses []HealthStatus, skipped []string) []HealthStatus {
+	now := time.Now()
+	for _, name := range skipped {
+		statuses = append(statuses, HealthStatus{
+			ID:          GenerateID(),
+			Name:        name,
+			State:       HealthStateSkipped,
+			LastChecked: now,
+			Message:     "Service skipped (not applicable in current mode)",
+		})
+	}
+	return statuses
 }
 
 // buildFailFastResult constructs WaitResult for FailFast case.

@@ -1749,7 +1749,9 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 		slog.Warn("failed to write output", "error", err)
 	}
 
-	services := health.DefaultServiceDefinitions()
+	// Use forecast mode-aware service definitions
+	// When using sapheneia mode, Ollama is non-critical
+	services := health.ServiceDefinitionsForMode(opts.ForecastMode)
 	waitOpts := health.DefaultWaitOptions()
 
 	// Extended timeout when models may still be loading
