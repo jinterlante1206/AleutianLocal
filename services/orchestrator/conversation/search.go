@@ -28,6 +28,12 @@ import (
 
 var tracer = otel.Tracer("aleutian.orchestrator.conversation")
 
+// defaultTTLFilterSkewAllowance accounts for minor clock differences between
+// the orchestrator and the Weaviate nodes when performing post-query TTL
+// filtering. Documents within this window of their expiration time are still
+// considered valid to avoid premature removal due to clock skew.
+const defaultTTLFilterSkewAllowance = 5 * time.Second
+
 // WeaviateConversationSearcher implements ConversationSearcher using Weaviate.
 //
 // # Description
@@ -47,9 +53,13 @@ var tracer = otel.Tracer("aleutian.orchestrator.conversation")
 //	searcher := NewWeaviateConversationSearcher(client, embedder, DefaultSearchConfig())
 //	history, err := searcher.GetHybridContext(ctx, "sess_123", "tell me more", 25)
 type WeaviateConversationSearcher struct {
-	client    *weaviate.Client
-	embedder  EmbeddingProvider
-	config    SearchConfig
+	client   *weaviate.Client
+	embedder EmbeddingProvider
+	config   SearchConfig
+	// ttlFilter provides post-query filtering for expired documents as a
+	// defense-in-depth measure. Even if the Weaviate query-level TTL filter
+	// misses an expiring document (due to clock skew or replication lag),
+	// this application-level filter catches it before results reach the user.
 	ttlFilter ttl.TTLQueryFilter
 }
 
@@ -90,7 +100,7 @@ func NewWeaviateConversationSearcher(client *weaviate.Client, embedder Embedding
 		client:    client,
 		embedder:  embedder,
 		config:    validatedConfig,
-		ttlFilter: ttl.NewTTLQueryFilter(5 * time.Second),
+		ttlFilter: ttl.NewTTLQueryFilter(defaultTTLFilterSkewAllowance),
 	}
 }
 

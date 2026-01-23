@@ -42,9 +42,6 @@ var (
 	evalAPIVersion     string // API version: "legacy" (default) or "unified" (new tracing API)
 	evalDeploymentMode string // Deployment mode: "standalone" (localhost) or "distributed" (k8s)
 
-	// TTL flags for document/session retention
-	ttlFlag string // TTL duration (e.g., "90d", "24h", "P30D")
-
 	rootCmd = &cobra.Command{
 		Use:   "aleutian",
 		Short: "A cli to manage the Aleutian FOSS private AI appliance",
@@ -333,7 +330,7 @@ func init() {
 	ingestCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
 	ingestCmd.Flags().String("dataspace", "default", "The logical dataspace to ingest into")
 	ingestCmd.Flags().String("version", "latest", "A version tag for this ingestion")
-	ingestCmd.Flags().StringVar(&ttlFlag, "ttl", "", "Document TTL (e.g., '90d', '24h', 'P30D'). 0 or empty = never expires.")
+	ingestCmd.Flags().String("ttl", "", "Document TTL (e.g., '90d', '24h', 'P30D'). 0 or empty = never expires.")
 
 	rootCmd.AddCommand(askCmd)
 	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking",
@@ -345,7 +342,7 @@ func init() {
 	populateVectorDBCmd.Flags().Bool("force", false, "Force ingestion, skipping policy/secret checks.")
 	populateVectorDBCmd.Flags().String("dataspace", "default", "The logical dataspace to ingest into (e.g., 'work', 'personal')")
 	populateVectorDBCmd.Flags().String("version", "latest", "A version tag for this ingestion (e.g., 'v1.1', '2025-11-01')")
-	populateVectorDBCmd.Flags().StringVar(&ttlFlag, "ttl", "", "Document TTL (e.g., '90d', '24h', 'P30D'). 0 or empty = never expires.")
+	populateVectorDBCmd.Flags().String("ttl", "", "Document TTL (e.g., '90d', '24h', 'P30D'). 0 or empty = never expires.")
 
 	// --- Local Commands ---
 	rootCmd.AddCommand(stackCmd)
@@ -393,7 +390,7 @@ func init() {
 	chatCmd.Flags().IntVarP(&verbosityLevel, "verbosity", "V", 2, "Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (default: 2)")
 	chatCmd.Flags().StringVar(&dataSpaceFlag, "dataspace", "", "Limit RAG search to a specific dataspace (e.g., 'work', 'personal')")
 	chatCmd.Flags().StringVar(&docVersionFlag, "doc-version", "", "Query a specific document version (e.g., 'v1' or 'report.md:v3')")
-	chatCmd.Flags().StringVar(&ttlFlag, "ttl", "", "Session TTL (e.g., '24h', '7d'). Resets on each message. Empty = never expires.")
+	chatCmd.Flags().String("ttl", "", "Session TTL (e.g., '24h', '7d'). Resets on each message. Empty = never expires.")
 
 	rootCmd.AddCommand(traceCmd)
 
