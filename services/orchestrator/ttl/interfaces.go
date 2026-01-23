@@ -575,6 +575,33 @@ type DeletionMetadata struct {
 	DataSpace    string
 }
 
+// ConfigChangeRecord represents a dataspace configuration change.
+//
+// # Description
+//
+// Records when retention policies or other dataspace settings are modified.
+// Used for audit compliance — demonstrates what policy was in effect at the
+// time of any TTL-based deletion.
+//
+// # Fields
+//
+//   - Timestamp: RFC3339 formatted time of the change (auto-set if empty).
+//   - DataSpace: Name of the affected data space.
+//   - FieldChanged: Which configuration field was modified (e.g., "retention_days").
+//   - OldValue: Previous value as string.
+//   - NewValue: New value as string.
+//   - ChangedBy: Identifier of who made the change (optional).
+//   - Reason: Human-readable reason for the change (optional).
+type ConfigChangeRecord struct {
+	Timestamp    string `json:"timestamp"`
+	DataSpace    string `json:"data_space"`
+	FieldChanged string `json:"field_changed"`
+	OldValue     string `json:"old_value"`
+	NewValue     string `json:"new_value"`
+	ChangedBy    string `json:"changed_by,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+}
+
 // =============================================================================
 // Types
 // =============================================================================

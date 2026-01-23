@@ -249,22 +249,22 @@ type ConfigChangeEvent struct {
 type noopAuditSink struct{}
 
 // OnTTLDeletion is a no-op in FOSS (local TTLLogger handles this).
-func (n *noopAuditSink) OnTTLDeletion(ctx context.Context, event TTLDeletionEvent) error {
+func (n *noopAuditSink) OnTTLDeletion(_ context.Context, _ TTLDeletionEvent) error {
 	return nil
 }
 
 // OnSessionDeleted is a no-op in FOSS.
-func (n *noopAuditSink) OnSessionDeleted(ctx context.Context, event SessionDeletionEvent) error {
+func (n *noopAuditSink) OnSessionDeleted(_ context.Context, _ SessionDeletionEvent) error {
 	return nil
 }
 
 // OnDataspaceDeleted is a no-op in FOSS.
-func (n *noopAuditSink) OnDataspaceDeleted(ctx context.Context, event DataspaceDeletionEvent) error {
+func (n *noopAuditSink) OnDataspaceDeleted(_ context.Context, _ DataspaceDeletionEvent) error {
 	return nil
 }
 
 // OnConfigChanged is a no-op in FOSS.
-func (n *noopAuditSink) OnConfigChanged(ctx context.Context, event ConfigChangeEvent) error {
+func (n *noopAuditSink) OnConfigChanged(_ context.Context, _ ConfigChangeEvent) error {
 	return nil
 }
 

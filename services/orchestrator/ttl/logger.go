@@ -344,6 +344,82 @@ func (l *ttlLogger) LogError(err error, context string) error {
 	return nil
 }
 
+// LogConfigChange records a dataspace configuration change to the audit log.
+//
+// # Description
+//
+// Creates an audit record when retention policies are modified. Writes to
+// both slog (for observability) and the dedicated audit file (for compliance).
+// Config changes are NOT part of the hash chain — they are informational records.
+//
+// # Inputs
+//
+//   - change: The configuration change details. Timestamp is auto-set if empty.
+//
+// # Outputs
+//
+//   - error: Non-nil if logging fails.
+//
+// # Examples
+//
+//	err := logger.LogConfigChange(ttl.ConfigChangeRecord{
+//	    DataSpace:    "work",
+//	    FieldChanged: "retention_days",
+//	    OldValue:     "90",
+//	    NewValue:     "30",
+//	    ChangedBy:    "admin@example.com",
+//	    Reason:       "Reduced retention per new policy",
+//	})
+//
+// # Limitations
+//
+//   - Not part of the hash chain (informational only).
+//   - Does not validate field values.
+//
+// # Assumptions
+//
+//   - The log file is open and writable.
+func (l *ttlLogger) LogConfigChange(change ConfigChangeRecord) error {
+	if change.Timestamp == "" {
+		change.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	// Log to slog for observability
+	slog.Info("ttl.config_change.logged",
+		"data_space", change.DataSpace,
+		"field", change.FieldChanged,
+		"old_value", change.OldValue,
+		"new_value", change.NewValue,
+		"changed_by", change.ChangedBy,
+	)
+
+	l.fileMu.Lock()
+	defer l.fileMu.Unlock()
+
+	// Build the audit record with explicit type field
+	record := configChangeAuditRecord{
+		Type:         "config_change",
+		Timestamp:    change.Timestamp,
+		DataSpace:    change.DataSpace,
+		FieldChanged: change.FieldChanged,
+		OldValue:     change.OldValue,
+		NewValue:     change.NewValue,
+		ChangedBy:    change.ChangedBy,
+		Reason:       change.Reason,
+	}
+
+	jsonBytes, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config change: %w", err)
+	}
+
+	if _, err := l.logFile.Write(append(jsonBytes, '\n')); err != nil {
+		return fmt.Errorf("failed to write config change: %w", err)
+	}
+
+	return nil
+}
+
 // VerifyChain verifies the integrity of the hash chain.
 //
 // # Description
@@ -853,6 +929,18 @@ type errorLogRecord struct {
 	Operation string `json:"operation"`
 	Context   string `json:"context"`
 	Error     string `json:"error"`
+}
+
+// configChangeAuditRecord represents a config change in the audit log (not part of hash chain).
+type configChangeAuditRecord struct {
+	Type         string `json:"type"`
+	Timestamp    string `json:"timestamp"`
+	DataSpace    string `json:"data_space"`
+	FieldChanged string `json:"field_changed"`
+	OldValue     string `json:"old_value"`
+	NewValue     string `json:"new_value"`
+	ChangedBy    string `json:"changed_by,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 // initializeChainState reads the existing log file to find the last sequence and hash.

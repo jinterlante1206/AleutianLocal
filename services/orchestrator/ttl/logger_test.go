@@ -11,9 +11,11 @@
 package ttl
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -147,7 +149,7 @@ func TestTTLLogger_VerifyFilePermissions_DetectsChange(t *testing.T) {
 
 	// Verify the error message is descriptive
 	expectedSubstring := "permissions changed"
-	if err != nil && !containsSubstring(err.Error(), expectedSubstring) {
+	if err != nil && !strings.Contains(err.Error(), expectedSubstring) {
 		t.Errorf("Error message should mention permissions: got %v", err)
 	}
 }
@@ -846,18 +848,267 @@ func TestTTLLogger_CheckLogSize_AfterClose(t *testing.T) {
 }
 
 // =============================================================================
-// Helper Functions
+// SEC-008: Config Change Audit Trail Tests
 // =============================================================================
 
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstringHelper(s, substr))
+// TestTTLLogger_LogConfigChange_WritesToFile tests that config changes are
+// written to the audit log file.
+func TestTTLLogger_LogConfigChange_WritesToFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test_config_change.log")
+
+	logger, err := NewTTLLogger(logPath)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	change := ConfigChangeRecord{
+		DataSpace:    "work",
+		FieldChanged: "retention_days",
+		OldValue:     "90",
+		NewValue:     "30",
+		ChangedBy:    "admin@example.com",
+		Reason:       "Reduced retention per new data policy",
+	}
+
+	if err := logger.LogConfigChange(change); err != nil {
+		t.Fatalf("LogConfigChange failed: %v", err)
+	}
+
+	// Read the file and verify content
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	contentStr := string(content)
+
+	// Verify key fields are present
+	if !strings.Contains(contentStr, "config_change") {
+		t.Error("Expected 'config_change' type in log")
+	}
+	if !strings.Contains(contentStr, "work") {
+		t.Error("Expected data_space 'work' in log")
+	}
+	if !strings.Contains(contentStr, "retention_days") {
+		t.Error("Expected field_changed 'retention_days' in log")
+	}
+	if !strings.Contains(contentStr, "90") {
+		t.Error("Expected old_value '90' in log")
+	}
+	if !strings.Contains(contentStr, "30") {
+		t.Error("Expected new_value '30' in log")
+	}
+	if !strings.Contains(contentStr, "admin@example.com") {
+		t.Error("Expected changed_by in log")
+	}
+	if !strings.Contains(contentStr, "Reduced retention") {
+		t.Error("Expected reason in log")
+	}
 }
 
-func containsSubstringHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+// TestTTLLogger_LogConfigChange_IncludesAllFields tests that the config change
+// record contains all required fields in valid JSON.
+func TestTTLLogger_LogConfigChange_IncludesAllFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test_config_fields.log")
+
+	logger, err := NewTTLLogger(logPath)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	change := ConfigChangeRecord{
+		Timestamp:    "2026-01-22T10:00:00Z",
+		DataSpace:    "personal",
+		FieldChanged: "ttl_duration",
+		OldValue:     "P30D",
+		NewValue:     "P7D",
+		ChangedBy:    "user123",
+		Reason:       "User requested shorter retention",
+	}
+
+	if err := logger.LogConfigChange(change); err != nil {
+		t.Fatalf("LogConfigChange failed: %v", err)
+	}
+
+	// Parse the JSON to verify structure
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	var record map[string]interface{}
+	if err := json.Unmarshal(content, &record); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+
+	expectedFields := map[string]string{
+		"type":          "config_change",
+		"timestamp":     "2026-01-22T10:00:00Z",
+		"data_space":    "personal",
+		"field_changed": "ttl_duration",
+		"old_value":     "P30D",
+		"new_value":     "P7D",
+		"changed_by":    "user123",
+		"reason":        "User requested shorter retention",
+	}
+
+	for field, expected := range expectedFields {
+		actual, ok := record[field]
+		if !ok {
+			t.Errorf("Missing field %q in record", field)
+			continue
+		}
+		if actual != expected {
+			t.Errorf("Field %q: expected %q, got %q", field, expected, actual)
 		}
 	}
-	return false
+}
+
+// TestTTLLogger_LogConfigChange_AutoTimestamp tests that timestamp is
+// automatically set when not provided.
+func TestTTLLogger_LogConfigChange_AutoTimestamp(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test_config_auto_ts.log")
+
+	logger, err := NewTTLLogger(logPath)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	change := ConfigChangeRecord{
+		DataSpace:    "test",
+		FieldChanged: "retention_days",
+		OldValue:     "7",
+		NewValue:     "14",
+		// No Timestamp set — should be auto-populated
+	}
+
+	if err := logger.LogConfigChange(change); err != nil {
+		t.Fatalf("LogConfigChange failed: %v", err)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	var record map[string]interface{}
+	if err := json.Unmarshal(content, &record); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+
+	ts, ok := record["timestamp"]
+	if !ok {
+		t.Fatal("Expected timestamp field to be set")
+	}
+	tsStr, ok := ts.(string)
+	if !ok || tsStr == "" {
+		t.Error("Expected non-empty timestamp string")
+	}
+	// Should be a valid RFC3339 timestamp
+	if !strings.Contains(tsStr, "T") || !strings.Contains(tsStr, "Z") {
+		t.Errorf("Timestamp doesn't look like RFC3339: %q", tsStr)
+	}
+}
+
+// TestTTLLogger_LogConfigChange_DoesNotAffectHashChain tests that config
+// changes do not interfere with the deletion hash chain.
+func TestTTLLogger_LogConfigChange_DoesNotAffectHashChain(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test_config_chain.log")
+
+	logger, err := NewTTLLogger(logPath)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Write deletion record 1
+	record1, err := logger.LogDeletion(
+		[]byte("content 1"),
+		"uuid-1",
+		"delete_document",
+		DeletionMetadata{DataSpace: "test"},
+	)
+	if err != nil {
+		t.Fatalf("LogDeletion 1 failed: %v", err)
+	}
+
+	// Write a config change (should NOT affect chain)
+	if err := logger.LogConfigChange(ConfigChangeRecord{
+		DataSpace:    "test",
+		FieldChanged: "retention_days",
+		OldValue:     "90",
+		NewValue:     "30",
+	}); err != nil {
+		t.Fatalf("LogConfigChange failed: %v", err)
+	}
+
+	// Write deletion record 2
+	record2, err := logger.LogDeletion(
+		[]byte("content 2"),
+		"uuid-2",
+		"delete_document",
+		DeletionMetadata{DataSpace: "test"},
+	)
+	if err != nil {
+		t.Fatalf("LogDeletion 2 failed: %v", err)
+	}
+
+	// Chain should link record2 to record1, skipping the config change
+	if record2.PrevHash != record1.EntryHash {
+		t.Error("Config change should not affect hash chain linkage")
+	}
+
+	// Verify full chain
+	valid, _, err := logger.VerifyChain()
+	if err != nil {
+		t.Fatalf("VerifyChain failed: %v", err)
+	}
+	if !valid {
+		t.Error("Chain should be valid with interleaved config changes")
+	}
+}
+
+// TestTTLLogger_LogConfigChange_OptionalFields tests that optional fields
+// (changed_by, reason) are omitted when empty.
+func TestTTLLogger_LogConfigChange_OptionalFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test_config_optional.log")
+
+	logger, err := NewTTLLogger(logPath)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	change := ConfigChangeRecord{
+		DataSpace:    "minimal",
+		FieldChanged: "retention_days",
+		OldValue:     "30",
+		NewValue:     "60",
+		// No ChangedBy or Reason
+	}
+
+	if err := logger.LogConfigChange(change); err != nil {
+		t.Fatalf("LogConfigChange failed: %v", err)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	// Optional fields with omitempty should not appear
+	if strings.Contains(string(content), "changed_by") {
+		t.Error("Empty changed_by should be omitted from JSON")
+	}
+	if strings.Contains(string(content), "reason") {
+		t.Error("Empty reason should be omitted from JSON")
+	}
 }
