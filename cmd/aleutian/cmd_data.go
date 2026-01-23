@@ -101,6 +101,29 @@ type ingestResult struct {
 	Error    error
 }
 
+// ingestRequestBody is the typed request body sent to the orchestrator /v1/documents endpoint.
+//
+// # Description
+//
+// This struct is used for JSON marshaling when sending ingestion requests to the
+// orchestrator. Using a typed struct instead of map[string]string ensures compile-time
+// type checking and aligns with the IngestDocumentRequest struct in the orchestrator.
+//
+// # Fields
+//
+//   - Source: File path or identifier for the document being ingested.
+//   - Content: The document content to be chunked and embedded.
+//   - DataSpace: Logical namespace for document segmentation.
+//   - VersionTag: Version label for this ingestion batch.
+//   - TTL: Optional TTL duration string (e.g., "90d", "P30D"). Empty = no expiration.
+type ingestRequestBody struct {
+	Source     string `json:"source"`
+	Content    string `json:"content"`
+	DataSpace  string `json:"data_space"`
+	VersionTag string `json:"version_tag"`
+	TTL        string `json:"ttl,omitempty"`
+}
+
 // IngestAuditContext captures identity and metadata for audit logging.
 //
 // # Description
@@ -162,6 +185,7 @@ type IngestAuditContext struct {
 //   - DataSpace: Logical namespace for documents (e.g., "default", "project-alpha")
 //   - VersionTag: Version label for this ingestion batch (e.g., "v1.0", "2024-01-15")
 //   - ForceMode: If true, bypasses interactive approval for files with secrets
+//   - TTL: Document retention period (e.g., "90d", "P30D"). Empty = no expiration.
 //
 // # Examples
 //
@@ -170,17 +194,20 @@ type IngestAuditContext struct {
 //	    DataSpace:       "codebase",
 //	    VersionTag:      "v2.1.0",
 //	    ForceMode:       false,
+//	    TTL:             "90d",
 //	}
 //
 // # Limitations
 //
 //   - ForceMode should only be used in automated pipelines with pre-approved content
 //   - DataSpace and VersionTag are not validated against any registry
+//   - TTL validation occurs at the orchestrator; invalid TTL will fail ingestion
 type IngestConfig struct {
 	OrchestratorURL string
 	DataSpace       string
 	VersionTag      string
 	ForceMode       bool
+	TTL             string
 }
 
 // IngestPipelineVersion is the current version of the ingestion pipeline.
@@ -736,12 +763,14 @@ func (p *IngestPipeline) ingestFiles(ctx context.Context, files []scanResult) (
 				}
 
 				file := files[idx]
-				postBody, marshalErr := json.Marshal(map[string]string{
-					"source":      file.FilePath,
-					"content":     string(file.Content),
-					"data_space":  p.config.DataSpace,
-					"version_tag": p.config.VersionTag,
-				})
+				reqBody := ingestRequestBody{
+					Source:     file.FilePath,
+					Content:    string(file.Content),
+					DataSpace:  p.config.DataSpace,
+					VersionTag: p.config.VersionTag,
+					TTL:        p.config.TTL,
+				}
+				postBody, marshalErr := json.Marshal(reqBody)
 				if marshalErr != nil {
 					resultChan <- ingestResult{
 						FilePath: file.FilePath,
@@ -914,6 +943,11 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		ux.Error(fmt.Sprintf("Failed to read 'force' flag: %v", err))
 		return
 	}
+	ttlValue, err := cmd.Flags().GetString("ttl")
+	if err != nil {
+		ux.Error(fmt.Sprintf("Failed to read 'ttl' flag: %v", err))
+		return
+	}
 
 	// Build configuration
 	config := IngestConfig{
@@ -921,6 +955,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		DataSpace:       dataSpace,
 		VersionTag:      versionTag,
 		ForceMode:       force,
+		TTL:             ttlValue,
 	}
 
 	// Build audit context with current user
@@ -953,6 +988,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		"data_space", config.DataSpace,
 		"version_tag", config.VersionTag,
 		"force_mode", config.ForceMode,
+		"ttl", config.TTL,
 		"paths", args,
 	)
 

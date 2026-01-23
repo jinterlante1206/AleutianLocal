@@ -26,6 +26,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-openapi/strfmt"
 	"github.com/google/uuid"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/ttl"
 	"github.com/tmc/langchaingo/textsplitter"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"
@@ -53,12 +54,28 @@ var (
 	}
 )
 
+// IngestDocumentRequest represents a request to ingest a document into Weaviate.
+//
+// # Description
+//
+// Contains the document content and metadata required for ingestion. The TTL
+// field is optional - if not provided or empty, the document will not expire.
+//
+// # Fields
+//
+//   - Content: The document content to be chunked and embedded.
+//   - Source: The source path/identifier for this document.
+//   - DataSpace: Logical namespace for document segmentation.
+//   - VersionTag: Version label for this ingestion (auto-generated if empty).
+//   - SessionUUID: If set, links document chunks to a session via cross-reference.
+//   - TTL: Optional TTL duration string (e.g., "90d", "P30D"). Empty = no expiration.
 type IngestDocumentRequest struct {
 	Content     string `json:"content"`
 	Source      string `json:"source"`
 	DataSpace   string `json:"data_space"`
 	VersionTag  string `json:"version_tag"`
 	SessionUUID string `json:"session_id"`
+	TTL         string `json:"ttl,omitempty"`
 }
 
 type IngestedDocument struct {
@@ -650,6 +667,25 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 	}
 	slog.Info("Successfully generated batch embeddings", "source", req.Source, "vector_count", len(vectors))
 
+	// --- TTL EXPIRATION CALCULATION ---
+	// Parse TTL string and calculate expiration timestamp. Zero = no expiration.
+	var ttlExpiresAt int64
+	if req.TTL != "" {
+		ttlResult, ttlErr := ttl.ParseTTLDuration(req.TTL)
+		if ttlErr != nil {
+			slog.Error("Failed to parse TTL duration", "ttl", req.TTL, "error", ttlErr)
+			return 0, fmt.Errorf("invalid TTL format '%s': %w", req.TTL, ttlErr)
+		}
+		ttlExpiresAt = ttlResult.ExpiresAt
+		slog.Info("Document TTL configured",
+			"source", req.Source,
+			"ttl_input", req.TTL,
+			"ttl_format", ttlResult.Format.String(),
+			"ttl_description", ttlResult.Description,
+			"expires_at", time.UnixMilli(ttlExpiresAt).Format(time.RFC3339),
+		)
+	}
+
 	// --- Batch Weaviate Import in one request ---
 	batcher := client.Batch().ObjectsBatcher()
 	objects := make([]*models.Object, len(chunks))
@@ -672,6 +708,7 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 			"version_number": newVersion,
 			"is_current":     true,
 			"ingested_at":    ingestedAt,
+			"ttl_expires_at": ttlExpiresAt,
 		}
 		if req.SessionUUID != "" {
 			beacon := map[string]interface{}{
