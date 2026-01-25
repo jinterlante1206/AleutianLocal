@@ -290,7 +290,7 @@ func HandleChatWebSocket(client *weaviate.Client, llmClient llm.LLMClient,
 					if err := turn.Save(client); err != nil {
 						slog.Warn("Failed to save non-RAG conversation turn", "error", err, "sessionID", sessionID)
 					} else {
-						go SaveMemoryChunk(client, sessionID, req.Query, resp.Answer, turnNum)
+						go SaveMemoryChunk(client, sessionID, req.Query, resp.Answer, turnNum, "") // No TTL for websocket
 					}
 					if isFirstTurn {
 						SummarizeAndSaveSession(llmClient, client, sessionID, req.Query, resp.Answer)

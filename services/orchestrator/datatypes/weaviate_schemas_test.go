@@ -40,6 +40,7 @@ func TestGetDocumentSchema_HasRequiredProperties(t *testing.T) {
 		"data_space",
 		"ingested_at",
 		"turn_number",
+		"ttl_expires_at",
 		"inSession",
 	}
 
@@ -68,6 +69,8 @@ func TestGetDocumentSchema_PropertyDataTypes(t *testing.T) {
 		"is_current":     "boolean",
 		"data_space":     "text",
 		"ingested_at":    "number",
+		"turn_number":    "int",
+		"ttl_expires_at": "number",
 		"inSession":      "Session",
 	}
 
@@ -178,6 +181,8 @@ func TestGetSessionSchema_HasRequiredProperties(t *testing.T) {
 		"session_id",
 		"summary",
 		"timestamp",
+		"ttl_expires_at",
+		"ttl_duration_ms",
 	}
 
 	require.NotNil(t, schema.Properties)
@@ -197,9 +202,11 @@ func TestGetSessionSchema_PropertyDataTypes(t *testing.T) {
 	schema := GetSessionSchema()
 
 	propertyDataTypes := map[string]string{
-		"session_id": "text",
-		"summary":    "text",
-		"timestamp":  "number",
+		"session_id":      "text",
+		"summary":         "text",
+		"timestamp":       "number",
+		"ttl_expires_at":  "number",
+		"ttl_duration_ms": "number",
 	}
 
 	for _, prop := range schema.Properties {

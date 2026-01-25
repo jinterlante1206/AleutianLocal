@@ -152,6 +152,8 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		Verbosity:   config.Verbosity,
 		DataSpace:   config.DataSpace,
 		DocVersion:  config.DocVersion,
+		SessionTTL:  config.SessionTTL,
+		RecencyBias: config.RecencyBias,
 	})
 
 	ui := ux.NewChatUI()

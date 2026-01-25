@@ -18,8 +18,10 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -99,11 +101,12 @@ type SessionProperties struct {
 }
 
 type RAGRequest struct {
-	Query     string `json:"query"`
-	SessionId string `json:"session_id"`
-	Pipeline  string `json:"pipeline"`
-	NoRag     bool   `json:"no_rag"`
-	DataSpace string `json:"data_space,omitempty"` // Data space to filter queries by (e.g., "work", "personal")
+	Query      string `json:"query"`
+	SessionId  string `json:"session_id"`
+	Pipeline   string `json:"pipeline"`
+	NoRag      bool   `json:"no_rag"`
+	DataSpace  string `json:"data_space,omitempty"`  // Data space to filter queries by (e.g., "work", "personal")
+	SessionTTL string `json:"session_ttl,omitempty"` // Session TTL (e.g., "24h", "7d"). Resets on each message.
 }
 
 // =============================================================================
@@ -400,12 +403,155 @@ type SourceInfo struct {
 	Hash          string  `json:"hash,omitempty"`
 	VersionNumber *int    `json:"version_number,omitempty"` // Document version (1, 2, 3...)
 	IsCurrent     *bool   `json:"is_current,omitempty"`     // True if this is the latest version
+	IngestedAt    int64   `json:"ingested_at,omitempty"`    // Unix ms timestamp when document was ingested
 }
 
 type RAGResponse struct {
 	Answer    string       `json:"answer"`
 	SessionId string       `json:"session_id"`
 	Sources   []SourceInfo `json:"sources,omitempty"`
+}
+
+// =============================================================================
+// Recency Bias - Time-Decay Scoring
+// =============================================================================
+
+// IMPORTANT: Recency Bias vs Document Versioning
+//
+// Recency bias is for TIME-SENSITIVE CONTENT where newer information is inherently
+// more relevant (news, changelogs, daily reports). It is NOT for document versioning.
+//
+// Document versioning is handled separately:
+//   - Old versions are marked is_current=false on re-ingestion
+//   - RAG queries filter by is_current=true by default (see base.py)
+//   - Use --keep-versions to delete old versions entirely
+//
+// Using recency bias on versioned documents will incorrectly penalize old-but-relevant
+// content (e.g., a "Company Mission Statement" from 2020 would be deprioritized).
+
+// RecencyDecayPreset defines decay rates for recency bias presets.
+//
+// # Presets
+//
+//   - none: No decay (λ=0). Default, backward compatible.
+//   - gentle: λ=0.01. 50% at ~69 days. General knowledge bases.
+//   - moderate: λ=0.05. 50% at ~14 days. News, changelogs.
+//   - aggressive: λ=0.1. 50% at ~7 days. Fast-changing data.
+var RecencyDecayPreset = map[string]float64{
+	"none":       0.0,
+	"gentle":     0.01,
+	"moderate":   0.05,
+	"aggressive": 0.1,
+}
+
+// GetRecencyDecayRate returns the decay rate for a given preset.
+//
+// # Description
+//
+// Looks up the decay rate (λ) for the given preset name. If the preset
+// is not recognized, returns 0.0 (no decay) for backward compatibility.
+//
+// # Inputs
+//
+//   - preset: One of "none", "gentle", "moderate", "aggressive"
+//
+// # Outputs
+//
+//   - float64: The decay rate λ for exponential decay formula
+func GetRecencyDecayRate(preset string) float64 {
+	if rate, ok := RecencyDecayPreset[preset]; ok {
+		return rate
+	}
+	return 0.0 // Unknown preset = no decay
+}
+
+// ApplyRecencyDecay applies time-based decay to source scores.
+//
+// # Description
+//
+// Applies exponential decay to document scores based on age:
+//
+//	final_score = semantic_score * exp(-λ * age_in_days)
+//
+// Where λ (lambda) is the decay rate. Higher λ = faster decay.
+// After decay, sources are re-sorted by score (highest first).
+//
+// # When To Use
+//
+// Use recency decay ONLY for time-sensitive content where newer = more relevant:
+//   - News articles and current events
+//   - Changelogs and release notes
+//   - Daily/weekly reports
+//   - Time-series data
+//
+// Do NOT use for document versioning (handled by is_current filter) or static
+// knowledge bases where old content is equally valid.
+//
+// # Inputs
+//
+//   - sources: Slice of SourceInfo to apply decay to.
+//   - decayRate: The decay rate λ. Use GetRecencyDecayRate() for presets.
+//
+// # Outputs
+//
+//   - []SourceInfo: Sources with adjusted scores, sorted by score descending.
+//
+// # Notes
+//
+//   - If decayRate is 0, returns sources unchanged.
+//   - Uses Score field if set, otherwise Distance (inverted for decay).
+//   - IngestedAt must be set for decay to work; 0 = no decay applied.
+func ApplyRecencyDecay(sources []SourceInfo, decayRate float64) []SourceInfo {
+	if decayRate == 0 || len(sources) == 0 {
+		return sources
+	}
+
+	now := time.Now().UnixMilli()
+	result := make([]SourceInfo, len(sources))
+	copy(result, sources)
+
+	for i := range result {
+		if result[i].IngestedAt == 0 {
+			continue // No timestamp, skip decay
+		}
+
+		// Calculate age in days
+		ageMs := now - result[i].IngestedAt
+		ageDays := float64(ageMs) / (24 * 60 * 60 * 1000)
+		if ageDays < 0 {
+			ageDays = 0 // Future timestamps treated as brand new
+		}
+
+		// Calculate decay factor: exp(-λ * age)
+		decayFactor := math.Exp(-decayRate * ageDays)
+
+		// Apply decay to score
+		if result[i].Score > 0 {
+			result[i].Score *= decayFactor
+		} else if result[i].Distance > 0 {
+			// Distance is inverse of similarity, so we increase it
+			// Higher distance = less relevant after decay
+			result[i].Distance /= decayFactor
+		}
+	}
+
+	// Re-sort by score descending (or distance ascending)
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Score > 0 && result[j].Score > 0 {
+			return result[i].Score > result[j].Score
+		}
+		if result[i].Distance > 0 && result[j].Distance > 0 {
+			return result[i].Distance < result[j].Distance
+		}
+		return result[i].Score > result[j].Score
+	})
+
+	slog.Debug("Applied recency decay to sources",
+		"decay_rate", decayRate,
+		"source_count", len(result),
+	)
+
+	return result
 }
 
 // HistoryTurn represents a single question-answer pair in conversation history.
@@ -759,6 +905,8 @@ type ChatRAGRequest struct {
 	Strictness           string                `json:"strictness,omitempty"`            // Verified pipeline: "strict" or "balanced"
 	DataSpace            string                `json:"data_space,omitempty"`            // Data space to filter queries by (e.g., "work", "personal")
 	VersionTag           string                `json:"version_tag,omitempty"`           // Specific version to query (e.g., "v1"); empty = current
+	SessionTTL           string                `json:"session_ttl,omitempty"`           // Session TTL (e.g., "24h", "7d"). Resets on each message.
+	RecencyBias          string                `json:"recency_bias,omitempty"`          // Recency bias preset: none, gentle, moderate, aggressive
 }
 
 // ChatTurn represents a single turn in a conversation

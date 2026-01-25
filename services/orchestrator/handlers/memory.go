@@ -32,6 +32,9 @@ const memoryChunkTimeout = 60 * time.Second
 // for semantic search during follow-up queries. The turn is embedded and stored
 // with a vector for similarity search.
 //
+// When sessionTTL is provided, the session's TTL is reset on each message (the
+// "reset on activity" behavior for ephemeral sessions).
+//
 // # Inputs
 //
 //   - client: Weaviate client for database access.
@@ -39,6 +42,7 @@ const memoryChunkTimeout = 60 * time.Second
 //   - question: The user's question for this turn.
 //   - answer: The AI's response for this turn.
 //   - turnNumber: The sequential turn number within the session (1-indexed).
+//   - sessionTTL: Optional session TTL (e.g., "24h", "7d"). Empty = no TTL.
 //
 // # Thread Safety
 //
@@ -47,17 +51,26 @@ const memoryChunkTimeout = 60 * time.Second
 //
 // # Example
 //
-//	go SaveMemoryChunk(client, "sess_123", "What is Chrysler?", "Chrysler is...", 5)
-func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string, turnNumber int) {
+//	go SaveMemoryChunk(client, "sess_123", "What is Chrysler?", "Chrysler is...", 5, "24h")
+//	go SaveMemoryChunk(client, "sess_456", "Hello", "Hi!", 1, "") // No TTL
+func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string, turnNumber int, sessionTTL string) {
 	// Create a bounded context to prevent goroutine accumulation
 	ctx, cancel := context.WithTimeout(context.Background(), memoryChunkTimeout)
 	defer cancel()
 
 	slog.Info("Saving chat turn to Document class for RAG memory",
 		"sessionId", sessionId,
-		"turnNumber", turnNumber)
+		"turnNumber", turnNumber,
+		"sessionTTL", sessionTTL)
 
-	sessionUUID, err := datatypes.FindOrCreateSessionUUID(ctx, client, sessionId)
+	// Use TTL-aware session management when TTL is provided
+	var sessionUUID string
+	var err error
+	if sessionTTL != "" {
+		sessionUUID, err = datatypes.FindOrCreateSessionWithTTL(ctx, client, sessionId, sessionTTL)
+	} else {
+		sessionUUID, err = datatypes.FindOrCreateSessionUUID(ctx, client, sessionId)
+	}
 	if err != nil {
 		slog.Error("Failed to find parent session for memory chunk, aborting save.",
 			"sessionId", sessionId, "error", err)

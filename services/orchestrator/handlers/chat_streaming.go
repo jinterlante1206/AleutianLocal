@@ -1230,6 +1230,19 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 	// Future: integrate granite-guardian for user acknowledgment flow
 	h.auditRAGContextForPII(req.Id, ragCtx, sources)
 
+	// Step 7.5: Apply recency bias if configured
+	if req.RecencyBias != "" && req.RecencyBias != "none" {
+		decayRate := datatypes.GetRecencyDecayRate(req.RecencyBias)
+		if decayRate > 0 {
+			sources = datatypes.ApplyRecencyDecay(sources, decayRate)
+			slog.Debug("Applied recency bias to sources",
+				"requestId", req.Id,
+				"recency_bias", req.RecencyBias,
+				"decay_rate", decayRate,
+			)
+		}
+	}
+
 	// Step 8: Emit sources event
 	if err := sseWriter.WriteSources(sources); err != nil {
 		close(heartbeatDone)
@@ -1898,7 +1911,8 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 				)
 
 				// Save to semantic memory for future context retrieval (P7)
-				go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, result.Answer, nextTurnNumber)
+				// Pass sessionTTL to reset TTL on each message (ephemeral session behavior)
+				go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, result.Answer, nextTurnNumber, req.SessionTTL)
 			}
 		}
 	}

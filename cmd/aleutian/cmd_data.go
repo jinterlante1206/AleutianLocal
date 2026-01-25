@@ -116,12 +116,14 @@ type ingestResult struct {
 //   - DataSpace: Logical namespace for document segmentation.
 //   - VersionTag: Version label for this ingestion batch.
 //   - TTL: Optional TTL duration string (e.g., "90d", "P30D"). Empty = no expiration.
+//   - KeepVersions: Number of versions to retain (0 = keep all). Deletes oldest after ingestion.
 type ingestRequestBody struct {
-	Source     string `json:"source"`
-	Content    string `json:"content"`
-	DataSpace  string `json:"data_space"`
-	VersionTag string `json:"version_tag"`
-	TTL        string `json:"ttl,omitempty"`
+	Source       string `json:"source"`
+	Content      string `json:"content"`
+	DataSpace    string `json:"data_space"`
+	VersionTag   string `json:"version_tag"`
+	TTL          string `json:"ttl,omitempty"`
+	KeepVersions int    `json:"keep_versions,omitempty"`
 }
 
 // IngestAuditContext captures identity and metadata for audit logging.
@@ -186,6 +188,7 @@ type IngestAuditContext struct {
 //   - VersionTag: Version label for this ingestion batch (e.g., "v1.0", "2024-01-15")
 //   - ForceMode: If true, bypasses interactive approval for files with secrets
 //   - TTL: Document retention period (e.g., "90d", "P30D"). Empty = no expiration.
+//   - KeepVersions: Number of versions to retain (0 = keep all). Deletes oldest after ingestion.
 //
 // # Examples
 //
@@ -195,6 +198,7 @@ type IngestAuditContext struct {
 //	    VersionTag:      "v2.1.0",
 //	    ForceMode:       false,
 //	    TTL:             "90d",
+//	    KeepVersions:    3,  // Keep only last 3 versions
 //	}
 //
 // # Limitations
@@ -208,6 +212,7 @@ type IngestConfig struct {
 	VersionTag      string
 	ForceMode       bool
 	TTL             string
+	KeepVersions    int
 }
 
 // IngestPipelineVersion is the current version of the ingestion pipeline.
@@ -764,11 +769,12 @@ func (p *IngestPipeline) ingestFiles(ctx context.Context, files []scanResult) (
 
 				file := files[idx]
 				reqBody := ingestRequestBody{
-					Source:     file.FilePath,
-					Content:    string(file.Content),
-					DataSpace:  p.config.DataSpace,
-					VersionTag: p.config.VersionTag,
-					TTL:        p.config.TTL,
+					Source:       file.FilePath,
+					Content:      string(file.Content),
+					DataSpace:    p.config.DataSpace,
+					VersionTag:   p.config.VersionTag,
+					TTL:          p.config.TTL,
+					KeepVersions: p.config.KeepVersions,
 				}
 				postBody, marshalErr := json.Marshal(reqBody)
 				if marshalErr != nil {
@@ -948,6 +954,11 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		ux.Error(fmt.Sprintf("Failed to read 'ttl' flag: %v", err))
 		return
 	}
+	keepVersions, err := cmd.Flags().GetInt("keep-versions")
+	if err != nil {
+		ux.Error(fmt.Sprintf("Failed to read 'keep-versions' flag: %v", err))
+		return
+	}
 
 	// Build configuration
 	config := IngestConfig{
@@ -956,6 +967,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		VersionTag:      versionTag,
 		ForceMode:       force,
 		TTL:             ttlValue,
+		KeepVersions:    keepVersions,
 	}
 
 	// Build audit context with current user
@@ -989,6 +1001,7 @@ func populateVectorDB(cmd *cobra.Command, args []string) {
 		"version_tag", config.VersionTag,
 		"force_mode", config.ForceMode,
 		"ttl", config.TTL,
+		"keep_versions", config.KeepVersions,
 		"paths", args,
 	)
 

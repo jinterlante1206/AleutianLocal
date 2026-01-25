@@ -81,6 +81,8 @@ func runAskCommand(_ *cobra.Command, args []string) {
 func runChatCommand(cmd *cobra.Command, _ []string) {
 	baseURL := getOrchestratorBaseURL()
 	resumeID, _ := cmd.Flags().GetString("resume")
+	sessionTTL, _ := cmd.Flags().GetString("ttl")
+	recencyBias, _ := cmd.Flags().GetString("recency-bias")
 
 	// Create the appropriate runner based on --no-rag flag
 	var runner ChatRunner
@@ -90,16 +92,19 @@ func runChatCommand(cmd *cobra.Command, _ []string) {
 			SessionID:      resumeID,
 			EnableThinking: enableThinking,
 			BudgetTokens:   budgetTokens,
+			SessionTTL:     sessionTTL,
 		})
 	} else {
 		runner = NewRAGChatRunner(RAGChatRunnerConfig{
-			BaseURL:    baseURL,
-			Pipeline:   pipelineType,
-			SessionID:  resumeID,
-			StrictMode: !unrestrictedMode, // Strict by default (only answer from RAG docs)
-			Verbosity:  verbosityLevel,    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
-			DataSpace:  dataSpaceFlag,     // Filter queries to specific data space
-			DocVersion: docVersionFlag,    // Query specific document version (e.g., "v1")
+			BaseURL:     baseURL,
+			Pipeline:    pipelineType,
+			SessionID:   resumeID,
+			StrictMode:  !unrestrictedMode, // Strict by default (only answer from RAG docs)
+			Verbosity:   verbosityLevel,    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
+			DataSpace:   dataSpaceFlag,     // Filter queries to specific data space
+			DocVersion:  docVersionFlag,    // Query specific document version (e.g., "v1")
+			SessionTTL:  sessionTTL,        // Session TTL (e.g., "24h", "7d")
+			RecencyBias: recencyBias,       // Recency bias (none, gentle, moderate, aggressive)
 		})
 	}
 	defer func() {

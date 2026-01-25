@@ -69,13 +69,15 @@ var (
 //   - VersionTag: Version label for this ingestion (auto-generated if empty).
 //   - SessionUUID: If set, links document chunks to a session via cross-reference.
 //   - TTL: Optional TTL duration string (e.g., "90d", "P30D"). Empty = no expiration.
+//   - KeepVersions: Number of versions to retain (0 = keep all). Deletes oldest after ingestion.
 type IngestDocumentRequest struct {
-	Content     string `json:"content"`
-	Source      string `json:"source"`
-	DataSpace   string `json:"data_space"`
-	VersionTag  string `json:"version_tag"`
-	SessionUUID string `json:"session_id"`
-	TTL         string `json:"ttl,omitempty"`
+	Content      string `json:"content"`
+	Source       string `json:"source"`
+	DataSpace    string `json:"data_space"`
+	VersionTag   string `json:"version_tag"`
+	SessionUUID  string `json:"session_id"`
+	TTL          string `json:"ttl,omitempty"`
+	KeepVersions int    `json:"keep_versions,omitempty"`
 }
 
 type IngestedDocument struct {
@@ -503,6 +505,158 @@ func getMaxVersionForParentSource(ctx context.Context, client *weaviate.Client, 
 	return int(maxVersion), nil
 }
 
+// cleanupOldVersions deletes document chunks from versions beyond the retention limit.
+//
+// # Description
+//
+// After a new version is ingested, this function removes old versions to enforce
+// the keep_versions retention policy. Versions are deleted from oldest to newest
+// until only keepVersions remain.
+//
+// # Inputs
+//
+//   - ctx: Context for the operation (supports cancellation/timeout)
+//   - client: Weaviate client instance
+//   - parentSource: The parent_source field to filter on
+//   - dataSpace: The data_space field to filter on
+//   - keepVersions: Number of versions to retain (must be > 0)
+//   - currentVersion: The version number just ingested
+//
+// # Outputs
+//
+//   - int: Number of chunks deleted across all removed versions
+//   - error: Any error encountered during deletion
+//
+// # Audit
+//
+// Logs deletion events with operation type "delete_old_version" for compliance.
+//
+// # Limitations
+//
+//   - Uses batch delete which may be slow for documents with many chunks
+//   - Does not verify deletion success for individual chunks
+func cleanupOldVersions(ctx context.Context, client *weaviate.Client, parentSource, dataSpace string, keepVersions, currentVersion int) (int, error) {
+	// Calculate which versions to delete
+	// If current is v5 and keep=3, delete versions 1 and 2 (keep 3, 4, 5)
+	oldestToKeep := currentVersion - keepVersions + 1
+	if oldestToKeep <= 0 {
+		return 0, nil // Nothing to delete
+	}
+
+	slog.Info("Version cleanup starting",
+		"parent_source", parentSource,
+		"data_space", dataSpace,
+		"current_version", currentVersion,
+		"keep_versions", keepVersions,
+		"deleting_versions_below", oldestToKeep,
+	)
+
+	// Build filter: parent_source AND data_space AND version_number < oldestToKeep
+	where := filters.Where().
+		WithOperator(filters.And).
+		WithOperands([]*filters.WhereBuilder{
+			filters.Where().
+				WithPath([]string{"parent_source"}).
+				WithOperator(filters.Equal).
+				WithValueText(parentSource),
+			filters.Where().
+				WithPath([]string{"data_space"}).
+				WithOperator(filters.Equal).
+				WithValueText(dataSpace),
+			filters.Where().
+				WithPath([]string{"version_number"}).
+				WithOperator(filters.LessThan).
+				WithValueInt(int64(oldestToKeep)),
+		})
+
+	// First, get all document IDs to delete
+	result, err := client.GraphQL().Get().
+		WithClassName("Document").
+		WithWhere(where).
+		WithFields(
+			graphql.Field{Name: "_additional { id }"},
+			graphql.Field{Name: "version_number"},
+		).
+		Do(ctx)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to query old versions: %w", err)
+	}
+
+	if result.Data == nil {
+		return 0, nil
+	}
+
+	getResult, ok := result.Data["Get"].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	docs, ok := getResult["Document"].([]interface{})
+	if !ok || len(docs) == 0 {
+		return 0, nil
+	}
+
+	// Collect IDs to delete
+	var idsToDelete []string
+	versionsDeleted := make(map[int]bool)
+	for _, doc := range docs {
+		docMap, ok := doc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		additional, ok := docMap["_additional"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, ok := additional["id"].(string)
+		if !ok {
+			continue
+		}
+		idsToDelete = append(idsToDelete, id)
+
+		// Track which versions are being deleted for audit
+		if versionNum, ok := docMap["version_number"].(float64); ok {
+			versionsDeleted[int(versionNum)] = true
+		}
+	}
+
+	if len(idsToDelete) == 0 {
+		return 0, nil
+	}
+
+	// Delete the chunks
+	deletedCount := 0
+	for _, id := range idsToDelete {
+		err := client.Data().Deleter().
+			WithClassName("Document").
+			WithID(id).
+			Do(ctx)
+
+		if err != nil {
+			slog.Warn("Failed to delete old version chunk", "id", id, "error", err)
+			continue
+		}
+		deletedCount++
+	}
+
+	// Audit log for compliance
+	versionsList := make([]int, 0, len(versionsDeleted))
+	for v := range versionsDeleted {
+		versionsList = append(versionsList, v)
+	}
+	slog.Info("version.cleanup.complete",
+		"operation", "delete_old_version",
+		"parent_source", parentSource,
+		"data_space", dataSpace,
+		"versions_removed", versionsList,
+		"chunks_deleted", deletedCount,
+		"keep_versions", keepVersions,
+	)
+
+	return deletedCount, nil
+}
+
 // markOldVersionsNotCurrent updates all existing document chunks with the given
 // parent_source and data_space to have is_current = false.
 //
@@ -765,6 +919,22 @@ func RunIngestion(ctx context.Context, client *weaviate.Client, req IngestDocume
 
 	slog.Info("Successfully processed document", "source", req.Source, "chunks_processed",
 		chunksCreated)
+
+	// --- VERSION CLEANUP ---
+	// If KeepVersions is set, delete old versions beyond the retention limit
+	if req.KeepVersions > 0 && newVersion > req.KeepVersions {
+		deletedCount, deleteErr := cleanupOldVersions(ctx, client, req.Source, req.DataSpace, req.KeepVersions, newVersion)
+		if deleteErr != nil {
+			slog.Warn("Failed to cleanup old versions", "source", req.Source, "error", deleteErr)
+			// Don't fail the request, just log the warning
+		} else if deletedCount > 0 {
+			slog.Info("Cleaned up old document versions",
+				"source", req.Source,
+				"versions_deleted", deletedCount,
+				"keep_versions", req.KeepVersions,
+			)
+		}
+	}
 
 	return chunksCreated, nil
 }
