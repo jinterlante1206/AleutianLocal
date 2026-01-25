@@ -91,9 +91,11 @@ type WeaviateSessionObject struct {
 }
 
 type SessionProperties struct {
-	SessionId string `json:"session_id"`
-	Summary   string `json:"summary"`
-	Timestamp int64  `json:"timestamp"`
+	SessionId     string `json:"session_id"`
+	Summary       string `json:"summary"`
+	Timestamp     int64  `json:"timestamp"`
+	TTLExpiresAt  int64  `json:"ttl_expires_at"`
+	TTLDurationMs int64  `json:"ttl_duration_ms"`
 }
 
 type RAGRequest struct {

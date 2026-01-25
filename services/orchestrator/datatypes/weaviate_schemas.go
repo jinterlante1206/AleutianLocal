@@ -96,6 +96,12 @@ func GetDocumentSchema() *models.Class {
 				IndexFilterable: indexFilterable,
 			},
 			{
+				Name:            "ttl_expires_at",
+				DataType:        []string{"number"},
+				Description:     "Unix milliseconds timestamp when document expires. 0 = never expires.",
+				IndexFilterable: indexFilterable,
+			},
+			{
 				Name:     "inSession",
 				DataType: []string{"Session"},
 				Description: "A direct graph link to the parent Session object (" +
@@ -200,6 +206,77 @@ func GetSessionSchema() *models.Class {
 				Description:     "The timestamp when the session began.",
 				IndexFilterable: indexFilterable,
 			},
+			{
+				Name:            "ttl_expires_at",
+				DataType:        []string{"number"},
+				Description:     "Unix milliseconds timestamp when session expires. 0 = never expires. Resets on each new message.",
+				IndexFilterable: indexFilterable,
+			},
+			{
+				Name:            "ttl_duration_ms",
+				DataType:        []string{"number"},
+				Description:     "Original TTL duration in milliseconds. Used to recalculate ttl_expires_at on activity.",
+				IndexFilterable: indexFilterable,
+			},
+		},
+	}
+}
+
+// GetDataspaceConfigSchema returns the schema for the DataspaceConfig class.
+//
+// # Description
+//
+// DataspaceConfig stores configuration for a logical data space, including
+// default retention policies. This enables per-dataspace TTL settings.
+//
+// # Properties
+//
+//   - data_space_name: Unique identifier for the data space (e.g., 'work', 'personal').
+//   - retention_days: Default retention period in days for new documents. 0 = indefinite.
+//   - created_at: Unix milliseconds when this config was created.
+//   - modified_at: Unix milliseconds when this config was last modified.
+//
+// # Example
+//
+//	config := GetDataspaceConfigSchema()
+//	client.Schema().ClassCreator().WithClass(config).Do(ctx)
+func GetDataspaceConfigSchema() *models.Class {
+	indexFilterable := new(bool)
+	*indexFilterable = true
+
+	return &models.Class{
+		Class:       "DataspaceConfig",
+		Description: "Configuration for a logical data space including retention policies.",
+		Vectorizer:  "none",
+		InvertedIndexConfig: &models.InvertedIndexConfig{
+			IndexTimestamps: true,
+		},
+		Properties: []*models.Property{
+			{
+				Name:            "data_space_name",
+				DataType:        []string{"text"},
+				Description:     "Unique identifier for this data space (e.g., 'work', 'personal').",
+				IndexFilterable: indexFilterable,
+				Tokenization:    "field",
+			},
+			{
+				Name:            "retention_days",
+				DataType:        []string{"int"},
+				Description:     "Default retention period in days for new documents. 0 = indefinite.",
+				IndexFilterable: indexFilterable,
+			},
+			{
+				Name:            "created_at",
+				DataType:        []string{"number"},
+				Description:     "Unix milliseconds when this config was created.",
+				IndexFilterable: indexFilterable,
+			},
+			{
+				Name:            "modified_at",
+				DataType:        []string{"number"},
+				Description:     "Unix milliseconds when this config was last modified.",
+				IndexFilterable: indexFilterable,
+			},
 		},
 	}
 }
@@ -211,6 +288,7 @@ func EnsureWeaviateSchema(client *weaviate.Client) {
 		GetDocumentSchema,
 		GetConversationSchema,
 		GetVerificationLogSchema,
+		GetDataspaceConfigSchema,
 	}
 
 	for _, getSchema := range schemaGetters {

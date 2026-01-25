@@ -107,10 +107,12 @@ type SessionQueryResponse struct {
 
 // SessionResult represents a single session from a query.
 type SessionResult struct {
-	SessionID  string `json:"session_id"`
-	Summary    string `json:"summary"`
-	Timestamp  int64  `json:"timestamp"`
-	Additional struct {
+	SessionID     string `json:"session_id"`
+	Summary       string `json:"summary"`
+	Timestamp     int64  `json:"timestamp"`
+	TTLExpiresAt  int64  `json:"ttl_expires_at"`
+	TTLDurationMs int64  `json:"ttl_duration_ms"`
+	Additional    struct {
 		ID string `json:"id"`
 	} `json:"_additional"`
 }
@@ -157,6 +159,7 @@ type DocumentResult struct {
 	IsCurrent     *bool  `json:"is_current"`
 	TurnNumber    *int   `json:"turn_number"`
 	IngestedAt    int64  `json:"ingested_at"`
+	TTLExpiresAt  int64  `json:"ttl_expires_at"`
 	Additional    struct {
 		ID        string   `json:"id"`
 		Distance  *float32 `json:"distance"`
@@ -185,9 +188,11 @@ type DocumentResult struct {
 //	client.Data().Creator().WithProperties(props.ToMap()).Do(ctx)
 func (p *SessionProperties) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"session_id": p.SessionId,
-		"summary":    p.Summary,
-		"timestamp":  p.Timestamp,
+		"session_id":      p.SessionId,
+		"summary":         p.Summary,
+		"timestamp":       p.Timestamp,
+		"ttl_expires_at":  p.TTLExpiresAt,
+		"ttl_duration_ms": p.TTLDurationMs,
 	}
 }
 
@@ -226,6 +231,7 @@ type DocumentProperties struct {
 	IsCurrent     bool   `json:"is_current"`
 	TurnNumber    int    `json:"turn_number"`
 	IngestedAt    int64  `json:"ingested_at"`
+	TTLExpiresAt  int64  `json:"ttl_expires_at"`
 }
 
 // ToMap converts DocumentProperties to map[string]interface{} for Weaviate.
@@ -240,6 +246,7 @@ func (p *DocumentProperties) ToMap() map[string]interface{} {
 		"is_current":     p.IsCurrent,
 		"turn_number":    p.TurnNumber,
 		"ingested_at":    p.IngestedAt,
+		"ttl_expires_at": p.TTLExpiresAt,
 	}
 }
 
@@ -274,4 +281,93 @@ func WithBeacon(props map[string]interface{}, sessionUUID string) {
 		Beacon: fmt.Sprintf("weaviate://localhost/Session/%s", sessionUUID),
 	}
 	props["inSession"] = []BeaconRef{beacon}
+}
+
+// =============================================================================
+// DataspaceConfig Types
+// =============================================================================
+
+// DataspaceConfigQueryResponse represents the response from querying the DataspaceConfig class.
+//
+// # Fields
+//
+//   - Get.DataspaceConfig: Array of dataspace configuration objects.
+type DataspaceConfigQueryResponse struct {
+	Get struct {
+		DataspaceConfig []DataspaceConfigResult `json:"DataspaceConfig"`
+	} `json:"Get"`
+}
+
+// DataspaceConfigResult represents a single dataspace config from a query.
+//
+// # Description
+//
+// Contains the configuration for a logical data space, including default
+// retention policies that apply to new documents ingested into the space.
+//
+// # Fields
+//
+//   - DataSpaceName: Unique identifier for the data space.
+//   - RetentionDays: Default retention period in days. 0 = indefinite.
+//   - CreatedAt: Unix milliseconds when the config was created.
+//   - ModifiedAt: Unix milliseconds when the config was last modified.
+type DataspaceConfigResult struct {
+	DataSpaceName string `json:"data_space_name"`
+	RetentionDays int    `json:"retention_days"`
+	CreatedAt     int64  `json:"created_at"`
+	ModifiedAt    int64  `json:"modified_at"`
+	Additional    struct {
+		ID string `json:"id"`
+	} `json:"_additional"`
+}
+
+// DataspaceConfigProperties represents the properties for creating/updating a DataspaceConfig object.
+//
+// # Description
+//
+// Used when creating or updating a dataspace configuration. The RetentionDays
+// field sets the default TTL for documents ingested into this dataspace when
+// no explicit --ttl flag is provided.
+//
+// # Fields
+//
+//   - DataSpaceName: Unique identifier for the data space. Must be non-empty.
+//   - RetentionDays: Default retention period in days. 0 = indefinite (no default TTL).
+//   - CreatedAt: Unix milliseconds when the config was created.
+//   - ModifiedAt: Unix milliseconds when the config was last modified.
+//
+// # Example
+//
+//	props := DataspaceConfigProperties{
+//	    DataSpaceName: "work",
+//	    RetentionDays: 90,
+//	    CreatedAt:     time.Now().UnixMilli(),
+//	    ModifiedAt:    time.Now().UnixMilli(),
+//	}
+//	client.Data().Creator().WithClassName("DataspaceConfig").
+//	    WithProperties(props.ToMap()).Do(ctx)
+type DataspaceConfigProperties struct {
+	DataSpaceName string `json:"data_space_name"`
+	RetentionDays int    `json:"retention_days"`
+	CreatedAt     int64  `json:"created_at"`
+	ModifiedAt    int64  `json:"modified_at"`
+}
+
+// ToMap converts DataspaceConfigProperties to map[string]interface{} for Weaviate.
+//
+// # Description
+//
+// Converts the typed DataspaceConfigProperties struct to the map format required
+// by Weaviate's WithProperties() method.
+//
+// # Outputs
+//
+//   - map[string]interface{}: Property map ready for Weaviate client.
+func (p *DataspaceConfigProperties) ToMap() map[string]interface{} {
+	return map[string]interface{}{
+		"data_space_name": p.DataSpaceName,
+		"retention_days":  p.RetentionDays,
+		"created_at":      p.CreatedAt,
+		"modified_at":     p.ModifiedAt,
+	}
 }

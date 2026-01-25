@@ -63,6 +63,7 @@ import (
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/observability"
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/routes"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/ttl"
 	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
@@ -221,6 +222,18 @@ type Config struct {
 	// Valid values: "debug", "release", "test"
 	// Default: uses GIN_MODE env var or "debug"
 	GinMode string
+
+	// TTLCleanupInterval is how often the TTL scheduler runs cleanup.
+	// Default: 1 hour
+	TTLCleanupInterval time.Duration
+
+	// TTLLogPath is the path to the TTL audit log file.
+	// Default: "./logs/ttl_cleanup.log"
+	TTLLogPath string
+
+	// TTLEnabled enables the background TTL cleanup scheduler.
+	// Default: true (when Weaviate is configured)
+	TTLEnabled bool
 }
 
 // =============================================================================
@@ -269,6 +282,8 @@ type service struct {
 	policyEngine   *policy_engine.PolicyEngine
 	weaviateClient *weaviate.Client
 	tracerCleanup  func(context.Context)
+	ttlScheduler   ttl.TTLScheduler
+	ttlLogger      ttl.TTLLogger
 }
 
 // =============================================================================
@@ -356,6 +371,15 @@ func New(cfg Config, opts *extensions.ServiceOptions) (Service, error) {
 		slog.Warn("Weaviate initialization failed, running in lightweight mode",
 			"error", err)
 		// Not fatal - continue without Weaviate
+	}
+
+	// Initialize TTL scheduler (only if Weaviate is available)
+	if s.weaviateClient != nil && s.config.TTLEnabled {
+		if err := s.initTTLScheduler(); err != nil {
+			slog.Warn("TTL scheduler initialization failed",
+				"error", err)
+			// Not fatal - continue without TTL cleanup
+		}
 	}
 
 	// Initialize policy engine
@@ -471,6 +495,17 @@ func applyConfigDefaults(cfg Config) Config {
 	// EnableMetrics defaults to true (zero value is false, so we need explicit check)
 	// We'll handle this by always enabling unless explicitly disabled via a setter
 	cfg.EnableMetrics = true
+
+	// TTL defaults
+	if cfg.TTLCleanupInterval == 0 {
+		cfg.TTLCleanupInterval = 1 * time.Hour
+	}
+	if cfg.TTLLogPath == "" {
+		cfg.TTLLogPath = "./logs/ttl_cleanup.log"
+	}
+	// TTLEnabled defaults to true (will only run if Weaviate is configured)
+	cfg.TTLEnabled = true
+
 	return cfg
 }
 
@@ -648,11 +683,83 @@ func (s *service) initRouter() {
 // # Description
 //
 // Called when Run() exits or on initialization failure.
-// Shuts down tracer and any other cleanup tasks.
+// Shuts down tracer, TTL scheduler, and any other cleanup tasks.
 func (s *service) cleanup() {
+	// Stop TTL scheduler
+	if s.ttlScheduler != nil {
+		if err := s.ttlScheduler.Stop(); err != nil {
+			slog.Warn("TTL scheduler stop error", "error", err)
+		}
+	}
+
+	// Close TTL logger
+	if s.ttlLogger != nil {
+		if err := s.ttlLogger.Close(); err != nil {
+			slog.Warn("TTL logger close error", "error", err)
+		}
+	}
+
+	// Shutdown tracer
 	if s.tracerCleanup != nil {
 		s.tracerCleanup(context.Background())
 	}
+}
+
+// initTTLScheduler initializes the background TTL cleanup scheduler.
+//
+// # Description
+//
+// Creates the TTL service, logger, and scheduler components. Starts the
+// scheduler as a background goroutine that periodically cleans up expired
+// documents and sessions.
+//
+// # Outputs
+//
+//   - error: Non-nil if scheduler initialization fails
+//
+// # Limitations
+//
+//   - Requires Weaviate client to be initialized
+//   - Log directory must be writable
+//
+// # Assumptions
+//
+//   - Weaviate client is available (checked by caller)
+//   - TTLEnabled is true (checked by caller)
+func (s *service) initTTLScheduler() error {
+	// Create TTL service backed by Weaviate
+	ttlService := ttl.NewTTLService(s.weaviateClient)
+
+	// Create TTL audit logger
+	logger, err := ttl.NewTTLLogger(s.config.TTLLogPath)
+	if err != nil {
+		slog.Warn("Failed to create TTL audit logger, continuing without audit log",
+			"log_path", s.config.TTLLogPath,
+			"error", err)
+		// Continue without audit logger - slog will still capture logs
+	} else {
+		s.ttlLogger = logger
+	}
+
+	// Create scheduler configuration
+	schedulerConfig := ttl.DefaultSchedulerConfig()
+	schedulerConfig.Interval = s.config.TTLCleanupInterval
+
+	// Create and start scheduler
+	s.ttlScheduler = ttl.NewTTLScheduler(ttlService, s.ttlLogger, schedulerConfig)
+
+	// Start scheduler in background
+	ctx := context.Background()
+	if err := s.ttlScheduler.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start TTL scheduler: %w", err)
+	}
+
+	slog.Info("TTL cleanup scheduler started",
+		"interval", s.config.TTLCleanupInterval.String(),
+		"log_path", s.config.TTLLogPath,
+	)
+
+	return nil
 }
 
 // =============================================================================

@@ -16,8 +16,10 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/ttl"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/graphql"
@@ -25,6 +27,12 @@ import (
 )
 
 var tracer = otel.Tracer("aleutian.orchestrator.conversation")
+
+// defaultTTLFilterSkewAllowance accounts for minor clock differences between
+// the orchestrator and the Weaviate nodes when performing post-query TTL
+// filtering. Documents within this window of their expiration time are still
+// considered valid to avoid premature removal due to clock skew.
+const defaultTTLFilterSkewAllowance = 5 * time.Second
 
 // WeaviateConversationSearcher implements ConversationSearcher using Weaviate.
 //
@@ -48,6 +56,11 @@ type WeaviateConversationSearcher struct {
 	client   *weaviate.Client
 	embedder EmbeddingProvider
 	config   SearchConfig
+	// ttlFilter provides post-query filtering for expired documents as a
+	// defense-in-depth measure. Even if the Weaviate query-level TTL filter
+	// misses an expiring document (due to clock skew or replication lag),
+	// this application-level filter catches it before results reach the user.
+	ttlFilter ttl.TTLQueryFilter
 }
 
 // NewWeaviateConversationSearcher creates a new conversation searcher.
@@ -84,9 +97,10 @@ func NewWeaviateConversationSearcher(client *weaviate.Client, embedder Embedding
 	validatedConfig := validateSearchConfig(config)
 
 	return &WeaviateConversationSearcher{
-		client:   client,
-		embedder: embedder,
-		config:   validatedConfig,
+		client:    client,
+		embedder:  embedder,
+		config:    validatedConfig,
+		ttlFilter: ttl.NewTTLQueryFilter(defaultTTLFilterSkewAllowance),
 	}
 }
 
@@ -215,10 +229,27 @@ func (s *WeaviateConversationSearcher) SearchRelevant(ctx context.Context, sessi
 		WithOperator(filters.GreaterThan).
 		WithValueInt(int64(minTurnNumber))
 
+	// SEC-002: TTL expiration filter (defense-in-depth)
+	// Exclude documents where TTL has passed. Keep docs where:
+	// - ttl_expires_at == 0 (never expires)
+	// - ttl_expires_at >= current time (not yet expired)
+	currentTimeMs := time.Now().UnixMilli()
+	ttlNotSetFilter := filters.Where().
+		WithPath([]string{"ttl_expires_at"}).
+		WithOperator(filters.Equal).
+		WithValueNumber(0)
+	ttlNotExpiredFilter := filters.Where().
+		WithPath([]string{"ttl_expires_at"}).
+		WithOperator(filters.GreaterThanEqual).
+		WithValueNumber(float64(currentTimeMs))
+	ttlFilter := filters.Where().
+		WithOperator(filters.Or).
+		WithOperands([]*filters.WhereBuilder{ttlNotSetFilter, ttlNotExpiredFilter})
+
 	// Combine filters with AND
 	combinedFilter := filters.Where().
 		WithOperator(filters.And).
-		WithOperands([]*filters.WhereBuilder{dataSpaceFilter, versionTagFilter, turnNumberFilter})
+		WithOperands([]*filters.WhereBuilder{dataSpaceFilter, versionTagFilter, turnNumberFilter, ttlFilter})
 
 	// 4. Build the NearVector search
 	nearVector := s.client.GraphQL().NearVectorArgBuilder().
@@ -226,10 +257,12 @@ func (s *WeaviateConversationSearcher) SearchRelevant(ctx context.Context, sessi
 
 	// 5. Define fields to retrieve
 	// Note: We request certainty (always [0,1]) instead of distance which varies by metric
+	// SEC-002: Include ttl_expires_at for post-query defense-in-depth filtering
 	fields := []graphql.Field{
 		{Name: "content"},
 		{Name: "source"},
 		{Name: "turn_number"},
+		{Name: "ttl_expires_at"},
 		{Name: "_additional", Fields: []graphql.Field{
 			{Name: "certainty"},
 		}},
@@ -254,6 +287,28 @@ func (s *WeaviateConversationSearcher) SearchRelevant(ctx context.Context, sessi
 	if err != nil {
 		slog.Error("Failed to parse search results", "error", err)
 		return nil, fmt.Errorf("failed to parse results: %w", err)
+	}
+
+	// SEC-002: Post-query TTL filtering (defense-in-depth)
+	// Even though we filter at the Weaviate query level, apply a second filter
+	// to catch any documents that expired between query and parse.
+	if parsed != nil && len(parsed.Get.Document) > 0 {
+		validDocs := make([]datatypes.DocumentResult, 0, len(parsed.Get.Document))
+		expiredCount := 0
+		for _, doc := range parsed.Get.Document {
+			if s.ttlFilter.IsExpired(doc.TTLExpiresAt) {
+				expiredCount++
+				continue
+			}
+			validDocs = append(validDocs, doc)
+		}
+		if expiredCount > 0 {
+			slog.Debug("SEC-002: Filtered expired documents from search results",
+				"expired_count", expiredCount,
+				"remaining_count", len(validDocs),
+			)
+		}
+		parsed.Get.Document = validDocs
 	}
 
 	turns := parseDocumentSearchResults(parsed)
