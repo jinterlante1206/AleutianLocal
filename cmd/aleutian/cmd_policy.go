@@ -4,8 +4,8 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
-	"github.com/jinterlante1206/AleutianLocal/services/policy_engine/enforcement"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine/enforcement"
 	"github.com/spf13/cobra"
 )
 

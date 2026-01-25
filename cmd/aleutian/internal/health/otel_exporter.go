@@ -40,7 +40,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/diagnostics"
 )
 
 // =============================================================================

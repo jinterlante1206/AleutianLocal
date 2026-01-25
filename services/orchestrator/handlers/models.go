@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/gin-gonic/gin"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 )
 
 // HandleModelPull triggers the huggingface-cli to download the model to the shared cache

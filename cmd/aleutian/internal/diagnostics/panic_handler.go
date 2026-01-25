@@ -571,7 +571,7 @@ func (h *DefaultPanicRecoveryHandler) printPanicInfo(w io.Writer, panicValue int
 		fmt.Fprintf(w, "  Location: %s\n", result.Location)
 		fmt.Fprintf(w, "\n")
 		fmt.Fprintf(w, "Please include this Trace ID when reporting issues:\n")
-		fmt.Fprintf(w, "  https://github.com/jinterlante1206/AleutianLocal/issues\n")
+		fmt.Fprintf(w, "  https://github.com/AleutianAI/AleutianFOSS/issues\n")
 	} else if result != nil {
 		fmt.Fprintf(w, "Diagnostic collection failed: %s\n", result.Error)
 	} else {

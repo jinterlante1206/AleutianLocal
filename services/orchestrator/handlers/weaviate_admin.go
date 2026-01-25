@@ -16,8 +16,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/gin-gonic/gin"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/graphql"

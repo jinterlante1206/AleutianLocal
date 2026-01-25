@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/handlers"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

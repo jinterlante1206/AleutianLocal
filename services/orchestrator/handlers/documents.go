@@ -23,10 +23,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/ttl"
 	"github.com/gin-gonic/gin"
 	"github.com/go-openapi/strfmt"
 	"github.com/google/uuid"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/ttl"
 	"github.com/tmc/langchaingo/textsplitter"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"

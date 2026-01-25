@@ -106,7 +106,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra"
 )
 
 // -----------------------------------------------------------------------------

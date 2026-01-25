@@ -23,10 +23,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/pkg/validation"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
-	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 )
 
 // Retry configuration

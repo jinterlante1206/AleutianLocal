@@ -53,8 +53,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra/process"
 )
 
 // -----------------------------------------------------------------------------

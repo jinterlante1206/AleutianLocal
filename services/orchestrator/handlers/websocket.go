@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/jinterlante1206/AleutianLocal/services/llm"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
-	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 

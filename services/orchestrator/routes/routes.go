@@ -13,13 +13,13 @@ package routes
 import (
 	"net/http"
 
+	"github.com/AleutianAI/AleutianFOSS/pkg/extensions"
+	"github.com/AleutianAI/AleutianFOSS/services/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/handlers"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/middleware"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/services"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
 	"github.com/gin-gonic/gin"
-	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
-	"github.com/jinterlante1206/AleutianLocal/services/llm"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/middleware"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/services"
-	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )

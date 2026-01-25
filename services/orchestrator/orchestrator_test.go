@@ -13,8 +13,8 @@ package orchestrator
 import (
 	"testing"
 
+	"github.com/AleutianAI/AleutianFOSS/pkg/extensions"
 	"github.com/gin-gonic/gin"
-	"github.com/jinterlante1206/AleutianLocal/pkg/extensions"
 	"github.com/stretchr/testify/assert"
 )
 

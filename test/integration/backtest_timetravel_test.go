@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/handlers"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api/query"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/handlers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

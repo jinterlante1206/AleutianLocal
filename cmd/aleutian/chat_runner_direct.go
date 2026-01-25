@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/pkg/ux"
+	"github.com/AleutianAI/AleutianFOSS/pkg/ux"
 )
 
 // =============================================================================

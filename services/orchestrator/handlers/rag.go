@@ -21,10 +21,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/AleutianAI/AleutianFOSS/services/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jinterlante1206/AleutianLocal/services/llm"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

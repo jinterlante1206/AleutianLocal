@@ -13,7 +13,7 @@ package main
 import (
 	"log"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
 )
 
 var version = "dev"

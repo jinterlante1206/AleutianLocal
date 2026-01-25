@@ -38,7 +38,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator"
 )
 
 func main() {

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
 	"github.com/spf13/cobra"
 )
 

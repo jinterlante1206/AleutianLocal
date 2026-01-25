@@ -39,9 +39,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/compose"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/health"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra/compose"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================

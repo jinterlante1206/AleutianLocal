@@ -18,11 +18,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/pkg/validation"
 	"github.com/gin-gonic/gin"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
-	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
 )
 
 const (

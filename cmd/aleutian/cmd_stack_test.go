@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
 )
 
 func TestCalculateOptimizedEnv(t *testing.T) {

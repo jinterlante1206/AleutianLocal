@@ -2,7 +2,12 @@ secrets/
 models/
 models_cache/
 *.idea
-*.test.ymldocs/timeseries.mermaid
+*.test.yml
+
+# Code Buddy tickets (internal roadmap)
+tickets/**/cb_*.md
+
+docs/timeseries.mermaid
 /.venv/bin/activate
 /.venv/bin/activate.csh
 /.venv/bin/activate.fish
@@ -3458,3 +3463,4 @@ models_cache/
 /.venv/lib/python3.10/site-packages/_cffi_backend.cpython-310-darwin.so
 /.venv/lib/python3.10/site-packages/deprecation.py
 /.venv/lib/python3.10/site-packages/py.py
+/docs/
