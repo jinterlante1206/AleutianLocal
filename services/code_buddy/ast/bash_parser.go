@@ -155,12 +155,15 @@ func (p *BashParser) Parse(ctx context.Context, content []byte, filePath string)
 	hash := sha256.Sum256(content)
 	hashStr := hex.EncodeToString(hash[:])
 
+	// Capture timestamp once for consistent timestamps across all symbols
+	parsedAt := time.Now().UnixMilli()
+
 	// Create result
 	result := &ParseResult{
 		FilePath:      filePath,
 		Language:      "bash",
 		Hash:          hashStr,
-		ParsedAtMilli: time.Now().UnixMilli(),
+		ParsedAtMilli: parsedAt,
 		Symbols:       make([]*Symbol, 0),
 		Imports:       make([]Import, 0),
 		Errors:        make([]string, 0),
@@ -187,7 +190,7 @@ func (p *BashParser) Parse(ctx context.Context, content []byte, filePath string)
 
 	// Extract symbols from AST
 	rootNode := tree.RootNode()
-	p.extractSymbols(ctx, rootNode, content, filePath, result, &lastComment, &lastCommentLine)
+	p.extractSymbols(ctx, rootNode, content, filePath, result, &lastComment, &lastCommentLine, parsedAt)
 
 	// Validate result
 	if err := result.Validate(); err != nil {
@@ -198,7 +201,7 @@ func (p *BashParser) Parse(ctx context.Context, content []byte, filePath string)
 }
 
 // extractSymbols recursively extracts symbols from the AST.
-func (p *BashParser) extractSymbols(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, lastComment *string, lastCommentLine *int) {
+func (p *BashParser) extractSymbols(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, lastComment *string, lastCommentLine *int, parsedAt int64) {
 	if node == nil {
 		return
 	}
@@ -214,7 +217,7 @@ func (p *BashParser) extractSymbols(ctx context.Context, node *sitter.Node, cont
 	case bashNodeProgram:
 		// Process all children
 		for i := 0; i < int(node.ChildCount()); i++ {
-			p.extractSymbols(ctx, node.Child(i), content, filePath, result, lastComment, lastCommentLine)
+			p.extractSymbols(ctx, node.Child(i), content, filePath, result, lastComment, lastCommentLine, parsedAt)
 		}
 
 	case bashNodeComment:
@@ -230,21 +233,21 @@ func (p *BashParser) extractSymbols(ctx context.Context, node *sitter.Node, cont
 		}
 
 	case bashNodeFunctionDefinition:
-		p.extractFunction(node, content, filePath, result, *lastComment, *lastCommentLine)
+		p.extractFunction(node, content, filePath, result, *lastComment, *lastCommentLine, parsedAt)
 		*lastComment = ""
 
 	case bashNodeVariableAssignment:
-		p.extractVariable(node, content, filePath, result, false, false, *lastComment, *lastCommentLine)
+		p.extractVariable(node, content, filePath, result, false, false, *lastComment, *lastCommentLine, parsedAt)
 		*lastComment = ""
 
 	case bashNodeDeclarationCommand:
-		p.extractDeclaration(node, content, filePath, result, *lastComment, *lastCommentLine)
+		p.extractDeclaration(node, content, filePath, result, *lastComment, *lastCommentLine, parsedAt)
 		*lastComment = ""
 
 	case bashNodeCommand:
 		// Check for alias command
 		if p.options.ExtractAliases {
-			p.extractAlias(node, content, filePath, result)
+			p.extractAlias(node, content, filePath, result, parsedAt)
 		}
 		// Check for source/. command (imports)
 		p.extractSource(node, content, filePath, result)
@@ -252,13 +255,13 @@ func (p *BashParser) extractSymbols(ctx context.Context, node *sitter.Node, cont
 	default:
 		// Recurse into children for other node types
 		for i := 0; i < int(node.ChildCount()); i++ {
-			p.extractSymbols(ctx, node.Child(i), content, filePath, result, lastComment, lastCommentLine)
+			p.extractSymbols(ctx, node.Child(i), content, filePath, result, lastComment, lastCommentLine, parsedAt)
 		}
 	}
 }
 
 // extractFunction extracts a function definition.
-func (p *BashParser) extractFunction(node *sitter.Node, content []byte, filePath string, result *ParseResult, lastComment string, lastCommentLine int) {
+func (p *BashParser) extractFunction(node *sitter.Node, content []byte, filePath string, result *ParseResult, lastComment string, lastCommentLine int, parsedAt int64) {
 	funcName := ""
 
 	for i := 0; i < int(node.ChildCount()); i++ {
@@ -273,9 +276,10 @@ func (p *BashParser) extractFunction(node *sitter.Node, content []byte, filePath
 		return
 	}
 
-	// Check if comment is immediately preceding
+	// Check if comment is immediately preceding (within 2 lines to allow blank lines)
 	docComment := ""
-	if lastComment != "" && lastCommentLine == int(node.StartPoint().Row) {
+	lineGap := int(node.StartPoint().Row) - lastCommentLine
+	if lastComment != "" && lineGap >= 0 && lineGap <= 1 {
 		docComment = lastComment
 	}
 
@@ -291,14 +295,14 @@ func (p *BashParser) extractFunction(node *sitter.Node, content []byte, filePath
 		Signature:     funcName + "()",
 		DocComment:    docComment,
 		Language:      "bash",
-		ParsedAtMilli: time.Now().UnixMilli(),
+		ParsedAtMilli: parsedAt,
 		Exported:      true, // Bash functions are globally accessible
 	}
 	result.Symbols = append(result.Symbols, sym)
 }
 
 // extractVariable extracts a variable assignment.
-func (p *BashParser) extractVariable(node *sitter.Node, content []byte, filePath string, result *ParseResult, isExported, isReadonly bool, lastComment string, lastCommentLine int) {
+func (p *BashParser) extractVariable(node *sitter.Node, content []byte, filePath string, result *ParseResult, isExported, isReadonly bool, lastComment string, lastCommentLine int, parsedAt int64) {
 	varName := ""
 	varValue := ""
 
@@ -333,9 +337,10 @@ func (p *BashParser) extractVariable(node *sitter.Node, content []byte, filePath
 		signature += "=" + displayValue
 	}
 
-	// Check if comment is immediately preceding
+	// Check if comment is immediately preceding (within 2 lines to allow blank lines)
 	docComment := ""
-	if lastComment != "" && lastCommentLine == int(node.StartPoint().Row) {
+	lineGap := int(node.StartPoint().Row) - lastCommentLine
+	if lastComment != "" && lineGap >= 0 && lineGap <= 1 {
 		docComment = lastComment
 	}
 
@@ -351,14 +356,14 @@ func (p *BashParser) extractVariable(node *sitter.Node, content []byte, filePath
 		Signature:     signature,
 		DocComment:    docComment,
 		Language:      "bash",
-		ParsedAtMilli: time.Now().UnixMilli(),
+		ParsedAtMilli: parsedAt,
 		Exported:      isExported,
 	}
 	result.Symbols = append(result.Symbols, sym)
 }
 
 // extractDeclaration extracts declaration commands (export, readonly, local, declare).
-func (p *BashParser) extractDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, lastComment string, lastCommentLine int) {
+func (p *BashParser) extractDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, lastComment string, lastCommentLine int, parsedAt int64) {
 	isExported := false
 	isReadonly := false
 	isLocal := false
@@ -375,14 +380,14 @@ func (p *BashParser) extractDeclaration(node *sitter.Node, content []byte, fileP
 		case bashNodeVariableAssignment:
 			// Don't extract local variables (they're function-scoped)
 			if !isLocal {
-				p.extractVariable(child, content, filePath, result, isExported, isReadonly, lastComment, lastCommentLine)
+				p.extractVariable(child, content, filePath, result, isExported, isReadonly, lastComment, lastCommentLine, parsedAt)
 			}
 		}
 	}
 }
 
 // extractAlias extracts alias definitions from alias commands.
-func (p *BashParser) extractAlias(node *sitter.Node, content []byte, filePath string, result *ParseResult) {
+func (p *BashParser) extractAlias(node *sitter.Node, content []byte, filePath string, result *ParseResult, parsedAt int64) {
 	// Check if this is an alias command
 	isAlias := false
 	for i := 0; i < int(node.ChildCount()); i++ {
@@ -428,7 +433,7 @@ func (p *BashParser) extractAlias(node *sitter.Node, content []byte, filePath st
 					EndCol:        int(node.EndPoint().Column),
 					Signature:     fmt.Sprintf("alias %s=%s", aliasName, aliasValue),
 					Language:      "bash",
-					ParsedAtMilli: time.Now().UnixMilli(),
+					ParsedAtMilli: parsedAt,
 					Exported:      false,
 				}
 				result.Symbols = append(result.Symbols, sym)
@@ -466,6 +471,10 @@ func (p *BashParser) extractSource(node *sitter.Node, content []byte, filePath s
 		return
 	}
 
+	// SECURITY WARNING: The extracted sourcePath is NOT sanitized and may contain
+	// path traversal sequences (e.g., '../') or be an absolute path. Downstream
+	// consumers MUST validate and sanitize this path before using it to access
+	// the filesystem to prevent path traversal vulnerabilities.
 	imp := Import{
 		Path:     sourcePath,
 		IsScript: true,
