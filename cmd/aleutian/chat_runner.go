@@ -462,6 +462,8 @@ type RAGChatRunnerConfig struct {
 	Verbosity   int                 // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (optional)
 	DataSpace   string              // Data space to filter queries by (optional, e.g., "work", "personal")
 	DocVersion  string              // Specific document version to query (optional, e.g., "v1", "report.md:v3")
+	SessionTTL  string              // Session TTL (optional, e.g., "24h", "7d"). Resets on each message.
+	RecencyBias string              // Recency bias preset (optional): none, gentle, moderate, aggressive
 }
 
 // DirectChatRunnerConfig holds configuration for creating DirectChatRunner.
@@ -505,6 +507,7 @@ type DirectChatRunnerConfig struct {
 	EnableThinking bool                // Enable extended thinking (optional)
 	BudgetTokens   int                 // Token budget for thinking (optional)
 	Personality    ux.PersonalityLevel // Output styling (optional)
+	SessionTTL     string              // Session TTL (optional, e.g., "24h", "7d"). Not used in direct mode.
 }
 
 // =============================================================================

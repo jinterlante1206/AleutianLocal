@@ -331,6 +331,7 @@ func init() {
 	ingestCmd.Flags().String("dataspace", "default", "The logical dataspace to ingest into")
 	ingestCmd.Flags().String("version", "latest", "A version tag for this ingestion")
 	ingestCmd.Flags().String("ttl", "", "Document TTL (e.g., '90d', '24h', 'P30D'). 0 or empty = never expires.")
+	ingestCmd.Flags().Int("keep-versions", 0, "Number of versions to keep (0 = keep all). Deletes oldest versions after ingestion.")
 
 	rootCmd.AddCommand(askCmd)
 	askCmd.Flags().StringVarP(&pipelineType, "pipeline", "p", "reranking",
@@ -343,6 +344,7 @@ func init() {
 	populateVectorDBCmd.Flags().String("dataspace", "default", "The logical dataspace to ingest into (e.g., 'work', 'personal')")
 	populateVectorDBCmd.Flags().String("version", "latest", "A version tag for this ingestion (e.g., 'v1.1', '2025-11-01')")
 	populateVectorDBCmd.Flags().String("ttl", "", "Document TTL (e.g., '90d', '24h', 'P30D'). 0 or empty = never expires.")
+	populateVectorDBCmd.Flags().Int("keep-versions", 0, "Number of versions to keep (0 = keep all). Deletes oldest versions after ingestion.")
 
 	// --- Local Commands ---
 	rootCmd.AddCommand(stackCmd)
@@ -390,7 +392,8 @@ func init() {
 	chatCmd.Flags().IntVarP(&verbosityLevel, "verbosity", "V", 2, "Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (default: 2)")
 	chatCmd.Flags().StringVar(&dataSpaceFlag, "dataspace", "", "Limit RAG search to a specific dataspace (e.g., 'work', 'personal')")
 	chatCmd.Flags().StringVar(&docVersionFlag, "doc-version", "", "Query a specific document version (e.g., 'v1' or 'report.md:v3')")
-	chatCmd.Flags().String("ttl", "", "Session TTL (e.g., '24h', '7d'). Resets on each message. Empty = never expires.")
+	chatCmd.Flags().String("ttl", "", "Session TTL (e.g., '24h', '7d'). Session expires after inactivity. Empty = never expires.")
+	chatCmd.Flags().String("recency-bias", "none", "Prefer recent documents: none, gentle, moderate, aggressive")
 
 	rootCmd.AddCommand(traceCmd)
 

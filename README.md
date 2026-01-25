@@ -254,8 +254,11 @@ Start a stateful chat session with the configured LLM.
     * `--no-rag`: Skip RAG retrieval and chat directly with the LLM.
     * `--dataspace <name>`: Filter queries to a specific data space (e.g., `--dataspace engineering`). Only documents ingested with that data space will be searched.
     * `--doc-version <version>`: Query a specific document version instead of the latest (e.g., `--doc-version v1`). Useful for comparing answers across document revisions.
+    * `--ttl <duration>`: Session expires after this period of inactivity (e.g., `24h`, `7d`). TTL resets on each message.
+    * `--recency-bias <preset>`: Prefer recent documents: `none` (default), `gentle`, `moderate`, `aggressive`. See [Data Lifecycle & Retention](#data-lifecycle--retention) for when to use this.
 * **Example:** `aleutian chat --thinking --budget 4096`
 * **Example with versioning:** `aleutian chat --dataspace work --doc-version v2`
+* **Example with ephemeral session:** `aleutian chat --ttl 24h`
 
 #### Streaming Features (New in v0.3.5)
 
@@ -386,10 +389,102 @@ Scan and add local files or directories to the Weaviate vector database. This co
     4. Sets the new version as `is_current=true`
 
     Old versions are preserved and can be queried using `--doc-version`. Use `aleutian docs versions <file>` to see all versions.
+* **Flags (continued):**
+    * `--ttl <duration>`: Document retention period. Documents auto-expire after this duration. Format: `30d`, `24h`, `1w`, or ISO 8601 (`P30D`).
+    * `--keep-versions <N>`: Number of versions to keep (0 = keep all). Deletes oldest versions after ingestion.
 * **Examples:**
     * `aleutian populate vectordb ./docs --dataspace engineering --version v2.0`
     * `aleutian populate vectordb ./src --force` (skip security prompts)
     * `aleutian populate vectordb ./report.md` (re-ingest creates v2 if v1 exists)
+    * `aleutian populate vectordb ./report.md --keep-versions 1` (keep only latest version)
+    * `aleutian populate vectordb ./temp-data/ --ttl 90d` (auto-delete after 90 days)
+
+---
+
+### Data Lifecycle & Retention
+
+Aleutian provides comprehensive data lifecycle management for both documents and chat sessions.
+
+#### Document Versioning (Automatic)
+
+When you re-ingest a document, Aleutian automatically:
+1. Creates a new version (v1 → v2 → v3...)
+2. Marks old versions as `is_current=false`
+3. RAG queries **only return current versions by default**
+
+This means old versions won't pollute your search results—they're preserved for history but filtered out of queries.
+
+#### Version Cleanup (`--keep-versions`)
+
+If you're iterating on documents (editing and re-ingesting frequently), use `--keep-versions` to automatically delete old chunks:
+
+```bash
+# Keep only the latest version (delete all previous)
+aleutian populate vectordb ./report.md --keep-versions 1
+
+# Keep last 3 versions
+aleutian populate vectordb ./docs/ --keep-versions 3
+```
+
+**Note:** Even without `--keep-versions`, old versions are filtered from RAG queries via `is_current=true`. Use `--keep-versions` when you want to reclaim storage space.
+
+#### Document TTL (Auto-Expiration)
+
+Set retention periods for documents that should auto-expire:
+
+```bash
+# Documents expire after 90 days
+aleutian populate vectordb ./quarterly-reports/ --ttl 90d
+
+# Temporary data expires in 24 hours
+aleutian populate vectordb ./daily-briefing.md --ttl 24h
+```
+
+#### Session TTL (Ephemeral Chat)
+
+Create chat sessions that auto-expire after inactivity:
+
+```bash
+# Session expires 24h after last message
+aleutian chat --ttl 24h
+
+# Week-long session
+aleutian chat --ttl 7d
+```
+
+The TTL resets on each message, so active conversations stay alive.
+
+#### Recency Bias vs Document Versioning
+
+> **⚠️ Important Distinction**
+>
+> Aleutian offers a `--recency-bias` flag for chat that applies time-decay to document scores. This is **NOT for document versioning**—versioning is handled automatically by the `is_current` filter.
+
+| Problem | Solution | Don't Use |
+|---------|----------|-----------|
+| "I keep re-ingesting the same doc and old versions fill up results" | Automatic! `is_current=true` filtering already handles this | `--recency-bias` |
+| "I want to delete old versions to save space" | `--keep-versions 1` | `--recency-bias` |
+| "I want newer news articles to rank higher than old ones" | `--recency-bias moderate` | `--keep-versions` |
+| "I have fast-changing data like daily reports" | `--recency-bias aggressive` | N/A |
+
+**Recency Bias Presets:**
+
+| Preset | Half-Life | Best For |
+|--------|-----------|----------|
+| `none` | Never | Static knowledge bases (default) |
+| `gentle` | ~69 days | Slow-changing documentation |
+| `moderate` | ~14 days | News, changelogs, release notes |
+| `aggressive` | ~7 days | Daily reports, fast-changing data |
+
+```bash
+# For news/changelog queries - prefer recent content
+aleutian chat --recency-bias moderate
+
+# For static knowledge base - no decay (default)
+aleutian chat
+```
+
+**Warning:** Using `--recency-bias` on a versioned knowledge base will incorrectly penalize old-but-relevant documents (e.g., a "Company Mission Statement" from 2020 would be deprioritized even though it's still the current version).
 
 ---
 

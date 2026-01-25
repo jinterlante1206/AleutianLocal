@@ -233,6 +233,8 @@ type RAGStreamingChatServiceConfig struct {
 	Verbosity   int                 // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed (optional)
 	DataSpace   string              // Data space to filter queries by (optional, e.g., "work", "personal")
 	DocVersion  string              // Specific document version to query (optional, e.g., "v1")
+	SessionTTL  string              // Session TTL (optional, e.g., "24h", "7d"). Resets on each message.
+	RecencyBias string              // Recency bias preset (optional): none, gentle, moderate, aggressive
 }
 
 // DirectStreamingChatServiceConfig holds configuration for direct streaming chat service.
@@ -328,6 +330,8 @@ type ragStreamingChatService struct {
 	verbosity   int    // Verified pipeline verbosity: 0=silent, 1=summary, 2=detailed
 	dataSpace   string // Data space to filter queries by
 	docVersion  string // Specific document version to query
+	sessionTTL  string // Session TTL (e.g., "24h", "7d")
+	recencyBias string // Recency bias preset: none, gentle, moderate, aggressive
 	mu          sync.Mutex
 }
 
@@ -453,6 +457,8 @@ func NewRAGStreamingChatService(config RAGStreamingChatServiceConfig) StreamingC
 		verbosity:   verbosity,
 		dataSpace:   config.DataSpace,
 		docVersion:  config.DocVersion,
+		sessionTTL:  config.SessionTTL,
+		recencyBias: config.RecencyBias,
 	}
 }
 
@@ -515,6 +521,9 @@ func NewRAGStreamingChatServiceWithClient(client HTTPClient, config RAGStreaming
 		strictMode:  config.StrictMode,
 		verbosity:   verbosity,
 		dataSpace:   config.DataSpace,
+		docVersion:  config.DocVersion,
+		sessionTTL:  config.SessionTTL,
+		recencyBias: config.RecencyBias,
 	}
 }
 
@@ -783,14 +792,16 @@ func (s *ragStreamingChatService) getSessionID() string {
 // All inputs are valid.
 func (s *ragStreamingChatService) buildRAGRequest(requestID, message, sessionID string) datatypes.ChatRAGRequest {
 	return datatypes.ChatRAGRequest{
-		Id:         requestID,
-		CreatedAt:  time.Now().UnixMilli(),
-		Message:    message,
-		SessionId:  sessionID,
-		Pipeline:   s.pipeline,
-		StrictMode: s.strictMode,
-		DataSpace:  s.dataSpace,
-		VersionTag: s.docVersion,
+		Id:          requestID,
+		CreatedAt:   time.Now().UnixMilli(),
+		Message:     message,
+		SessionId:   sessionID,
+		Pipeline:    s.pipeline,
+		StrictMode:  s.strictMode,
+		DataSpace:   s.dataSpace,
+		VersionTag:  s.docVersion,
+		SessionTTL:  s.sessionTTL,
+		RecencyBias: s.recencyBias,
 	}
 }
 
