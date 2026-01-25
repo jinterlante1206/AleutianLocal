@@ -22,9 +22,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/AleutianAI/AleutianFOSS/pkg/validation"
 	"github.com/gin-gonic/gin"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
-	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
 	"go.opentelemetry.io/otel"
 )
 

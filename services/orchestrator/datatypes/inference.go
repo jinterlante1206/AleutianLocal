@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/pkg/validation"
+	"github.com/AleutianAI/AleutianFOSS/pkg/validation"
 )
 
 // =============================================================================

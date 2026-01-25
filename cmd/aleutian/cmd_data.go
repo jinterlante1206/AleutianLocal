@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/pkg/ux"
-	"github.com/jinterlante1206/AleutianLocal/services/policy_engine"
+	"github.com/AleutianAI/AleutianFOSS/pkg/ux"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
 	"github.com/spf13/cobra"
 )
 

@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/resilience"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/sampling"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra/process"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/resilience"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/sampling"
 )
 
 // ReliabilityOrchestrator defines the interface for coordinating reliability subsystems.

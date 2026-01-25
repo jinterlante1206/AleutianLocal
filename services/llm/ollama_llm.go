@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"

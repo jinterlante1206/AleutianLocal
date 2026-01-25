@@ -11,7 +11,7 @@
 package main
 
 import (
-	"github.com/jinterlante1206/AleutianLocal/pkg/ux"
+	"github.com/AleutianAI/AleutianFOSS/pkg/ux"
 	"github.com/spf13/cobra"
 )
 

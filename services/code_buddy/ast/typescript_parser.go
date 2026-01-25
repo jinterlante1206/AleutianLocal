@@ -1,0 +1,1397 @@
+package ast
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/typescript/tsx"
+	"github.com/smacker/go-tree-sitter/typescript/typescript"
+)
+
+// TypeScriptParserOption configures a TypeScriptParser instance.
+type TypeScriptParserOption func(*TypeScriptParser)
+
+// WithTypeScriptMaxFileSize sets the maximum file size the parser will accept.
+//
+// Parameters:
+//   - bytes: Maximum file size in bytes. Must be positive.
+//
+// Example:
+//
+//	parser := NewTypeScriptParser(WithTypeScriptMaxFileSize(5 * 1024 * 1024)) // 5MB limit
+func WithTypeScriptMaxFileSize(bytes int64) TypeScriptParserOption {
+	return func(p *TypeScriptParser) {
+		if bytes > 0 {
+			p.maxFileSize = bytes
+		}
+	}
+}
+
+// WithTypeScriptParseOptions applies the given ParseOptions to the parser.
+//
+// Parameters:
+//   - opts: ParseOptions to apply.
+//
+// Example:
+//
+//	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: false}))
+func WithTypeScriptParseOptions(opts ParseOptions) TypeScriptParserOption {
+	return func(p *TypeScriptParser) {
+		p.parseOptions = opts
+	}
+}
+
+// TypeScriptParser implements the Parser interface for TypeScript source code.
+//
+// Description:
+//
+//	TypeScriptParser uses tree-sitter to parse TypeScript source files and extract symbols.
+//	It supports concurrent use from multiple goroutines - each Parse call
+//	creates its own tree-sitter parser instance internally.
+//
+// Thread Safety:
+//
+//	TypeScriptParser instances are safe for concurrent use. Multiple goroutines
+//	may call Parse simultaneously on the same TypeScriptParser instance.
+//
+// Example:
+//
+//	parser := NewTypeScriptParser()
+//	result, err := parser.Parse(ctx, []byte("export function hello(): string { return 'hi'; }"), "main.ts")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	for _, sym := range result.Symbols {
+//	    fmt.Printf("%s: %s\n", sym.Kind, sym.Name)
+//	}
+type TypeScriptParser struct {
+	maxFileSize  int64
+	parseOptions ParseOptions
+}
+
+// NewTypeScriptParser creates a new TypeScriptParser with the given options.
+//
+// Description:
+//
+//	Creates a TypeScriptParser configured with sensible defaults. Options can be
+//	provided to customize behavior such as maximum file size.
+//
+// Inputs:
+//   - opts: Optional configuration functions (WithTypeScriptMaxFileSize, WithTypeScriptParseOptions)
+//
+// Outputs:
+//   - *TypeScriptParser: Configured parser instance, never nil
+//
+// Example:
+//
+//	// Default configuration
+//	parser := NewTypeScriptParser()
+//
+//	// Custom max file size
+//	parser := NewTypeScriptParser(WithTypeScriptMaxFileSize(5 * 1024 * 1024))
+//
+// Thread Safety:
+//
+//	The returned TypeScriptParser is safe for concurrent use.
+func NewTypeScriptParser(opts ...TypeScriptParserOption) *TypeScriptParser {
+	p := &TypeScriptParser{
+		maxFileSize:  DefaultMaxFileSize,
+		parseOptions: DefaultParseOptions(),
+	}
+
+	for _, opt := range opts {
+		opt(p)
+	}
+
+	return p
+}
+
+// Parse extracts symbols from TypeScript source code.
+//
+// Description:
+//
+//	Parse uses tree-sitter to parse the provided TypeScript source code and extract
+//	all symbols (functions, classes, interfaces, etc.) into a ParseResult.
+//	The parser is error-tolerant and will return partial results for syntactically
+//	invalid code.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Checked before and after parsing.
+//     Note: Tree-sitter parsing itself cannot be interrupted mid-parse.
+//   - content: Raw TypeScript source code bytes. Must be valid UTF-8.
+//   - filePath: Path to the file (for ID generation and error reporting).
+//     Should be relative to project root using forward slashes.
+//
+// Outputs:
+//   - *ParseResult: Extracted symbols and metadata. Never nil on success.
+//     May contain partial results with errors for syntactically invalid code.
+//   - error: Non-nil for complete failures:
+//   - ErrFileTooLarge: Content exceeds maxFileSize
+//   - ErrInvalidContent: Content is not valid UTF-8
+//   - Context errors: Context was canceled or timed out
+//
+// Example:
+//
+//	result, err := parser.Parse(ctx, []byte("export const x = 1;"), "main.ts")
+//	if err != nil {
+//	    return err
+//	}
+//	fmt.Printf("Found %d symbols\n", len(result.Symbols))
+//
+// Limitations:
+//   - Tree-sitter parsing is synchronous and cannot be interrupted mid-parse
+//   - Very large files may take significant time to parse
+//   - Some edge cases in TypeScript syntax may not be fully handled
+//
+// Assumptions:
+//   - Content is valid UTF-8 (validated internally)
+//   - FilePath uses forward slashes as path separator
+//   - FilePath does not contain path traversal sequences
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (p *TypeScriptParser) Parse(ctx context.Context, content []byte, filePath string) (*ParseResult, error) {
+	// Check context before starting
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("parse canceled before start: %w", err)
+	}
+
+	// Validate file size
+	if int64(len(content)) > p.maxFileSize {
+		return nil, fmt.Errorf("%w: size %d exceeds limit %d", ErrFileTooLarge, len(content), p.maxFileSize)
+	}
+
+	// Log warning for large files
+	if len(content) > WarnFileSize {
+		slog.Warn("parsing large file",
+			slog.String("file", filePath),
+			slog.Int("size_bytes", len(content)))
+	}
+
+	// Validate UTF-8
+	if !utf8.Valid(content) {
+		return nil, fmt.Errorf("%w: content is not valid UTF-8", ErrInvalidContent)
+	}
+
+	// Compute hash before parsing (captures input)
+	hash := sha256.Sum256(content)
+	hashStr := hex.EncodeToString(hash[:])
+
+	// Create tree-sitter parser (new instance per call for thread safety)
+	parser := sitter.NewParser()
+
+	// Use TSX grammar for .tsx files, TypeScript grammar otherwise
+	if strings.HasSuffix(filePath, ".tsx") {
+		parser.SetLanguage(tsx.GetLanguage())
+	} else {
+		parser.SetLanguage(typescript.GetLanguage())
+	}
+
+	// Parse the content
+	tree, err := parser.ParseCtx(ctx, nil, content)
+	if err != nil {
+		return nil, fmt.Errorf("tree-sitter parse failed: %w", err)
+	}
+	defer tree.Close()
+
+	// Check context after parsing
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("parse canceled after tree-sitter: %w", err)
+	}
+
+	// Build result
+	result := &ParseResult{
+		FilePath:      filePath,
+		Language:      "typescript",
+		Hash:          hashStr,
+		ParsedAtMilli: time.Now().UnixMilli(),
+		Symbols:       make([]*Symbol, 0),
+		Imports:       make([]Import, 0),
+		Errors:        make([]string, 0),
+	}
+
+	// Extract symbols from the tree
+	rootNode := tree.RootNode()
+	if rootNode == nil {
+		result.Errors = append(result.Errors, "tree-sitter returned nil root node")
+		return result, nil
+	}
+
+	// Check for syntax errors in tree
+	if rootNode.HasError() {
+		result.Errors = append(result.Errors, "source contains syntax errors")
+	}
+
+	// Extract imports
+	p.extractImports(rootNode, content, filePath, result)
+
+	// Extract declarations (functions, classes, interfaces, types, enums, variables)
+	p.extractDeclarations(rootNode, content, filePath, result)
+
+	// Validate result before returning
+	if err := result.Validate(); err != nil {
+		return nil, fmt.Errorf("result validation failed: %w", err)
+	}
+
+	// Check context one final time
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("parse canceled after extraction: %w", err)
+	}
+
+	return result, nil
+}
+
+// Language returns the canonical language name for this parser.
+//
+// Returns:
+//   - "typescript" for TypeScript source files
+func (p *TypeScriptParser) Language() string {
+	return "typescript"
+}
+
+// Extensions returns the file extensions this parser handles.
+//
+// Returns:
+//   - []string{".ts", ".tsx", ".mts", ".cts"} for TypeScript source files
+func (p *TypeScriptParser) Extensions() []string {
+	return []string{".ts", ".tsx", ".mts", ".cts"}
+}
+
+// extractImports extracts import statements from the AST.
+func (p *TypeScriptParser) extractImports(root *sitter.Node, content []byte, filePath string, result *ParseResult) {
+	for i := 0; i < int(root.ChildCount()); i++ {
+		child := root.Child(i)
+		switch child.Type() {
+		case "import_statement":
+			p.processImportStatement(child, content, filePath, result)
+		case "lexical_declaration":
+			// Check for CommonJS require
+			p.processCommonJSRequire(child, content, filePath, result)
+		}
+	}
+}
+
+// processImportStatement handles ES module import statements.
+func (p *TypeScriptParser) processImportStatement(node *sitter.Node, content []byte, filePath string, result *ParseResult) {
+	var modulePath string
+	var names []string
+	var alias string
+	var isDefault bool
+	var isNamespace bool
+	var isTypeOnly bool
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type":
+			// import type { ... }
+			isTypeOnly = true
+		case "import_clause":
+			p.processImportClause(child, content, &names, &alias, &isDefault, &isNamespace)
+		case "string":
+			modulePath = p.extractStringContent(child, content)
+		}
+	}
+
+	if modulePath == "" {
+		return
+	}
+
+	startLine := int(node.StartPoint().Row + 1)
+	endLine := int(node.EndPoint().Row + 1)
+	startCol := int(node.StartPoint().Column)
+	endCol := int(node.EndPoint().Column)
+
+	imp := Import{
+		Path:        modulePath,
+		Names:       names,
+		Alias:       alias,
+		IsDefault:   isDefault,
+		IsNamespace: isNamespace,
+		IsTypeOnly:  isTypeOnly,
+		IsModule:    true,
+		Location: Location{
+			FilePath:  filePath,
+			StartLine: startLine,
+			EndLine:   endLine,
+			StartCol:  startCol,
+			EndCol:    endCol,
+		},
+	}
+	result.Imports = append(result.Imports, imp)
+
+	// Also add as symbol
+	sym := &Symbol{
+		ID:        GenerateID(filePath, startLine, modulePath),
+		Name:      modulePath,
+		Kind:      SymbolKindImport,
+		FilePath:  filePath,
+		Language:  "typescript",
+		Exported:  false,
+		StartLine: startLine,
+		EndLine:   endLine,
+		StartCol:  startCol,
+		EndCol:    endCol,
+	}
+	result.Symbols = append(result.Symbols, sym)
+}
+
+// processImportClause extracts import clause details.
+func (p *TypeScriptParser) processImportClause(node *sitter.Node, content []byte, names *[]string, alias *string, isDefault *bool, isNamespace *bool) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			// Default import: import foo from 'bar'
+			*alias = string(content[child.StartByte():child.EndByte()])
+			*isDefault = true
+		case "namespace_import":
+			// Namespace import: import * as foo from 'bar'
+			*isNamespace = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == "identifier" {
+					*alias = string(content[gc.StartByte():gc.EndByte()])
+				}
+			}
+		case "named_imports":
+			// Named imports: import { a, b } from 'bar'
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == "import_specifier" {
+					name := p.extractImportSpecifier(gc, content)
+					if name != "" {
+						*names = append(*names, name)
+					}
+				}
+			}
+		}
+	}
+}
+
+// extractImportSpecifier extracts a single import specifier.
+func (p *TypeScriptParser) extractImportSpecifier(node *sitter.Node, content []byte) string {
+	var name, alias string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" {
+			if name == "" {
+				name = string(content[child.StartByte():child.EndByte()])
+			} else {
+				alias = string(content[child.StartByte():child.EndByte()])
+			}
+		}
+	}
+	if alias != "" {
+		return name + " as " + alias
+	}
+	return name
+}
+
+// processCommonJSRequire handles const foo = require('bar') style imports.
+func (p *TypeScriptParser) processCommonJSRequire(node *sitter.Node, content []byte, filePath string, result *ParseResult) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "variable_declarator" {
+			var name string
+			var modulePath string
+
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				switch gc.Type() {
+				case "identifier":
+					name = string(content[gc.StartByte():gc.EndByte()])
+				case "call_expression":
+					// Check if this is require()
+					modulePath = p.extractRequireCall(gc, content)
+				}
+			}
+
+			if modulePath != "" && name != "" {
+				startLine := int(node.StartPoint().Row + 1)
+				endLine := int(node.EndPoint().Row + 1)
+
+				imp := Import{
+					Path:       modulePath,
+					Alias:      name,
+					IsCommonJS: true,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: startLine,
+						EndLine:   endLine,
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				}
+				result.Imports = append(result.Imports, imp)
+
+				sym := &Symbol{
+					ID:        GenerateID(filePath, startLine, modulePath),
+					Name:      modulePath,
+					Kind:      SymbolKindImport,
+					FilePath:  filePath,
+					Language:  "typescript",
+					Exported:  false,
+					StartLine: startLine,
+					EndLine:   endLine,
+					StartCol:  int(node.StartPoint().Column),
+					EndCol:    int(node.EndPoint().Column),
+				}
+				result.Symbols = append(result.Symbols, sym)
+			}
+		}
+	}
+}
+
+// extractRequireCall extracts the module path from a require() call.
+func (p *TypeScriptParser) extractRequireCall(node *sitter.Node, content []byte) string {
+	var funcName string
+	var modulePath string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			funcName = string(content[child.StartByte():child.EndByte()])
+		case "arguments":
+			for j := 0; j < int(child.ChildCount()); j++ {
+				arg := child.Child(j)
+				if arg.Type() == "string" {
+					modulePath = p.extractStringContent(arg, content)
+				}
+			}
+		}
+	}
+
+	if funcName == "require" {
+		return modulePath
+	}
+	return ""
+}
+
+// extractDeclarations extracts all top-level declarations.
+func (p *TypeScriptParser) extractDeclarations(root *sitter.Node, content []byte, filePath string, result *ParseResult) {
+	for i := 0; i < int(root.ChildCount()); i++ {
+		child := root.Child(i)
+		switch child.Type() {
+		case "export_statement":
+			p.processExportStatement(child, content, filePath, result)
+		case "function_declaration":
+			if fn := p.processFunction(child, content, filePath, nil, false); fn != nil {
+				result.Symbols = append(result.Symbols, fn)
+			}
+		case "class_declaration":
+			if cls := p.processClass(child, content, filePath, nil, false); cls != nil {
+				result.Symbols = append(result.Symbols, cls)
+			}
+		case "interface_declaration":
+			if iface := p.processInterface(child, content, filePath, false); iface != nil {
+				result.Symbols = append(result.Symbols, iface)
+			}
+		case "type_alias_declaration":
+			if ta := p.processTypeAlias(child, content, filePath, false); ta != nil {
+				result.Symbols = append(result.Symbols, ta)
+			}
+		case "enum_declaration":
+			if enum := p.processEnum(child, content, filePath, false); enum != nil {
+				result.Symbols = append(result.Symbols, enum)
+			}
+		case "lexical_declaration":
+			p.processLexicalDeclaration(child, content, filePath, result, false)
+		case "variable_declaration":
+			p.processVariableDeclaration(child, content, filePath, result, false)
+		}
+	}
+}
+
+// processExportStatement handles export statements.
+func (p *TypeScriptParser) processExportStatement(node *sitter.Node, content []byte, filePath string, result *ParseResult) {
+	var decorators []string
+	isDefault := false
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "decorator":
+			decorators = append(decorators, p.extractDecoratorName(child, content))
+		case "default":
+			isDefault = true
+		case "function_declaration":
+			if fn := p.processFunction(child, content, filePath, decorators, true); fn != nil {
+				if isDefault {
+					if fn.Metadata == nil {
+						fn.Metadata = &SymbolMetadata{}
+					}
+					// Note: We could add an IsDefault field, but for now just mark exported
+				}
+				result.Symbols = append(result.Symbols, fn)
+			}
+		case "class_declaration":
+			if cls := p.processClass(child, content, filePath, decorators, true); cls != nil {
+				result.Symbols = append(result.Symbols, cls)
+			}
+		case "interface_declaration":
+			if iface := p.processInterface(child, content, filePath, true); iface != nil {
+				result.Symbols = append(result.Symbols, iface)
+			}
+		case "type_alias_declaration":
+			if ta := p.processTypeAlias(child, content, filePath, true); ta != nil {
+				result.Symbols = append(result.Symbols, ta)
+			}
+		case "enum_declaration":
+			if enum := p.processEnum(child, content, filePath, true); enum != nil {
+				result.Symbols = append(result.Symbols, enum)
+			}
+		case "lexical_declaration":
+			p.processLexicalDeclaration(child, content, filePath, result, true)
+		case "abstract_class_declaration":
+			if cls := p.processAbstractClass(child, content, filePath, decorators, true); cls != nil {
+				result.Symbols = append(result.Symbols, cls)
+			}
+		}
+	}
+}
+
+// processFunction extracts a function declaration.
+func (p *TypeScriptParser) processFunction(node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+	var name string
+	var typeParams []string
+	var params string
+	var returnType string
+	var docstring string
+	var isAsync bool
+
+	// Get preceding comment
+	docstring = p.getPrecedingComment(node, content)
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "async":
+			isAsync = true
+		case "identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_parameters":
+			typeParams = p.extractTypeParameters(child, content)
+		case "formal_parameters":
+			params = string(content[child.StartByte():child.EndByte()])
+		case "type_annotation":
+			returnType = p.extractTypeAnnotation(child, content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	// Build signature
+	signature := "function " + name
+	if len(typeParams) > 0 {
+		signature += "<" + strings.Join(typeParams, ", ") + ">"
+	}
+	signature += params
+	if returnType != "" {
+		signature += ": " + returnType
+	}
+
+	sym := &Symbol{
+		ID:         GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:       name,
+		Kind:       SymbolKindFunction,
+		FilePath:   filePath,
+		Language:   "typescript",
+		Exported:   exported,
+		Signature:  signature,
+		DocComment: docstring,
+		StartLine:  int(node.StartPoint().Row + 1),
+		EndLine:    int(node.EndPoint().Row + 1),
+		StartCol:   int(node.StartPoint().Column),
+		EndCol:     int(node.EndPoint().Column),
+	}
+
+	if len(decorators) > 0 || len(typeParams) > 0 || returnType != "" || isAsync {
+		sym.Metadata = &SymbolMetadata{
+			Decorators:     decorators,
+			TypeParameters: typeParams,
+			ReturnType:     returnType,
+			IsAsync:        isAsync,
+		}
+	}
+
+	return sym
+}
+
+// processClass extracts a class declaration.
+func (p *TypeScriptParser) processClass(node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+	var name string
+	var typeParams []string
+	var extends string
+	var implements []string
+	var bodyNode *sitter.Node
+	var docstring string
+
+	docstring = p.getPrecedingComment(node, content)
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_parameters":
+			typeParams = p.extractTypeParameters(child, content)
+		case "class_heritage":
+			extends, implements = p.extractClassHeritage(child, content)
+		case "class_body":
+			bodyNode = child
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	sym := &Symbol{
+		ID:         GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:       name,
+		Kind:       SymbolKindClass,
+		FilePath:   filePath,
+		Language:   "typescript",
+		Exported:   exported,
+		DocComment: docstring,
+		StartLine:  int(node.StartPoint().Row + 1),
+		EndLine:    int(node.EndPoint().Row + 1),
+		StartCol:   int(node.StartPoint().Column),
+		EndCol:     int(node.EndPoint().Column),
+		Children:   make([]*Symbol, 0),
+	}
+
+	if len(decorators) > 0 || len(typeParams) > 0 || extends != "" || len(implements) > 0 {
+		sym.Metadata = &SymbolMetadata{
+			Decorators:     decorators,
+			TypeParameters: typeParams,
+			Extends:        extends,
+			Implements:     implements,
+		}
+	}
+
+	// Extract class members
+	if bodyNode != nil {
+		p.extractClassMembers(bodyNode, content, filePath, sym)
+	}
+
+	return sym
+}
+
+// processAbstractClass extracts an abstract class declaration.
+func (p *TypeScriptParser) processAbstractClass(node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+	sym := p.processClass(node, content, filePath, decorators, exported)
+	if sym != nil {
+		if sym.Metadata == nil {
+			sym.Metadata = &SymbolMetadata{}
+		}
+		sym.Metadata.IsAbstract = true
+	}
+	return sym
+}
+
+// extractClassMembers extracts methods and fields from a class body.
+func (p *TypeScriptParser) extractClassMembers(body *sitter.Node, content []byte, filePath string, classSym *Symbol) {
+	for i := 0; i < int(body.ChildCount()); i++ {
+		child := body.Child(i)
+		switch child.Type() {
+		case "method_definition":
+			if method := p.processMethod(child, content, filePath); method != nil {
+				classSym.Children = append(classSym.Children, method)
+			}
+		case "public_field_definition":
+			if field := p.processField(child, content, filePath); field != nil {
+				classSym.Children = append(classSym.Children, field)
+			}
+		}
+	}
+}
+
+// processMethod extracts a method definition.
+func (p *TypeScriptParser) processMethod(node *sitter.Node, content []byte, filePath string) *Symbol {
+	var name string
+	var typeParams []string
+	var params string
+	var returnType string
+	var accessModifier string
+	var isAsync bool
+	var isStatic bool
+	var isAbstract bool
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "accessibility_modifier":
+			accessModifier = string(content[child.StartByte():child.EndByte()])
+		case "static":
+			isStatic = true
+		case "async":
+			isAsync = true
+		case "abstract":
+			isAbstract = true
+		case "property_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_parameters":
+			typeParams = p.extractTypeParameters(child, content)
+		case "formal_parameters":
+			params = string(content[child.StartByte():child.EndByte()])
+		case "type_annotation":
+			returnType = p.extractTypeAnnotation(child, content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	// Determine visibility
+	exported := accessModifier != "private"
+
+	// Build signature
+	signature := name + params
+	if returnType != "" {
+		signature += ": " + returnType
+	}
+
+	sym := &Symbol{
+		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:      name,
+		Kind:      SymbolKindMethod,
+		FilePath:  filePath,
+		Language:  "typescript",
+		Exported:  exported,
+		Signature: signature,
+		StartLine: int(node.StartPoint().Row + 1),
+		EndLine:   int(node.EndPoint().Row + 1),
+		StartCol:  int(node.StartPoint().Column),
+		EndCol:    int(node.EndPoint().Column),
+		Metadata: &SymbolMetadata{
+			TypeParameters: typeParams,
+			ReturnType:     returnType,
+			IsAsync:        isAsync,
+			IsStatic:       isStatic,
+			IsAbstract:     isAbstract,
+			AccessModifier: accessModifier,
+		},
+	}
+
+	return sym
+}
+
+// processField extracts a field definition.
+func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, filePath string) *Symbol {
+	var name string
+	var typeStr string
+	var accessModifier string
+	var isReadonly bool
+	var isStatic bool
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "accessibility_modifier":
+			accessModifier = string(content[child.StartByte():child.EndByte()])
+		case "readonly":
+			isReadonly = true
+		case "static":
+			isStatic = true
+		case "property_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_annotation":
+			typeStr = p.extractTypeAnnotation(child, content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	exported := accessModifier != "private"
+
+	signature := name
+	if typeStr != "" {
+		signature += ": " + typeStr
+	}
+	if isReadonly {
+		signature = "readonly " + signature
+	}
+
+	sym := &Symbol{
+		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:      name,
+		Kind:      SymbolKindField,
+		FilePath:  filePath,
+		Language:  "typescript",
+		Exported:  exported,
+		Signature: signature,
+		StartLine: int(node.StartPoint().Row + 1),
+		EndLine:   int(node.EndPoint().Row + 1),
+		StartCol:  int(node.StartPoint().Column),
+		EndCol:    int(node.EndPoint().Column),
+		Metadata: &SymbolMetadata{
+			IsStatic:       isStatic,
+			AccessModifier: accessModifier,
+		},
+	}
+
+	return sym
+}
+
+// processInterface extracts an interface declaration.
+func (p *TypeScriptParser) processInterface(node *sitter.Node, content []byte, filePath string, exported bool) *Symbol {
+	var name string
+	var typeParams []string
+	var bodyNode *sitter.Node
+	var docstring string
+
+	docstring = p.getPrecedingComment(node, content)
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_parameters":
+			typeParams = p.extractTypeParameters(child, content)
+		case "interface_body", "object_type":
+			bodyNode = child
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	sym := &Symbol{
+		ID:         GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:       name,
+		Kind:       SymbolKindInterface,
+		FilePath:   filePath,
+		Language:   "typescript",
+		Exported:   exported,
+		DocComment: docstring,
+		StartLine:  int(node.StartPoint().Row + 1),
+		EndLine:    int(node.EndPoint().Row + 1),
+		StartCol:   int(node.StartPoint().Column),
+		EndCol:     int(node.EndPoint().Column),
+		Children:   make([]*Symbol, 0),
+	}
+
+	if len(typeParams) > 0 {
+		sym.Metadata = &SymbolMetadata{
+			TypeParameters: typeParams,
+		}
+	}
+
+	// Extract interface members
+	if bodyNode != nil {
+		p.extractInterfaceMembers(bodyNode, content, filePath, sym)
+	}
+
+	return sym
+}
+
+// extractInterfaceMembers extracts properties and methods from an interface body.
+func (p *TypeScriptParser) extractInterfaceMembers(body *sitter.Node, content []byte, filePath string, ifaceSym *Symbol) {
+	for i := 0; i < int(body.ChildCount()); i++ {
+		child := body.Child(i)
+		switch child.Type() {
+		case "property_signature":
+			if prop := p.processPropertySignature(child, content, filePath); prop != nil {
+				ifaceSym.Children = append(ifaceSym.Children, prop)
+			}
+		case "method_signature":
+			if method := p.processMethodSignature(child, content, filePath); method != nil {
+				ifaceSym.Children = append(ifaceSym.Children, method)
+			}
+		}
+	}
+}
+
+// processPropertySignature extracts an interface property.
+func (p *TypeScriptParser) processPropertySignature(node *sitter.Node, content []byte, filePath string) *Symbol {
+	var name string
+	var typeStr string
+	var isReadonly bool
+	var isOptional bool
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "readonly":
+			isReadonly = true
+		case "property_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "?":
+			isOptional = true
+		case "type_annotation":
+			typeStr = p.extractTypeAnnotation(child, content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := name
+	if isOptional {
+		signature += "?"
+	}
+	if typeStr != "" {
+		signature += ": " + typeStr
+	}
+	if isReadonly {
+		signature = "readonly " + signature
+	}
+
+	return &Symbol{
+		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:      name,
+		Kind:      SymbolKindField,
+		FilePath:  filePath,
+		Language:  "typescript",
+		Exported:  true,
+		Signature: signature,
+		StartLine: int(node.StartPoint().Row + 1),
+		EndLine:   int(node.EndPoint().Row + 1),
+		StartCol:  int(node.StartPoint().Column),
+		EndCol:    int(node.EndPoint().Column),
+	}
+}
+
+// processMethodSignature extracts an interface method signature.
+func (p *TypeScriptParser) processMethodSignature(node *sitter.Node, content []byte, filePath string) *Symbol {
+	var name string
+	var params string
+	var returnType string
+	var typeParams []string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "property_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_parameters":
+			typeParams = p.extractTypeParameters(child, content)
+		case "formal_parameters":
+			params = string(content[child.StartByte():child.EndByte()])
+		case "type_annotation":
+			returnType = p.extractTypeAnnotation(child, content)
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := name + params
+	if returnType != "" {
+		signature += ": " + returnType
+	}
+
+	sym := &Symbol{
+		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:      name,
+		Kind:      SymbolKindMethod,
+		FilePath:  filePath,
+		Language:  "typescript",
+		Exported:  true,
+		Signature: signature,
+		StartLine: int(node.StartPoint().Row + 1),
+		EndLine:   int(node.EndPoint().Row + 1),
+		StartCol:  int(node.StartPoint().Column),
+		EndCol:    int(node.EndPoint().Column),
+	}
+
+	if len(typeParams) > 0 || returnType != "" {
+		sym.Metadata = &SymbolMetadata{
+			TypeParameters: typeParams,
+			ReturnType:     returnType,
+		}
+	}
+
+	return sym
+}
+
+// processTypeAlias extracts a type alias declaration.
+func (p *TypeScriptParser) processTypeAlias(node *sitter.Node, content []byte, filePath string, exported bool) *Symbol {
+	var name string
+	var typeParams []string
+	var typeDef string
+	var docstring string
+
+	docstring = p.getPrecedingComment(node, content)
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_parameters":
+			typeParams = p.extractTypeParameters(child, content)
+		default:
+			// Capture type definition (after =)
+			if child.Type() != "type" && child.Type() != "=" && child.Type() != ";" && typeDef == "" && name != "" {
+				typeDef = string(content[child.StartByte():child.EndByte()])
+			}
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := "type " + name
+	if len(typeParams) > 0 {
+		signature += "<" + strings.Join(typeParams, ", ") + ">"
+	}
+	if typeDef != "" {
+		signature += " = " + typeDef
+	}
+
+	sym := &Symbol{
+		ID:         GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:       name,
+		Kind:       SymbolKindType,
+		FilePath:   filePath,
+		Language:   "typescript",
+		Exported:   exported,
+		Signature:  signature,
+		DocComment: docstring,
+		StartLine:  int(node.StartPoint().Row + 1),
+		EndLine:    int(node.EndPoint().Row + 1),
+		StartCol:   int(node.StartPoint().Column),
+		EndCol:     int(node.EndPoint().Column),
+	}
+
+	if len(typeParams) > 0 {
+		sym.Metadata = &SymbolMetadata{
+			TypeParameters: typeParams,
+		}
+	}
+
+	return sym
+}
+
+// processEnum extracts an enum declaration.
+func (p *TypeScriptParser) processEnum(node *sitter.Node, content []byte, filePath string, exported bool) *Symbol {
+	var name string
+	var bodyNode *sitter.Node
+	var docstring string
+
+	docstring = p.getPrecedingComment(node, content)
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "enum_body":
+			bodyNode = child
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	sym := &Symbol{
+		ID:         GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:       name,
+		Kind:       SymbolKindEnum,
+		FilePath:   filePath,
+		Language:   "typescript",
+		Exported:   exported,
+		DocComment: docstring,
+		StartLine:  int(node.StartPoint().Row + 1),
+		EndLine:    int(node.EndPoint().Row + 1),
+		StartCol:   int(node.StartPoint().Column),
+		EndCol:     int(node.EndPoint().Column),
+		Children:   make([]*Symbol, 0),
+	}
+
+	// Extract enum members
+	if bodyNode != nil {
+		p.extractEnumMembers(bodyNode, content, filePath, sym)
+	}
+
+	return sym
+}
+
+// extractEnumMembers extracts members from an enum body.
+func (p *TypeScriptParser) extractEnumMembers(body *sitter.Node, content []byte, filePath string, enumSym *Symbol) {
+	for i := 0; i < int(body.ChildCount()); i++ {
+		child := body.Child(i)
+		switch child.Type() {
+		case "enum_assignment":
+			if member := p.processEnumMember(child, content, filePath); member != nil {
+				enumSym.Children = append(enumSym.Children, member)
+			}
+		case "property_identifier":
+			// Simple enum member without value
+			name := string(content[child.StartByte():child.EndByte()])
+			member := &Symbol{
+				ID:        GenerateID(filePath, int(child.StartPoint().Row+1), name),
+				Name:      name,
+				Kind:      SymbolKindEnumMember,
+				FilePath:  filePath,
+				Language:  "typescript",
+				Exported:  true,
+				StartLine: int(child.StartPoint().Row + 1),
+				EndLine:   int(child.EndPoint().Row + 1),
+				StartCol:  int(child.StartPoint().Column),
+				EndCol:    int(child.EndPoint().Column),
+			}
+			enumSym.Children = append(enumSym.Children, member)
+		}
+	}
+}
+
+// processEnumMember extracts an enum member with assignment.
+func (p *TypeScriptParser) processEnumMember(node *sitter.Node, content []byte, filePath string) *Symbol {
+	var name string
+	var value string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "property_identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "string", "number":
+			value = string(content[child.StartByte():child.EndByte()])
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	signature := name
+	if value != "" {
+		signature += " = " + value
+	}
+
+	return &Symbol{
+		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:      name,
+		Kind:      SymbolKindEnumMember,
+		FilePath:  filePath,
+		Language:  "typescript",
+		Exported:  true,
+		Signature: signature,
+		StartLine: int(node.StartPoint().Row + 1),
+		EndLine:   int(node.EndPoint().Row + 1),
+		StartCol:  int(node.StartPoint().Column),
+		EndCol:    int(node.EndPoint().Column),
+	}
+}
+
+// processLexicalDeclaration handles const/let declarations.
+func (p *TypeScriptParser) processLexicalDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
+	var declKind string // const or let
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "const", "let":
+			declKind = child.Type()
+		case "variable_declarator":
+			if variable := p.processVariableDeclarator(child, content, filePath, declKind, exported); variable != nil {
+				result.Symbols = append(result.Symbols, variable)
+			}
+		}
+	}
+}
+
+// processVariableDeclaration handles var declarations.
+func (p *TypeScriptParser) processVariableDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "variable_declarator" {
+			if variable := p.processVariableDeclarator(child, content, filePath, "var", exported); variable != nil {
+				result.Symbols = append(result.Symbols, variable)
+			}
+		}
+	}
+}
+
+// processVariableDeclarator extracts a variable declarator.
+func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content []byte, filePath string, declKind string, exported bool) *Symbol {
+	var name string
+	var typeStr string
+	var hasArrowFunction bool
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			name = string(content[child.StartByte():child.EndByte()])
+		case "type_annotation":
+			typeStr = p.extractTypeAnnotation(child, content)
+		case "arrow_function":
+			hasArrowFunction = true
+		}
+	}
+
+	if name == "" {
+		return nil
+	}
+
+	kind := SymbolKindVariable
+	if declKind == "const" {
+		kind = SymbolKindConstant
+	}
+	if hasArrowFunction {
+		kind = SymbolKindFunction
+	}
+
+	signature := declKind + " " + name
+	if typeStr != "" {
+		signature += ": " + typeStr
+	}
+
+	return &Symbol{
+		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
+		Name:      name,
+		Kind:      kind,
+		FilePath:  filePath,
+		Language:  "typescript",
+		Exported:  exported,
+		Signature: signature,
+		StartLine: int(node.StartPoint().Row + 1),
+		EndLine:   int(node.EndPoint().Row + 1),
+		StartCol:  int(node.StartPoint().Column),
+		EndCol:    int(node.EndPoint().Column),
+	}
+}
+
+// extractTypeParameters extracts type parameters from a type_parameters node.
+func (p *TypeScriptParser) extractTypeParameters(node *sitter.Node, content []byte) []string {
+	params := make([]string, 0)
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_parameter" {
+			param := string(content[child.StartByte():child.EndByte()])
+			params = append(params, param)
+		}
+	}
+
+	return params
+}
+
+// extractTypeAnnotation extracts the type from a type annotation.
+func (p *TypeScriptParser) extractTypeAnnotation(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() != ":" {
+			return string(content[child.StartByte():child.EndByte()])
+		}
+	}
+	return ""
+}
+
+// extractClassHeritage extracts extends and implements from class heritage.
+func (p *TypeScriptParser) extractClassHeritage(node *sitter.Node, content []byte) (extends string, implements []string) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "extends_clause":
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				// Tree-sitter uses "identifier" for simple class names, "type_identifier" for type references
+				if gc.Type() == "identifier" || gc.Type() == "type_identifier" || gc.Type() == "generic_type" {
+					extends = string(content[gc.StartByte():gc.EndByte()])
+				}
+			}
+		case "implements_clause":
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == "type_identifier" || gc.Type() == "generic_type" {
+					implements = append(implements, string(content[gc.StartByte():gc.EndByte()]))
+				}
+			}
+		}
+	}
+	return
+}
+
+// extractDecoratorName extracts the name from a decorator node.
+func (p *TypeScriptParser) extractDecoratorName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			return string(content[child.StartByte():child.EndByte()])
+		case "call_expression":
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == "identifier" {
+					return string(content[gc.StartByte():gc.EndByte()])
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// extractStringContent extracts the content from a string node.
+func (p *TypeScriptParser) extractStringContent(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "string_fragment" {
+			return string(content[child.StartByte():child.EndByte()])
+		}
+	}
+	// Fallback: strip quotes from raw content
+	raw := string(content[node.StartByte():node.EndByte()])
+	return strings.Trim(raw, `"'`)
+}
+
+// getPrecedingComment extracts JSDoc or comment before a node.
+func (p *TypeScriptParser) getPrecedingComment(node *sitter.Node, content []byte) string {
+	if node == nil {
+		return ""
+	}
+
+	// Look for comment node immediately before this one
+	prev := node.PrevSibling()
+	if prev != nil && prev.Type() == "comment" {
+		comment := string(content[prev.StartByte():prev.EndByte()])
+		// Check if it's a JSDoc comment
+		if strings.HasPrefix(comment, "/**") {
+			return comment
+		}
+	}
+
+	// If this node is inside an export_statement, the comment may be
+	// a sibling of the export_statement, not this declaration node.
+	// Check parent's previous sibling.
+	parent := node.Parent()
+	if parent != nil && parent.Type() == "export_statement" {
+		parentPrev := parent.PrevSibling()
+		if parentPrev != nil && parentPrev.Type() == "comment" {
+			comment := string(content[parentPrev.StartByte():parentPrev.EndByte()])
+			if strings.HasPrefix(comment, "/**") {
+				return comment
+			}
+		}
+	}
+
+	return ""
+}
+
+// Compile-time interface compliance check.
+var _ Parser = (*TypeScriptParser)(nil)

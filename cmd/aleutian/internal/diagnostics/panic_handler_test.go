@@ -252,7 +252,7 @@ func TestDefaultPanicRecoveryHandler_Wrap_PrintsOutput(t *testing.T) {
 		"output test panic",
 		"Trace ID: mock-trace-id-12345",
 		"Location: /tmp/test-diag.json",
-		"github.com/jinterlante1206/AleutianLocal/issues",
+		"github.com/AleutianAI/AleutianFOSS/issues",
 	}
 
 	for _, expected := range expectedStrings {

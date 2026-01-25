@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/google/uuid"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
 )
 
 // =============================================================================

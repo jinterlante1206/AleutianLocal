@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/ttl"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/ttl"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/filters"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate/graphql"

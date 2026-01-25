@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jinterlante1206/AleutianLocal/services/policy_engine/enforcement"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine/enforcement"
 	"gopkg.in/yaml.v3"
 )
 

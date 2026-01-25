@@ -21,11 +21,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/config"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/diagnostics"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/health"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra"
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/compose"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/diagnostics"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/health"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra/compose"
 )
 
 // =============================================================================

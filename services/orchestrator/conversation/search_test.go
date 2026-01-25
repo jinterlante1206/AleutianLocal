@@ -14,7 +14,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 )
 
 // =============================================================================
@@ -279,8 +279,8 @@ func TestParseDocumentSearchResults(t *testing.T) {
 			expected: 2,
 		},
 		{
-			name: "nil response",
-			resp: nil,
+			name:     "nil response",
+			resp:     nil,
 			expected: 0,
 		},
 	}

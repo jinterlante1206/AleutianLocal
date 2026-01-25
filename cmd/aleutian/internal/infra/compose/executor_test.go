@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/cmd/aleutian/internal/infra/process"
+	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/infra/process"
 )
 
 // =============================================================================

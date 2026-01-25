@@ -27,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jinterlante1206/AleutianLocal/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/spf13/cobra"
 )
 
