@@ -119,6 +119,94 @@ const (
 
 	// SymbolKindForm represents an HTML form.
 	SymbolKindForm
+
+	// === SQL Symbols ===
+
+	// SymbolKindTable represents a SQL table definition.
+	SymbolKindTable
+
+	// SymbolKindColumn represents a SQL column definition.
+	SymbolKindColumn
+
+	// SymbolKindView represents a SQL view definition.
+	SymbolKindView
+
+	// SymbolKindIndex represents a SQL index definition.
+	SymbolKindIndex
+
+	// SymbolKindTrigger represents a SQL trigger definition.
+	SymbolKindTrigger
+
+	// SymbolKindProcedure represents a SQL stored procedure.
+	SymbolKindProcedure
+
+	// SymbolKindSchema represents a SQL schema/database.
+	SymbolKindSchema
+
+	// SymbolKindConstraint represents a SQL constraint (PRIMARY KEY, FOREIGN KEY, etc).
+	SymbolKindConstraint
+
+	// === YAML Symbols ===
+
+	// SymbolKindKey represents a YAML key in a mapping.
+	SymbolKindKey
+
+	// SymbolKindAnchor represents a YAML anchor (&name).
+	SymbolKindAnchor
+
+	// SymbolKindDocument represents a YAML document (separated by ---).
+	SymbolKindDocument
+
+	// === Bash/Shell Symbols ===
+
+	// SymbolKindAlias represents a shell alias definition.
+	SymbolKindAlias
+
+	// SymbolKindScript represents an executable script.
+	SymbolKindScript
+
+	// === Dockerfile Symbols ===
+
+	// SymbolKindStage represents a Docker build stage (FROM ... AS name).
+	SymbolKindStage
+
+	// SymbolKindInstruction represents a Dockerfile instruction (FROM, RUN, COPY, etc).
+	SymbolKindInstruction
+
+	// SymbolKindPort represents an exposed port (EXPOSE).
+	SymbolKindPort
+
+	// SymbolKindVolume represents a Docker volume (VOLUME).
+	SymbolKindVolume
+
+	// SymbolKindLabel represents a Docker label (LABEL).
+	SymbolKindLabel
+
+	// SymbolKindEnvVar represents an environment variable (ENV).
+	SymbolKindEnvVar
+
+	// SymbolKindArg represents a build argument (ARG).
+	SymbolKindArg
+
+	// === Markdown Symbols ===
+
+	// SymbolKindHeading represents a markdown heading (# H1, ## H2, etc).
+	SymbolKindHeading
+
+	// SymbolKindCodeBlock represents a fenced code block (```language).
+	SymbolKindCodeBlock
+
+	// SymbolKindLink represents a markdown link [text](url).
+	SymbolKindLink
+
+	// SymbolKindList represents a markdown list (ordered or unordered).
+	SymbolKindList
+
+	// SymbolKindBlockquote represents a markdown blockquote (> text).
+	SymbolKindBlockquote
+
+	// SymbolKindImage represents a markdown image ![alt](url).
+	SymbolKindImage
 )
 
 // symbolKindNames maps SymbolKind values to their string representations.
@@ -149,6 +237,37 @@ var symbolKindNames = map[SymbolKind]string{
 	SymbolKindComponent:   "component",
 	SymbolKindElement:     "element",
 	SymbolKindForm:        "form",
+	// SQL
+	SymbolKindTable:      "table",
+	SymbolKindColumn:     "column",
+	SymbolKindView:       "view",
+	SymbolKindIndex:      "index",
+	SymbolKindTrigger:    "trigger",
+	SymbolKindProcedure:  "procedure",
+	SymbolKindSchema:     "schema",
+	SymbolKindConstraint: "constraint",
+	// YAML
+	SymbolKindKey:      "key",
+	SymbolKindAnchor:   "anchor",
+	SymbolKindDocument: "document",
+	// Bash
+	SymbolKindAlias:  "alias",
+	SymbolKindScript: "script",
+	// Dockerfile
+	SymbolKindStage:       "stage",
+	SymbolKindInstruction: "instruction",
+	SymbolKindPort:        "port",
+	SymbolKindVolume:      "volume",
+	SymbolKindLabel:       "label",
+	SymbolKindEnvVar:      "env_var",
+	SymbolKindArg:         "arg",
+	// Markdown
+	SymbolKindHeading:    "heading",
+	SymbolKindCodeBlock:  "code_block",
+	SymbolKindLink:       "link",
+	SymbolKindList:       "list",
+	SymbolKindBlockquote: "blockquote",
+	SymbolKindImage:      "image",
 }
 
 // String returns the string representation of the SymbolKind.
@@ -347,6 +466,31 @@ type SymbolMetadata struct {
 
 	// CSSSelector is the full CSS selector for CSS symbols.
 	CSSSelector string `json:"css_selector,omitempty"`
+
+	// ParentName is the parent symbol name (e.g., table name for columns).
+	ParentName string `json:"parent_name,omitempty"`
+
+	// SQLConstraints lists SQL constraints for columns (PRIMARY KEY, UNIQUE, etc.).
+	SQLConstraints []string `json:"sql_constraints,omitempty"`
+
+	// HeadingLevel is the heading level (1-6) for Markdown headings.
+	HeadingLevel int `json:"heading_level,omitempty"`
+
+	// CodeLanguage is the language identifier for fenced code blocks.
+	// Example: "go", "python", "javascript"
+	CodeLanguage string `json:"code_language,omitempty"`
+
+	// ListType is the type of list: "ordered" or "unordered".
+	ListType string `json:"list_type,omitempty"`
+
+	// ListItems is the number of items in a list.
+	ListItems int `json:"list_items,omitempty"`
+
+	// LinkURL is the destination URL for link reference definitions.
+	LinkURL string `json:"link_url,omitempty"`
+
+	// LinkTitle is the optional title for link reference definitions.
+	LinkTitle string `json:"link_title,omitempty"`
 }
 
 // GenerateID creates a unique identifier for a symbol based on its location and name.
