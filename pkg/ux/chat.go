@@ -55,16 +55,19 @@ type HeaderConfig struct {
 //
 // # Description
 //
-// DataSpaceStats captures aggregate information about documents within
+// DataSpaceStats captures aggregate information about chunks within
 // a dataspace. This is fetched from the orchestrator and displayed
 // in the chat header.
 //
+// Note: DocumentCount actually represents chunk count, not unique source
+// documents. A single uploaded file may produce many chunks for vector search.
+//
 // # Fields
 //
-//   - DocumentCount: Number of documents in the dataspace
+//   - DocumentCount: Number of chunks in the dataspace (not unique documents)
 //   - LastUpdatedAt: Unix milliseconds of most recent document ingestion
 type DataSpaceStats struct {
-	DocumentCount int   `json:"document_count"`
+	DocumentCount int   `json:"document_count"`  // Actually chunk count
 	LastUpdatedAt int64 `json:"last_updated_at"` // Unix ms timestamp
 }
 
@@ -281,7 +284,7 @@ func (u *terminalChatUI) headerMachine(config HeaderConfig) {
 			parts = append(parts, fmt.Sprintf("dataspace=%s", config.DataSpace))
 		}
 		if config.DataSpaceStats != nil {
-			parts = append(parts, fmt.Sprintf("doc_count=%d", config.DataSpaceStats.DocumentCount))
+			parts = append(parts, fmt.Sprintf("chunks=%d", config.DataSpaceStats.DocumentCount))
 			if config.DataSpaceStats.LastUpdatedAt > 0 {
 				parts = append(parts, fmt.Sprintf("last_updated=%d", config.DataSpaceStats.LastUpdatedAt))
 			}
@@ -305,7 +308,7 @@ func (u *terminalChatUI) headerMinimal(config HeaderConfig) {
 		u.write("RAG Chat (pipeline: %s)\n", config.Pipeline)
 		if config.DataSpace != "" {
 			if config.DataSpaceStats != nil {
-				u.write("Dataspace: %s (%d docs)\n", config.DataSpace, config.DataSpaceStats.DocumentCount)
+				u.write("Dataspace: %s (%d chunks)\n", config.DataSpace, config.DataSpaceStats.DocumentCount)
 			} else {
 				u.write("Dataspace: %s\n", config.DataSpace)
 			}
@@ -331,8 +334,8 @@ func (u *terminalChatUI) headerFull(config HeaderConfig) {
 		if config.DataSpace != "" {
 			content.WriteString("\n")
 			if config.DataSpaceStats != nil {
-				// Format: "Dataspace: wheat (142 docs, updated 2h ago)"
-				statsInfo := fmt.Sprintf("%d docs", config.DataSpaceStats.DocumentCount)
+				// Format: "Dataspace: wheat (142 chunks, updated 2h ago)"
+				statsInfo := fmt.Sprintf("%d chunks", config.DataSpaceStats.DocumentCount)
 				if config.DataSpaceStats.LastUpdatedAt > 0 {
 					relTime := formatRelativeTime(config.DataSpaceStats.LastUpdatedAt)
 					statsInfo = fmt.Sprintf("%s, updated %s", statsInfo, relTime)

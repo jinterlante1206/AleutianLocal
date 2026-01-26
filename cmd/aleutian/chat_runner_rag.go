@@ -23,7 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strings"
+	"regexp"
 	"sync"
 	"time"
 
@@ -169,11 +169,13 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 	input := NewInteractiveInputReader(50) // Keep last 50 prompts in history
 
 	// Initialize spell corrector with dataspace name as a known term
+	// Also include common English words (5000 most common) to avoid false corrections
 	var corrector *SpellCorrector
 	if config.DataSpace != "" {
-		terms := map[string]int{
-			config.DataSpace: 100, // High frequency for the dataspace name itself
-		}
+		// Start with common English words from embedded word list
+		terms := GetCommonWords()
+		// Add dataspace name with highest priority (will override if in common words)
+		terms[config.DataSpace] = 0             // 0 = highest priority (lowest rank number)
 		corrector = NewSpellCorrector(terms, 2) // Max 2 edit distance
 	}
 
@@ -419,6 +421,12 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 			continue
 		}
 
+		// Echo the user's input for interactive readers
+		// Bubbletea clears its rendering area on exit, so we restore the visual line
+		if _, isInteractive := r.input.(*InteractiveInputReader); isInteractive {
+			fmt.Printf("%s%s\n", r.ui.Prompt(), input)
+		}
+
 		// Check for exit command
 		if isExitCommand(input) {
 			r.displaySessionEndWithStats()
@@ -608,20 +616,32 @@ func (r *RAGChatRunner) applySpellCorrection(input string) string {
 }
 
 // replaceWord replaces all occurrences of a word in text (case-insensitive).
+//
+// # Description
+//
+// Uses regex with word boundaries for robust, case-insensitive replacement
+// of all occurrences of a word.
+//
+// # Inputs
+//
+//   - text: The text to search in
+//   - oldWord: The word to replace (case-insensitive match)
+//   - newWord: The replacement word
+//
+// # Outputs
+//
+//   - string: Text with all occurrences replaced
+//
+// # Examples
+//
+//	replaceWord("show me wheet and wheet data", "wheet", "wheat")
+//	// Returns: "show me wheat and wheat data"
 func replaceWord(text, oldWord, newWord string) string {
-	// Simple case-insensitive word replacement
-	// We need to handle word boundaries properly
-	words := extractWords(text)
-	result := text
-
-	for _, w := range words {
-		if strings.EqualFold(w, oldWord) {
-			// Replace this occurrence
-			result = strings.Replace(result, w, newWord, 1)
-		}
-	}
-
-	return result
+	// Use regex for robust, case-insensitive, whole-word replacement
+	// (?i) makes it case-insensitive
+	// \b ensures we match whole words only
+	re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(oldWord) + `\b`)
+	return re.ReplaceAllString(text, newWord)
 }
 
 // # Inputs

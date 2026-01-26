@@ -193,6 +193,8 @@ func (p *SessionProperties) ToMap() map[string]interface{} {
 		"timestamp":       p.Timestamp,
 		"ttl_expires_at":  p.TTLExpiresAt,
 		"ttl_duration_ms": p.TTLDurationMs,
+		"data_space":      p.DataSpace,
+		"pipeline":        p.Pipeline,
 	}
 }
 

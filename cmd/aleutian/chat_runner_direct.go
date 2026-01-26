@@ -336,6 +336,12 @@ func (r *DirectChatRunner) Run(ctx context.Context) error {
 			continue
 		}
 
+		// Echo the user's input for interactive readers
+		// Bubbletea clears its rendering area on exit, so we restore the visual line
+		if _, isInteractive := r.input.(*InteractiveInputReader); isInteractive {
+			fmt.Printf("%s%s\n", r.ui.Prompt(), input)
+		}
+
 		// Check for exit command
 		if isExitCommand(input) {
 			r.displaySessionEndWithStats()

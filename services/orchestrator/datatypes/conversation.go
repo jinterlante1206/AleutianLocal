@@ -92,26 +92,45 @@ func FindOrCreateSessionUUID(ctx context.Context, client *weaviate.Client,
 	return result.Object.ID.String(), nil
 }
 
-// FindOrCreateSessionWithTTL finds or creates a session with optional TTL.
+// SessionContext holds context values that should be stored with a session.
+//
+// # Description
+//
+// SessionContext captures the configuration used when a session was created,
+// allowing resume to restore the exact same experience.
+//
+// # Fields
+//
+//   - DataSpace: The data space filter for RAG queries (e.g., "work", "personal").
+//   - Pipeline: The RAG pipeline to use (e.g., "reranking", "verified").
+//   - TTL: TTL duration string (e.g., "24h", "7d"). Empty = no TTL.
+type SessionContext struct {
+	DataSpace string
+	Pipeline  string
+	TTL       string
+}
+
+// FindOrCreateSessionWithTTL finds or creates a session with optional TTL and context.
 //
 // # Description
 //
 // Like FindOrCreateSessionUUID, but also sets TTL on new sessions and resets
 // TTL on existing sessions (for the "resets on each message" behavior).
+// Additionally stores dataspace and pipeline for session resume.
 //
 // # Inputs
 //
 //   - ctx: Context for cancellation and tracing.
 //   - client: Weaviate client.
 //   - sessionID: Session identifier (e.g., "sess_abc123").
-//   - sessionTTL: TTL duration string (e.g., "24h", "7d"). Empty = no TTL.
+//   - sessionCtx: Session context with dataspace, pipeline, and TTL.
 //
 // # Outputs
 //
 //   - string: Weaviate UUID of the session.
 //   - error: Non-nil if operation fails.
 func FindOrCreateSessionWithTTL(ctx context.Context, client *weaviate.Client,
-	sessionID, sessionTTL string) (string, error) {
+	sessionID string, sessionCtx SessionContext) (string, error) {
 
 	ctx, span := convTracer.Start(ctx, "FindOrCreateSessionWithTTL")
 	defer span.End()
@@ -119,16 +138,16 @@ func FindOrCreateSessionWithTTL(ctx context.Context, client *weaviate.Client,
 	// Parse TTL if provided
 	var ttlExpiresAt int64
 	var ttlDurationMs int64
-	if sessionTTL != "" {
-		result, err := ttl.ParseTTLDuration(sessionTTL)
+	if sessionCtx.TTL != "" {
+		result, err := ttl.ParseTTLDuration(sessionCtx.TTL)
 		if err != nil {
-			return "", fmt.Errorf("invalid session TTL '%s': %w", sessionTTL, err)
+			return "", fmt.Errorf("invalid session TTL '%s': %w", sessionCtx.TTL, err)
 		}
 		ttlExpiresAt = result.ExpiresAt
 		ttlDurationMs = result.Duration.Milliseconds()
 		slog.Info("Session TTL configured",
 			"session_id", sessionID,
-			"ttl_input", sessionTTL,
+			"ttl_input", sessionCtx.TTL,
 			"ttl_description", result.Description,
 			"expires_at", time.UnixMilli(ttlExpiresAt).Format(time.RFC3339),
 		)
@@ -176,10 +195,12 @@ func FindOrCreateSessionWithTTL(ctx context.Context, client *weaviate.Client,
 		return uuid, nil
 	}
 
-	// 2. Not found, so create it with TTL
+	// 2. Not found, so create it with TTL and context
 	slog.Info("No existing session found, creating a new one...",
 		"sessionId", sessionID,
 		"has_ttl", ttlExpiresAt > 0,
+		"data_space", sessionCtx.DataSpace,
+		"pipeline", sessionCtx.Pipeline,
 	)
 	props := SessionProperties{
 		SessionId:     sessionID,
@@ -187,6 +208,8 @@ func FindOrCreateSessionWithTTL(ctx context.Context, client *weaviate.Client,
 		Timestamp:     time.Now().UnixMilli(),
 		TTLExpiresAt:  ttlExpiresAt,
 		TTLDurationMs: ttlDurationMs,
+		DataSpace:     sessionCtx.DataSpace,
+		Pipeline:      sessionCtx.Pipeline,
 	}
 
 	result, err := client.Data().Creator().

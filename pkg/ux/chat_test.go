@@ -324,8 +324,8 @@ func TestChatUI_HeaderWithConfig_DataSpaceStats_MachineMode(t *testing.T) {
 	if !strings.Contains(output, "dataspace=wheat") {
 		t.Errorf("expected dataspace=wheat, got %q", output)
 	}
-	if !strings.Contains(output, "doc_count=142") {
-		t.Errorf("expected doc_count=142, got %q", output)
+	if !strings.Contains(output, "chunks=142") {
+		t.Errorf("expected chunks=142, got %q", output)
 	}
 	if !strings.Contains(output, "last_updated=") {
 		t.Errorf("expected last_updated=, got %q", output)
@@ -347,8 +347,8 @@ func TestChatUI_HeaderWithConfig_DataSpaceStats_MinimalMode(t *testing.T) {
 	})
 
 	output := buf.String()
-	if !strings.Contains(output, "Dataspace: wheat (142 docs)") {
-		t.Errorf("expected 'Dataspace: wheat (142 docs)', got %q", output)
+	if !strings.Contains(output, "Dataspace: wheat (142 chunks)") {
+		t.Errorf("expected 'Dataspace: wheat (142 chunks)', got %q", output)
 	}
 }
 
@@ -367,9 +367,9 @@ func TestChatUI_HeaderWithConfig_DataSpaceStats_FullMode(t *testing.T) {
 	})
 
 	output := buf.String()
-	// Should contain document count and relative time
-	if !strings.Contains(output, "142 docs") {
-		t.Errorf("expected '142 docs', got %q", output)
+	// Should contain chunk count and relative time
+	if !strings.Contains(output, "142 chunks") {
+		t.Errorf("expected '142 chunks', got %q", output)
 	}
 	if !strings.Contains(output, "updated") {
 		t.Errorf("expected 'updated' (relative time), got %q", output)
@@ -392,9 +392,9 @@ func TestChatUI_HeaderWithConfig_DataSpaceStatsNil_FullMode(t *testing.T) {
 	if !strings.Contains(output, "wheat") {
 		t.Errorf("expected 'wheat' dataspace, got %q", output)
 	}
-	// Should NOT contain doc count
-	if strings.Contains(output, "docs") {
-		t.Errorf("unexpected 'docs' when stats are nil, got %q", output)
+	// Should NOT contain chunk count
+	if strings.Contains(output, "chunks") {
+		t.Errorf("unexpected 'chunks' when stats are nil, got %q", output)
 	}
 }
 

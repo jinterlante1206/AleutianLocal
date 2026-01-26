@@ -222,14 +222,17 @@ func parseChunksFromResult(resp *models.GraphQLResponse) []map[string]interface{
 //
 // # Description
 //
-// DataspaceStats captures aggregate information about documents within
+// DataspaceStats captures aggregate information about chunks within
 // a dataspace, including count and timestamps. This is used to display
 // dataspace metadata in the chat header.
+//
+// Note: DocumentCount actually represents chunk count, not unique source
+// documents. A single uploaded file may produce many chunks for vector search.
 //
 // # Fields
 //
 //   - Name: The dataspace name (e.g., "wheat", "work", "default")
-//   - DocumentCount: Number of documents in the dataspace
+//   - DocumentCount: Number of chunks in the dataspace (not unique documents)
 //   - LastUpdatedAt: Unix milliseconds of most recent document ingestion
 //
 // # Thread Safety
@@ -237,7 +240,7 @@ func parseChunksFromResult(resp *models.GraphQLResponse) []map[string]interface{
 // This type is safe for concurrent read access.
 type DataspaceStats struct {
 	Name          string `json:"name"`
-	DocumentCount int    `json:"document_count"`
+	DocumentCount int    `json:"document_count"`  // Actually chunk count
 	LastUpdatedAt int64  `json:"last_updated_at"` // Unix ms timestamp
 }
 
@@ -245,14 +248,15 @@ type DataspaceStats struct {
 //
 // # Description
 //
-// Queries Weaviate to aggregate statistics for all documents in the
+// Queries Weaviate to aggregate statistics for all current documents in the
 // specified dataspace. Returns document count and the most recent
-// ingestion timestamp.
+// ingestion timestamp. Only counts chunks where is_current=true (ignoring
+// old versions from re-ingested documents).
 //
 // # Inputs
 //
 //   - name (path param): Dataspace name to query. If "default" or empty,
-//     queries all documents without dataspace filter.
+//     queries all current documents without dataspace filter.
 //
 // # Outputs
 //
@@ -273,7 +277,7 @@ type DataspaceStats struct {
 // # Assumptions
 //
 //   - Weaviate client is properly initialized
-//   - Document schema exists with data_space and ingested_at fields
+//   - Document schema exists with data_space, is_current, and ingested_at fields
 func GetDataspaceStats(client *weaviate.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		dataspaceName := c.Param("name")
@@ -287,13 +291,24 @@ func GetDataspaceStats(client *weaviate.Client) gin.HandlerFunc {
 		ctx := c.Request.Context()
 
 		// Build the aggregate query
-		// For "default" dataspace, we query all documents without a data_space filter
+		// Always filter by is_current=true to only count current versions
+		isCurrentFilter := filters.Where().
+			WithPath([]string{"is_current"}).
+			WithOperator(filters.Equal).
+			WithValueBoolean(true)
+
+		// For "default" dataspace, we query all current documents without a data_space filter
 		var whereFilter *filters.WhereBuilder
 		if dataspaceName != "default" {
-			whereFilter = filters.Where().
+			dataSpaceFilter := filters.Where().
 				WithPath([]string{"data_space"}).
 				WithOperator(filters.Equal).
 				WithValueString(dataspaceName)
+			whereFilter = filters.Where().
+				WithOperator(filters.And).
+				WithOperands([]*filters.WhereBuilder{dataSpaceFilter, isCurrentFilter})
+		} else {
+			whereFilter = isCurrentFilter
 		}
 
 		// Query for count using Aggregate
@@ -303,11 +318,8 @@ func GetDataspaceStats(client *weaviate.Client) gin.HandlerFunc {
 
 		builder := client.GraphQL().Aggregate().
 			WithClassName("Document").
-			WithFields(fields...)
-
-		if whereFilter != nil {
-			builder = builder.WithWhere(whereFilter)
-		}
+			WithFields(fields...).
+			WithWhere(whereFilter)
 
 		aggResp, err := builder.Do(ctx)
 		if err != nil {
@@ -382,12 +394,23 @@ func parseAggregateCount(resp *models.GraphQLResponse) int {
 // getMaxIngestedAt queries for the most recent ingested_at timestamp in a dataspace.
 func getMaxIngestedAt(ctx context.Context, client *weaviate.Client, dataspaceName string) (int64, error) {
 	// Query for the single most recent document by ingested_at
+	// Always filter by is_current=true to only count current versions
+	isCurrentFilter := filters.Where().
+		WithPath([]string{"is_current"}).
+		WithOperator(filters.Equal).
+		WithValueBoolean(true)
+
 	var whereFilter *filters.WhereBuilder
 	if dataspaceName != "default" {
-		whereFilter = filters.Where().
+		dataSpaceFilter := filters.Where().
 			WithPath([]string{"data_space"}).
 			WithOperator(filters.Equal).
 			WithValueString(dataspaceName)
+		whereFilter = filters.Where().
+			WithOperator(filters.And).
+			WithOperands([]*filters.WhereBuilder{dataSpaceFilter, isCurrentFilter})
+	} else {
+		whereFilter = isCurrentFilter
 	}
 
 	fields := []graphql.Field{
@@ -397,14 +420,9 @@ func getMaxIngestedAt(ctx context.Context, client *weaviate.Client, dataspaceNam
 	builder := client.GraphQL().Get().
 		WithClassName("Document").
 		WithFields(fields...).
-		WithLimit(1)
-
-	if whereFilter != nil {
-		builder = builder.WithWhere(whereFilter)
-	}
-
-	// Sort by ingested_at descending to get the most recent
-	builder = builder.WithSort(graphql.Sort{Path: []string{"ingested_at"}, Order: "desc"})
+		WithLimit(1).
+		WithWhere(whereFilter).
+		WithSort(graphql.Sort{Path: []string{"ingested_at"}, Order: "desc"})
 
 	getResp, err := builder.Do(ctx)
 	if err != nil {

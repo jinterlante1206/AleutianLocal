@@ -573,6 +573,7 @@ type DeletionMetadata struct {
 	ParentSource string
 	SessionID    string
 	DataSpace    string
+	Pipeline     string
 }
 
 // ConfigChangeRecord represents a dataspace configuration change.
@@ -681,7 +682,7 @@ type ExpiredDocument struct {
 // # Description
 //
 // Contains the metadata needed to identify and delete an expired session
-// from Weaviate.
+// from Weaviate. Includes context info (DataSpace, Pipeline) for audit logging.
 //
 // # Fields
 //
@@ -689,11 +690,15 @@ type ExpiredDocument struct {
 //   - SessionID: The session identifier for logging.
 //   - TTLExpiresAt: Unix milliseconds when it expired.
 //   - Timestamp: Unix milliseconds when session was created.
+//   - DataSpace: The data space this session operated in (for audit logging).
+//   - Pipeline: The RAG pipeline used for this session (for audit logging).
 type ExpiredSession struct {
 	WeaviateID   string
 	SessionID    string
 	TTLExpiresAt int64
 	Timestamp    int64
+	DataSpace    string
+	Pipeline     string
 }
 
 // CleanupResult summarizes a TTL cleanup operation.
@@ -795,6 +800,7 @@ type DeletionRecord struct {
 	ParentSource string `json:"parent_source,omitempty"`
 	SessionID    string `json:"session_id,omitempty"`
 	DataSpace    string `json:"data_space,omitempty"`
+	Pipeline     string `json:"pipeline,omitempty"`
 	PrevHash     string `json:"prev_hash"`
 	EntryHash    string `json:"entry_hash"`
 }

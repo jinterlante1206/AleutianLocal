@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -118,6 +119,11 @@ type ttlLogger struct {
 //   - Caller handles log file rotation.
 //   - System clock is reasonably accurate for timestamps.
 func NewTTLLogger(logPath string) (TTLLogger, error) {
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
+
 	// Open file in append mode, create if doesn't exist
 	// Use restricted permissions (0600) to prevent unauthorized access to audit data
 	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, auditLogFileMode)
@@ -210,6 +216,7 @@ func (l *ttlLogger) LogDeletion(content []byte, weaviateID string, operation str
 		ParentSource: metadata.ParentSource,
 		SessionID:    metadata.SessionID,
 		DataSpace:    metadata.DataSpace,
+		Pipeline:     metadata.Pipeline,
 		PrevHash:     l.prevHash,
 	}
 
@@ -1018,7 +1025,7 @@ func computeSHA256(content []byte) string {
 func computeRecordHash(record DeletionRecord) string {
 	// Create a deterministic string from record fields (excluding EntryHash)
 	// Use a consistent format for reproducibility
-	data := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s",
+	data := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s|%s",
 		record.Sequence,
 		record.Timestamp,
 		record.Operation,
@@ -1027,6 +1034,7 @@ func computeRecordHash(record DeletionRecord) string {
 		record.ParentSource,
 		record.SessionID,
 		record.DataSpace,
+		record.Pipeline,
 		record.PrevHash,
 	)
 

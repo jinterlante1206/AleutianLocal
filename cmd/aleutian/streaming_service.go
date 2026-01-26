@@ -215,6 +215,62 @@ type StreamingChatService interface {
 	// Assumptions:
 	//   - Orchestrator supports /v1/dataspace/{name}/stats endpoint
 	GetDataSpaceStats(ctx context.Context) (*ux.DataSpaceStats, error)
+
+	// LoadSessionMetadata fetches session configuration for resume.
+	//
+	// Description:
+	//   Retrieves stored session context (dataspace, pipeline, TTL) from server.
+	//   This allows resume to restore the exact same experience as when the
+	//   session was created, without requiring the user to re-specify flags.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation/timeout.
+	//   - sessionID: The session ID to load metadata for.
+	//
+	// Outputs:
+	//   - *SessionMetadata: Session configuration if found.
+	//   - error: Non-nil if session not found or server error.
+	//
+	// Examples:
+	//   meta, err := service.LoadSessionMetadata(ctx, "sess-abc123")
+	//   if err != nil {
+	//       log.Fatal("session not found")
+	//   }
+	//   fmt.Printf("Resuming with dataspace=%s pipeline=%s\n", meta.DataSpace, meta.Pipeline)
+	//
+	// Limitations:
+	//   - Requires session to exist on server
+	//   - Old sessions may not have dataspace/pipeline stored
+	//
+	// Assumptions:
+	//   - Orchestrator supports /v1/sessions/{id} endpoint
+	LoadSessionMetadata(ctx context.Context, sessionID string) (*SessionMetadata, error)
+}
+
+// SessionMetadata contains session configuration for resume.
+//
+// # Description
+//
+// SessionMetadata is returned when loading a session for resume.
+// It contains the stored context (dataspace, pipeline, TTL) that was
+// used when the session was created, allowing the CLI to restore
+// the exact same experience.
+//
+// # Fields
+//
+//   - SessionID: The session identifier.
+//   - DataSpace: The data space filter for RAG queries.
+//   - Pipeline: The RAG pipeline used (reranking, verified, etc.).
+//   - TTLDurationMs: The TTL duration in milliseconds.
+//   - TTLExpiresAt: Unix milliseconds when session expires.
+type SessionMetadata struct {
+	SessionID     string `json:"session_id"`
+	DataSpace     string `json:"data_space,omitempty"`
+	Pipeline      string `json:"pipeline,omitempty"`
+	TTLDurationMs int64  `json:"ttl_duration_ms,omitempty"`
+	TTLExpiresAt  int64  `json:"ttl_expires_at,omitempty"`
+	Timestamp     int64  `json:"timestamp,omitempty"`
+	Summary       string `json:"summary,omitempty"`
 }
 
 // =============================================================================
@@ -1201,6 +1257,77 @@ func (s *ragStreamingChatService) GetDataSpaceStats(ctx context.Context) (*ux.Da
 	}, nil
 }
 
+// LoadSessionMetadata fetches session configuration for resume.
+//
+// # Description
+//
+// Retrieves stored session context (dataspace, pipeline, TTL) from server.
+// This allows resume to restore the exact same experience as when the
+// session was created, without requiring the user to re-specify flags.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation/timeout.
+//   - sessionID: The session ID to load metadata for.
+//
+// # Outputs
+//
+//   - *SessionMetadata: Session configuration if found.
+//   - error: Non-nil if session not found or server error.
+func (s *ragStreamingChatService) LoadSessionMetadata(ctx context.Context, sessionID string) (*SessionMetadata, error) {
+	escapedSessionID := url.PathEscape(sessionID)
+	targetURL := fmt.Sprintf("%s/v1/sessions/%s", s.baseURL, escapedSessionID)
+
+	slog.Debug("loading session metadata for resume",
+		"session_id", sessionID,
+		"url", targetURL,
+	)
+
+	resp, err := s.client.Get(ctx, targetURL)
+	if err != nil {
+		slog.Error("failed to load session metadata",
+			"session_id", sessionID,
+			"error", err,
+		)
+		return nil, fmt.Errorf("get session metadata: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("session metadata request failed",
+			"session_id", sessionID,
+			"status_code", resp.StatusCode,
+		)
+		return nil, fmt.Errorf("session metadata request failed (status %d)", resp.StatusCode)
+	}
+
+	var metadata SessionMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		slog.Error("failed to parse session metadata",
+			"session_id", sessionID,
+			"error", err,
+		)
+		return nil, fmt.Errorf("parse session metadata: %w", err)
+	}
+
+	slog.Info("session metadata loaded for resume",
+		"session_id", sessionID,
+		"data_space", metadata.DataSpace,
+		"pipeline", metadata.Pipeline,
+		"ttl_duration_ms", metadata.TTLDurationMs,
+	)
+
+	return &metadata, nil
+}
+
 // =============================================================================
 // DIRECT STREAMING CHAT SERVICE METHODS
 // =============================================================================
@@ -1565,6 +1692,47 @@ func (s *directStreamingChatService) Close() error {
 //   - error: Always nil.
 func (s *directStreamingChatService) GetDataSpaceStats(_ context.Context) (*ux.DataSpaceStats, error) {
 	return nil, nil
+}
+
+// LoadSessionMetadata fetches session configuration for resume.
+//
+// # Description
+//
+// Retrieves stored session context (dataspace, pipeline, TTL) from server.
+// For direct chat, this is mostly for consistency; pipeline/dataspace are N/A.
+func (s *directStreamingChatService) LoadSessionMetadata(ctx context.Context, sessionID string) (*SessionMetadata, error) {
+	escapedSessionID := url.PathEscape(sessionID)
+	targetURL := fmt.Sprintf("%s/v1/sessions/%s", s.baseURL, escapedSessionID)
+
+	slog.Debug("loading session metadata for resume",
+		"session_id", sessionID,
+		"url", targetURL,
+	)
+
+	resp, err := s.client.Get(ctx, targetURL)
+	if err != nil {
+		return nil, fmt.Errorf("get session metadata: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("session metadata request failed (status %d)", resp.StatusCode)
+	}
+
+	var metadata SessionMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return nil, fmt.Errorf("parse session metadata: %w", err)
+	}
+
+	return &metadata, nil
 }
 
 // LoadSessionHistory loads previous conversation history for session resume.

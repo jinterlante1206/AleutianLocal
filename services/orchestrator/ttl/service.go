@@ -45,6 +45,7 @@ import (
 //   - clockChecker: Validates system clock before time-sensitive operations.
 //   - verifier: Performs read-after-delete checks for compliance verification.
 //   - sessionCleaner: Performs cascading session deletes (SEC-003).
+//   - logger: Optional TTLLogger for audit logging individual deletions.
 //
 // # Thread Safety
 //
@@ -54,6 +55,7 @@ type ttlService struct {
 	clockChecker   ClockChecker
 	verifier       DeletionVerifier
 	sessionCleaner SessionCleaner
+	logger         TTLLogger
 }
 
 // NewTTLService creates a new TTL service backed by Weaviate.
@@ -168,6 +170,38 @@ func NewTTLServiceWithVerifier(client *weaviate.Client, clockChecker ClockChecke
 		clockChecker:   clockChecker,
 		verifier:       verifier,
 		sessionCleaner: sessionCleaner,
+	}
+}
+
+// NewTTLServiceWithLogger creates a TTL service with an audit logger.
+//
+// # Description
+//
+// Creates a TTL service that logs individual deletions to the provided
+// TTLLogger for audit compliance. Each session deletion is logged with
+// context info (DataSpace, Pipeline) for GDPR/CCPA compliance reporting.
+//
+// # Inputs
+//
+//   - client: Weaviate client instance. Must not be nil.
+//   - logger: TTLLogger for audit logging. May be nil to disable logging.
+//
+// # Outputs
+//
+//   - TTLService: Ready-to-use service with audit logging.
+func NewTTLServiceWithLogger(client *weaviate.Client, logger TTLLogger) TTLService {
+	verifier := NewDeletionVerifier(newWeaviateExistsFunc(client), 100*time.Millisecond, 3)
+	return &ttlService{
+		client:       client,
+		clockChecker: NewClockChecker(),
+		verifier:     verifier,
+		sessionCleaner: NewSessionCleaner(
+			newWeaviateBatchDeleteFunc(client),
+			newWeaviateQuerySessionDocsFunc(client),
+			newWeaviateDeleteByIDFunc(client),
+			verifier,
+		),
+		logger: logger,
 	}
 }
 
@@ -315,6 +349,8 @@ func (s *ttlService) GetExpiredSessions(ctx context.Context, limit int) ([]Expir
 			graphql.Field{Name: "session_id"},
 			graphql.Field{Name: "ttl_expires_at"},
 			graphql.Field{Name: "timestamp"},
+			graphql.Field{Name: "data_space"},
+			graphql.Field{Name: "pipeline"},
 		).
 		Do(ctx)
 
@@ -492,6 +528,29 @@ func (s *ttlService) DeleteExpiredSessionBatch(ctx context.Context, sessions []E
 
 		if cascadeResult.SessionDeleted {
 			result.SessionsDeleted++
+
+			// Log session deletion with context info for audit compliance
+			if s.logger != nil {
+				// Create content hash from session metadata
+				contentForHash := fmt.Sprintf("session:%s:dataspace:%s:pipeline:%s",
+					sess.SessionID, sess.DataSpace, sess.Pipeline)
+				_, logErr := s.logger.LogDeletion(
+					[]byte(contentForHash),
+					sess.WeaviateID,
+					"delete_session",
+					DeletionMetadata{
+						SessionID: sess.SessionID,
+						DataSpace: sess.DataSpace,
+						Pipeline:  sess.Pipeline,
+					},
+				)
+				if logErr != nil {
+					slog.Warn("Failed to log session deletion to audit log",
+						"session_id", sess.SessionID,
+						"error", logErr,
+					)
+				}
+			}
 		}
 
 		// Accumulate child deletion counts into the documents counters
@@ -697,6 +756,8 @@ type sessionResultItem struct {
 	SessionID    string `json:"session_id"`
 	TTLExpiresAt int64  `json:"ttl_expires_at"`
 	Timestamp    int64  `json:"timestamp"`
+	DataSpace    string `json:"data_space"`
+	Pipeline     string `json:"pipeline"`
 	Additional   struct {
 		ID string `json:"id"`
 	} `json:"_additional"`
@@ -785,6 +846,8 @@ func parseExpiredSessions(resp *models.GraphQLResponse) ([]ExpiredSession, error
 			SessionID:    sess.SessionID,
 			TTLExpiresAt: sess.TTLExpiresAt,
 			Timestamp:    sess.Timestamp,
+			DataSpace:    sess.DataSpace,
+			Pipeline:     sess.Pipeline,
 		})
 	}
 

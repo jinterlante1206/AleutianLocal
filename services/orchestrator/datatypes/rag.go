@@ -98,6 +98,8 @@ type SessionProperties struct {
 	Timestamp     int64  `json:"timestamp"`
 	TTLExpiresAt  int64  `json:"ttl_expires_at"`
 	TTLDurationMs int64  `json:"ttl_duration_ms"`
+	DataSpace     string `json:"data_space"`
+	Pipeline      string `json:"pipeline"`
 }
 
 type RAGRequest struct {

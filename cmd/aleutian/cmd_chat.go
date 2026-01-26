@@ -78,11 +78,79 @@ func runAskCommand(_ *cobra.Command, args []string) {
 	fmt.Println("\n---")
 }
 
-func runChatCommand(cmd *cobra.Command, _ []string) {
+func runChatCommand(cmd *cobra.Command, args []string) {
+	// Check for common misuse: positional arguments when flags are expected
+	if len(args) > 0 {
+		// Check if user meant to use --resume
+		if len(args) >= 1 && args[0] == "resume" {
+			if len(args) >= 2 {
+				fmt.Printf("Hint: Did you mean '--resume %s'? Use 'aleutian chat --resume <session-id>'\n", args[1])
+			} else {
+				fmt.Println("Hint: Did you mean '--resume'? Use 'aleutian chat --resume <session-id>'")
+			}
+			os.Exit(1)
+		}
+		// Generic warning for unexpected arguments
+		fmt.Printf("Warning: Unexpected arguments ignored: %v\n", args)
+		fmt.Println("Use 'aleutian chat --help' to see available flags.")
+	}
+
 	baseURL := getOrchestratorBaseURL()
 	resumeID, _ := cmd.Flags().GetString("resume")
 	sessionTTL, _ := cmd.Flags().GetString("ttl")
 	recencyBias, _ := cmd.Flags().GetString("recency-bias")
+
+	// Effective values (may be overridden by session metadata on resume)
+	effectivePipeline := pipelineType
+	effectiveDataSpace := dataSpaceFlag
+	effectiveSessionTTL := sessionTTL
+
+	// If resuming, fetch session metadata and restore stored context
+	if resumeID != "" {
+		meta, err := fetchSessionMetadata(baseURL, resumeID)
+		if err != nil {
+			log.Fatalf("Failed to load session for resume: %v", err)
+		}
+
+		// Warn if user EXPLICITLY passes flags that conflict with stored session context
+		// Use cmd.Flags().Changed() to detect explicit flag usage (vs default values)
+		if cmd.Flags().Changed("pipeline") && meta.Pipeline != "" && pipelineType != meta.Pipeline {
+			fmt.Printf("Warning: Ignoring --pipeline flag; resumed session uses stored pipeline %q\n", meta.Pipeline)
+		}
+		if cmd.Flags().Changed("dataspace") && meta.DataSpace != "" && dataSpaceFlag != meta.DataSpace {
+			fmt.Printf("Warning: Ignoring --dataspace flag; resumed session uses stored dataspace %q\n", meta.DataSpace)
+		}
+		if cmd.Flags().Changed("ttl") && meta.TTLDurationMs > 0 {
+			storedTTL := time.Duration(meta.TTLDurationMs) * time.Millisecond
+			fmt.Printf("Warning: Ignoring --ttl flag; resumed session uses stored TTL %v\n", storedTTL)
+		}
+
+		// Override with stored values (empty values mean "use default")
+		if meta.Pipeline != "" {
+			effectivePipeline = meta.Pipeline
+		}
+		if meta.DataSpace != "" {
+			effectiveDataSpace = meta.DataSpace
+		}
+		if meta.TTLDurationMs > 0 {
+			// Convert stored duration back to string format for display
+			storedDuration := time.Duration(meta.TTLDurationMs) * time.Millisecond
+			effectiveSessionTTL = storedDuration.String()
+		}
+
+		// Check if session has expired
+		if meta.TTLExpiresAt > 0 && time.Now().UnixMilli() > meta.TTLExpiresAt {
+			expiredAt := time.UnixMilli(meta.TTLExpiresAt).Format(time.RFC3339)
+			log.Fatalf("Session expired at %s. Start a new session instead.", expiredAt)
+		}
+
+		slog.Info("Resuming session with stored context",
+			"session_id", resumeID,
+			"pipeline", effectivePipeline,
+			"dataspace", effectiveDataSpace,
+			"ttl", effectiveSessionTTL,
+		)
+	}
 
 	// Create the appropriate runner based on --no-rag flag
 	var runner ChatRunner
@@ -92,19 +160,19 @@ func runChatCommand(cmd *cobra.Command, _ []string) {
 			SessionID:      resumeID,
 			EnableThinking: enableThinking,
 			BudgetTokens:   budgetTokens,
-			SessionTTL:     sessionTTL,
+			SessionTTL:     effectiveSessionTTL,
 		})
 	} else {
 		runner = NewRAGChatRunner(RAGChatRunnerConfig{
 			BaseURL:     baseURL,
-			Pipeline:    pipelineType,
+			Pipeline:    effectivePipeline,
 			SessionID:   resumeID,
-			StrictMode:  !unrestrictedMode, // Strict by default (only answer from RAG docs)
-			Verbosity:   verbosityLevel,    // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
-			DataSpace:   dataSpaceFlag,     // Filter queries to specific data space
-			DocVersion:  docVersionFlag,    // Query specific document version (e.g., "v1")
-			SessionTTL:  sessionTTL,        // Session TTL (e.g., "24h", "7d")
-			RecencyBias: recencyBias,       // Recency bias (none, gentle, moderate, aggressive)
+			StrictMode:  !unrestrictedMode,   // Strict by default (only answer from RAG docs)
+			Verbosity:   verbosityLevel,      // Verified pipeline verbosity (0=silent, 1=summary, 2=detailed)
+			DataSpace:   effectiveDataSpace,  // Filter queries to specific data space (from session or flag)
+			DocVersion:  docVersionFlag,      // Query specific document version (e.g., "v1")
+			SessionTTL:  effectiveSessionTTL, // Session TTL (from session or flag)
+			RecencyBias: recencyBias,         // Recency bias (none, gentle, moderate, aggressive)
 		})
 	}
 	defer func() {
@@ -397,4 +465,63 @@ func showSpinner(msg string, done chan bool, statsChan chan string) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// sessionMetadataResponse mirrors the server's SessionMetadata response.
+type sessionMetadataResponse struct {
+	SessionID     string `json:"session_id"`
+	DataSpace     string `json:"data_space,omitempty"`
+	Pipeline      string `json:"pipeline,omitempty"`
+	TTLDurationMs int64  `json:"ttl_duration_ms,omitempty"`
+	TTLExpiresAt  int64  `json:"ttl_expires_at,omitempty"`
+	Timestamp     int64  `json:"timestamp,omitempty"`
+	Summary       string `json:"summary,omitempty"`
+}
+
+// fetchSessionMetadata retrieves stored session context for resume.
+//
+// # Description
+//
+// Fetches session metadata (dataspace, pipeline, TTL) from the orchestrator.
+// This enables resume to restore the exact same experience as when the
+// session was created.
+//
+// # Inputs
+//
+//   - baseURL: Orchestrator base URL.
+//   - sessionID: Session ID to fetch metadata for.
+//
+// # Outputs
+//
+//   - *sessionMetadataResponse: Session context if found.
+//   - error: Non-nil if session not found or server error.
+func fetchSessionMetadata(baseURL, sessionID string) (*sessionMetadataResponse, error) {
+	targetURL := fmt.Sprintf("%s/v1/sessions/%s", baseURL, sessionID)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch session metadata: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Error("failed to close response body", "error", closeErr)
+		}
+	}()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to fetch session (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var meta sessionMetadataResponse
+	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+		return nil, fmt.Errorf("failed to parse session metadata: %w", err)
+	}
+
+	return &meta, nil
 }
