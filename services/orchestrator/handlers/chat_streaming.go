@@ -1424,12 +1424,13 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 
 					// Save to semantic memory for future context retrieval
 					// Also stores session context (dataspace, pipeline, TTL) for resume functionality
+					// If this is the first turn, also generate a session summary
 					sessionCtx := datatypes.SessionContext{
 						DataSpace: req.DataSpace,
 						Pipeline:  req.Pipeline,
 						TTL:       req.SessionTTL,
 					}
-					go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, answer, turnNumber, sessionCtx)
+					go SaveMemoryChunkWithSummary(h.llmClient, h.weaviateClient, sessionID, req.Message, answer, turnNumber, sessionCtx)
 				}
 			}
 		}
@@ -1921,12 +1922,13 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 
 				// Save to semantic memory for future context retrieval (P7)
 				// Pass session context to store dataspace/pipeline for resume functionality
+				// If first turn, also generate session summary
 				sessionCtx := datatypes.SessionContext{
 					DataSpace: req.DataSpace,
 					Pipeline:  req.Pipeline,
 					TTL:       req.SessionTTL,
 				}
-				go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, result.Answer, nextTurnNumber, sessionCtx)
+				go SaveMemoryChunkWithSummary(h.llmClient, h.weaviateClient, sessionID, req.Message, result.Answer, nextTurnNumber, sessionCtx)
 			}
 		}
 	}
