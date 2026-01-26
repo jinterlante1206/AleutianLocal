@@ -1,3 +1,13 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
 // Package ast provides types and interfaces for language-agnostic AST parsing.
 //
 // This package defines the core data structures used throughout the Code Buddy
@@ -207,6 +217,13 @@ const (
 
 	// SymbolKindImage represents a markdown image ![alt](url).
 	SymbolKindImage
+
+	// === Graph Building ===
+
+	// SymbolKindExternal represents an external/unresolved symbol.
+	// Used for placeholder nodes representing symbols from external packages
+	// or unresolved references during graph building.
+	SymbolKindExternal
 )
 
 // symbolKindNames maps SymbolKind values to their string representations.
@@ -268,6 +285,8 @@ var symbolKindNames = map[SymbolKind]string{
 	SymbolKindList:       "list",
 	SymbolKindBlockquote: "blockquote",
 	SymbolKindImage:      "image",
+	// Graph Building
+	SymbolKindExternal: "external",
 }
 
 // String returns the string representation of the SymbolKind.

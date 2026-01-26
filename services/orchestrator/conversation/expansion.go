@@ -1,3 +1,13 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
 package conversation
 
 import (
@@ -451,8 +461,8 @@ var topicSwitchPhrases = []string{
 //
 // # Example
 //
-//   expander.NeedsExpansion("tell me more")  // true
-//   expander.NeedsExpansion("help")          // false
+//	expander.NeedsExpansion("tell me more")  // true
+//	expander.NeedsExpansion("help")          // false
 //
 // # Limitations
 //
@@ -511,7 +521,7 @@ func (e *LLMQueryExpander) NeedsExpansion(query string) bool {
 //
 // # Example
 //
-//   needsExpand, isSwitch := expander.NeedsExpansionWithContext(query, prev, curr)
+//	needsExpand, isSwitch := expander.NeedsExpansionWithContext(query, prev, curr)
 //
 // # Limitations
 //
@@ -560,7 +570,7 @@ func (e *LLMQueryExpander) NeedsExpansionWithContext(query string, prevQueryVect
 //
 // # Example
 //
-//   expander.DetectsTopicSwitch("Switching gears, tell me about X")  // true
+//	expander.DetectsTopicSwitch("Switching gears, tell me about X")  // true
 //
 // # Limitations
 //
@@ -599,7 +609,7 @@ func (e *LLMQueryExpander) DetectsTopicSwitch(query string) bool {
 //
 // # Example
 //
-//   expanded, err := expander.Expand(ctx, "tell me more", history)
+//	expanded, err := expander.Expand(ctx, "tell me more", history)
 //
 // # Limitations
 //
