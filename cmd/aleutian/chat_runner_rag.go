@@ -30,6 +30,13 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/pkg/ux"
 )
 
+// replaceWordRegexCache caches compiled regexes for word replacement.
+// This avoids recompiling the same regex patterns on every call to replaceWord.
+var (
+	replaceWordRegexCache   = make(map[string]*regexp.Regexp)
+	replaceWordRegexCacheMu sync.RWMutex
+)
+
 // =============================================================================
 // RAGChatRunner Implementation
 // =============================================================================
@@ -640,7 +647,24 @@ func replaceWord(text, oldWord, newWord string) string {
 	// Use regex for robust, case-insensitive, whole-word replacement
 	// (?i) makes it case-insensitive
 	// \b ensures we match whole words only
-	re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(oldWord) + `\b`)
+	pattern := `(?i)\b` + regexp.QuoteMeta(oldWord) + `\b`
+
+	// Check cache with read lock first
+	replaceWordRegexCacheMu.RLock()
+	re, found := replaceWordRegexCache[pattern]
+	replaceWordRegexCacheMu.RUnlock()
+
+	if !found {
+		// Compile and cache with write lock
+		replaceWordRegexCacheMu.Lock()
+		// Double-check after acquiring write lock
+		if re, found = replaceWordRegexCache[pattern]; !found {
+			re = regexp.MustCompile(pattern)
+			replaceWordRegexCache[pattern] = re
+		}
+		replaceWordRegexCacheMu.Unlock()
+	}
+
 	return re.ReplaceAllString(text, newWord)
 }
 

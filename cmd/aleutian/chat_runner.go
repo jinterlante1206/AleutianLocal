@@ -28,6 +28,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -506,7 +507,12 @@ func (r *InteractiveInputReader) ReadLine() (string, error) {
 		return "", err
 	}
 
-	result := finalModel.(inputModel)
+	// Defensive type assertion - finalModel should never be nil when err is nil,
+	// but we check anyway to prevent potential panic
+	result, ok := finalModel.(inputModel)
+	if !ok {
+		return "", fmt.Errorf("unexpected model type from bubbletea: %T", finalModel)
+	}
 
 	// Handle Ctrl+D (EOF)
 	if result.cancelled && result.textInput.Value() == "" {
