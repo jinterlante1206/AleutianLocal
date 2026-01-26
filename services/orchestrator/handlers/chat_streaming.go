@@ -1421,6 +1421,15 @@ func (h *streamingChatHandler) HandleChatRAGStream(c *gin.Context) {
 						"sessionId", sessionID,
 						"turnNumber", turnNumber,
 					)
+
+					// Save to semantic memory for future context retrieval
+					// Also stores session context (dataspace, pipeline, TTL) for resume functionality
+					sessionCtx := datatypes.SessionContext{
+						DataSpace: req.DataSpace,
+						Pipeline:  req.Pipeline,
+						TTL:       req.SessionTTL,
+					}
+					go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, answer, turnNumber, sessionCtx)
 				}
 			}
 		}
@@ -1911,8 +1920,13 @@ func (h *streamingChatHandler) HandleVerifiedRAGStream(c *gin.Context) {
 				)
 
 				// Save to semantic memory for future context retrieval (P7)
-				// Pass sessionTTL to reset TTL on each message (ephemeral session behavior)
-				go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, result.Answer, nextTurnNumber, req.SessionTTL)
+				// Pass session context to store dataspace/pipeline for resume functionality
+				sessionCtx := datatypes.SessionContext{
+					DataSpace: req.DataSpace,
+					Pipeline:  req.Pipeline,
+					TTL:       req.SessionTTL,
+				}
+				go SaveMemoryChunk(h.weaviateClient, sessionID, req.Message, result.Answer, nextTurnNumber, sessionCtx)
 			}
 		}
 	}

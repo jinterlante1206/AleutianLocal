@@ -229,7 +229,7 @@ type Config struct {
 	TTLCleanupInterval time.Duration
 
 	// TTLLogPath is the path to the TTL audit log file.
-	// Default: "./logs/ttl_cleanup.log"
+	// Default: "/tmp/aleutian/logs/ttl_cleanup.log"
 	TTLLogPath string
 
 	// TTLEnabled enables the background TTL cleanup scheduler.
@@ -513,7 +513,7 @@ func applyConfigDefaults(cfg Config) Config {
 		}
 	}
 	if cfg.TTLLogPath == "" {
-		cfg.TTLLogPath = "./logs/ttl_cleanup.log"
+		cfg.TTLLogPath = "/tmp/aleutian/logs/ttl_cleanup.log"
 	}
 	// TTLEnabled defaults to true (will only run if Weaviate is configured)
 	cfg.TTLEnabled = true
@@ -739,10 +739,7 @@ func (s *service) cleanup() {
 //   - Weaviate client is available (checked by caller)
 //   - TTLEnabled is true (checked by caller)
 func (s *service) initTTLScheduler() error {
-	// Create TTL service backed by Weaviate
-	ttlService := ttl.NewTTLService(s.weaviateClient)
-
-	// Create TTL audit logger
+	// Create TTL audit logger first (needed by service for deletion logging)
 	logger, err := ttl.NewTTLLogger(s.config.TTLLogPath)
 	if err != nil {
 		slog.Warn("Failed to create TTL audit logger, continuing without audit log",
@@ -752,6 +749,10 @@ func (s *service) initTTLScheduler() error {
 	} else {
 		s.ttlLogger = logger
 	}
+
+	// Create TTL service backed by Weaviate with audit logger
+	// This enables individual session deletion logging with context info (DataSpace, Pipeline)
+	ttlService := ttl.NewTTLServiceWithLogger(s.weaviateClient, s.ttlLogger)
 
 	// Create scheduler configuration
 	schedulerConfig := ttl.DefaultSchedulerConfig()

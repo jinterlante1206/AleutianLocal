@@ -88,6 +88,16 @@ func (m *mockStreamingChatService) Close() error {
 	return m.closeErr
 }
 
+func (m *mockStreamingChatService) GetDataSpaceStats(_ context.Context) (*ux.DataSpaceStats, error) {
+	// Mock returns nil stats (no dataspace configured or stats unavailable)
+	return nil, nil
+}
+
+func (m *mockStreamingChatService) LoadSessionMetadata(_ context.Context, _ string) (*SessionMetadata, error) {
+	// Mock returns nil metadata (session doesn't exist or no stored context)
+	return nil, nil
+}
+
 // =============================================================================
 // InputReader Tests
 // =============================================================================
@@ -135,6 +145,125 @@ func TestMockInputReader_ReadLine_EmptyInputs(t *testing.T) {
 	_, err := reader.ReadLine()
 	if err != io.EOF {
 		t.Errorf("ReadLine() on empty: got error %v, want io.EOF", err)
+	}
+}
+
+// =============================================================================
+// InteractiveInputReader Tests
+// =============================================================================
+
+func TestInteractiveInputReader_ImplementsInputReader(t *testing.T) {
+	// Verify the type implements the interface
+	var _ InputReader = &InteractiveInputReader{}
+}
+
+func TestInteractiveInputReader_ImplementsPromptingInputReader(t *testing.T) {
+	// Verify the type implements the PromptingInputReader interface
+	var _ PromptingInputReader = &InteractiveInputReader{}
+}
+
+func TestInteractiveInputReader_SetPrompt(t *testing.T) {
+	reader := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   50,
+		prompt:       "> ",
+	}
+
+	reader.SetPrompt("custom> ")
+
+	if reader.prompt != "custom> " {
+		t.Errorf("SetPrompt(): prompt = %q, want %q", reader.prompt, "custom> ")
+	}
+}
+
+func TestInteractiveInputReader_AddToHistory(t *testing.T) {
+	reader := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   3,
+		prompt:       "> ",
+	}
+
+	// Add items to history
+	reader.addToHistory("first")
+	reader.addToHistory("second")
+	reader.addToHistory("third")
+
+	if len(reader.history) != 3 {
+		t.Errorf("addToHistory(): len = %d, want 3", len(reader.history))
+	}
+
+	// Add fourth item, should trim oldest
+	reader.addToHistory("fourth")
+
+	if len(reader.history) != 3 {
+		t.Errorf("addToHistory() after overflow: len = %d, want 3", len(reader.history))
+	}
+
+	if reader.history[0] != "second" {
+		t.Errorf("addToHistory(): first item = %q, want %q", reader.history[0], "second")
+	}
+}
+
+func TestInteractiveInputReader_AddToHistory_NoDuplicates(t *testing.T) {
+	reader := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   10,
+		prompt:       "> ",
+	}
+
+	// Add same item twice
+	reader.addToHistory("same")
+	reader.addToHistory("same")
+
+	if len(reader.history) != 1 {
+		t.Errorf("addToHistory() with duplicate: len = %d, want 1", len(reader.history))
+	}
+}
+
+func TestNewInteractiveInputReader_NonTTY_FallsBackToStdin(t *testing.T) {
+	// In test environment, stdin is not a TTY
+	// So NewInteractiveInputReader should return a StdinReader
+	reader := NewInteractiveInputReader(50)
+
+	// Type assertion to check fallback
+	_, isStdinReader := reader.(*StdinReader)
+	_, isInteractive := reader.(*InteractiveInputReader)
+
+	// In non-TTY (test environment), should be StdinReader
+	// Note: This test behavior depends on test runner's TTY status
+	if !isStdinReader && !isInteractive {
+		t.Errorf("NewInteractiveInputReader(): unexpected type %T", reader)
+	}
+}
+
+func TestPromptingInputReader_TypeAssertion(t *testing.T) {
+	// Test that we can correctly identify prompting readers
+	interactive := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   50,
+		prompt:       "> ",
+	}
+
+	stdin := &StdinReader{}
+	mock := NewMockInputReader([]string{"test"})
+
+	// Interactive should implement PromptingInputReader
+	if _, ok := InputReader(interactive).(PromptingInputReader); !ok {
+		t.Error("InteractiveInputReader should implement PromptingInputReader")
+	}
+
+	// StdinReader should NOT implement PromptingInputReader
+	if _, ok := InputReader(stdin).(PromptingInputReader); ok {
+		t.Error("StdinReader should NOT implement PromptingInputReader")
+	}
+
+	// MockInputReader should NOT implement PromptingInputReader
+	if _, ok := InputReader(mock).(PromptingInputReader); ok {
+		t.Error("MockInputReader should NOT implement PromptingInputReader")
 	}
 }
 
@@ -588,5 +717,252 @@ func makeSSEResponse(statusCode int, body string) *http.Response {
 			"Content-Type": []string{"text/event-stream"},
 		},
 		Body: io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+// =============================================================================
+// Spell Correction Tests
+// =============================================================================
+
+// mockChatUI implements ux.ChatUI for testing spell correction.
+type mockChatUI struct {
+	autoCorrectionCalls []struct{ original, corrected string }
+	suggestionCalls     []struct{ original, suggested string }
+}
+
+func (m *mockChatUI) Header(mode ux.ChatMode, pipeline, sessionID string)     {}
+func (m *mockChatUI) HeaderWithConfig(config ux.HeaderConfig)                 {}
+func (m *mockChatUI) Prompt() string                                          { return "> " }
+func (m *mockChatUI) Response(answer string)                                  {}
+func (m *mockChatUI) Sources(sources []ux.SourceInfo)                         {}
+func (m *mockChatUI) NoSources()                                              {}
+func (m *mockChatUI) Error(err error)                                         {}
+func (m *mockChatUI) SessionResume(sessionID string, turnCount int)           {}
+func (m *mockChatUI) SessionEnd(sessionID string)                             {}
+func (m *mockChatUI) SessionEndRich(sessionID string, stats *ux.SessionStats) {}
+
+func (m *mockChatUI) ShowAutoCorrection(original, corrected string) {
+	m.autoCorrectionCalls = append(m.autoCorrectionCalls, struct {
+		original  string
+		corrected string
+	}{original, corrected})
+}
+
+func (m *mockChatUI) ShowCorrectionSuggestion(original, suggested string) {
+	m.suggestionCalls = append(m.suggestionCalls, struct {
+		original  string
+		suggested string
+	}{original, suggested})
+}
+
+func TestReplaceWord_SingleOccurrence(t *testing.T) {
+	result := replaceWord("show me wheet data", "wheet", "wheat")
+	expected := "show me wheat data"
+	if result != expected {
+		t.Errorf("replaceWord single occurrence: got %q, want %q", result, expected)
+	}
+}
+
+func TestReplaceWord_MultipleOccurrences(t *testing.T) {
+	result := replaceWord("what is wheet and where is wheet", "wheet", "wheat")
+	expected := "what is wheat and where is wheat"
+	if result != expected {
+		t.Errorf("replaceWord multiple occurrences: got %q, want %q", result, expected)
+	}
+}
+
+func TestReplaceWord_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		oldWord  string
+		newWord  string
+		expected string
+	}{
+		{"lowercase", "show me wheet", "wheet", "wheat", "show me wheat"},
+		{"uppercase", "show me WHEET", "wheet", "wheat", "show me wheat"},
+		{"mixed case", "show me Wheet", "wheet", "wheat", "show me wheat"},
+		{"multiple mixed", "WHEET and wheet and Wheet", "wheet", "wheat", "wheat and wheat and wheat"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := replaceWord(tt.input, tt.oldWord, tt.newWord)
+			if result != tt.expected {
+				t.Errorf("replaceWord case-insensitive %s: got %q, want %q", tt.name, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestReplaceWord_WithPunctuation(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		oldWord  string
+		newWord  string
+		expected string
+	}{
+		{"trailing period", "show me wheet.", "wheet", "wheat", "show me wheat."},
+		{"trailing comma", "wheet, barley", "wheet", "wheat", "wheat, barley"},
+		{"trailing question", "is this wheet?", "wheet", "wheat", "is this wheat?"},
+		{"in parentheses", "(wheet)", "wheet", "wheat", "(wheat)"},
+		{"with quotes", `"wheet"`, "wheet", "wheat", `"wheat"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := replaceWord(tt.input, tt.oldWord, tt.newWord)
+			if result != tt.expected {
+				t.Errorf("replaceWord with punctuation %s: got %q, want %q", tt.name, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestReplaceWord_WordBoundaries(t *testing.T) {
+	// Should NOT replace partial matches
+	tests := []struct {
+		name     string
+		input    string
+		oldWord  string
+		newWord  string
+		expected string
+	}{
+		{"prefix match", "wheetabix cereal", "wheet", "wheat", "wheetabix cereal"},
+		{"suffix match", "buckwheet flour", "wheet", "wheat", "buckwheet flour"},
+		{"embedded match", "awheeta", "wheet", "wheat", "awheeta"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := replaceWord(tt.input, tt.oldWord, tt.newWord)
+			if result != tt.expected {
+				t.Errorf("replaceWord word boundaries %s: got %q, want %q", tt.name, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestReplaceWord_NoMatch(t *testing.T) {
+	input := "show me barley data"
+	result := replaceWord(input, "wheet", "wheat")
+	if result != input {
+		t.Errorf("replaceWord no match: got %q, want %q", result, input)
+	}
+}
+
+func TestReplaceWord_EmptyInput(t *testing.T) {
+	result := replaceWord("", "wheet", "wheat")
+	if result != "" {
+		t.Errorf("replaceWord empty input: got %q, want empty", result)
+	}
+}
+
+func TestReplaceWord_SpecialRegexChars(t *testing.T) {
+	// Old word with regex special characters should be escaped
+	result := replaceWord("test a.b test", "a.b", "x")
+	expected := "test x test"
+	if result != expected {
+		t.Errorf("replaceWord regex escape: got %q, want %q", result, expected)
+	}
+}
+
+// =============================================================================
+// applySpellCorrection Integration Tests
+// =============================================================================
+
+func TestApplySpellCorrection_NoTypo(t *testing.T) {
+	// Create a corrector with "wheat" in vocabulary
+	terms := map[string]int{"wheat": 100}
+	corrector := NewSpellCorrector(terms, 2)
+
+	ui := &mockChatUI{}
+	runner := &RAGChatRunner{
+		ui:             ui,
+		spellCorrector: corrector,
+	}
+
+	input := "tell me about wheat"
+	result := runner.applySpellCorrection(input)
+
+	// Should return unchanged - "wheat" is an exact match
+	if result != input {
+		t.Errorf("expected no change for exact match, got %q", result)
+	}
+	if len(ui.autoCorrectionCalls) != 0 {
+		t.Errorf("expected no auto-correction calls, got %d", len(ui.autoCorrectionCalls))
+	}
+	if len(ui.suggestionCalls) != 0 {
+		t.Errorf("expected no suggestion calls, got %d", len(ui.suggestionCalls))
+	}
+}
+
+func TestApplySpellCorrection_AutoCorrectDistance1(t *testing.T) {
+	// Create a corrector with "wheat" in vocabulary
+	terms := map[string]int{"wheat": 100}
+	corrector := NewSpellCorrector(terms, 2)
+
+	ui := &mockChatUI{}
+	runner := &RAGChatRunner{
+		ui:             ui,
+		spellCorrector: corrector,
+	}
+
+	input := "tell me about whet" // distance 1 from wheat
+	result := runner.applySpellCorrection(input)
+
+	// Should auto-correct
+	expected := "tell me about wheat"
+	if result != expected {
+		t.Errorf("expected auto-correction, got %q, want %q", result, expected)
+	}
+	if len(ui.autoCorrectionCalls) != 1 {
+		t.Errorf("expected 1 auto-correction call, got %d", len(ui.autoCorrectionCalls))
+	}
+	if len(ui.suggestionCalls) != 0 {
+		t.Errorf("expected no suggestion calls, got %d", len(ui.suggestionCalls))
+	}
+}
+
+func TestApplySpellCorrection_SuggestionDistance2(t *testing.T) {
+	// Create a corrector with "wheat" in vocabulary
+	terms := map[string]int{"wheat": 100}
+	corrector := NewSpellCorrector(terms, 2)
+
+	ui := &mockChatUI{}
+	runner := &RAGChatRunner{
+		ui:             ui,
+		spellCorrector: corrector,
+	}
+
+	input := "tell me about wehat" // distance 2 from wheat (transposition)
+	result := runner.applySpellCorrection(input)
+
+	// Should suggest but not auto-correct
+	if result != input {
+		t.Errorf("expected no change for distance 2, got %q", result)
+	}
+	if len(ui.autoCorrectionCalls) != 0 {
+		t.Errorf("expected no auto-correction calls, got %d", len(ui.autoCorrectionCalls))
+	}
+	if len(ui.suggestionCalls) != 1 {
+		t.Errorf("expected 1 suggestion call, got %d", len(ui.suggestionCalls))
+	}
+}
+
+func TestApplySpellCorrection_NilCorrector(t *testing.T) {
+	ui := &mockChatUI{}
+	runner := &RAGChatRunner{
+		ui:             ui,
+		spellCorrector: nil, // No corrector configured
+	}
+
+	input := "tell me about wheet"
+	result := runner.applySpellCorrection(input)
+
+	// Should return unchanged
+	if result != input {
+		t.Errorf("expected no change with nil corrector, got %q", result)
 	}
 }

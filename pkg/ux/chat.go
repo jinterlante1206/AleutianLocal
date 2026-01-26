@@ -26,6 +26,51 @@ const (
 	ChatModeDirect
 )
 
+// HeaderConfig contains configuration for displaying the chat header.
+//
+// # Description
+//
+// HeaderConfig groups all optional parameters for the chat header display.
+// This allows extending the header with new fields without breaking existing
+// callers of the Header() method.
+//
+// # Fields
+//
+//   - Mode: Required. RAG or Direct chat mode.
+//   - Pipeline: RAG pipeline name (e.g., "verified", "reranking"). Empty for direct mode.
+//   - SessionID: Session identifier for resume. May be empty for new sessions.
+//   - TTL: Session TTL as configured (e.g., "5m", "24h"). Empty if no TTL.
+//   - DataSpace: Dataspace being queried (e.g., "wheat", "work"). Empty for all docs.
+//   - DataSpaceStats: Optional aggregated stats for the dataspace.
+type HeaderConfig struct {
+	Mode           ChatMode
+	Pipeline       string
+	SessionID      string
+	TTL            string
+	DataSpace      string
+	DataSpaceStats *DataSpaceStats // Optional stats from orchestrator
+}
+
+// DataSpaceStats contains aggregated metrics for a dataspace.
+//
+// # Description
+//
+// DataSpaceStats captures aggregate information about chunks within
+// a dataspace. This is fetched from the orchestrator and displayed
+// in the chat header.
+//
+// Note: DocumentCount actually represents chunk count, not unique source
+// documents. A single uploaded file may produce many chunks for vector search.
+//
+// # Fields
+//
+//   - DocumentCount: Number of chunks in the dataspace (not unique documents)
+//   - LastUpdatedAt: Unix milliseconds of most recent document ingestion
+type DataSpaceStats struct {
+	DocumentCount int   `json:"document_count"`  // Actually chunk count
+	LastUpdatedAt int64 `json:"last_updated_at"` // Unix ms timestamp
+}
+
 // SessionStats aggregates metrics from a chat session for display.
 //
 // # Description
@@ -85,8 +130,13 @@ type SourceInfo struct {
 // ChatUI defines the interface for chat user interface operations.
 // Implementations handle rendering chat elements to different outputs.
 type ChatUI interface {
-	// Header displays the chat session header with mode and configuration
+	// Header displays the chat session header with mode and configuration.
+	// Deprecated: Use HeaderWithConfig for new code.
 	Header(mode ChatMode, pipeline, sessionID string)
+
+	// HeaderWithConfig displays the chat session header with full configuration.
+	// This method supports displaying TTL, dataspace, and other metadata.
+	HeaderWithConfig(config HeaderConfig)
 
 	// Prompt returns the styled input prompt string
 	Prompt() string
@@ -118,6 +168,32 @@ type ChatUI interface {
 	//
 	// Use this instead of SessionEnd when you have accumulated stats.
 	SessionEndRich(sessionID string, stats *SessionStats)
+
+	// ShowAutoCorrection displays a notification that a typo was auto-corrected.
+	//
+	// # Description
+	//
+	// Called when a high-confidence typo correction is applied automatically.
+	// Informs the user what was corrected so they can undo if needed.
+	//
+	// # Inputs
+	//
+	//   - original: The original (misspelled) word
+	//   - corrected: The corrected word that will be used
+	ShowAutoCorrection(original, corrected string)
+
+	// ShowCorrectionSuggestion displays a suggestion for a possible typo.
+	//
+	// # Description
+	//
+	// Called for lower-confidence corrections that require user confirmation.
+	// The user can retype their query if the suggestion is correct.
+	//
+	// # Inputs
+	//
+	//   - original: The original (possibly misspelled) word
+	//   - suggested: The suggested correction
+	ShowCorrectionSuggestion(original, suggested string)
 }
 
 // terminalChatUI implements ChatUI for terminal output
@@ -159,45 +235,140 @@ func NewChatUIWithWriter(w io.Writer, personality PersonalityLevel) ChatUI {
 	}
 }
 
-// Header displays the chat session header
+// Header displays the chat session header.
+// Deprecated: Use HeaderWithConfig for new code with TTL/dataspace support.
 func (u *terminalChatUI) Header(mode ChatMode, pipeline, sessionID string) {
+	u.HeaderWithConfig(HeaderConfig{
+		Mode:      mode,
+		Pipeline:  pipeline,
+		SessionID: sessionID,
+	})
+}
+
+// HeaderWithConfig displays the chat session header with full configuration.
+//
+// # Description
+//
+// Renders the chat header box with mode, pipeline, and optional metadata
+// including TTL and dataspace. Adapts output based on personality level.
+//
+// # Inputs
+//
+//   - config: HeaderConfig with mode, pipeline, sessionID, TTL, dataspace
+//
+// # Outputs
+//
+// None. Writes directly to the configured writer.
+func (u *terminalChatUI) HeaderWithConfig(config HeaderConfig) {
 	if u.personality == PersonalityMachine {
-		if mode == ChatModeRAG {
-			u.write("CHAT_START: mode=rag pipeline=%s session=%s\n", pipeline, sessionID)
-		} else {
-			u.write("CHAT_START: mode=direct session=%s\n", sessionID)
-		}
+		u.headerMachine(config)
 		return
 	}
 
 	if u.personality == PersonalityMinimal {
-		if mode == ChatModeRAG {
-			u.write("RAG Chat (pipeline: %s)\n", pipeline)
-		} else {
-			u.writeln("Direct Chat (no RAG)")
-		}
-		u.writeln("Type 'exit' to end.")
+		u.headerMinimal(config)
 		return
 	}
 
-	// Full personality with box
+	u.headerFull(config)
+}
+
+// headerMachine renders the header in machine-readable format.
+func (u *terminalChatUI) headerMachine(config HeaderConfig) {
+	if config.Mode == ChatModeRAG {
+		parts := []string{fmt.Sprintf("mode=rag pipeline=%s", config.Pipeline)}
+		if config.SessionID != "" {
+			parts = append(parts, fmt.Sprintf("session=%s", config.SessionID))
+		}
+		if config.DataSpace != "" {
+			parts = append(parts, fmt.Sprintf("dataspace=%s", config.DataSpace))
+		}
+		if config.DataSpaceStats != nil {
+			parts = append(parts, fmt.Sprintf("chunks=%d", config.DataSpaceStats.DocumentCount))
+			if config.DataSpaceStats.LastUpdatedAt > 0 {
+				parts = append(parts, fmt.Sprintf("last_updated=%d", config.DataSpaceStats.LastUpdatedAt))
+			}
+		}
+		if config.TTL != "" {
+			parts = append(parts, fmt.Sprintf("ttl=%s", config.TTL))
+		}
+		u.write("CHAT_START: %s\n", strings.Join(parts, " "))
+	} else {
+		parts := []string{"mode=direct"}
+		if config.SessionID != "" {
+			parts = append(parts, fmt.Sprintf("session=%s", config.SessionID))
+		}
+		u.write("CHAT_START: %s\n", strings.Join(parts, " "))
+	}
+}
+
+// headerMinimal renders the header in minimal format.
+func (u *terminalChatUI) headerMinimal(config HeaderConfig) {
+	if config.Mode == ChatModeRAG {
+		u.write("RAG Chat (pipeline: %s)\n", config.Pipeline)
+		if config.DataSpace != "" {
+			if config.DataSpaceStats != nil {
+				u.write("Dataspace: %s (%d chunks)\n", config.DataSpace, config.DataSpaceStats.DocumentCount)
+			} else {
+				u.write("Dataspace: %s\n", config.DataSpace)
+			}
+		}
+		if config.TTL != "" {
+			u.write("TTL: %s\n", config.TTL)
+		}
+	} else {
+		u.writeln("Direct Chat (no RAG)")
+	}
+	u.writeln("Type 'exit' to end.")
+}
+
+// headerFull renders the header with full styling.
+func (u *terminalChatUI) headerFull(config HeaderConfig) {
 	var content strings.Builder
-	if mode == ChatModeRAG {
+	if config.Mode == ChatModeRAG {
 		content.WriteString(Styles.Highlight.Render("RAG-Enabled Chat"))
 		content.WriteString("\n")
-		content.WriteString(fmt.Sprintf("Pipeline: %s", Styles.Success.Render(pipeline)))
+		content.WriteString(fmt.Sprintf("Pipeline: %s", Styles.Success.Render(config.Pipeline)))
+
+		// Add dataspace with optional stats
+		if config.DataSpace != "" {
+			content.WriteString("\n")
+			if config.DataSpaceStats != nil {
+				// Format: "Dataspace: wheat (142 chunks, updated 2h ago)"
+				statsInfo := fmt.Sprintf("%d chunks", config.DataSpaceStats.DocumentCount)
+				if config.DataSpaceStats.LastUpdatedAt > 0 {
+					relTime := formatRelativeTime(config.DataSpaceStats.LastUpdatedAt)
+					statsInfo = fmt.Sprintf("%s, updated %s", statsInfo, relTime)
+				}
+				content.WriteString(fmt.Sprintf("Dataspace: %s %s",
+					Styles.Success.Render(config.DataSpace),
+					Styles.Muted.Render(fmt.Sprintf("(%s)", statsInfo))))
+			} else {
+				content.WriteString(fmt.Sprintf("Dataspace: %s", Styles.Success.Render(config.DataSpace)))
+			}
+		}
+
+		// Add TTL on same line as dataspace if both present, otherwise new line
+		if config.TTL != "" {
+			if config.DataSpace != "" {
+				content.WriteString(" | ")
+			} else {
+				content.WriteString("\n")
+			}
+			content.WriteString(fmt.Sprintf("TTL: %s", Styles.Success.Render(config.TTL)))
+		}
 	} else {
 		content.WriteString(Styles.Warning.Render("Direct LLM Chat"))
 		content.WriteString("\n")
 		content.WriteString(Styles.Muted.Render("(no knowledge base)"))
 	}
 
-	if sessionID != "" {
+	if config.SessionID != "" {
 		content.WriteString("\n")
-		content.WriteString(fmt.Sprintf("Session: %s", Styles.Muted.Render(sessionID)))
+		content.WriteString(fmt.Sprintf("Session: %s", Styles.Muted.Render(config.SessionID)))
 	}
 
-	boxStyle := Styles.Box.Width(50)
+	boxStyle := Styles.Box.Width(60)
 	u.writeln(boxStyle.Render(content.String()))
 	u.writeln()
 	u.writeln(Styles.Muted.Render("Type 'exit' to end, '/help' for commands."))
@@ -608,6 +779,135 @@ func formatDuration(d time.Duration) string {
 	hours := int(d.Hours())
 	mins := int(d.Minutes()) % 60
 	return fmt.Sprintf("%dh %dm", hours, mins)
+}
+
+// formatRelativeTime converts a Unix milliseconds timestamp to a relative time string.
+//
+// # Description
+//
+// Converts a timestamp to a human-friendly relative time like "2h ago",
+// "3 days ago", etc. Adapts the unit based on the time difference.
+//
+// # Inputs
+//
+//   - unixMs: Unix timestamp in milliseconds
+//
+// # Outputs
+//
+//   - string: Relative time string (e.g., "2h ago", "3 days ago")
+//
+// # Examples
+//
+//	formatRelativeTime(time.Now().Add(-2*time.Hour).UnixMilli()) // "2h ago"
+//	formatRelativeTime(time.Now().Add(-3*24*time.Hour).UnixMilli()) // "3 days ago"
+//
+// # Limitations
+//
+//   - Returns "just now" for times within the last minute
+//   - Does not handle future times specially
+//
+// # Assumptions
+//
+//   - Timestamp is in milliseconds (not seconds)
+func formatRelativeTime(unixMs int64) string {
+	if unixMs == 0 {
+		return "unknown"
+	}
+
+	t := time.UnixMilli(unixMs)
+	diff := time.Since(t)
+
+	if diff < time.Minute {
+		return "just now"
+	}
+	if diff < time.Hour {
+		mins := int(diff.Minutes())
+		if mins == 1 {
+			return "1 min ago"
+		}
+		return fmt.Sprintf("%d mins ago", mins)
+	}
+	if diff < 24*time.Hour {
+		hours := int(diff.Hours())
+		if hours == 1 {
+			return "1h ago"
+		}
+		return fmt.Sprintf("%dh ago", hours)
+	}
+	if diff < 7*24*time.Hour {
+		days := int(diff.Hours() / 24)
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	}
+	if diff < 30*24*time.Hour {
+		weeks := int(diff.Hours() / (24 * 7))
+		if weeks == 1 {
+			return "1 week ago"
+		}
+		return fmt.Sprintf("%d weeks ago", weeks)
+	}
+
+	// For older times, show the date
+	return t.Format("Jan 2, 2006")
+}
+
+// ShowAutoCorrection displays a notification that a typo was auto-corrected.
+//
+// # Description
+//
+// Called when a high-confidence typo correction is applied automatically.
+// Output format varies by personality mode:
+//   - Machine: AUTOCORRECT: original -> corrected
+//   - Minimal: [corrected "original" to "corrected"]
+//   - Full: Styled message with muted styling
+//
+// # Inputs
+//
+//   - original: The original (misspelled) word
+//   - corrected: The corrected word that will be used
+//
+// # Outputs
+//
+// None. Writes to the configured writer.
+func (u *terminalChatUI) ShowAutoCorrection(original, corrected string) {
+	switch u.personality {
+	case PersonalityMachine:
+		u.write("AUTOCORRECT: %s -> %s\n", original, corrected)
+	case PersonalityMinimal:
+		u.write("[corrected \"%s\" to \"%s\"]\n", original, corrected)
+	default:
+		u.writeln(Styles.Muted.Render(fmt.Sprintf("(corrected \"%s\" → \"%s\")", original, corrected)))
+	}
+}
+
+// ShowCorrectionSuggestion displays a suggestion for a possible typo.
+//
+// # Description
+//
+// Called for lower-confidence corrections that the user might want to consider.
+// Does not auto-correct; just informs the user of a possible typo.
+// Output format varies by personality mode.
+//
+// # Inputs
+//
+//   - original: The original (possibly misspelled) word
+//   - suggested: The suggested correction
+//
+// # Outputs
+//
+// None. Writes to the configured writer.
+func (u *terminalChatUI) ShowCorrectionSuggestion(original, suggested string) {
+	switch u.personality {
+	case PersonalityMachine:
+		u.write("SUGGEST: %s -> %s\n", original, suggested)
+	case PersonalityMinimal:
+		u.write("Did you mean \"%s\"? (you typed \"%s\")\n", suggested, original)
+	default:
+		u.writeln(Styles.Warning.Render(fmt.Sprintf("Did you mean \"%s\"?", suggested)) +
+			Styles.Muted.Render(fmt.Sprintf(" (you typed \"%s\")", original)))
+	}
 }
 
 // Convenience functions that use the default ChatUI (for backward compatibility)

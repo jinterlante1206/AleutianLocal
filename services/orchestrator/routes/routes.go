@@ -110,6 +110,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 			sessions := v1.Group("/sessions")
 			{
 				sessions.GET("", handlers.ListSessions(client))
+				sessions.GET("/:sessionId", handlers.GetSession(client))
 				sessions.GET("/:sessionId/history", handlers.GetSessionHistory(client))
 				sessions.GET("/:sessionId/documents", handlers.GetSessionDocuments(client))
 				sessions.DELETE("/:sessionId", handlers.DeleteSessions(client))
@@ -122,6 +123,12 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 				weaviateAdmin.POST("/backups", handlers.HandleBackup(client))
 				weaviateAdmin.GET("/summary", handlers.GetSummary(client))
 				weaviateAdmin.DELETE("/data", handlers.DeleteAll(client))
+			}
+
+			// Dataspace routes
+			dataspace := v1.Group("/dataspace")
+			{
+				dataspace.GET("/:name/stats", handlers.GetDataspaceStats(client))
 			}
 		}
 	}

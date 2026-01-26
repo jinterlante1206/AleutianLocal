@@ -186,6 +186,8 @@ func TestGetSessionSchema_HasRequiredProperties(t *testing.T) {
 		"timestamp",
 		"ttl_expires_at",
 		"ttl_duration_ms",
+		"data_space",
+		"pipeline",
 	}
 
 	require.NotNil(t, schema.Properties)
@@ -210,6 +212,8 @@ func TestGetSessionSchema_PropertyDataTypes(t *testing.T) {
 		"timestamp":       "number",
 		"ttl_expires_at":  "number",
 		"ttl_duration_ms": "number",
+		"data_space":      "text",
+		"pipeline":        "text",
 	}
 
 	for _, prop := range schema.Properties {

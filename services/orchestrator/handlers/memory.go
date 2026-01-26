@@ -32,8 +32,9 @@ const memoryChunkTimeout = 60 * time.Second
 // for semantic search during follow-up queries. The turn is embedded and stored
 // with a vector for similarity search.
 //
-// When sessionTTL is provided, the session's TTL is reset on each message (the
-// "reset on activity" behavior for ephemeral sessions).
+// When sessionCtx.TTL is provided, the session's TTL is reset on each message (the
+// "reset on activity" behavior for ephemeral sessions). The dataspace and pipeline
+// are stored with the session for resume functionality.
 //
 // # Inputs
 //
@@ -42,7 +43,7 @@ const memoryChunkTimeout = 60 * time.Second
 //   - question: The user's question for this turn.
 //   - answer: The AI's response for this turn.
 //   - turnNumber: The sequential turn number within the session (1-indexed).
-//   - sessionTTL: Optional session TTL (e.g., "24h", "7d"). Empty = no TTL.
+//   - sessionCtx: Session context with dataspace, pipeline, and TTL.
 //
 // # Thread Safety
 //
@@ -51,9 +52,9 @@ const memoryChunkTimeout = 60 * time.Second
 //
 // # Example
 //
-//	go SaveMemoryChunk(client, "sess_123", "What is Chrysler?", "Chrysler is...", 5, "24h")
-//	go SaveMemoryChunk(client, "sess_456", "Hello", "Hi!", 1, "") // No TTL
-func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string, turnNumber int, sessionTTL string) {
+//	ctx := datatypes.SessionContext{DataSpace: "work", Pipeline: "verified", TTL: "24h"}
+//	go SaveMemoryChunk(client, "sess_123", "What is Chrysler?", "Chrysler is...", 5, ctx)
+func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string, turnNumber int, sessionCtx datatypes.SessionContext) {
 	// Create a bounded context to prevent goroutine accumulation
 	ctx, cancel := context.WithTimeout(context.Background(), memoryChunkTimeout)
 	defer cancel()
@@ -61,13 +62,15 @@ func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string
 	slog.Info("Saving chat turn to Document class for RAG memory",
 		"sessionId", sessionId,
 		"turnNumber", turnNumber,
-		"sessionTTL", sessionTTL)
+		"sessionTTL", sessionCtx.TTL,
+		"dataSpace", sessionCtx.DataSpace,
+		"pipeline", sessionCtx.Pipeline)
 
-	// Use TTL-aware session management when TTL is provided
+	// Use TTL-aware session management when TTL is provided (also stores dataspace/pipeline)
 	var sessionUUID string
 	var err error
-	if sessionTTL != "" {
-		sessionUUID, err = datatypes.FindOrCreateSessionWithTTL(ctx, client, sessionId, sessionTTL)
+	if sessionCtx.TTL != "" || sessionCtx.DataSpace != "" || sessionCtx.Pipeline != "" {
+		sessionUUID, err = datatypes.FindOrCreateSessionWithTTL(ctx, client, sessionId, sessionCtx)
 	} else {
 		sessionUUID, err = datatypes.FindOrCreateSessionUUID(ctx, client, sessionId)
 	}

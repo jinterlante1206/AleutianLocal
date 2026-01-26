@@ -218,6 +218,20 @@ func GetSessionSchema() *models.Class {
 				Description:     "Original TTL duration in milliseconds. Used to recalculate ttl_expires_at on activity.",
 				IndexFilterable: indexFilterable,
 			},
+			{
+				Name:            "data_space",
+				DataType:        []string{"text"},
+				Description:     "The data space this session operates in (e.g., 'work', 'personal'). Restored on resume.",
+				IndexFilterable: indexFilterable,
+				Tokenization:    "field",
+			},
+			{
+				Name:            "pipeline",
+				DataType:        []string{"text"},
+				Description:     "The RAG pipeline used for this session (e.g., 'reranking', 'verified'). Restored on resume.",
+				IndexFilterable: indexFilterable,
+				Tokenization:    "field",
+			},
 		},
 	}
 }

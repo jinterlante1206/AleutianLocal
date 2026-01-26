@@ -204,3 +204,136 @@ func GetSessionDocuments(client *weaviate.Client) gin.HandlerFunc {
 
 	}
 }
+
+// SessionMetadata contains session configuration for resume functionality.
+//
+// # Description
+//
+// SessionMetadata is returned by GET /v1/sessions/:sessionId to provide
+// the client with stored session context for resume. This enables the CLI
+// to restore the exact same experience (dataspace, pipeline, TTL) without
+// requiring the user to re-specify flags.
+type SessionMetadata struct {
+	SessionID     string `json:"session_id"`
+	DataSpace     string `json:"data_space,omitempty"`
+	Pipeline      string `json:"pipeline,omitempty"`
+	TTLDurationMs int64  `json:"ttl_duration_ms,omitempty"`
+	TTLExpiresAt  int64  `json:"ttl_expires_at,omitempty"`
+	Timestamp     int64  `json:"timestamp,omitempty"`
+	Summary       string `json:"summary,omitempty"`
+}
+
+// GetSession retrieves session metadata for resume functionality.
+//
+// # Description
+//
+// Returns the stored session context including dataspace, pipeline, and TTL
+// configuration. This allows the CLI to restore the exact same experience
+// when resuming a session.
+//
+// # Inputs
+//
+//   - sessionId (path param): The session ID to retrieve.
+//
+// # Outputs
+//
+//   - 200: SessionMetadata JSON response
+//   - 400: Missing session ID
+//   - 404: Session not found
+//   - 500: Weaviate query failure
+//
+// # Examples
+//
+//	GET /v1/sessions/abc-123
+//	Response: {"session_id":"abc-123","data_space":"wheat","pipeline":"verified","ttl_duration_ms":300000}
+func GetSession(client *weaviate.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), "GetSession.handler")
+		defer span.End()
+
+		sessionId := c.Param("sessionId")
+		if sessionId == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "sessionId is required"})
+			return
+		}
+
+		slog.Info("Fetching session metadata for resume", "sessionId", sessionId)
+
+		// Query for all session fields including new data_space and pipeline
+		fields := []graphql.Field{
+			{Name: "session_id"},
+			{Name: "summary"},
+			{Name: "timestamp"},
+			{Name: "ttl_expires_at"},
+			{Name: "ttl_duration_ms"},
+			{Name: "data_space"},
+			{Name: "pipeline"},
+		}
+
+		whereFilter := filters.Where().
+			WithPath([]string{"session_id"}).
+			WithOperator(filters.Equal).
+			WithValueString(sessionId)
+
+		result, err := client.GraphQL().Get().
+			WithClassName("Session").
+			WithWhere(whereFilter).
+			WithFields(fields...).
+			WithLimit(1).
+			Do(ctx)
+
+		if err != nil {
+			slog.Error("failed to query session metadata", "sessionId", sessionId, "error", err)
+			span.RecordError(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query session"})
+			return
+		}
+
+		// Parse the response
+		var parsedResp struct {
+			Get struct {
+				Session []struct {
+					SessionID     string  `json:"session_id"`
+					Summary       string  `json:"summary"`
+					Timestamp     float64 `json:"timestamp"`
+					TTLExpiresAt  float64 `json:"ttl_expires_at"`
+					TTLDurationMs float64 `json:"ttl_duration_ms"`
+					DataSpace     string  `json:"data_space"`
+					Pipeline      string  `json:"pipeline"`
+				} `json:"Session"`
+			} `json:"Get"`
+		}
+
+		rawData, _ := json.Marshal(result.Data)
+		if err := json.Unmarshal(rawData, &parsedResp); err != nil {
+			slog.Error("failed to parse session response", "sessionId", sessionId, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response"})
+			return
+		}
+
+		if len(parsedResp.Get.Session) == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
+		}
+
+		session := parsedResp.Get.Session[0]
+		metadata := SessionMetadata{
+			SessionID:     session.SessionID,
+			DataSpace:     session.DataSpace,
+			Pipeline:      session.Pipeline,
+			TTLDurationMs: int64(session.TTLDurationMs),
+			TTLExpiresAt:  int64(session.TTLExpiresAt),
+			Timestamp:     int64(session.Timestamp),
+			Summary:       session.Summary,
+		}
+
+		slog.Info("Session metadata retrieved",
+			"sessionId", sessionId,
+			"dataSpace", metadata.DataSpace,
+			"pipeline", metadata.Pipeline,
+			"ttlDurationMs", metadata.TTLDurationMs,
+		)
+
+		c.JSON(http.StatusOK, metadata)
+	}
+}
