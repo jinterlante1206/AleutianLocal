@@ -4,6 +4,9 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 // See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
 
 package sampling
 
