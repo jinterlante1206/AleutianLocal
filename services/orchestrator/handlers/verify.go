@@ -407,19 +407,23 @@ type SessionVerifier interface {
 //   - VerifiedAt: Timestamp when verification was performed
 //   - TurnHashes: Hash of each individual Q&A turn
 //   - ErrorDetails: If verification failed, details about the failure
+//   - TTLExpiresAt: Unix ms when session expires (0 = no TTL)
+//   - TTLDurationMs: Original TTL duration in ms (0 = no TTL)
 //
 // # Security
 //
 // This endpoint is read-only and does not modify any data.
 // The verification result is based on SHA-256 hash computation.
 type VerifySessionResponse struct {
-	SessionID    string         `json:"session_id"`
-	Verified     bool           `json:"verified"`
-	TurnCount    int            `json:"turn_count"`
-	ChainHash    string         `json:"chain_hash,omitempty"`
-	VerifiedAt   int64          `json:"verified_at"`
-	TurnHashes   map[int]string `json:"turn_hashes,omitempty"`
-	ErrorDetails string         `json:"error_details,omitempty"`
+	SessionID     string         `json:"session_id"`
+	Verified      bool           `json:"verified"`
+	TurnCount     int            `json:"turn_count"`
+	ChainHash     string         `json:"chain_hash,omitempty"`
+	VerifiedAt    int64          `json:"verified_at"`
+	TurnHashes    map[int]string `json:"turn_hashes,omitempty"`
+	ErrorDetails  string         `json:"error_details,omitempty"`
+	TTLExpiresAt  int64          `json:"ttl_expires_at,omitempty"`
+	TTLDurationMs int64          `json:"ttl_duration_ms,omitempty"`
 }
 
 // conversationTurn represents a Q&A turn from Weaviate.
@@ -874,6 +878,9 @@ func (v *weaviateSessionVerifier) VerifySession(c *gin.Context, sessionID string
 		return nil, fmt.Errorf("failed to load conversation turns: %w", err)
 	}
 
+	// Load session TTL info
+	ttlExpiresAt, ttlDurationMs := v.loadSessionTTL(c, sessionID)
+
 	// Compute hashes for each turn
 	turnHashes := v.computeTurnHashes(turns)
 
@@ -882,12 +889,14 @@ func (v *weaviateSessionVerifier) VerifySession(c *gin.Context, sessionID string
 
 	// Build response
 	response := &VerifySessionResponse{
-		SessionID:  sessionID,
-		Verified:   true, // Currently always true if we can read the data
-		TurnCount:  len(turns),
-		ChainHash:  chainHash,
-		VerifiedAt: time.Now().UnixMilli(),
-		TurnHashes: turnHashes,
+		SessionID:     sessionID,
+		Verified:      true, // Currently always true if we can read the data
+		TurnCount:     len(turns),
+		ChainHash:     chainHash,
+		VerifiedAt:    time.Now().UnixMilli(),
+		TurnHashes:    turnHashes,
+		TTLExpiresAt:  ttlExpiresAt,
+		TTLDurationMs: ttlDurationMs,
 	}
 
 	return response, nil
@@ -956,6 +965,78 @@ func (v *weaviateSessionVerifier) loadConversationTurns(c *gin.Context, sessionI
 
 	// Parse the response using marshal/unmarshal pattern
 	return v.parseConversationResult(result.Data)
+}
+
+// loadSessionTTL retrieves TTL information for a session.
+//
+// # Description
+//
+// Queries Weaviate's Session class for TTL fields. Returns 0 values
+// if no TTL is set or if the query fails (non-fatal).
+//
+// # Inputs
+//
+//   - c: Gin context for request handling
+//   - sessionID: The session to look up
+//
+// # Outputs
+//
+//   - ttlExpiresAt: Unix ms when session expires (0 = no TTL)
+//   - ttlDurationMs: Original TTL duration in ms (0 = no TTL)
+//
+// # Limitations
+//
+//   - Returns 0 values on any error (non-fatal for verification)
+//
+// # Assumptions
+//
+//   - Session class has ttl_expires_at and ttl_duration_ms fields
+func (v *weaviateSessionVerifier) loadSessionTTL(c *gin.Context, sessionID string) (int64, int64) {
+	ctx := c.Request.Context()
+
+	fields := []graphql.Field{
+		{Name: "ttl_expires_at"},
+		{Name: "ttl_duration_ms"},
+	}
+
+	whereFilter := filters.Where().
+		WithPath([]string{"session_id"}).
+		WithOperator(filters.Equal).
+		WithValueString(sessionID)
+
+	result, err := v.client.GraphQL().Get().
+		WithClassName("Session").
+		WithWhere(whereFilter).
+		WithFields(fields...).
+		Do(ctx)
+	if err != nil {
+		slog.Debug("failed to load session TTL", "sessionId", sessionID, "error", err)
+		return 0, 0
+	}
+
+	// Parse the response
+	rawBytes, err := json.Marshal(result.Data)
+	if err != nil {
+		return 0, 0
+	}
+
+	var parsed struct {
+		Get struct {
+			Session []struct {
+				TTLExpiresAt  float64 `json:"ttl_expires_at"`
+				TTLDurationMs float64 `json:"ttl_duration_ms"`
+			} `json:"Session"`
+		} `json:"Get"`
+	}
+	if err := json.Unmarshal(rawBytes, &parsed); err != nil {
+		return 0, 0
+	}
+
+	if len(parsed.Get.Session) == 0 {
+		return 0, 0
+	}
+
+	return int64(parsed.Get.Session[0].TTLExpiresAt), int64(parsed.Get.Session[0].TTLDurationMs)
 }
 
 // weaviateConversationResponse is the expected structure from Weaviate.

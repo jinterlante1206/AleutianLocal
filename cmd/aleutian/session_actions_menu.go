@@ -600,8 +600,7 @@ func (m *DefaultSessionActionsMenu) showCurlCommands(sessionID, baseURL, graphql
 	m.writef("  curl -X POST %s/v1/sessions/%s/verify\n", baseURL, sessionID)
 	m.writeLine("")
 	m.writeLine("  # Query GraphQL (example)")
-	m.writef("  curl -X POST %s -H 'Content-Type: application/json' \\\n", graphqlURL)
-	m.writeLine("    -d '{\"query\": \"{ Get { Session { session_id } } }\"}'")
+	m.writef("  curl -X POST %s -H 'Content-Type: application/json' -d '{\"query\": \"{ Get { Session { session_id } } }\"}'\n", graphqlURL)
 	m.writeLine("")
 }
 
@@ -667,9 +666,7 @@ func (m *DefaultSessionActionsMenu) showGraphQLQuery(sessionID, graphqlURL strin
 	m.writeLine("  └─────────────────────────────────────────────────────────────")
 	m.writeLine("")
 	m.writeLine("  Curl command:")
-	m.writef("  curl -X POST %s \\\n", graphqlURL)
-	m.writeLine("    -H 'Content-Type: application/json' \\")
-	m.writef("    -d '{\"query\": \"{ Get { Conversation(where: {path: [\\\"session_id\\\"], operator: Equal, valueString: \\\"%s\\\"}) { question answer timestamp } } }\"}'\n", sessionID)
+	m.writef("  curl -X POST %s -H 'Content-Type: application/json' -d '{\"query\": \"{ Get { Conversation(where: {path: [\\\"session_id\\\"], operator: Equal, valueString: \\\"%s\\\"}) { question answer timestamp } } }\"}'\n", graphqlURL, sessionID)
 	m.writeLine("")
 }
 

@@ -1147,15 +1147,19 @@ func runDeleteSession(_ *cobra.Command, args []string) {
 //   - VerifiedAt: Timestamp when verification was performed
 //   - TurnHashes: Hash of each individual Q&A turn
 //   - ErrorDetails: If verification failed, details about the failure
+//   - TTLExpiresAt: Unix ms when session expires (0 = no TTL)
+//   - TTLDurationMs: Original TTL duration in ms (0 = no TTL)
 type VerifySessionResponse struct {
-	SessionID    string         `json:"session_id"`
-	Verified     bool           `json:"verified"`
-	TurnCount    int            `json:"turn_count"`
-	ChainHash    string         `json:"chain_hash,omitempty"`
-	VerifiedAt   int64          `json:"verified_at"`
-	TurnHashes   map[int]string `json:"turn_hashes,omitempty"`
-	ErrorDetails string         `json:"error_details,omitempty"`
-	DataSpace    string         `json:"data_space,omitempty"` // Dataspace used for this session's queries
+	SessionID     string         `json:"session_id"`
+	Verified      bool           `json:"verified"`
+	TurnCount     int            `json:"turn_count"`
+	ChainHash     string         `json:"chain_hash,omitempty"`
+	VerifiedAt    int64          `json:"verified_at"`
+	TurnHashes    map[int]string `json:"turn_hashes,omitempty"`
+	ErrorDetails  string         `json:"error_details,omitempty"`
+	DataSpace     string         `json:"data_space,omitempty"` // Dataspace used for this session's queries
+	TTLExpiresAt  int64          `json:"ttl_expires_at,omitempty"`
+	TTLDurationMs int64          `json:"ttl_duration_ms,omitempty"`
 }
 
 // runVerifySession verifies the integrity of a session's hash chain.
@@ -1355,11 +1359,10 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 	fmt.Println("INTEGRITY & HASH CHAIN")
 	fmt.Println(divider)
 	fmt.Println()
-	fmt.Printf("  %s  Chain Verification:      %s (all %d turns verified)\n",
-		ux.Styles.Success.Render("🔐"),
-		ux.Styles.Success.Render("✓ PASSED"),
+	fmt.Printf("  Chain Verification:      %s (all %d turns verified)\n",
+		ux.Styles.Success.Render("PASSED"),
 		result.TurnCount)
-	fmt.Printf("  🔗  Chain Length:            %d events\n", result.TurnCount)
+	fmt.Printf("  Chain Length:            %d events\n", result.TurnCount)
 	fmt.Println()
 
 	// Final Chain Hash
@@ -1416,12 +1419,61 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 	fmt.Println()
 
 	fmt.Println(sectionDivider)
+	fmt.Println("SESSION TTL")
+	fmt.Println(sectionDivider)
+	fmt.Println()
+	if result.TTLDurationMs > 0 {
+		// TTL is configured
+		durationSec := result.TTLDurationMs / 1000
+		var durationStr string
+		if durationSec >= 86400 {
+			durationStr = fmt.Sprintf("%dd", durationSec/86400)
+		} else if durationSec >= 3600 {
+			durationStr = fmt.Sprintf("%dh", durationSec/3600)
+		} else if durationSec >= 60 {
+			durationStr = fmt.Sprintf("%dm", durationSec/60)
+		} else {
+			durationStr = fmt.Sprintf("%ds", durationSec)
+		}
+		fmt.Printf("  TTL Duration:            %s\n", durationStr)
+
+		// Calculate time remaining
+		now := time.Now().UnixMilli()
+		if result.TTLExpiresAt > now {
+			remainingMs := result.TTLExpiresAt - now
+			remainingSec := remainingMs / 1000
+			var remainingStr string
+			if remainingSec >= 86400 {
+				remainingStr = fmt.Sprintf("%dd %dh", remainingSec/86400, (remainingSec%86400)/3600)
+			} else if remainingSec >= 3600 {
+				remainingStr = fmt.Sprintf("%dh %dm", remainingSec/3600, (remainingSec%3600)/60)
+			} else if remainingSec >= 60 {
+				remainingStr = fmt.Sprintf("%dm %ds", remainingSec/60, remainingSec%60)
+			} else {
+				remainingStr = fmt.Sprintf("%ds", remainingSec)
+			}
+			fmt.Printf("  Time Remaining:          %s\n", remainingStr)
+			fmt.Printf("  Status:                  Active\n")
+		} else {
+			fmt.Printf("  Time Remaining:          EXPIRED\n")
+			fmt.Printf("  Status:                  Awaiting cleanup\n")
+			fmt.Println()
+			fmt.Println("  Note: Expired sessions are cleaned up by the TTL scheduler")
+			fmt.Println("        (runs hourly by default).")
+		}
+	} else {
+		fmt.Printf("  TTL Duration:            Not configured (session persists indefinitely)\n")
+		fmt.Printf("  Status:                  Permanent\n")
+	}
+	fmt.Println()
+
+	fmt.Println(sectionDivider)
 	fmt.Println("WEAVIATE STORAGE")
 	fmt.Println(sectionDivider)
 	fmt.Println()
-	fmt.Printf("  📊  Session Records:         1\n")
-	fmt.Printf("  💬  Conversation Turns:      %d\n", result.TurnCount)
-	fmt.Printf("  📄  Document Chunks:         (query Weaviate for count)\n")
+	fmt.Printf("  Session Records:         1\n")
+	fmt.Printf("  Conversation Turns:      %d\n", result.TurnCount)
+	fmt.Printf("  Document Chunks:         (query Weaviate for count)\n")
 	fmt.Println()
 
 	fmt.Println(sectionDivider)
@@ -1431,12 +1483,12 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 
 	// Display dataspace info (from response if available, otherwise show as not tracked)
 	if result.DataSpace != "" {
-		fmt.Printf("  📁  Dataspace:               %s\n", result.DataSpace)
+		fmt.Printf("  Dataspace:               %s\n", result.DataSpace)
 		fmt.Println()
 		fmt.Printf("  Documents in this session were queried from the '%s' dataspace.\n", result.DataSpace)
 		fmt.Println("  Other dataspaces were NOT searched.")
 	} else {
-		fmt.Println("  📁  Dataspace:               (not tracked for this session)")
+		fmt.Println("  Dataspace:               (not tracked for this session)")
 		fmt.Println()
 		fmt.Println("  This session did not specify a dataspace filter.")
 		fmt.Println("  Documents from ALL dataspaces may have been searched.")
@@ -1444,8 +1496,8 @@ func printVerifyFullOutput(result VerifySessionResponse, sessionID, baseURL stri
 	fmt.Println()
 
 	// Security status (placeholder for future encryption features)
-	fmt.Println("  🔒  Access Control:          Not configured")
-	fmt.Println("  🔐  Content Encryption:      Not configured")
+	fmt.Println("  Access Control:          Not configured")
+	fmt.Println("  Content Encryption:      Not configured")
 	fmt.Println()
 
 	fmt.Println("  Security Features (Coming Soon):")

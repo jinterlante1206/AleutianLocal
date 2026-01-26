@@ -54,6 +54,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -498,7 +499,18 @@ func applyConfigDefaults(cfg Config) Config {
 
 	// TTL defaults
 	if cfg.TTLCleanupInterval == 0 {
-		cfg.TTLCleanupInterval = 1 * time.Hour
+		// Allow override via environment variable (e.g., "5m", "30m", "1h")
+		if intervalStr := os.Getenv("TTL_CLEANUP_INTERVAL"); intervalStr != "" {
+			if parsed, err := time.ParseDuration(intervalStr); err == nil {
+				cfg.TTLCleanupInterval = parsed
+				slog.Info("TTL cleanup interval set from environment", "interval", parsed.String())
+			} else {
+				slog.Warn("Invalid TTL_CLEANUP_INTERVAL, using default 1h", "value", intervalStr, "error", err)
+				cfg.TTLCleanupInterval = 1 * time.Hour
+			}
+		} else {
+			cfg.TTLCleanupInterval = 1 * time.Hour
+		}
 	}
 	if cfg.TTLLogPath == "" {
 		cfg.TTLLogPath = "./logs/ttl_cleanup.log"
