@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,8 @@ import (
 //   - input: InputReader for user input (injectable for testing)
 //   - pipeline: RAG pipeline name for display in header
 //   - initialSessionID: Session ID provided at creation (for resume)
+//   - sessionTTL: Configured session TTL (e.g., "5m", "24h")
+//   - dataSpace: Dataspace being queried (e.g., "wheat")
 //   - sessionStartTime: When the session started (for duration tracking)
 //   - sessionStats: Accumulated statistics for the session
 //   - uniqueSources: Set of unique source names referenced
@@ -82,6 +85,9 @@ type RAGChatRunner struct {
 	input            InputReader
 	pipeline         string
 	initialSessionID string
+	sessionTTL       string          // Configured TTL (e.g., "5m", "24h")
+	dataSpace        string          // Dataspace being queried
+	spellCorrector   *SpellCorrector // Typo correction (optional)
 	sessionStartTime time.Time
 	sessionStats     ux.SessionStats
 	uniqueSources    map[string]bool
@@ -160,7 +166,16 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 	})
 
 	ui := ux.NewChatUI()
-	input := NewStdinReader()
+	input := NewInteractiveInputReader(50) // Keep last 50 prompts in history
+
+	// Initialize spell corrector with dataspace name as a known term
+	var corrector *SpellCorrector
+	if config.DataSpace != "" {
+		terms := map[string]int{
+			config.DataSpace: 100, // High frequency for the dataspace name itself
+		}
+		corrector = NewSpellCorrector(terms, 2) // Max 2 edit distance
+	}
 
 	return &RAGChatRunner{
 		service:          service,
@@ -168,10 +183,24 @@ func NewRAGChatRunner(config RAGChatRunnerConfig) ChatRunner {
 		input:            input,
 		pipeline:         pipeline,
 		initialSessionID: config.SessionID,
+		sessionTTL:       config.SessionTTL,
+		dataSpace:        config.DataSpace,
+		spellCorrector:   corrector,
 		uniqueSources:    make(map[string]bool),
 		strictMode:       config.StrictMode,
 		closed:           false,
 	}
+}
+
+// RAGChatRunnerTestConfig holds configuration for creating RAGChatRunner in tests.
+type RAGChatRunnerTestConfig struct {
+	Service   StreamingChatService
+	UI        ux.ChatUI
+	Input     InputReader
+	Pipeline  string
+	SessionID string
+	TTL       string
+	DataSpace string
 }
 
 // NewRAGChatRunnerWithDeps creates a RAG chat runner with injected dependencies.
@@ -228,6 +257,36 @@ func NewRAGChatRunnerWithDeps(
 		input:            input,
 		pipeline:         pipeline,
 		initialSessionID: "",
+		sessionTTL:       "",
+		dataSpace:        "",
+		uniqueSources:    make(map[string]bool),
+		closed:           false,
+	}
+}
+
+// NewRAGChatRunnerWithTestConfig creates a RAG chat runner with full test configuration.
+//
+// # Description
+//
+// Creates a RAGChatRunner with all configurable fields for comprehensive testing.
+// Use this when testing TTL and dataspace header display.
+//
+// # Inputs
+//
+//   - config: RAGChatRunnerTestConfig with all test dependencies and settings
+//
+// # Outputs
+//
+//   - *RAGChatRunner: Ready to run chat session
+func NewRAGChatRunnerWithTestConfig(config RAGChatRunnerTestConfig) *RAGChatRunner {
+	return &RAGChatRunner{
+		service:          config.Service,
+		ui:               config.UI,
+		input:            config.Input,
+		pipeline:         config.Pipeline,
+		initialSessionID: config.SessionID,
+		sessionTTL:       config.TTL,
+		dataSpace:        config.DataSpace,
 		uniqueSources:    make(map[string]bool),
 		closed:           false,
 	}
@@ -292,8 +351,28 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 	// Record session start time for duration tracking
 	r.sessionStartTime = time.Now()
 
-	// Display header
-	r.ui.Header(ux.ChatModeRAG, r.pipeline, r.initialSessionID)
+	// Fetch dataspace stats if available (non-blocking, errors are ignored)
+	var stats *ux.DataSpaceStats
+	if r.dataSpace != "" {
+		var err error
+		stats, err = r.service.GetDataSpaceStats(ctx)
+		if err != nil {
+			slog.Warn("failed to fetch dataspace stats, continuing without",
+				"dataspace", r.dataSpace,
+				"error", err,
+			)
+		}
+	}
+
+	// Display header with TTL, dataspace, and stats
+	r.ui.HeaderWithConfig(ux.HeaderConfig{
+		Mode:           ux.ChatModeRAG,
+		Pipeline:       r.pipeline,
+		SessionID:      r.initialSessionID,
+		TTL:            r.sessionTTL,
+		DataSpace:      r.dataSpace,
+		DataSpaceStats: stats,
+	})
 
 	// Display RAG mode notice
 	if r.strictMode {
@@ -318,7 +397,12 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 		}
 
 		// Display prompt and read input
-		fmt.Print(r.ui.Prompt())
+		// If the reader handles prompts (interactive mode), set it; otherwise print manually
+		if p, ok := r.input.(PromptingInputReader); ok {
+			p.SetPrompt(r.ui.Prompt())
+		} else {
+			fmt.Print(r.ui.Prompt())
+		}
 		input, err := r.input.ReadLine()
 		if err != nil {
 			if err == io.EOF {
@@ -340,6 +424,9 @@ func (r *RAGChatRunner) Run(ctx context.Context) error {
 			r.displaySessionEndWithStats()
 			return nil
 		}
+
+		// Check for typos and apply corrections
+		input = r.applySpellCorrection(input)
 
 		// Process the message
 		if err := r.handleMessage(ctx, input); err != nil {
@@ -476,6 +563,67 @@ func (r *RAGChatRunner) displaySessionEndWithStats() {
 //  3. Displays session end message with statistics
 //  4. Returns context error
 //
+// applySpellCorrection checks for typos and applies corrections.
+//
+// # Description
+//
+// Uses Levenshtein distance to detect likely typos in the user input.
+// For high-confidence matches (1 edit distance), auto-corrects and notifies.
+// For lower-confidence matches (2 edit distance), suggests but doesn't change.
+//
+// # Inputs
+//
+//   - input: The user's input text
+//
+// # Outputs
+//
+//   - string: The possibly corrected input
+//
+// # Limitations
+//
+//   - Only corrects words that are similar to known terms
+//   - Currently only knows the dataspace name
+func (r *RAGChatRunner) applySpellCorrection(input string) string {
+	if r.spellCorrector == nil {
+		return input
+	}
+
+	suggestions := r.spellCorrector.Check(input)
+	if len(suggestions) == 0 {
+		return input
+	}
+
+	// Process the first suggestion (most likely typo)
+	suggestion := suggestions[0]
+
+	if suggestion.Distance == 1 {
+		// High confidence - auto-correct
+		r.ui.ShowAutoCorrection(suggestion.Original, suggestion.Suggested)
+		return replaceWord(input, suggestion.Original, suggestion.Suggested)
+	}
+
+	// Lower confidence - just suggest, don't auto-correct
+	r.ui.ShowCorrectionSuggestion(suggestion.Original, suggestion.Suggested)
+	return input
+}
+
+// replaceWord replaces all occurrences of a word in text (case-insensitive).
+func replaceWord(text, oldWord, newWord string) string {
+	// Simple case-insensitive word replacement
+	// We need to handle word boundaries properly
+	words := extractWords(text)
+	result := text
+
+	for _, w := range words {
+		if strings.EqualFold(w, oldWord) {
+			// Replace this occurrence
+			result = strings.Replace(result, w, newWord, 1)
+		}
+	}
+
+	return result
+}
+
 // # Inputs
 //
 //   - ctx: The cancelled context

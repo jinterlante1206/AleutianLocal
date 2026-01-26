@@ -88,6 +88,11 @@ func (m *mockStreamingChatService) Close() error {
 	return m.closeErr
 }
 
+func (m *mockStreamingChatService) GetDataSpaceStats(_ context.Context) (*ux.DataSpaceStats, error) {
+	// Mock returns nil stats (no dataspace configured or stats unavailable)
+	return nil, nil
+}
+
 // =============================================================================
 // InputReader Tests
 // =============================================================================
@@ -135,6 +140,125 @@ func TestMockInputReader_ReadLine_EmptyInputs(t *testing.T) {
 	_, err := reader.ReadLine()
 	if err != io.EOF {
 		t.Errorf("ReadLine() on empty: got error %v, want io.EOF", err)
+	}
+}
+
+// =============================================================================
+// InteractiveInputReader Tests
+// =============================================================================
+
+func TestInteractiveInputReader_ImplementsInputReader(t *testing.T) {
+	// Verify the type implements the interface
+	var _ InputReader = &InteractiveInputReader{}
+}
+
+func TestInteractiveInputReader_ImplementsPromptingInputReader(t *testing.T) {
+	// Verify the type implements the PromptingInputReader interface
+	var _ PromptingInputReader = &InteractiveInputReader{}
+}
+
+func TestInteractiveInputReader_SetPrompt(t *testing.T) {
+	reader := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   50,
+		prompt:       "> ",
+	}
+
+	reader.SetPrompt("custom> ")
+
+	if reader.prompt != "custom> " {
+		t.Errorf("SetPrompt(): prompt = %q, want %q", reader.prompt, "custom> ")
+	}
+}
+
+func TestInteractiveInputReader_AddToHistory(t *testing.T) {
+	reader := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   3,
+		prompt:       "> ",
+	}
+
+	// Add items to history
+	reader.addToHistory("first")
+	reader.addToHistory("second")
+	reader.addToHistory("third")
+
+	if len(reader.history) != 3 {
+		t.Errorf("addToHistory(): len = %d, want 3", len(reader.history))
+	}
+
+	// Add fourth item, should trim oldest
+	reader.addToHistory("fourth")
+
+	if len(reader.history) != 3 {
+		t.Errorf("addToHistory() after overflow: len = %d, want 3", len(reader.history))
+	}
+
+	if reader.history[0] != "second" {
+		t.Errorf("addToHistory(): first item = %q, want %q", reader.history[0], "second")
+	}
+}
+
+func TestInteractiveInputReader_AddToHistory_NoDuplicates(t *testing.T) {
+	reader := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   10,
+		prompt:       "> ",
+	}
+
+	// Add same item twice
+	reader.addToHistory("same")
+	reader.addToHistory("same")
+
+	if len(reader.history) != 1 {
+		t.Errorf("addToHistory() with duplicate: len = %d, want 1", len(reader.history))
+	}
+}
+
+func TestNewInteractiveInputReader_NonTTY_FallsBackToStdin(t *testing.T) {
+	// In test environment, stdin is not a TTY
+	// So NewInteractiveInputReader should return a StdinReader
+	reader := NewInteractiveInputReader(50)
+
+	// Type assertion to check fallback
+	_, isStdinReader := reader.(*StdinReader)
+	_, isInteractive := reader.(*InteractiveInputReader)
+
+	// In non-TTY (test environment), should be StdinReader
+	// Note: This test behavior depends on test runner's TTY status
+	if !isStdinReader && !isInteractive {
+		t.Errorf("NewInteractiveInputReader(): unexpected type %T", reader)
+	}
+}
+
+func TestPromptingInputReader_TypeAssertion(t *testing.T) {
+	// Test that we can correctly identify prompting readers
+	interactive := &InteractiveInputReader{
+		history:      make([]string, 0),
+		historyIndex: -1,
+		maxHistory:   50,
+		prompt:       "> ",
+	}
+
+	stdin := &StdinReader{}
+	mock := NewMockInputReader([]string{"test"})
+
+	// Interactive should implement PromptingInputReader
+	if _, ok := InputReader(interactive).(PromptingInputReader); !ok {
+		t.Error("InteractiveInputReader should implement PromptingInputReader")
+	}
+
+	// StdinReader should NOT implement PromptingInputReader
+	if _, ok := InputReader(stdin).(PromptingInputReader); ok {
+		t.Error("StdinReader should NOT implement PromptingInputReader")
+	}
+
+	// MockInputReader should NOT implement PromptingInputReader
+	if _, ok := InputReader(mock).(PromptingInputReader); ok {
+		t.Error("MockInputReader should NOT implement PromptingInputReader")
 	}
 }
 

@@ -162,7 +162,7 @@ func NewDirectChatRunner(config DirectChatRunnerConfig) ChatRunner {
 	})
 
 	ui := ux.NewChatUI()
-	input := NewStdinReader()
+	input := NewInteractiveInputReader(50) // Keep last 50 prompts in history
 
 	return &DirectChatRunner{
 		service:   service,
@@ -314,7 +314,12 @@ func (r *DirectChatRunner) Run(ctx context.Context) error {
 		}
 
 		// Display prompt and read input
-		fmt.Print(r.ui.Prompt())
+		// If the reader handles prompts (interactive mode), set it; otherwise print manually
+		if p, ok := r.input.(PromptingInputReader); ok {
+			p.SetPrompt(r.ui.Prompt())
+		} else {
+			fmt.Print(r.ui.Prompt())
+		}
 		input, err := r.input.ReadLine()
 		if err != nil {
 			if err == io.EOF {

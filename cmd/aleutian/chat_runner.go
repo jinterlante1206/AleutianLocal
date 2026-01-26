@@ -33,6 +33,9 @@ import (
 	"strings"
 
 	"github.com/AleutianAI/AleutianFOSS/pkg/ux"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-isatty"
 )
 
 // =============================================================================
@@ -204,6 +207,30 @@ type InputReader interface {
 	ReadLine() (string, error)
 }
 
+// PromptingInputReader extends InputReader with prompt display capability.
+//
+// # Description
+//
+// PromptingInputReader is implemented by input readers that handle their own
+// prompt display (like interactive readers with bubbletea). The chat runner
+// checks for this interface to avoid double-prompting.
+//
+// # Usage
+//
+//	if p, ok := reader.(PromptingInputReader); ok {
+//	    p.SetPrompt(promptString)
+//	    // Reader will display prompt
+//	} else {
+//	    fmt.Print(promptString)
+//	    // Manually display prompt
+//	}
+//	line, err := reader.ReadLine()
+type PromptingInputReader interface {
+	InputReader
+	// SetPrompt sets the prompt string to display before input.
+	SetPrompt(prompt string)
+}
+
 // =============================================================================
 // StdinReader Implementation
 // =============================================================================
@@ -306,6 +333,289 @@ func (r *StdinReader) ReadLine() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+// =============================================================================
+// InteractiveInputReader Implementation (with history)
+// =============================================================================
+
+// InteractiveInputReader implements InputReader with history navigation.
+//
+// # Description
+//
+// InteractiveInputReader uses charmbracelet/bubbletea to provide an interactive
+// input experience with:
+//   - Up/down arrow history navigation
+//   - Line editing (Ctrl+A, Ctrl+E, etc.)
+//   - Proper terminal handling
+//
+// Falls back to StdinReader for non-TTY environments (piped input, CI/CD).
+//
+// # Fields
+//
+//   - history: Slice of previous inputs (most recent last)
+//   - historyIndex: Current position when navigating history (-1 = new input)
+//   - maxHistory: Maximum number of history entries to keep
+//   - prompt: The prompt string to display
+//
+// # Thread Safety
+//
+// Not thread-safe. Single reader per stdin. Do not share across goroutines.
+//
+// # Limitations
+//
+//   - History is in-memory only (not persisted across sessions)
+//   - Maximum history size is configurable (default: 50)
+//
+// # Assumptions
+//
+//   - Terminal supports ANSI escape codes
+//   - os.Stdin is a TTY for interactive mode
+type InteractiveInputReader struct {
+	history      []string
+	historyIndex int
+	maxHistory   int
+	prompt       string
+}
+
+// inputModel is the bubbletea model for interactive input.
+type inputModel struct {
+	textInput    textinput.Model
+	history      []string
+	historyIndex int
+	currentInput string // Stores current input when navigating history
+	done         bool
+	cancelled    bool
+}
+
+// NewInteractiveInputReader creates an interactive input reader with history.
+//
+// # Description
+//
+// Creates an InteractiveInputReader that provides up-arrow history navigation
+// and line editing. If stdin is not a TTY, returns a StdinReader instead.
+//
+// Note: This reader does NOT display a prompt - the caller (chat runner)
+// is responsible for displaying the prompt before calling ReadLine().
+//
+// # Inputs
+//
+//   - maxHistory: Maximum number of history entries to keep
+//
+// # Outputs
+//
+//   - InputReader: Interactive reader if TTY, StdinReader otherwise
+//
+// # Examples
+//
+//	reader := NewInteractiveInputReader(50)
+//	for {
+//	    fmt.Print("> ") // Caller displays prompt
+//	    line, err := reader.ReadLine()
+//	    if err == io.EOF {
+//	        break
+//	    }
+//	    fmt.Println("You said:", line)
+//	}
+//
+// # Limitations
+//
+//   - Falls back to basic input for non-TTY
+//
+// # Assumptions
+//
+//   - Terminal supports ANSI escape codes for interactive mode
+func NewInteractiveInputReader(maxHistory int) InputReader {
+	// Fall back to basic stdin reader for non-TTY (piped input, CI/CD)
+	if !isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		return NewStdinReader()
+	}
+
+	return &InteractiveInputReader{
+		history:      make([]string, 0, maxHistory),
+		historyIndex: -1,
+		maxHistory:   maxHistory,
+		prompt:       "> ", // Default prompt, can be overridden via SetPrompt
+	}
+}
+
+// SetPrompt sets the prompt string to display before input.
+//
+// # Description
+//
+// Implements PromptingInputReader interface. The prompt will be displayed
+// by the bubbletea textinput component.
+//
+// # Inputs
+//
+//   - prompt: The prompt string (e.g., "> ")
+func (r *InteractiveInputReader) SetPrompt(prompt string) {
+	r.prompt = prompt
+}
+
+// ReadLine reads a single line with interactive history support.
+//
+// # Description
+//
+// Displays a prompt and reads user input with support for:
+//   - Up arrow: Previous history entry
+//   - Down arrow: Next history entry
+//   - Enter: Submit input
+//   - Ctrl+C: Cancel current input (returns empty string)
+//   - Ctrl+D: EOF (returns io.EOF)
+//
+// Successfully submitted non-empty inputs are added to history.
+//
+// # Inputs
+//
+// None.
+//
+// # Outputs
+//
+//   - string: The line read, with leading/trailing whitespace trimmed
+//   - error: io.EOF on Ctrl+D, or other error
+//
+// # Limitations
+//
+//   - Blocks until input is submitted
+//
+// # Assumptions
+//
+//   - Terminal is in a usable state
+func (r *InteractiveInputReader) ReadLine() (string, error) {
+	// Create text input model
+	ti := textinput.New()
+	ti.Prompt = r.prompt
+	ti.Focus()
+	ti.CharLimit = 4096
+	ti.Width = 80
+
+	m := inputModel{
+		textInput:    ti,
+		history:      r.history,
+		historyIndex: -1,
+		currentInput: "",
+		done:         false,
+		cancelled:    false,
+	}
+
+	// Run the bubbletea program
+	p := tea.NewProgram(m, tea.WithOutput(os.Stderr))
+	finalModel, err := p.Run()
+	if err != nil {
+		return "", err
+	}
+
+	result := finalModel.(inputModel)
+
+	// Handle Ctrl+D (EOF)
+	if result.cancelled && result.textInput.Value() == "" {
+		return "", io.EOF
+	}
+
+	// Get the final input value
+	input := strings.TrimSpace(result.textInput.Value())
+
+	// Add non-empty inputs to history
+	if input != "" {
+		r.addToHistory(input)
+	}
+
+	return input, nil
+}
+
+// addToHistory adds an input to the history buffer.
+func (r *InteractiveInputReader) addToHistory(input string) {
+	// Don't add duplicates of the most recent entry
+	if len(r.history) > 0 && r.history[len(r.history)-1] == input {
+		return
+	}
+
+	r.history = append(r.history, input)
+
+	// Trim history if it exceeds max size
+	if len(r.history) > r.maxHistory {
+		r.history = r.history[1:]
+	}
+}
+
+// Init initializes the bubbletea model.
+func (m inputModel) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+// Update handles input events for the bubbletea model.
+func (m inputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyEnter:
+			m.done = true
+			return m, tea.Quit
+
+		case tea.KeyCtrlC:
+			// Clear input and return empty
+			m.textInput.SetValue("")
+			m.done = true
+			return m, tea.Quit
+
+		case tea.KeyCtrlD:
+			// EOF - signal to exit
+			m.cancelled = true
+			m.textInput.SetValue("")
+			m.done = true
+			return m, tea.Quit
+
+		case tea.KeyUp:
+			// Navigate to previous history entry
+			if len(m.history) == 0 {
+				return m, nil
+			}
+
+			// Save current input when first entering history
+			if m.historyIndex == -1 {
+				m.currentInput = m.textInput.Value()
+				m.historyIndex = len(m.history) - 1
+			} else if m.historyIndex > 0 {
+				m.historyIndex--
+			}
+
+			m.textInput.SetValue(m.history[m.historyIndex])
+			m.textInput.CursorEnd()
+			return m, nil
+
+		case tea.KeyDown:
+			// Navigate to next history entry
+			if m.historyIndex == -1 {
+				return m, nil
+			}
+
+			if m.historyIndex < len(m.history)-1 {
+				m.historyIndex++
+				m.textInput.SetValue(m.history[m.historyIndex])
+			} else {
+				// Return to current input
+				m.historyIndex = -1
+				m.textInput.SetValue(m.currentInput)
+			}
+			m.textInput.CursorEnd()
+			return m, nil
+		}
+	}
+
+	// Handle other input
+	m.textInput, cmd = m.textInput.Update(msg)
+	return m, cmd
+}
+
+// View renders the input prompt.
+func (m inputModel) View() string {
+	if m.done {
+		return ""
+	}
+	return m.textInput.View()
 }
 
 // =============================================================================

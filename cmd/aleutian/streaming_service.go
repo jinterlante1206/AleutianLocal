@@ -187,6 +187,34 @@ type StreamingChatService interface {
 	// Assumptions:
 	//   - Caller manages request lifecycle separately
 	Close() error
+
+	// GetDataSpaceStats fetches aggregated stats for the configured dataspace.
+	//
+	// Description:
+	//   Queries the orchestrator for dataspace metadata including document
+	//   count and last update timestamp. Returns nil if no dataspace is
+	//   configured or on error (non-fatal).
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation/timeout.
+	//
+	// Outputs:
+	//   - *ux.DataSpaceStats: Stats if available, nil otherwise.
+	//   - error: Non-nil on network/server errors.
+	//
+	// Examples:
+	//   stats, err := service.GetDataSpaceStats(ctx)
+	//   if err != nil {
+	//       // Non-fatal, continue without stats
+	//   }
+	//
+	// Limitations:
+	//   - Only available for RAG services with dataspace configured
+	//   - Direct chat services return nil
+	//
+	// Assumptions:
+	//   - Orchestrator supports /v1/dataspace/{name}/stats endpoint
+	GetDataSpaceStats(ctx context.Context) (*ux.DataSpaceStats, error)
 }
 
 // =============================================================================
@@ -1085,6 +1113,94 @@ func (s *ragStreamingChatService) Close() error {
 	return nil
 }
 
+// GetDataSpaceStats fetches aggregated stats for the configured dataspace.
+//
+// # Description
+//
+// Queries the orchestrator for dataspace metadata including document
+// count and last update timestamp. Returns nil if no dataspace is
+// configured.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation/timeout.
+//
+// # Outputs
+//
+//   - *ux.DataSpaceStats: Stats if available, nil otherwise.
+//   - error: Non-nil on network/server errors.
+//
+// # Limitations
+//
+//   - Returns nil if dataspace is not configured
+//   - Error is non-fatal; caller should continue without stats
+//
+// # Assumptions
+//
+//   - Orchestrator supports /v1/dataspace/{name}/stats endpoint
+func (s *ragStreamingChatService) GetDataSpaceStats(ctx context.Context) (*ux.DataSpaceStats, error) {
+	// No dataspace configured, return nil
+	if s.dataSpace == "" {
+		return nil, nil
+	}
+
+	targetURL := fmt.Sprintf("%s/v1/dataspace/%s/stats", s.baseURL, s.dataSpace)
+
+	slog.Debug("fetching dataspace stats",
+		"dataspace", s.dataSpace,
+		"url", targetURL,
+	)
+
+	resp, err := s.client.Get(ctx, targetURL)
+	if err != nil {
+		slog.Warn("failed to fetch dataspace stats",
+			"dataspace", s.dataSpace,
+			"error", err,
+		)
+		return nil, fmt.Errorf("get dataspace stats: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Error("failed to close response body", "error", err)
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("dataspace stats request failed",
+			"dataspace", s.dataSpace,
+			"status_code", resp.StatusCode,
+		)
+		return nil, fmt.Errorf("dataspace stats request failed (status %d)", resp.StatusCode)
+	}
+
+	// Parse the response
+	type statsResponse struct {
+		Name          string `json:"name"`
+		DocumentCount int    `json:"document_count"`
+		LastUpdatedAt int64  `json:"last_updated_at"`
+	}
+
+	var statsResp statsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&statsResp); err != nil {
+		slog.Warn("failed to parse dataspace stats",
+			"dataspace", s.dataSpace,
+			"error", err,
+		)
+		return nil, fmt.Errorf("parse dataspace stats: %w", err)
+	}
+
+	slog.Debug("dataspace stats retrieved",
+		"dataspace", s.dataSpace,
+		"document_count", statsResp.DocumentCount,
+		"last_updated_at", statsResp.LastUpdatedAt,
+	)
+
+	return &ux.DataSpaceStats{
+		DocumentCount: statsResp.DocumentCount,
+		LastUpdatedAt: statsResp.LastUpdatedAt,
+	}, nil
+}
+
 // =============================================================================
 // DIRECT STREAMING CHAT SERVICE METHODS
 // =============================================================================
@@ -1431,6 +1547,24 @@ func (s *directStreamingChatService) GetSessionID() string {
 // None.
 func (s *directStreamingChatService) Close() error {
 	return nil
+}
+
+// GetDataSpaceStats returns nil for direct chat (no dataspace support).
+//
+// # Description
+//
+// Direct chat does not support dataspaces, so this method always returns nil.
+//
+// # Inputs
+//
+//   - ctx: Context (unused).
+//
+// # Outputs
+//
+//   - *ux.DataSpaceStats: Always nil.
+//   - error: Always nil.
+func (s *directStreamingChatService) GetDataSpaceStats(_ context.Context) (*ux.DataSpaceStats, error) {
+	return nil, nil
 }
 
 // LoadSessionHistory loads previous conversation history for session resume.

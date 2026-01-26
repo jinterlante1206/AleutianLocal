@@ -12,6 +12,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -215,4 +216,224 @@ func parseChunksFromResult(resp *models.GraphQLResponse) []map[string]interface{
 		}
 	}
 	return chunks
+}
+
+// DataspaceStats contains aggregated metrics for a dataspace.
+//
+// # Description
+//
+// DataspaceStats captures aggregate information about documents within
+// a dataspace, including count and timestamps. This is used to display
+// dataspace metadata in the chat header.
+//
+// # Fields
+//
+//   - Name: The dataspace name (e.g., "wheat", "work", "default")
+//   - DocumentCount: Number of documents in the dataspace
+//   - LastUpdatedAt: Unix milliseconds of most recent document ingestion
+//
+// # Thread Safety
+//
+// This type is safe for concurrent read access.
+type DataspaceStats struct {
+	Name          string `json:"name"`
+	DocumentCount int    `json:"document_count"`
+	LastUpdatedAt int64  `json:"last_updated_at"` // Unix ms timestamp
+}
+
+// GetDataspaceStats returns aggregated stats for a dataspace.
+//
+// # Description
+//
+// Queries Weaviate to aggregate statistics for all documents in the
+// specified dataspace. Returns document count and the most recent
+// ingestion timestamp.
+//
+// # Inputs
+//
+//   - name (path param): Dataspace name to query. If "default" or empty,
+//     queries all documents without dataspace filter.
+//
+// # Outputs
+//
+//   - 200: DataspaceStats JSON response
+//   - 400: Invalid dataspace name
+//   - 500: Weaviate query failure
+//
+// # Examples
+//
+//	GET /v1/dataspace/wheat/stats
+//	Response: {"name":"wheat","document_count":142,"last_updated_at":1737844200000}
+//
+// # Limitations
+//
+//   - Does not include content size (not stored in schema)
+//   - Aggregate queries on very large dataspaces may be slow
+//
+// # Assumptions
+//
+//   - Weaviate client is properly initialized
+//   - Document schema exists with data_space and ingested_at fields
+func GetDataspaceStats(client *weaviate.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		dataspaceName := c.Param("name")
+		if dataspaceName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "dataspace name is required"})
+			return
+		}
+
+		slog.Info("Fetching dataspace stats", "dataspace", dataspaceName)
+
+		ctx := c.Request.Context()
+
+		// Build the aggregate query
+		// For "default" dataspace, we query all documents without a data_space filter
+		var whereFilter *filters.WhereBuilder
+		if dataspaceName != "default" {
+			whereFilter = filters.Where().
+				WithPath([]string{"data_space"}).
+				WithOperator(filters.Equal).
+				WithValueString(dataspaceName)
+		}
+
+		// Query for count using Aggregate
+		fields := []graphql.Field{
+			{Name: "meta", Fields: []graphql.Field{{Name: "count"}}},
+		}
+
+		builder := client.GraphQL().Aggregate().
+			WithClassName("Document").
+			WithFields(fields...)
+
+		if whereFilter != nil {
+			builder = builder.WithWhere(whereFilter)
+		}
+
+		aggResp, err := builder.Do(ctx)
+		if err != nil {
+			slog.Error("failed to aggregate dataspace stats", "dataspace", dataspaceName, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query dataspace stats"})
+			return
+		}
+
+		// Parse the aggregate response to get count
+		docCount := parseAggregateCount(aggResp)
+
+		// Query for max ingested_at timestamp
+		var lastUpdatedAt int64
+		if docCount > 0 {
+			lastUpdatedAt, err = getMaxIngestedAt(ctx, client, dataspaceName)
+			if err != nil {
+				slog.Warn("failed to get max ingested_at", "dataspace", dataspaceName, "error", err)
+				// Non-fatal, continue with 0
+			}
+		}
+
+		stats := DataspaceStats{
+			Name:          dataspaceName,
+			DocumentCount: docCount,
+			LastUpdatedAt: lastUpdatedAt,
+		}
+
+		slog.Info("Dataspace stats retrieved",
+			"dataspace", dataspaceName,
+			"document_count", docCount,
+			"last_updated_at", lastUpdatedAt,
+		)
+
+		c.JSON(http.StatusOK, stats)
+	}
+}
+
+// parseAggregateCount extracts the document count from an aggregate response.
+func parseAggregateCount(resp *models.GraphQLResponse) int {
+	if resp == nil || resp.Data == nil {
+		return 0
+	}
+
+	aggMap, ok := resp.Data["Aggregate"].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+
+	docList, ok := aggMap["Document"].([]interface{})
+	if !ok || len(docList) == 0 {
+		return 0
+	}
+
+	firstDoc, ok := docList[0].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+
+	meta, ok := firstDoc["meta"].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+
+	count, ok := meta["count"].(float64)
+	if !ok {
+		return 0
+	}
+
+	return int(count)
+}
+
+// getMaxIngestedAt queries for the most recent ingested_at timestamp in a dataspace.
+func getMaxIngestedAt(ctx context.Context, client *weaviate.Client, dataspaceName string) (int64, error) {
+	// Query for the single most recent document by ingested_at
+	var whereFilter *filters.WhereBuilder
+	if dataspaceName != "default" {
+		whereFilter = filters.Where().
+			WithPath([]string{"data_space"}).
+			WithOperator(filters.Equal).
+			WithValueString(dataspaceName)
+	}
+
+	fields := []graphql.Field{
+		{Name: "ingested_at"},
+	}
+
+	builder := client.GraphQL().Get().
+		WithClassName("Document").
+		WithFields(fields...).
+		WithLimit(1)
+
+	if whereFilter != nil {
+		builder = builder.WithWhere(whereFilter)
+	}
+
+	// Sort by ingested_at descending to get the most recent
+	builder = builder.WithSort(graphql.Sort{Path: []string{"ingested_at"}, Order: "desc"})
+
+	getResp, err := builder.Do(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("query max ingested_at: %w", err)
+	}
+
+	if getResp == nil || getResp.Data == nil {
+		return 0, nil
+	}
+
+	getMap, ok := getResp.Data["Get"].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	docList, ok := getMap["Document"].([]interface{})
+	if !ok || len(docList) == 0 {
+		return 0, nil
+	}
+
+	firstDoc, ok := docList[0].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	ingestedAt, ok := firstDoc["ingested_at"].(float64)
+	if !ok {
+		return 0, nil
+	}
+
+	return int64(ingestedAt), nil
 }

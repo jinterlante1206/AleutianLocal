@@ -99,6 +99,340 @@ func TestChatUI_Header_Direct_MinimalMode(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
+// HeaderWithConfig Tests (TTL and DataSpace)
+// -----------------------------------------------------------------------------
+
+func TestChatUI_HeaderWithConfig_TTL_MachineMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMachine)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "verified",
+		SessionID: "sess-123",
+		TTL:       "5m",
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "ttl=5m") {
+		t.Errorf("expected ttl=5m in output, got %q", output)
+	}
+	if !strings.Contains(output, "pipeline=verified") {
+		t.Errorf("expected pipeline=verified, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DataSpace_MachineMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMachine)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "reranking",
+		DataSpace: "wheat",
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "dataspace=wheat") {
+		t.Errorf("expected dataspace=wheat in output, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_TTLAndDataSpace_MachineMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMachine)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "verified",
+		SessionID: "sess-456",
+		TTL:       "24h",
+		DataSpace: "production",
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "ttl=24h") {
+		t.Errorf("expected ttl=24h in output, got %q", output)
+	}
+	if !strings.Contains(output, "dataspace=production") {
+		t.Errorf("expected dataspace=production in output, got %q", output)
+	}
+	if !strings.Contains(output, "session=sess-456") {
+		t.Errorf("expected session=sess-456 in output, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_TTL_MinimalMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMinimal)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:     ChatModeRAG,
+		Pipeline: "graph",
+		TTL:      "7d",
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "TTL: 7d") {
+		t.Errorf("expected TTL: 7d in output, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DataSpace_MinimalMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMinimal)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "standard",
+		DataSpace: "work",
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "Dataspace: work") {
+		t.Errorf("expected Dataspace: work in output, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_TTL_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityFull)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "verified",
+		SessionID: "sess-full",
+		TTL:       "1h",
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "TTL:") {
+		t.Errorf("expected TTL: in output, got %q", output)
+	}
+	if !strings.Contains(output, "1h") {
+		t.Errorf("expected 1h in output, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DataSpace_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityFull)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "reranking",
+		DataSpace: "personal",
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "Dataspace:") {
+		t.Errorf("expected Dataspace: in output, got %q", output)
+	}
+	if !strings.Contains(output, "personal") {
+		t.Errorf("expected personal in output, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_BothTTLAndDataSpace_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityFull)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "verified",
+		SessionID: "sess-both",
+		TTL:       "30m",
+		DataSpace: "research",
+	})
+
+	output := buf.String()
+	// Should show both TTL and DataSpace
+	if !strings.Contains(output, "TTL:") {
+		t.Errorf("expected TTL: in output, got %q", output)
+	}
+	if !strings.Contains(output, "30m") {
+		t.Errorf("expected 30m in output, got %q", output)
+	}
+	if !strings.Contains(output, "Dataspace:") {
+		t.Errorf("expected Dataspace: in output, got %q", output)
+	}
+	if !strings.Contains(output, "research") {
+		t.Errorf("expected research in output, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_NoTTLOrDataSpace(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityFull)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "standard",
+		SessionID: "sess-none",
+	})
+
+	output := buf.String()
+	// Should NOT contain TTL or Dataspace when not provided
+	if strings.Contains(output, "TTL:") {
+		t.Errorf("expected no TTL line when empty, got %q", output)
+	}
+	if strings.Contains(output, "Dataspace:") {
+		t.Errorf("expected no Dataspace line when empty, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DirectMode_IgnoresTTLAndDataSpace(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMachine)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeDirect,
+		SessionID: "sess-direct",
+		TTL:       "5m",      // Should be ignored for direct mode
+		DataSpace: "ignored", // Should be ignored for direct mode
+	})
+
+	output := buf.String()
+	// Direct mode header should not include TTL or dataspace
+	if !strings.Contains(output, "mode=direct") {
+		t.Errorf("expected mode=direct, got %q", output)
+	}
+	// These should NOT appear in direct mode output
+	if strings.Contains(output, "ttl=") {
+		t.Errorf("unexpected ttl in direct mode, got %q", output)
+	}
+	if strings.Contains(output, "dataspace=") {
+		t.Errorf("unexpected dataspace in direct mode, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DataSpaceStats_MachineMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMachine)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "reranking",
+		DataSpace: "wheat",
+		DataSpaceStats: &DataSpaceStats{
+			DocumentCount: 142,
+			LastUpdatedAt: time.Now().Add(-2 * time.Hour).UnixMilli(),
+		},
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "dataspace=wheat") {
+		t.Errorf("expected dataspace=wheat, got %q", output)
+	}
+	if !strings.Contains(output, "doc_count=142") {
+		t.Errorf("expected doc_count=142, got %q", output)
+	}
+	if !strings.Contains(output, "last_updated=") {
+		t.Errorf("expected last_updated=, got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DataSpaceStats_MinimalMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityMinimal)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "reranking",
+		DataSpace: "wheat",
+		DataSpaceStats: &DataSpaceStats{
+			DocumentCount: 142,
+			LastUpdatedAt: time.Now().Add(-2 * time.Hour).UnixMilli(),
+		},
+	})
+
+	output := buf.String()
+	if !strings.Contains(output, "Dataspace: wheat (142 docs)") {
+		t.Errorf("expected 'Dataspace: wheat (142 docs)', got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DataSpaceStats_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityFull)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:      ChatModeRAG,
+		Pipeline:  "reranking",
+		DataSpace: "wheat",
+		DataSpaceStats: &DataSpaceStats{
+			DocumentCount: 142,
+			LastUpdatedAt: time.Now().Add(-2 * time.Hour).UnixMilli(),
+		},
+	})
+
+	output := buf.String()
+	// Should contain document count and relative time
+	if !strings.Contains(output, "142 docs") {
+		t.Errorf("expected '142 docs', got %q", output)
+	}
+	if !strings.Contains(output, "updated") {
+		t.Errorf("expected 'updated' (relative time), got %q", output)
+	}
+}
+
+func TestChatUI_HeaderWithConfig_DataSpaceStatsNil_FullMode(t *testing.T) {
+	var buf bytes.Buffer
+	ui := NewChatUIWithWriter(&buf, PersonalityFull)
+
+	ui.HeaderWithConfig(HeaderConfig{
+		Mode:           ChatModeRAG,
+		Pipeline:       "reranking",
+		DataSpace:      "wheat",
+		DataSpaceStats: nil, // No stats available
+	})
+
+	output := buf.String()
+	// Should still show dataspace but without stats
+	if !strings.Contains(output, "wheat") {
+		t.Errorf("expected 'wheat' dataspace, got %q", output)
+	}
+	// Should NOT contain doc count
+	if strings.Contains(output, "docs") {
+		t.Errorf("unexpected 'docs' when stats are nil, got %q", output)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// formatRelativeTime Tests
+// -----------------------------------------------------------------------------
+
+func TestFormatRelativeTime(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name     string
+		unixMs   int64
+		expected string
+	}{
+		{"zero", 0, "unknown"},
+		{"just now", now.Add(-30 * time.Second).UnixMilli(), "just now"},
+		{"1 min ago", now.Add(-1 * time.Minute).UnixMilli(), "1 min ago"},
+		{"5 mins ago", now.Add(-5 * time.Minute).UnixMilli(), "5 mins ago"},
+		{"1h ago", now.Add(-1 * time.Hour).UnixMilli(), "1h ago"},
+		{"2h ago", now.Add(-2 * time.Hour).UnixMilli(), "2h ago"},
+		{"1 day ago", now.Add(-24 * time.Hour).UnixMilli(), "1 day ago"},
+		{"3 days ago", now.Add(-3 * 24 * time.Hour).UnixMilli(), "3 days ago"},
+		{"1 week ago", now.Add(-7 * 24 * time.Hour).UnixMilli(), "1 week ago"},
+		{"2 weeks ago", now.Add(-14 * 24 * time.Hour).UnixMilli(), "2 weeks ago"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatRelativeTime(tt.unixMs)
+			if result != tt.expected {
+				t.Errorf("formatRelativeTime(%d) = %q, want %q", tt.unixMs, result, tt.expected)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
 // Prompt Tests
 // -----------------------------------------------------------------------------
 

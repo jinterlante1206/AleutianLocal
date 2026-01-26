@@ -123,6 +123,12 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 				weaviateAdmin.GET("/summary", handlers.GetSummary(client))
 				weaviateAdmin.DELETE("/data", handlers.DeleteAll(client))
 			}
+
+			// Dataspace routes
+			dataspace := v1.Group("/dataspace")
+			{
+				dataspace.GET("/:name/stats", handlers.GetDataspaceStats(client))
+			}
 		}
 	}
 }
