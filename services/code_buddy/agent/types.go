@@ -127,6 +127,9 @@ type HistoryEntry struct {
 
 	// Error contains any error message from this step.
 	Error string `json:"error,omitempty"`
+
+	// ClarificationPrompt is the prompt shown when entering CLARIFY state.
+	ClarificationPrompt string `json:"clarification_prompt,omitempty"`
 }
 
 // SessionMetrics tracks metrics for a session.

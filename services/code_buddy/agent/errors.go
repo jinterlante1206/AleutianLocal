@@ -61,4 +61,7 @@ var (
 
 	// ErrNotInClarifyState indicates Continue was called but state is not CLARIFY.
 	ErrNotInClarifyState = errors.New("session not in CLARIFY state")
+
+	// ErrAwaitingClarification indicates the agent is waiting for user clarification.
+	ErrAwaitingClarification = errors.New("awaiting user clarification")
 )

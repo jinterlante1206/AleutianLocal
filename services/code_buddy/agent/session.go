@@ -504,3 +504,38 @@ func (s *Session) ToSessionState() *SessionState {
 		DegradedMode: s.Metrics.DegradedMode,
 	}
 }
+
+// GetClarificationPrompt returns the clarification prompt if set.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetClarificationPrompt() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.History) == 0 {
+		return ""
+	}
+	// Return the last history entry's clarification prompt if any
+	lastEntry := s.History[len(s.History)-1]
+	return lastEntry.ClarificationPrompt
+}
+
+// GetMetrics returns a copy of the session metrics.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetMetrics() SessionMetrics {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Metrics == nil {
+		return SessionMetrics{}
+	}
+	return *s.Metrics
+}
+
+// GetProjectRoot returns the project root path.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetProjectRoot() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ProjectRoot
+}
