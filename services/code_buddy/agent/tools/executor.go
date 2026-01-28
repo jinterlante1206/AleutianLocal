@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -426,6 +428,28 @@ func (e *Executor) IsRequirementSatisfied(requirement string) bool {
 }
 
 // truncateResult truncates a result to fit within token limits.
+//
+// Description:
+//
+//	Truncates the OutputText field if it exceeds the estimated token limit.
+//	Uses an approximation of ~4 characters per token.
+//
+// Inputs:
+//
+//	result - The result to truncate
+//
+// Outputs:
+//
+//	*Result - The same result pointer (modified in place)
+//
+// Limitations:
+//
+//	Modifies the input result in place rather than returning a copy.
+//	The caller should be aware that the original result is mutated.
+//
+// Assumptions:
+//
+//	Token count is approximately 4 characters per token.
 func (e *Executor) truncateResult(result *Result) *Result {
 	// Simple truncation based on estimated tokens
 	// In practice, this would be more sophisticated
@@ -504,9 +528,41 @@ func newResultCache(ttl time.Duration) *resultCache {
 	}
 }
 
+// key generates a deterministic cache key from tool name and parameters.
+//
+// Description:
+//
+//	Creates a cache key by sorting parameter keys alphabetically before
+//	formatting. This ensures the same parameters always produce the same
+//	key regardless of map iteration order.
+//
+// Inputs:
+//
+//	toolName - The tool name
+//	params - The parameter map
+//
+// Outputs:
+//
+//	string - Deterministic cache key
 func (c *resultCache) key(toolName string, params map[string]any) string {
-	// Simple key generation - in production, use a hash
-	return fmt.Sprintf("%s:%v", toolName, params)
+	if len(params) == 0 {
+		return toolName
+	}
+
+	// Sort keys for deterministic ordering
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Build key with sorted parameters
+	var keyParts []string
+	for _, k := range keys {
+		keyParts = append(keyParts, fmt.Sprintf("%s=%v", k, params[k]))
+	}
+
+	return fmt.Sprintf("%s:{%s}", toolName, strings.Join(keyParts, ","))
 }
 
 func (c *resultCache) get(toolName string, params map[string]any) (*Result, bool) {

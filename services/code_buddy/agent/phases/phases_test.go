@@ -355,7 +355,7 @@ func TestReflectPhase_Execute_MaxStepsExceeded(t *testing.T) {
 
 	// Simulate many steps completed
 	for i := 0; i < 15; i++ {
-		deps.Session.IncrementMetric("steps", 1)
+		deps.Session.IncrementMetric(agent.MetricSteps, 1)
 	}
 
 	nextState, err := phase.Execute(context.Background(), deps)

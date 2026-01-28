@@ -11,11 +11,44 @@
 package agent
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// MetricField represents a session metric field for type-safe increments.
+type MetricField string
+
+const (
+	// MetricSteps is the total steps metric.
+	MetricSteps MetricField = "steps"
+
+	// MetricTokens is the total tokens metric.
+	MetricTokens MetricField = "tokens"
+
+	// MetricToolCalls is the tool calls metric.
+	MetricToolCalls MetricField = "tool_calls"
+
+	// MetricToolErrors is the tool errors metric.
+	MetricToolErrors MetricField = "tool_errors"
+
+	// MetricLLMCalls is the LLM calls metric.
+	MetricLLMCalls MetricField = "llm_calls"
+
+	// MetricCacheHits is the cache hits metric.
+	MetricCacheHits MetricField = "cache_hits"
+)
+
+// ValidContextEvictionPolicies contains valid eviction policy values.
+var ValidContextEvictionPolicies = []string{"lru", "relevance", "hybrid"}
+
+// ValidSafetyCheckScopes contains valid safety check scope values.
+var ValidSafetyCheckScopes = []string{"changed_files", "blast_radius", "full"}
+
+// ValidDegradationModes contains valid degradation mode values.
+var ValidDegradationModes = []string{"fallback", "fail", "ask"}
 
 // SessionConfig holds all tunable parameters for a session.
 //
@@ -134,32 +167,59 @@ func DefaultSessionConfig() *SessionConfig {
 
 // Validate checks that the configuration is valid.
 //
+// Description:
+//
+//	Validates all configuration fields including numeric limits and string enums.
+//	Returns ErrInvalidSession with details if validation fails.
+//
 // Outputs:
 //
-//	error - Non-nil if configuration is invalid
+//	error - Non-nil if configuration is invalid, contains validation details
 func (c *SessionConfig) Validate() error {
 	if c.MaxSteps <= 0 {
-		return ErrInvalidSession
+		return fmt.Errorf("%w: MaxSteps must be positive", ErrInvalidSession)
 	}
 	if c.MaxTokensPerStep <= 0 {
-		return ErrInvalidSession
+		return fmt.Errorf("%w: MaxTokensPerStep must be positive", ErrInvalidSession)
 	}
 	if c.MaxTotalTokens <= 0 {
-		return ErrInvalidSession
+		return fmt.Errorf("%w: MaxTotalTokens must be positive", ErrInvalidSession)
 	}
 	if c.StepTimeout <= 0 {
-		return ErrInvalidSession
+		return fmt.Errorf("%w: StepTimeout must be positive", ErrInvalidSession)
 	}
 	if c.TotalTimeout <= 0 {
-		return ErrInvalidSession
+		return fmt.Errorf("%w: TotalTimeout must be positive", ErrInvalidSession)
 	}
 	if c.InitialContextBudget <= 0 {
-		return ErrInvalidSession
+		return fmt.Errorf("%w: InitialContextBudget must be positive", ErrInvalidSession)
 	}
 	if c.ConfidenceThreshold < 0 || c.ConfidenceThreshold > 1 {
-		return ErrInvalidSession
+		return fmt.Errorf("%w: ConfidenceThreshold must be between 0 and 1", ErrInvalidSession)
 	}
+
+	// Validate string enums
+	if c.ContextEvictionPolicy != "" && !isValidEnum(c.ContextEvictionPolicy, ValidContextEvictionPolicies) {
+		return fmt.Errorf("%w: ContextEvictionPolicy must be one of %v", ErrInvalidSession, ValidContextEvictionPolicies)
+	}
+	if c.SafetyCheckScope != "" && !isValidEnum(c.SafetyCheckScope, ValidSafetyCheckScopes) {
+		return fmt.Errorf("%w: SafetyCheckScope must be one of %v", ErrInvalidSession, ValidSafetyCheckScopes)
+	}
+	if c.DegradationMode != "" && !isValidEnum(c.DegradationMode, ValidDegradationModes) {
+		return fmt.Errorf("%w: DegradationMode must be one of %v", ErrInvalidSession, ValidDegradationModes)
+	}
+
 	return nil
+}
+
+// isValidEnum checks if a value is in the allowed list.
+func isValidEnum(value string, allowed []string) bool {
+	for _, v := range allowed {
+		if value == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Session represents an agent session with all state.
@@ -316,6 +376,11 @@ type Message struct {
 //	    return fmt.Errorf("create session: %w", err)
 //	}
 func NewSession(projectRoot string, config *SessionConfig) (*Session, error) {
+	// Validate projectRoot
+	if projectRoot == "" {
+		return nil, fmt.Errorf("%w: projectRoot must not be empty", ErrInvalidSession)
+	}
+
 	if config == nil {
 		config = DefaultSessionConfig()
 	}
@@ -390,6 +455,16 @@ func (s *Session) AddHistoryEntry(entry HistoryEntry) {
 
 // GetHistory returns a copy of the history.
 //
+// Description:
+//
+//	Returns a shallow copy of the history slice. The slice itself is copied
+//	but HistoryEntry structs are value types so modifications to the returned
+//	slice won't affect the session's internal history.
+//
+// Outputs:
+//
+//	[]HistoryEntry - Copy of the session history
+//
 // Thread Safety: This method is safe for concurrent use.
 func (s *Session) GetHistory() []HistoryEntry {
 	s.mu.RLock()
@@ -401,22 +476,32 @@ func (s *Session) GetHistory() []HistoryEntry {
 
 // IncrementMetric increments a session metric.
 //
+// Description:
+//
+//	Increments the specified metric by the given value. Use the
+//	MetricField constants (MetricSteps, MetricTokens, etc.) for type safety.
+//
+// Inputs:
+//
+//	field - The metric field to increment (use MetricField constants)
+//	value - The amount to add
+//
 // Thread Safety: This method is safe for concurrent use.
-func (s *Session) IncrementMetric(field string, value int) {
+func (s *Session) IncrementMetric(field MetricField, value int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch field {
-	case "steps":
+	case MetricSteps:
 		s.Metrics.TotalSteps += value
-	case "tokens":
+	case MetricTokens:
 		s.Metrics.TotalTokens += value
-	case "tool_calls":
+	case MetricToolCalls:
 		s.Metrics.ToolCalls += value
-	case "tool_errors":
+	case MetricToolErrors:
 		s.Metrics.ToolErrors += value
-	case "llm_calls":
+	case MetricLLMCalls:
 		s.Metrics.LLMCalls += value
-	case "cache_hits":
+	case MetricCacheHits:
 		s.Metrics.CacheHits += value
 	}
 	s.LastActiveAt = time.Now()

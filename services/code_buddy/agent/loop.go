@@ -516,7 +516,7 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 			}
 		}
 
-		session.IncrementMetric("steps", 1)
+		session.IncrementMetric(MetricSteps, 1)
 	}
 }
 

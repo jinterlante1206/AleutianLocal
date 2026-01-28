@@ -169,9 +169,14 @@ func (r *Registry) GetByCategory(category ToolCategory) []Tool {
 
 // GetAll returns all registered tools.
 //
+// Description:
+//
+//	Returns all registered tools sorted by name for deterministic ordering.
+//	The returned slice is a copy and can be safely modified by the caller.
+//
 // Outputs:
 //
-//	[]Tool - All registered tools
+//	[]Tool - All registered tools, sorted by name
 //
 // Thread Safety: This method is safe for concurrent use.
 func (r *Registry) GetAll() []Tool {
@@ -182,6 +187,12 @@ func (r *Registry) GetAll() []Tool {
 	for _, tool := range r.byName {
 		result = append(result, tool)
 	}
+
+	// Sort by name for deterministic ordering
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name() < result[j].Name()
+	})
+
 	return result
 }
 
@@ -290,9 +301,14 @@ func (r *Registry) Names() []string {
 
 // Categories returns all categories that have registered tools.
 //
+// Description:
+//
+//	Returns all categories that have at least one registered tool,
+//	sorted alphabetically for deterministic ordering.
+//
 // Outputs:
 //
-//	[]ToolCategory - Categories with at least one tool
+//	[]ToolCategory - Categories with at least one tool, sorted alphabetically
 //
 // Thread Safety: This method is safe for concurrent use.
 func (r *Registry) Categories() []ToolCategory {
@@ -305,6 +321,12 @@ func (r *Registry) Categories() []ToolCategory {
 			categories = append(categories, category)
 		}
 	}
+
+	// Sort for deterministic ordering
+	sort.Slice(categories, func(i, j int) bool {
+		return categories[i].String() < categories[j].String()
+	})
+
 	return categories
 }
 
