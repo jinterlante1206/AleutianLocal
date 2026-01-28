@@ -1,0 +1,292 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
+// Package tools provides the tool registry and execution framework for the agent.
+//
+// Tools are the primary mechanism for the agent to interact with the codebase
+// and external systems. Each tool is defined by a ToolDefinition that describes
+// its parameters and capabilities, and implements the Tool interface for execution.
+//
+// Thread Safety:
+//
+//	All types in this package are designed for concurrent use.
+package tools
+
+import (
+	"context"
+	"time"
+)
+
+// ToolCategory represents the category a tool belongs to.
+type ToolCategory string
+
+const (
+	// CategoryExploration includes tools for exploring and understanding code.
+	CategoryExploration ToolCategory = "exploration"
+
+	// CategoryReasoning includes tools for reasoning about code.
+	CategoryReasoning ToolCategory = "reasoning"
+
+	// CategorySafety includes tools for security analysis.
+	CategorySafety ToolCategory = "safety"
+
+	// CategoryFile includes tools for file operations.
+	CategoryFile ToolCategory = "file"
+)
+
+// String returns the string representation of the category.
+func (c ToolCategory) String() string {
+	return string(c)
+}
+
+// ParamType represents the type of a tool parameter.
+type ParamType string
+
+const (
+	// ParamTypeString is a string parameter.
+	ParamTypeString ParamType = "string"
+
+	// ParamTypeInt is an integer parameter.
+	ParamTypeInt ParamType = "integer"
+
+	// ParamTypeFloat is a floating-point parameter.
+	ParamTypeFloat ParamType = "number"
+
+	// ParamTypeBool is a boolean parameter.
+	ParamTypeBool ParamType = "boolean"
+
+	// ParamTypeArray is an array parameter.
+	ParamTypeArray ParamType = "array"
+
+	// ParamTypeObject is an object parameter.
+	ParamTypeObject ParamType = "object"
+)
+
+// ParamDef defines a single parameter for a tool.
+type ParamDef struct {
+	// Type is the parameter type.
+	Type ParamType `json:"type"`
+
+	// Description explains what the parameter is for.
+	Description string `json:"description"`
+
+	// Required indicates if the parameter must be provided.
+	Required bool `json:"required"`
+
+	// Default is the default value if not provided.
+	Default any `json:"default,omitempty"`
+
+	// Enum restricts values to a set of options.
+	Enum []any `json:"enum,omitempty"`
+
+	// MinLength is the minimum string length (for string type).
+	MinLength int `json:"minLength,omitempty"`
+
+	// MaxLength is the maximum string length (for string type).
+	MaxLength int `json:"maxLength,omitempty"`
+
+	// Minimum is the minimum value (for numeric types).
+	Minimum *float64 `json:"minimum,omitempty"`
+
+	// Maximum is the maximum value (for numeric types).
+	Maximum *float64 `json:"maximum,omitempty"`
+
+	// Items defines array item type (for array type).
+	Items *ParamDef `json:"items,omitempty"`
+
+	// Properties defines object properties (for object type).
+	Properties map[string]ParamDef `json:"properties,omitempty"`
+}
+
+// ToolDefinition describes a tool's interface for the LLM.
+//
+// This structure is designed to be serializable to JSON Schema format
+// for use with LLM tool calling APIs.
+type ToolDefinition struct {
+	// Name is the unique identifier for the tool.
+	Name string `json:"name"`
+
+	// Description explains what the tool does.
+	Description string `json:"description"`
+
+	// Parameters defines the input parameters.
+	Parameters map[string]ParamDef `json:"parameters"`
+
+	// Category is the tool category (exploration, reasoning, safety, file).
+	Category ToolCategory `json:"category"`
+
+	// Priority influences tool selection (higher = prefer).
+	Priority int `json:"priority"`
+
+	// Requires lists dependencies (e.g., "graph_initialized").
+	Requires []string `json:"requires,omitempty"`
+
+	// SideEffects indicates if the tool modifies state.
+	SideEffects bool `json:"side_effects"`
+
+	// Timeout is the default execution timeout.
+	Timeout time.Duration `json:"timeout,omitempty"`
+
+	// Examples provides usage examples.
+	Examples []ToolExample `json:"examples,omitempty"`
+}
+
+// ToolExample provides an example invocation for a tool.
+type ToolExample struct {
+	// Description explains what the example demonstrates.
+	Description string `json:"description"`
+
+	// Parameters are the example input parameters.
+	Parameters map[string]any `json:"parameters"`
+
+	// ExpectedOutput describes what output to expect.
+	ExpectedOutput string `json:"expected_output,omitempty"`
+}
+
+// RequiredParams returns a list of required parameter names.
+func (d *ToolDefinition) RequiredParams() []string {
+	var required []string
+	for name, param := range d.Parameters {
+		if param.Required {
+			required = append(required, name)
+		}
+	}
+	return required
+}
+
+// Tool defines the interface for executable tools.
+//
+// Implementations must be safe for concurrent use.
+type Tool interface {
+	// Name returns the unique tool name.
+	Name() string
+
+	// Category returns the tool category.
+	Category() ToolCategory
+
+	// Definition returns the tool's parameter schema.
+	Definition() ToolDefinition
+
+	// Execute runs the tool with the given parameters.
+	//
+	// Inputs:
+	//   ctx - Context for cancellation and timeout
+	//   params - Input parameters (validated before call)
+	//
+	// Outputs:
+	//   *Result - Execution result
+	//   error - Non-nil if execution failed
+	Execute(ctx context.Context, params map[string]any) (*Result, error)
+}
+
+// Result contains the outcome of a tool execution.
+type Result struct {
+	// Success indicates if the tool succeeded.
+	Success bool `json:"success"`
+
+	// Output is the tool's output data.
+	Output any `json:"output"`
+
+	// OutputText is a text representation of the output.
+	OutputText string `json:"output_text"`
+
+	// Error contains any error message.
+	Error string `json:"error,omitempty"`
+
+	// Duration is how long execution took.
+	Duration time.Duration `json:"duration"`
+
+	// TokensUsed estimates the output token count.
+	TokensUsed int `json:"tokens_used"`
+
+	// Cached indicates if result came from cache.
+	Cached bool `json:"cached"`
+
+	// Truncated indicates if output was truncated.
+	Truncated bool `json:"truncated"`
+
+	// Metadata contains additional result metadata.
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// Invocation represents a pending or completed tool call.
+type Invocation struct {
+	// ID is a unique identifier for this invocation.
+	ID string `json:"id"`
+
+	// ToolName is the tool to invoke.
+	ToolName string `json:"tool_name"`
+
+	// Parameters are the input parameters.
+	Parameters map[string]any `json:"parameters"`
+
+	// Reason explains why the agent chose this tool.
+	Reason string `json:"reason,omitempty"`
+
+	// StepNumber is the agent step when this was invoked.
+	StepNumber int `json:"step_number"`
+
+	// StartedAt is when execution started.
+	StartedAt time.Time `json:"started_at,omitempty"`
+
+	// CompletedAt is when execution completed.
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+
+	// Result contains the execution result (after completion).
+	Result *Result `json:"result,omitempty"`
+}
+
+// ExecutorOptions configures the tool executor.
+type ExecutorOptions struct {
+	// DefaultTimeout is the default execution timeout.
+	DefaultTimeout time.Duration
+
+	// MaxOutputTokens limits output size (estimated).
+	MaxOutputTokens int
+
+	// EnableCaching enables result caching.
+	EnableCaching bool
+
+	// CacheTTL is how long cached results are valid.
+	CacheTTL time.Duration
+}
+
+// DefaultExecutorOptions returns sensible defaults.
+func DefaultExecutorOptions() ExecutorOptions {
+	return ExecutorOptions{
+		DefaultTimeout:  30 * time.Second,
+		MaxOutputTokens: 4000,
+		EnableCaching:   true,
+		CacheTTL:        5 * time.Minute,
+	}
+}
+
+// ValidationError represents a parameter validation error.
+type ValidationError struct {
+	// Parameter is the parameter name that failed validation.
+	Parameter string `json:"parameter"`
+
+	// Message describes the validation failure.
+	Message string `json:"message"`
+
+	// Expected describes what was expected.
+	Expected string `json:"expected,omitempty"`
+
+	// Actual describes what was received.
+	Actual string `json:"actual,omitempty"`
+}
+
+// Error implements the error interface.
+func (e *ValidationError) Error() string {
+	if e.Expected != "" && e.Actual != "" {
+		return e.Parameter + ": " + e.Message + " (expected " + e.Expected + ", got " + e.Actual + ")"
+	}
+	return e.Parameter + ": " + e.Message
+}
