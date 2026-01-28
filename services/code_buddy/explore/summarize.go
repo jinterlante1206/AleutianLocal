@@ -211,7 +211,11 @@ func (s *FileSummarizer) SummarizePackage(ctx context.Context, packagePath strin
 	} {
 		symbols := s.index.GetByKind(kind)
 		for _, sym := range symbols {
-			if sym.Package == packagePath {
+			// Match package by:
+			// 1. Exact match (e.g., "main" == "main")
+			// 2. File path contains the package directory (e.g., "pkg/handlers/user.go" contains "handlers")
+			// 3. Package path suffix (e.g., "github.com/foo/handlers" ends with "handlers")
+			if matchesPackage(sym, packagePath) {
 				fileSet[sym.FilePath] = true
 			}
 		}
@@ -469,7 +473,8 @@ func (s *PackageAPISummarizer) FindPackageAPI(ctx context.Context, packagePath s
 
 		symbols := s.index.GetByKind(kp.kind)
 		for _, sym := range symbols {
-			if sym.Package != packagePath {
+			// Use flexible package matching (handles path variants)
+			if !matchesPackage(sym, packagePath) {
 				continue
 			}
 			if !sym.Exported {
@@ -503,4 +508,61 @@ func sortAPISymbols(symbols []APISymbol) {
 	sort.Slice(symbols, func(i, j int) bool {
 		return symbols[i].Name < symbols[j].Name
 	})
+}
+
+// matchesPackage checks if a symbol belongs to the given package path.
+//
+// Description:
+//
+//	Matches packages using multiple strategies to handle different naming conventions:
+//	1. Exact match (e.g., "main" == "main")
+//	2. Package name matches the last component of a path (e.g., "handlers" matches "pkg/handlers")
+//	3. File path contains the package directory (e.g., "pkg/handlers/user.go" for "handlers")
+//
+// Inputs:
+//
+//	sym - The symbol to check
+//	packagePath - The package path to match against
+//
+// Outputs:
+//
+//	bool - True if the symbol belongs to the package
+func matchesPackage(sym *ast.Symbol, packagePath string) bool {
+	if sym == nil {
+		return false
+	}
+
+	// Strategy 1: Exact package name match
+	if sym.Package == packagePath {
+		return true
+	}
+
+	// Strategy 2: Package name matches the last component
+	// e.g., "handlers" should match symbols with package "handlers"
+	// where the file is in "pkg/handlers/user.go"
+	lastSlash := strings.LastIndex(packagePath, "/")
+	if lastSlash >= 0 {
+		lastComponent := packagePath[lastSlash+1:]
+		if sym.Package == lastComponent {
+			// Verify the file path matches the directory structure
+			if strings.Contains(sym.FilePath, packagePath+"/") || strings.HasPrefix(sym.FilePath, packagePath+"/") {
+				return true
+			}
+		}
+	}
+
+	// Strategy 3: File path contains the package directory
+	// This handles cases where packagePath is a directory like "handlers"
+	// and the file is "pkg/handlers/user.go"
+	if strings.Contains(sym.FilePath, "/"+packagePath+"/") || strings.HasPrefix(sym.FilePath, packagePath+"/") {
+		return true
+	}
+
+	// Strategy 4: Package ends with the given path component
+	// e.g., "github.com/foo/handlers" ends with "/handlers"
+	if strings.HasSuffix(sym.Package, "/"+packagePath) {
+		return true
+	}
+
+	return false
 }

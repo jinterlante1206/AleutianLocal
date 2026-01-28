@@ -144,7 +144,10 @@ type FileChange struct {
 // ChangePlan is the coordinated plan for all files.
 type ChangePlan struct {
 	// ID is a unique identifier for this plan.
-	ID string `json:"id"`
+	ID string `json:"plan_id"`
+
+	// GraphID is the ID of the graph this plan was created for.
+	GraphID string `json:"graph_id,omitempty"`
 
 	// Description explains the overall change.
 	Description string `json:"description"`
@@ -179,6 +182,32 @@ type ChangePlan struct {
 
 	// CreatedAt is when the plan was created.
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// GetID returns the plan's unique identifier.
+//
+// Description:
+//
+//	Returns the plan ID for storage and retrieval.
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (p *ChangePlan) GetID() string {
+	return p.ID
+}
+
+// GetGraphID returns the graph ID this plan was created for.
+//
+// Description:
+//
+//	Returns the graph ID for plan retrieval and validation.
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (p *ChangePlan) GetGraphID() string {
+	return p.GraphID
 }
 
 // Hunk represents a section of changed lines in a diff.
