@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
@@ -124,4 +125,34 @@ func SaveMemoryChunk(client *weaviate.Client, sessionId, question, answer string
 		"sessionId", sessionId,
 		"turnNumber", turnNumber,
 		"source", source)
+}
+
+// SaveMemoryChunkWithSummary saves the memory chunk and generates a session summary on first turn.
+//
+// # Description
+//
+// Wraps SaveMemoryChunk and additionally calls SummarizeAndSaveSession when turnNumber is 1.
+// This ensures the session exists before attempting to update its summary, avoiding race conditions.
+//
+// # Inputs
+//
+//   - llmClient: LLM client for summary generation.
+//   - client: Weaviate client for database access.
+//   - sessionId: The session ID to associate with this memory chunk.
+//   - question: The user's question for this turn.
+//   - answer: The AI's response for this turn.
+//   - turnNumber: The sequential turn number within the session (1-indexed).
+//   - sessionCtx: Session context with dataspace, pipeline, and TTL.
+//
+// # Thread Safety
+//
+// This function is safe to call from a goroutine.
+func SaveMemoryChunkWithSummary(llmClient llm.LLMClient, client *weaviate.Client, sessionId, question, answer string, turnNumber int, sessionCtx datatypes.SessionContext) {
+	// First, save the memory chunk (this creates the Session if needed)
+	SaveMemoryChunk(client, sessionId, question, answer, turnNumber, sessionCtx)
+
+	// Then generate summary on first turn (session now guaranteed to exist)
+	if turnNumber == 1 {
+		SummarizeAndSaveSession(llmClient, client, sessionId, question, answer)
+	}
 }

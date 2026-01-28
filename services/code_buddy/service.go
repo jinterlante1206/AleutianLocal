@@ -89,6 +89,22 @@ type Service struct {
 
 	// libDocProvider is optional library documentation provider
 	libDocProvider cbcontext.LibraryDocProvider
+
+	// plans holds cached change plans for validation and preview
+	plans   map[string]*CachedPlan
+	plansMu sync.RWMutex
+}
+
+// CachedPlan holds a change plan and its associated graph ID.
+type CachedPlan struct {
+	// GraphID is the graph this plan was created for.
+	GraphID string
+
+	// Plan is the change plan.
+	Plan interface{} // *coordinate.ChangePlan
+
+	// CreatedAt is when the plan was created.
+	CreatedAt time.Time
 }
 
 // NewService creates a new Code Buddy service.
@@ -110,6 +126,7 @@ func NewService(config ServiceConfig) *Service {
 		config:   config,
 		graphs:   make(map[string]*CachedGraph),
 		registry: ast.NewParserRegistry(),
+		plans:    make(map[string]*CachedPlan),
 	}
 
 	// Register default parsers
@@ -653,6 +670,161 @@ func (s *Service) evictIfNeeded() {
 		}
 		if oldestID != "" {
 			delete(s.graphs, oldestID)
+		}
+	}
+}
+
+// =============================================================================
+// PLAN STORAGE METHODS (CB-22b)
+// =============================================================================
+
+// StorePlan stores a change plan for later validation and preview.
+//
+// Description:
+//
+//	Stores the plan with its associated graph ID so it can be retrieved
+//	for validation and preview. Plans expire after 1 hour.
+//
+// Inputs:
+//
+//	plan - The change plan (must have ID field)
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) StorePlan(plan interface{}) {
+	s.plansMu.Lock()
+	defer s.plansMu.Unlock()
+
+	// Extract plan ID and graph ID via reflection or type assertion
+	// For now we use a type switch
+	type planWithID interface {
+		GetID() string
+	}
+
+	var planID string
+	var graphID string
+
+	// Type assertion for coordinate.ChangePlan
+	if p, ok := plan.(interface{ GetID() string }); ok {
+		planID = p.GetID()
+	}
+
+	// Try to get GraphID if available
+	if p, ok := plan.(interface{ GetGraphID() string }); ok {
+		graphID = p.GetGraphID()
+	}
+
+	// Fallback: use the plan pointer address as ID
+	if planID == "" {
+		planID = fmt.Sprintf("plan_%d", time.Now().UnixNano())
+	}
+
+	s.plans[planID] = &CachedPlan{
+		GraphID:   graphID,
+		Plan:      plan,
+		CreatedAt: time.Now(),
+	}
+
+	// Evict old plans (keep last 100)
+	s.evictOldPlans()
+}
+
+// GetPlan retrieves a stored change plan by ID.
+//
+// Description:
+//
+//	Returns the plan if found and not expired.
+//
+// Inputs:
+//
+//	planID - The plan ID
+//
+// Outputs:
+//
+//	interface{} - The plan (caller casts to *coordinate.ChangePlan)
+//	error - Non-nil if plan not found
+func (s *Service) GetPlan(planID string) (interface{}, error) {
+	s.plansMu.RLock()
+	defer s.plansMu.RUnlock()
+
+	cached, ok := s.plans[planID]
+	if !ok {
+		return nil, fmt.Errorf("plan not found: %s", planID)
+	}
+
+	// Check expiry (1 hour)
+	if time.Since(cached.CreatedAt) > time.Hour {
+		return nil, fmt.Errorf("plan expired: %s", planID)
+	}
+
+	return cached.Plan, nil
+}
+
+// GetGraphForPlan returns the graph associated with a plan.
+//
+// Description:
+//
+//	Finds the graph that was used to create the plan.
+//
+// Inputs:
+//
+//	plan - The change plan
+//
+// Outputs:
+//
+//	*CachedGraph - The graph
+//	error - Non-nil if graph not found
+func (s *Service) GetGraphForPlan(plan interface{}) (*CachedGraph, error) {
+	// Try to get GraphID from the plan
+	var graphID string
+	if p, ok := plan.(interface{ GetGraphID() string }); ok {
+		graphID = p.GetGraphID()
+	}
+
+	if graphID == "" {
+		// Search for the plan in cache to find graph ID
+		s.plansMu.RLock()
+		for _, cached := range s.plans {
+			if cached.Plan == plan {
+				graphID = cached.GraphID
+				break
+			}
+		}
+		s.plansMu.RUnlock()
+	}
+
+	if graphID == "" {
+		return nil, fmt.Errorf("could not determine graph ID for plan")
+	}
+
+	return s.GetGraph(graphID)
+}
+
+// evictOldPlans removes plans older than 1 hour or if over 100 plans.
+func (s *Service) evictOldPlans() {
+	maxPlans := 100
+	maxAge := time.Hour
+
+	// Remove expired plans
+	for id, cached := range s.plans {
+		if time.Since(cached.CreatedAt) > maxAge {
+			delete(s.plans, id)
+		}
+	}
+
+	// If still over limit, remove oldest
+	for len(s.plans) > maxPlans {
+		var oldestID string
+		var oldestTime time.Time = time.Now()
+		for id, cached := range s.plans {
+			if cached.CreatedAt.Before(oldestTime) {
+				oldestTime = cached.CreatedAt
+				oldestID = id
+			}
+		}
+		if oldestID != "" {
+			delete(s.plans, oldestID)
 		}
 	}
 }

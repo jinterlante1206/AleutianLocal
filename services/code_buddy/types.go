@@ -273,7 +273,7 @@ func SymbolInfoFromAST(s *ast.Symbol) *SymbolInfo {
 }
 
 // =============================================================================
-// Agent API Types
+// Agent API Types (CB-11 Agent Loop)
 // =============================================================================
 
 // AgentRunRequest is the request body for POST /v1/codebuddy/agent/run.
@@ -359,4 +359,216 @@ type AgentStateResponse struct {
 
 	// DegradedMode indicates if running with limited capabilities.
 	DegradedMode bool `json:"degraded_mode"`
+}
+
+// =============================================================================
+// AGENTIC TOOL TYPES (CB-20/21/22/23 Tool Endpoints)
+// =============================================================================
+// Request and response types for the agentic reasoning layer tools.
+// These wrap the internal package types for HTTP API consumption.
+
+// ToolsResponse is the response for GET /v1/codebuddy/tools.
+type ToolsResponse struct {
+	Tools []ToolDefinition `json:"tools"`
+}
+
+// --- Exploration Tool Types ---
+
+// FindEntryPointsRequest is the request for POST /v1/codebuddy/explore/entry_points.
+type FindEntryPointsRequest struct {
+	GraphID      string `json:"graph_id" binding:"required"`
+	Type         string `json:"type"`
+	Package      string `json:"package"`
+	Limit        int    `json:"limit"`
+	IncludeTests bool   `json:"include_tests"`
+}
+
+// TraceDataFlowRequest is the request for POST /v1/codebuddy/explore/data_flow.
+type TraceDataFlowRequest struct {
+	GraphID     string `json:"graph_id" binding:"required"`
+	SourceID    string `json:"source_id" binding:"required"`
+	MaxHops     int    `json:"max_hops"`
+	IncludeCode bool   `json:"include_code"`
+}
+
+// TraceErrorFlowRequest is the request for POST /v1/codebuddy/explore/error_flow.
+type TraceErrorFlowRequest struct {
+	GraphID string `json:"graph_id" binding:"required"`
+	Scope   string `json:"scope" binding:"required"`
+	MaxHops int    `json:"max_hops"`
+}
+
+// FindConfigUsageRequest is the request for POST /v1/codebuddy/explore/config_usage.
+type FindConfigUsageRequest struct {
+	GraphID         string `json:"graph_id" binding:"required"`
+	ConfigKey       string `json:"config_key" binding:"required"`
+	IncludeDefaults bool   `json:"include_defaults"`
+}
+
+// FindSimilarCodeRequest is the request for POST /v1/codebuddy/explore/similar_code.
+type FindSimilarCodeRequest struct {
+	GraphID       string  `json:"graph_id" binding:"required"`
+	SymbolID      string  `json:"symbol_id" binding:"required"`
+	MinSimilarity float64 `json:"min_similarity"`
+	Limit         int     `json:"limit"`
+}
+
+// BuildMinimalContextRequest is the request for POST /v1/codebuddy/explore/minimal_context.
+type BuildMinimalContextRequest struct {
+	GraphID        string `json:"graph_id" binding:"required"`
+	SymbolID       string `json:"symbol_id" binding:"required"`
+	TokenBudget    int    `json:"token_budget"`
+	IncludeCallees bool   `json:"include_callees"`
+}
+
+// SummarizeFileRequest is the request for POST /v1/codebuddy/explore/summarize_file.
+type SummarizeFileRequest struct {
+	GraphID  string `json:"graph_id" binding:"required"`
+	FilePath string `json:"file_path" binding:"required"`
+}
+
+// SummarizePackageRequest is the request for POST /v1/codebuddy/explore/summarize_package.
+type SummarizePackageRequest struct {
+	GraphID string `json:"graph_id" binding:"required"`
+	Package string `json:"package" binding:"required"`
+}
+
+// AnalyzeChangeImpactRequest is the request for POST /v1/codebuddy/explore/change_impact.
+type AnalyzeChangeImpactRequest struct {
+	GraphID    string `json:"graph_id" binding:"required"`
+	SymbolID   string `json:"symbol_id" binding:"required"`
+	ChangeType string `json:"change_type"`
+}
+
+// --- Reasoning Tool Types ---
+
+// CheckBreakingChangesRequest is the request for POST /v1/codebuddy/reason/breaking_changes.
+type CheckBreakingChangesRequest struct {
+	GraphID           string `json:"graph_id" binding:"required"`
+	SymbolID          string `json:"symbol_id" binding:"required"`
+	ProposedSignature string `json:"proposed_signature" binding:"required"`
+}
+
+// SimulateChangeRequest is the request for POST /v1/codebuddy/reason/simulate_change.
+type SimulateChangeRequest struct {
+	GraphID       string                 `json:"graph_id" binding:"required"`
+	SymbolID      string                 `json:"symbol_id" binding:"required"`
+	ChangeType    string                 `json:"change_type" binding:"required"`
+	ChangeDetails map[string]interface{} `json:"change_details" binding:"required"`
+}
+
+// ValidateChangeRequest is the request for POST /v1/codebuddy/reason/validate_change.
+type ValidateChangeRequest struct {
+	Code     string `json:"code" binding:"required"`
+	Language string `json:"language" binding:"required"`
+}
+
+// FindTestCoverageRequest is the request for POST /v1/codebuddy/reason/test_coverage.
+type FindTestCoverageRequest struct {
+	GraphID         string `json:"graph_id" binding:"required"`
+	SymbolID        string `json:"symbol_id" binding:"required"`
+	IncludeIndirect bool   `json:"include_indirect"`
+}
+
+// DetectSideEffectsRequest is the request for POST /v1/codebuddy/reason/side_effects.
+type DetectSideEffectsRequest struct {
+	GraphID    string `json:"graph_id" binding:"required"`
+	SymbolID   string `json:"symbol_id" binding:"required"`
+	Transitive bool   `json:"transitive"`
+}
+
+// SuggestRefactorRequest is the request for POST /v1/codebuddy/reason/suggest_refactor.
+type SuggestRefactorRequest struct {
+	GraphID  string `json:"graph_id" binding:"required"`
+	SymbolID string `json:"symbol_id" binding:"required"`
+}
+
+// --- Coordination Tool Types ---
+
+// PlanMultiFileChangeRequest is the request for POST /v1/codebuddy/coordinate/plan_changes.
+type PlanMultiFileChangeRequest struct {
+	GraphID      string `json:"graph_id" binding:"required"`
+	TargetID     string `json:"target_id" binding:"required"`
+	ChangeType   string `json:"change_type" binding:"required"`
+	NewSignature string `json:"new_signature"`
+	NewName      string `json:"new_name"`
+	Description  string `json:"description"`
+	IncludeTests bool   `json:"include_tests"`
+}
+
+// ValidatePlanRequest is the request for POST /v1/codebuddy/coordinate/validate_plan.
+type ValidatePlanRequest struct {
+	PlanID string `json:"plan_id" binding:"required"`
+}
+
+// PreviewChangesRequest is the request for POST /v1/codebuddy/coordinate/preview_changes.
+type PreviewChangesRequest struct {
+	PlanID       string `json:"plan_id" binding:"required"`
+	ContextLines int    `json:"context_lines"`
+}
+
+// --- Pattern Tool Types ---
+
+// DetectPatternsRequest is the request for POST /v1/codebuddy/patterns/detect.
+type DetectPatternsRequest struct {
+	GraphID       string   `json:"graph_id" binding:"required"`
+	Scope         string   `json:"scope"`
+	Patterns      []string `json:"patterns"`
+	MinConfidence float64  `json:"min_confidence"`
+}
+
+// FindCodeSmellsRequest is the request for POST /v1/codebuddy/patterns/code_smells.
+type FindCodeSmellsRequest struct {
+	GraphID      string `json:"graph_id" binding:"required"`
+	Scope        string `json:"scope"`
+	MinSeverity  string `json:"min_severity"`
+	IncludeTests bool   `json:"include_tests"`
+}
+
+// FindDuplicationRequest is the request for POST /v1/codebuddy/patterns/duplication.
+type FindDuplicationRequest struct {
+	GraphID       string  `json:"graph_id" binding:"required"`
+	Scope         string  `json:"scope"`
+	MinSimilarity float64 `json:"min_similarity"`
+	Type          string  `json:"type"`
+	IncludeTests  bool    `json:"include_tests"`
+}
+
+// FindCircularDepsRequest is the request for POST /v1/codebuddy/patterns/circular_deps.
+type FindCircularDepsRequest struct {
+	GraphID string `json:"graph_id" binding:"required"`
+	Scope   string `json:"scope"`
+	Level   string `json:"level"`
+}
+
+// ExtractConventionsRequest is the request for POST /v1/codebuddy/patterns/conventions.
+type ExtractConventionsRequest struct {
+	GraphID      string   `json:"graph_id" binding:"required"`
+	Scope        string   `json:"scope"`
+	Types        []string `json:"types"`
+	IncludeTests bool     `json:"include_tests"`
+}
+
+// FindDeadCodeRequest is the request for POST /v1/codebuddy/patterns/dead_code.
+type FindDeadCodeRequest struct {
+	GraphID         string `json:"graph_id" binding:"required"`
+	Scope           string `json:"scope"`
+	IncludeExported bool   `json:"include_exported"`
+}
+
+// --- Common Response Wrapper ---
+
+// AgenticResponse wraps all agentic tool responses with latency tracking.
+type AgenticResponse struct {
+	// Result contains the actual response data.
+	Result interface{} `json:"result"`
+
+	// LatencyMs is the time taken to process the request in milliseconds.
+	LatencyMs int64 `json:"latency_ms"`
+
+	// Warnings contains non-fatal warnings if any.
+	Warnings []string `json:"warnings,omitempty"`
+
+	// Limitations documents what couldn't be analyzed.
+	Limitations []string `json:"limitations,omitempty"`
 }
