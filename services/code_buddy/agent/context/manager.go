@@ -117,14 +117,29 @@ type Manager struct {
 //
 // Inputs:
 //
-//	g - The code graph. Must be frozen.
-//	idx - The symbol index.
+//	g - The code graph. Must be frozen. Must not be nil.
+//	idx - The symbol index. Must not be nil.
 //	config - Manager configuration (nil uses defaults).
 //
 // Outputs:
 //
-//	*Manager - The configured manager.
-func NewManager(g *graph.Graph, idx *index.SymbolIndex, config *ManagerConfig) *Manager {
+//	*Manager - The configured manager, or nil if validation fails.
+//	error - Non-nil if g or idx is nil.
+//
+// Example:
+//
+//	manager, err := NewManager(graph, index, nil)
+//	if err != nil {
+//	    return fmt.Errorf("create context manager: %w", err)
+//	}
+func NewManager(g *graph.Graph, idx *index.SymbolIndex, config *ManagerConfig) (*Manager, error) {
+	if g == nil {
+		return nil, fmt.Errorf("graph must not be nil")
+	}
+	if idx == nil {
+		return nil, fmt.Errorf("symbol index must not be nil")
+	}
+
 	cfg := DefaultManagerConfig()
 	if config != nil {
 		cfg = *config
@@ -137,7 +152,7 @@ func NewManager(g *graph.Graph, idx *index.SymbolIndex, config *ManagerConfig) *
 		config:    cfg,
 		relevance: make(map[string]float64),
 		addedAt:   make(map[string]int),
-	}
+	}, nil
 }
 
 // Assemble builds initial context for a query.
@@ -203,6 +218,27 @@ func (m *Manager) Assemble(ctx context.Context, query string, budget int) (*agen
 }
 
 // parseContextEntries parses the assembled context into structured entries.
+//
+// Description:
+//
+//	Converts the raw context string and symbol IDs from the Assembler
+//	into structured CodeEntry objects suitable for the agent loop.
+//	Each entry is assigned a relevance score based on its position
+//	in the symbol list (assuming ordered by relevance from Assembler).
+//
+// Inputs:
+//
+//	contextStr - The raw context string from Assembler (used for token estimation).
+//	symbolIDs - List of symbol IDs included in the context, ordered by relevance.
+//
+// Outputs:
+//
+//	[]agent.CodeEntry - Structured entries with relevance scores and metadata.
+//
+// Limitations:
+//
+//	Currently uses simple position-based relevance scoring (1.0 - 0.05*index).
+//	Does not parse contextStr for detailed content extraction.
 func (m *Manager) parseContextEntries(contextStr string, symbolIDs []string) []agent.CodeEntry {
 	entries := make([]agent.CodeEntry, 0, len(symbolIDs))
 
@@ -479,6 +515,31 @@ func (m *Manager) evictHybrid(current *agent.AssembledContext, tokensToFree int)
 }
 
 // removeEntries removes entries at the specified indices.
+//
+// Description:
+//
+//	Removes code entries from the context at the specified indices.
+//	Also cleans up the manager's internal tracking maps (relevance, addedAt)
+//	and updates the context's relevance map and total token count.
+//
+// Inputs:
+//
+//	current - The context to modify. MUTATED IN PLACE.
+//	toRemove - Map of indices to remove (true = remove).
+//
+// Outputs:
+//
+//	*agent.AssembledContext - The same pointer as input (modified).
+//
+// Limitations:
+//
+//	MUTATES the input context. The caller should be aware that the
+//	original context is modified rather than a new copy being returned.
+//	For immutable behavior, use copyContext before calling this method.
+//
+// Thread Safety:
+//
+//	Caller must hold the Manager's write lock.
 func (m *Manager) removeEntries(current *agent.AssembledContext, toRemove map[int]bool) *agent.AssembledContext {
 	newContext := make([]agent.CodeEntry, 0, len(current.CodeContext)-len(toRemove))
 	tokenReduction := 0

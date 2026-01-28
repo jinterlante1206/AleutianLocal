@@ -286,19 +286,29 @@ func TestEmitter_Metadata(t *testing.T) {
 		received = e
 	})
 
-	emitter.EmitWithMetadata(TypeStateTransition, nil, map[string]any{
-		"key1": "value1",
-		"key2": 123,
+	emitter.EmitWithMetadata(TypeStateTransition, nil, &EventMetadata{
+		TraceID:  "trace123",
+		Source:   "test",
+		Priority: 5,
+		Tags: map[string]string{
+			"key1": "value1",
+		},
 	})
 
 	if received.Metadata == nil {
 		t.Fatal("expected metadata")
 	}
-	if received.Metadata["key1"] != "value1" {
-		t.Errorf("Metadata[key1] = %v, want value1", received.Metadata["key1"])
+	if received.Metadata.TraceID != "trace123" {
+		t.Errorf("Metadata.TraceID = %v, want trace123", received.Metadata.TraceID)
 	}
-	if received.Metadata["key2"] != 123 {
-		t.Errorf("Metadata[key2] = %v, want 123", received.Metadata["key2"])
+	if received.Metadata.Source != "test" {
+		t.Errorf("Metadata.Source = %v, want test", received.Metadata.Source)
+	}
+	if received.Metadata.Priority != 5 {
+		t.Errorf("Metadata.Priority = %v, want 5", received.Metadata.Priority)
+	}
+	if received.Metadata.Tags["key1"] != "value1" {
+		t.Errorf("Metadata.Tags[key1] = %v, want value1", received.Metadata.Tags["key1"])
 	}
 }
 

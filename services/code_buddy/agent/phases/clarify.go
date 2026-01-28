@@ -13,6 +13,7 @@ package phases
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
@@ -27,6 +28,8 @@ import (
 //
 // Thread Safety: ClarifyPhase is safe for concurrent use.
 type ClarifyPhase struct {
+	mu sync.RWMutex
+
 	// defaultPrompt is used when no specific prompt is provided.
 	defaultPrompt string
 
@@ -93,17 +96,29 @@ func (p *ClarifyPhase) Name() string {
 //
 //	input - The user's clarification text.
 //
-// Thread Safety: This method is NOT safe for concurrent use.
-// Caller should ensure exclusive access during clarification flow.
+// Thread Safety: This method is safe for concurrent use.
 func (p *ClarifyPhase) SetClarificationInput(input string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.clarificationInput = input
 }
 
 // ClearClarificationInput clears any pending clarification input.
 //
-// Thread Safety: This method is NOT safe for concurrent use.
+// Thread Safety: This method is safe for concurrent use.
 func (p *ClarifyPhase) ClearClarificationInput() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.clarificationInput = ""
+}
+
+// getClarificationInput returns the current clarification input.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *ClarifyPhase) getClarificationInput() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.clarificationInput
 }
 
 // Execute implements Phase.
@@ -131,8 +146,8 @@ func (p *ClarifyPhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		return agent.StateError, err
 	}
 
-	// Check if we have clarification input
-	if p.clarificationInput == "" {
+	// Check if we have clarification input (thread-safe access)
+	if p.getClarificationInput() == "" {
 		// No input yet - return to signal we're awaiting clarification
 		// The agent loop should pause and wait for user input
 		return agent.StateClarify, agent.ErrAwaitingClarification
@@ -173,12 +188,11 @@ func (p *ClarifyPhase) validateDependencies(deps *Dependencies) error {
 //	agent.AgentState - PLAN to re-analyze with clarification.
 //	error - Non-nil if processing fails.
 func (p *ClarifyPhase) processClarification(ctx context.Context, deps *Dependencies) (agent.AgentState, error) {
-	// Add clarification to conversation history
-	p.addClarificationToContext(deps)
+	// Get the clarification (thread-safe) and clear it atomically
+	clarification := p.getAndClearClarification()
 
-	// Clear the pending clarification
-	clarification := p.clarificationInput
-	p.ClearClarificationInput()
+	// Add clarification to conversation history
+	p.addClarificationToContext(deps, clarification)
 
 	// Emit context update event
 	p.emitContextUpdate(deps, clarification)
@@ -189,18 +203,30 @@ func (p *ClarifyPhase) processClarification(ctx context.Context, deps *Dependenc
 	return agent.StatePlan, nil
 }
 
+// getAndClearClarification atomically gets and clears the clarification input.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *ClarifyPhase) getAndClearClarification() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	clarification := p.clarificationInput
+	p.clarificationInput = ""
+	return clarification
+}
+
 // addClarificationToContext adds the clarification to conversation history.
 //
 // Inputs:
 //
 //	deps - Phase dependencies.
-func (p *ClarifyPhase) addClarificationToContext(deps *Dependencies) {
+//	clarification - The user's clarification text.
+func (p *ClarifyPhase) addClarificationToContext(deps *Dependencies, clarification string) {
 	if deps.Context == nil || deps.ContextManager == nil {
 		return
 	}
 
 	// Add as a user message
-	deps.ContextManager.AddMessage(deps.Context, "user", p.clarificationInput)
+	deps.ContextManager.AddMessage(deps.Context, "user", clarification)
 }
 
 // GetClarificationPrompt returns the prompt to show the user.

@@ -11,11 +11,30 @@
 package events
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// EventMetadata contains typed additional context for events.
+type EventMetadata struct {
+	// TraceID links the event to a distributed trace.
+	TraceID string `json:"trace_id,omitempty"`
+
+	// SpanID links the event to a specific span.
+	SpanID string `json:"span_id,omitempty"`
+
+	// Source identifies where the event originated.
+	Source string `json:"source,omitempty"`
+
+	// Tags are key-value pairs for categorization.
+	Tags map[string]string `json:"tags,omitempty"`
+
+	// Priority indicates event importance (higher = more important).
+	Priority int `json:"priority,omitempty"`
+}
 
 // Handler is a function that processes events.
 type Handler func(event *Event)
@@ -155,12 +174,21 @@ func (e *Emitter) Emit(eventType Type, data any) {
 
 // EmitWithMetadata broadcasts an event with additional metadata.
 //
+// Description:
+//
+//	Creates an event with the specified type, data, and metadata, then
+//	broadcasts it to all matching subscribers. The event is also buffered
+//	for later retrieval. Handler panics are recovered to prevent one
+//	failing handler from crashing the emitter.
+//
 // Inputs:
 //
 //	eventType - The type of event.
-//	data - Event-specific data.
-//	metadata - Additional context.
-func (e *Emitter) EmitWithMetadata(eventType Type, data any, metadata map[string]any) {
+//	data - Event-specific data (use typed data structs from types.go).
+//	metadata - Additional context (nil is allowed).
+//
+// Thread Safety: This method is safe for concurrent use.
+func (e *Emitter) EmitWithMetadata(eventType Type, data any, metadata *EventMetadata) {
 	e.mu.RLock()
 	sessionID := e.sessionID
 	step := e.currentStep
@@ -189,13 +217,37 @@ func (e *Emitter) EmitWithMetadata(eventType Type, data any, metadata map[string
 	e.buffer = append(e.buffer, event)
 	e.mu.Unlock()
 
-	// Notify subscribers
+	// Notify subscribers with panic recovery
 	for _, sub := range subs {
 		if e.shouldHandle(sub, &event) {
-			// Run handlers synchronously to ensure ordering
-			sub.Handler(&event)
+			e.safeInvokeHandler(sub.Handler, &event)
 		}
 	}
+}
+
+// safeInvokeHandler invokes a handler with panic recovery.
+//
+// Description:
+//
+//	Calls the handler function with panic recovery to prevent one
+//	misbehaving handler from crashing the entire emitter or causing
+//	other handlers to miss events.
+//
+// Inputs:
+//
+//	handler - The handler function to invoke.
+//	event - The event to pass to the handler.
+func (e *Emitter) safeInvokeHandler(handler Handler, event *Event) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("event handler panicked",
+				"event_type", event.Type,
+				"event_id", event.ID,
+				"panic", r,
+			)
+		}
+	}()
+	handler(event)
 }
 
 // shouldHandle determines if a subscription should handle an event.
@@ -321,6 +373,11 @@ func NewMockEmitter() *MockEmitter {
 
 // Emit records an event.
 func (m *MockEmitter) Emit(eventType Type, data any) {
+	m.EmitWithMetadata(eventType, data, nil)
+}
+
+// EmitWithMetadata records an event with metadata.
+func (m *MockEmitter) EmitWithMetadata(eventType Type, data any, metadata *EventMetadata) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -329,6 +386,7 @@ func (m *MockEmitter) Emit(eventType Type, data any) {
 		Type:      eventType,
 		Timestamp: time.Now(),
 		Data:      data,
+		Metadata:  metadata,
 	})
 }
 

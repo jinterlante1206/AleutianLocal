@@ -66,6 +66,17 @@ const (
 )
 
 // Event represents an agent event.
+//
+// Description:
+//
+//	Events are the primary mechanism for observing agent behavior.
+//	Each event has a type that determines the structure of its Data field.
+//	Use the appropriate typed data struct (StateTransitionData, ToolResultData, etc.)
+//	when setting the Data field.
+//
+// Thread Safety:
+//
+//	Event structs should be treated as immutable after creation.
 type Event struct {
 	// ID is a unique identifier for this event.
 	ID string `json:"id"`
@@ -82,11 +93,14 @@ type Event struct {
 	// Step is the agent step number when this event occurred.
 	Step int `json:"step"`
 
-	// Data contains event-specific data.
+	// Data contains event-specific data. Should be one of the typed
+	// data structs: StateTransitionData, ToolInvocationData, ToolResultData,
+	// ContextUpdateData, LLMRequestData, LLMResponseData, SafetyCheckData,
+	// ReflectionData, ErrorData, SessionStartData, SessionEndData, or StepCompleteData.
 	Data any `json:"data,omitempty"`
 
-	// Metadata contains additional context.
-	Metadata map[string]any `json:"metadata,omitempty"`
+	// Metadata contains typed additional context for the event.
+	Metadata *EventMetadata `json:"metadata,omitempty"`
 }
 
 // StateTransitionData is the data for state transition events.
@@ -101,6 +115,21 @@ type StateTransitionData struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// ToolInvocationParameters contains typed parameters for tool invocation events.
+type ToolInvocationParameters struct {
+	// StringParams contains string parameter values.
+	StringParams map[string]string `json:"string_params,omitempty"`
+
+	// IntParams contains integer parameter values.
+	IntParams map[string]int `json:"int_params,omitempty"`
+
+	// BoolParams contains boolean parameter values.
+	BoolParams map[string]bool `json:"bool_params,omitempty"`
+
+	// RawJSON contains the original JSON if parsing into typed maps failed.
+	RawJSON []byte `json:"raw_json,omitempty"`
+}
+
 // ToolInvocationData is the data for tool invocation events.
 type ToolInvocationData struct {
 	// ToolName is the name of the tool being invoked.
@@ -109,8 +138,8 @@ type ToolInvocationData struct {
 	// InvocationID uniquely identifies this invocation.
 	InvocationID string `json:"invocation_id"`
 
-	// Parameters are the tool parameters.
-	Parameters map[string]any `json:"parameters,omitempty"`
+	// Parameters are the typed tool parameters.
+	Parameters *ToolInvocationParameters `json:"parameters,omitempty"`
 }
 
 // ToolResultData is the data for tool result events.
@@ -221,6 +250,30 @@ type ReflectionData struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// ErrorContext contains typed context for error events.
+type ErrorContext struct {
+	// ToolName is the tool that caused the error, if applicable.
+	ToolName string `json:"tool_name,omitempty"`
+
+	// InvocationID links to the tool invocation that failed.
+	InvocationID string `json:"invocation_id,omitempty"`
+
+	// FilePath is the file involved in the error, if applicable.
+	FilePath string `json:"file_path,omitempty"`
+
+	// SymbolID is the symbol involved in the error, if applicable.
+	SymbolID string `json:"symbol_id,omitempty"`
+
+	// Phase is the agent phase where the error occurred.
+	Phase string `json:"phase,omitempty"`
+
+	// StepNumber is the step where the error occurred.
+	StepNumber int `json:"step_number,omitempty"`
+
+	// StackTrace is the stack trace, if available.
+	StackTrace string `json:"stack_trace,omitempty"`
+}
+
 // ErrorData is the data for error events.
 type ErrorData struct {
 	// Error is the error message.
@@ -232,8 +285,8 @@ type ErrorData struct {
 	// Recoverable indicates if the error can be recovered from.
 	Recoverable bool `json:"recoverable"`
 
-	// Context provides additional error context.
-	Context map[string]any `json:"context,omitempty"`
+	// Context provides typed additional error context.
+	Context *ErrorContext `json:"context,omitempty"`
 }
 
 // SessionStartData is the data for session start events.

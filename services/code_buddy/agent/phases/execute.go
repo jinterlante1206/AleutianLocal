@@ -522,12 +522,25 @@ func (p *ExecutePhase) emitToolInvocation(deps *Dependencies, inv *agent.ToolInv
 		return
 	}
 
-	// Convert ToolParameters to map for event data
+	// Convert ToolParameters to event parameters
 	deps.EventEmitter.Emit(events.TypeToolInvocation, &events.ToolInvocationData{
 		ToolName:     inv.Tool,
 		InvocationID: inv.ID,
-		Parameters:   toolParamsToMap(inv.Parameters),
+		Parameters:   toolParamsToEventParams(inv.Parameters),
 	})
+}
+
+// toolParamsToEventParams converts agent.ToolParameters to events.ToolInvocationParameters.
+func toolParamsToEventParams(params *agent.ToolParameters) *events.ToolInvocationParameters {
+	if params == nil {
+		return nil
+	}
+	return &events.ToolInvocationParameters{
+		StringParams: params.StringParams,
+		IntParams:    params.IntParams,
+		BoolParams:   params.BoolParams,
+		RawJSON:      params.RawJSON,
+	}
 }
 
 // emitToolResult emits a tool result event.

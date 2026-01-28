@@ -22,6 +22,7 @@ package safety
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -39,6 +40,33 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
+// ChangeMetadata contains additional typed information about a proposed change.
+type ChangeMetadata struct {
+	// Reason explains why this change is being made.
+	Reason string `json:"reason,omitempty"`
+
+	// ToolName is the tool that initiated this change.
+	ToolName string `json:"tool_name,omitempty"`
+
+	// InvocationID links to the tool invocation.
+	InvocationID string `json:"invocation_id,omitempty"`
+
+	// OldContent is the previous content (for modifications).
+	OldContent string `json:"old_content,omitempty"`
+
+	// LineRange specifies the affected lines (for partial edits).
+	LineRange *LineRange `json:"line_range,omitempty"`
+
+	// Permissions are the requested file permissions (for creates).
+	Permissions string `json:"permissions,omitempty"`
+}
+
+// LineRange specifies a range of lines in a file.
+type LineRange struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
 // ProposedChange represents a change the agent wants to make.
 type ProposedChange struct {
 	// Type is the kind of change (e.g., "file_write", "file_delete", "shell_command").
@@ -50,8 +78,8 @@ type ProposedChange struct {
 	// Content is the proposed content (for writes).
 	Content string `json:"content,omitempty"`
 
-	// Metadata contains additional information about the change.
-	Metadata map[string]any `json:"metadata,omitempty"`
+	// Metadata contains additional typed information about the change.
+	Metadata *ChangeMetadata `json:"metadata,omitempty"`
 }
 
 // Issue represents a safety issue found during checking.
@@ -205,6 +233,28 @@ type DefaultGate struct {
 }
 
 // NewDefaultGate creates a new safety gate with the provided config.
+//
+// Description:
+//
+//	Creates a DefaultGate instance with the specified configuration.
+//	Registers default checkers: PathChecker, CommandChecker, and FileSizeChecker.
+//	If config is nil, uses DefaultGateConfig().
+//
+// Inputs:
+//
+//	config - Gate configuration. If nil, uses defaults.
+//
+// Outputs:
+//
+//	*DefaultGate - The configured gate with default checkers registered.
+//
+// Example:
+//
+//	gate := NewDefaultGate(&GateConfig{
+//	    Enabled:         true,
+//	    BlockOnCritical: true,
+//	    BlockedPaths:    []string{".git", ".env"},
+//	})
 func NewDefaultGate(config *GateConfig) *DefaultGate {
 	cfg := DefaultGateConfig()
 	if config != nil {
@@ -328,7 +378,17 @@ func (g *DefaultGate) GenerateWarnings(result *Result) []string {
 	return warnings
 }
 
-// PathChecker checks for blocked paths.
+// PathChecker validates file operations against blocked path patterns.
+//
+// Description:
+//
+//	Checks if proposed file operations (writes, deletes) target paths
+//	that match blocked patterns defined in the configuration.
+//	Returns critical issues for any blocked path matches.
+//
+// Thread Safety:
+//
+//	PathChecker is safe for concurrent use as it only reads config.
 type PathChecker struct {
 	config GateConfig
 }
@@ -361,7 +421,17 @@ func (c *PathChecker) Check(ctx context.Context, change *ProposedChange) []Issue
 	return issues
 }
 
-// CommandChecker checks for blocked commands.
+// CommandChecker validates shell commands against blocked patterns.
+//
+// Description:
+//
+//	Checks if proposed shell commands contain blocked patterns
+//	defined in the configuration (e.g., "rm -rf", "chmod 777").
+//	Returns critical issues for any blocked command matches.
+//
+// Thread Safety:
+//
+//	CommandChecker is safe for concurrent use as it only reads config.
 type CommandChecker struct {
 	config GateConfig
 }
@@ -394,7 +464,16 @@ func (c *CommandChecker) Check(ctx context.Context, change *ProposedChange) []Is
 	return issues
 }
 
-// FileSizeChecker checks file sizes.
+// FileSizeChecker validates file write sizes against configured limits.
+//
+// Description:
+//
+//	Checks if proposed file write content exceeds the maximum file size
+//	limit defined in the configuration. Returns a warning for oversized files.
+//
+// Thread Safety:
+//
+//	FileSizeChecker is safe for concurrent use as it only reads config.
 type FileSizeChecker struct {
 	config GateConfig
 }
@@ -426,28 +505,47 @@ func (c *FileSizeChecker) Check(ctx context.Context, change *ProposedChange) []I
 }
 
 // containsPath checks if a path contains a blocked pattern.
+//
+// Description:
+//
+//	Checks if the given path matches a blocked pattern. Handles various
+//	path formats: exact match, directory component, or path prefix/suffix.
+//
+// Inputs:
+//
+//	path - The file path to check.
+//	pattern - The blocked pattern to match against.
+//
+// Outputs:
+//
+//	bool - True if the path matches the blocked pattern.
 func containsPath(path, pattern string) bool {
-	// Simple substring check - in practice, use proper path matching
-	return len(pattern) > 0 && len(path) >= len(pattern) &&
-		(path == pattern ||
-			containsSubstring(path, "/"+pattern+"/") ||
-			containsSubstring(path, "/"+pattern) ||
-			containsSubstring(path, pattern+"/"))
+	if len(pattern) == 0 || len(path) < len(pattern) {
+		return false
+	}
+	return path == pattern ||
+		strings.Contains(path, "/"+pattern+"/") ||
+		strings.HasSuffix(path, "/"+pattern) ||
+		strings.HasPrefix(path, pattern+"/")
 }
 
 // containsCommand checks if a command contains a blocked pattern.
+//
+// Description:
+//
+//	Checks if the given command string contains a blocked pattern
+//	using simple substring matching.
+//
+// Inputs:
+//
+//	command - The shell command to check.
+//	pattern - The blocked pattern to match against.
+//
+// Outputs:
+//
+//	bool - True if the command contains the blocked pattern.
 func containsCommand(command, pattern string) bool {
-	return containsSubstring(command, pattern)
-}
-
-// containsSubstring is a simple substring check.
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(command, pattern)
 }
 
 // MockGate is a mock implementation for testing.

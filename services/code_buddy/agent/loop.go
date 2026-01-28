@@ -13,6 +13,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -521,6 +522,21 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 }
 
 // executePhase runs the phase for the current state.
+//
+// Description:
+//
+//	Looks up the phase implementation for the current state and executes it.
+//	Falls back to default phase execution if no phase is registered.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout.
+//	session - The session being executed.
+//
+// Outputs:
+//
+//	AgentState - The next state to transition to.
+//	error - Non-nil if phase execution failed.
 func (l *DefaultAgentLoop) executePhase(ctx context.Context, session *Session) (AgentState, error) {
 	currentState := session.GetState()
 
@@ -530,7 +546,7 @@ func (l *DefaultAgentLoop) executePhase(ctx context.Context, session *Session) (
 	}
 
 	phase, ok := l.phaseRegistry.GetPhase(currentState)
-	if !ok {
+	if !ok || phase == nil {
 		return l.defaultPhaseExecution(session)
 	}
 
@@ -679,6 +695,16 @@ func (s *InMemorySessionStore) Delete(id string) {
 }
 
 // List implements SessionStore.
+//
+// Description:
+//
+//	Returns all session IDs sorted alphabetically for deterministic ordering.
+//
+// Outputs:
+//
+//	[]string - All session IDs, sorted alphabetically.
+//
+// Thread Safety: This method is safe for concurrent use.
 func (s *InMemorySessionStore) List() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -687,5 +713,6 @@ func (s *InMemorySessionStore) List() []string {
 	for id := range s.sessions {
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 	return ids
 }

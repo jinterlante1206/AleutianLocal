@@ -13,6 +13,7 @@ package phases
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
@@ -304,28 +305,19 @@ func (p *PlanPhase) emitError(deps *Dependencies, err error, recoverable bool) {
 }
 
 // containsIgnoreCase checks if s contains substr (case-insensitive).
+//
+// Description:
+//
+//	Performs case-insensitive substring search using the standard library.
+//
+// Inputs:
+//
+//	s - The string to search in.
+//	substr - The substring to search for.
+//
+// Outputs:
+//
+//	bool - True if s contains substr (case-insensitive).
 func containsIgnoreCase(s, substr string) bool {
-	sLower := toLower(s)
-	substrLower := toLower(substr)
-
-	for i := 0; i <= len(sLower)-len(substrLower); i++ {
-		if sLower[i:i+len(substrLower)] == substrLower {
-			return true
-		}
-	}
-	return false
-}
-
-// toLower converts a string to lowercase.
-func toLower(s string) string {
-	result := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			result[i] = c + 32
-		} else {
-			result[i] = c
-		}
-	}
-	return string(result)
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
