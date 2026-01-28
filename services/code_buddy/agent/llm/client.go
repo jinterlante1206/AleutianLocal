@@ -213,7 +213,7 @@ func ParseToolCalls(response *Response) []agent.ToolInvocation {
 
 	invocations := make([]agent.ToolInvocation, 0, len(response.ToolCalls))
 	for _, call := range response.ToolCalls {
-		// Parse arguments JSON
+		// Parse arguments JSON into ToolParameters
 		params := parseArguments(call.Arguments)
 
 		invocations = append(invocations, agent.ToolInvocation{
@@ -226,14 +226,28 @@ func ParseToolCalls(response *Response) []agent.ToolInvocation {
 	return invocations
 }
 
-// parseArguments parses JSON arguments string into a map.
-func parseArguments(argsJSON string) map[string]any {
-	// Simple implementation - in practice, use encoding/json
-	// This is just for the interface definition
-	if argsJSON == "" {
-		return make(map[string]any)
+// parseArguments parses JSON arguments string into ToolParameters.
+//
+// Inputs:
+//
+//	argsJSON - Raw JSON string of arguments
+//
+// Outputs:
+//
+//	*agent.ToolParameters - Parsed parameters
+func parseArguments(argsJSON string) *agent.ToolParameters {
+	params := &agent.ToolParameters{
+		StringParams: make(map[string]string),
+		IntParams:    make(map[string]int),
+		BoolParams:   make(map[string]bool),
 	}
 
-	// Would parse JSON here
-	return make(map[string]any)
+	if argsJSON == "" {
+		return params
+	}
+
+	// Store raw JSON for flexible parsing by tool implementations
+	params.RawJSON = []byte(argsJSON)
+
+	return params
 }

@@ -63,5 +63,7 @@ var (
 	ErrNotInClarifyState = errors.New("session not in CLARIFY state")
 
 	// ErrAwaitingClarification indicates the agent is waiting for user clarification.
+	// NOTE: This is used for flow control in the agent loop, not as a true error.
+	// The loop returns this when it needs to pause for user input via Continue().
 	ErrAwaitingClarification = errors.New("awaiting user clarification")
 )

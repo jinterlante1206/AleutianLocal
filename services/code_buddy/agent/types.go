@@ -59,16 +59,28 @@ const (
 )
 
 // String returns the string representation of the state.
+//
+// Outputs:
+//
+//	string - The state as a string (e.g., "IDLE", "EXECUTE")
 func (s AgentState) String() string {
 	return string(s)
 }
 
 // IsTerminal returns true if the state is a terminal state (COMPLETE or ERROR).
+//
+// Outputs:
+//
+//	bool - True if state is COMPLETE or ERROR
 func (s AgentState) IsTerminal() bool {
 	return s == StateComplete || s == StateError
 }
 
 // IsActive returns true if the state allows continued execution.
+//
+// Outputs:
+//
+//	bool - True if state is INIT, PLAN, EXECUTE, REFLECT, or DEGRADED
 func (s AgentState) IsActive() bool {
 	switch s {
 	case StateInit, StatePlan, StateExecute, StateReflect, StateDegraded:
@@ -79,6 +91,10 @@ func (s AgentState) IsActive() bool {
 }
 
 // AllStates returns all valid agent states.
+//
+// Outputs:
+//
+//	[]AgentState - Slice containing all 9 valid states
 func AllStates() []AgentState {
 	return []AgentState{
 		StateIdle,
@@ -216,6 +232,80 @@ type ClarifyRequest struct {
 	Context string `json:"context,omitempty"`
 }
 
+// ToolParameters represents validated parameters for a tool invocation.
+//
+// This struct provides type-safe parameter storage instead of map[string]any.
+// The RawJSON field allows flexible parameter passing while maintaining
+// type safety at the API boundary.
+type ToolParameters struct {
+	// RawJSON contains the raw JSON parameters for flexible tool inputs.
+	// Use encoding/json to unmarshal into tool-specific parameter structs.
+	RawJSON []byte `json:"raw_json,omitempty"`
+
+	// StringParams contains string-typed parameters.
+	StringParams map[string]string `json:"string_params,omitempty"`
+
+	// IntParams contains integer-typed parameters.
+	IntParams map[string]int `json:"int_params,omitempty"`
+
+	// BoolParams contains boolean-typed parameters.
+	BoolParams map[string]bool `json:"bool_params,omitempty"`
+}
+
+// GetString returns a string parameter by key.
+//
+// Inputs:
+//
+//	key - The parameter name
+//
+// Outputs:
+//
+//	string - The parameter value
+//	bool - True if the parameter exists
+func (p *ToolParameters) GetString(key string) (string, bool) {
+	if p.StringParams == nil {
+		return "", false
+	}
+	v, ok := p.StringParams[key]
+	return v, ok
+}
+
+// GetInt returns an integer parameter by key.
+//
+// Inputs:
+//
+//	key - The parameter name
+//
+// Outputs:
+//
+//	int - The parameter value
+//	bool - True if the parameter exists
+func (p *ToolParameters) GetInt(key string) (int, bool) {
+	if p.IntParams == nil {
+		return 0, false
+	}
+	v, ok := p.IntParams[key]
+	return v, ok
+}
+
+// GetBool returns a boolean parameter by key.
+//
+// Inputs:
+//
+//	key - The parameter name
+//
+// Outputs:
+//
+//	bool - The parameter value
+//	bool - True if the parameter exists
+func (p *ToolParameters) GetBool(key string) (bool, bool) {
+	if p.BoolParams == nil {
+		return false, false
+	}
+	v, ok := p.BoolParams[key]
+	return v, ok
+}
+
 // ToolInvocation represents a single tool call.
 type ToolInvocation struct {
 	// ID is a unique identifier for this invocation.
@@ -225,7 +315,7 @@ type ToolInvocation struct {
 	Tool string `json:"tool"`
 
 	// Parameters are the tool input parameters.
-	Parameters map[string]any `json:"parameters"`
+	Parameters *ToolParameters `json:"parameters"`
 
 	// Reason explains why the agent chose this tool.
 	Reason string `json:"reason,omitempty"`
@@ -238,6 +328,9 @@ type ToolInvocation struct {
 }
 
 // ToolResult contains the outcome of a tool execution.
+//
+// Note: Duration is serialized as nanoseconds (int64) in JSON per Go's
+// default time.Duration marshaling. Use DurationMs() for milliseconds.
 type ToolResult struct {
 	// InvocationID links back to the invocation.
 	InvocationID string `json:"invocation_id"`
@@ -251,7 +344,7 @@ type ToolResult struct {
 	// Error contains any error message.
 	Error string `json:"error,omitempty"`
 
-	// Duration is how long execution took.
+	// Duration is how long execution took (serialized as nanoseconds).
 	Duration time.Duration `json:"duration"`
 
 	// TokensUsed is the estimated tokens in the output.
@@ -262,6 +355,15 @@ type ToolResult struct {
 
 	// Truncated indicates if output was truncated.
 	Truncated bool `json:"truncated"`
+}
+
+// DurationMs returns the duration in milliseconds.
+//
+// Outputs:
+//
+//	int64 - Duration in milliseconds
+func (r *ToolResult) DurationMs() int64 {
+	return r.Duration.Milliseconds()
 }
 
 // SafetyResult contains security analysis findings.
@@ -307,6 +409,9 @@ type SecurityIssue struct {
 }
 
 // AgentError contains error information for the ERROR state.
+//
+// AgentError implements the error interface, allowing it to be used
+// as a standard Go error while providing structured error information.
 type AgentError struct {
 	// Code is a machine-readable error code.
 	Code string `json:"code"`
@@ -324,6 +429,27 @@ type AgentError struct {
 	Step int `json:"step,omitempty"`
 }
 
+// Error implements the error interface.
+//
+// Outputs:
+//
+//	string - The error message, optionally with code prefix
+func (e *AgentError) Error() string {
+	if e.Code != "" {
+		return e.Code + ": " + e.Message
+	}
+	return e.Message
+}
+
+// Unwrap returns nil as AgentError does not wrap another error.
+//
+// Outputs:
+//
+//	error - Always nil
+func (e *AgentError) Unwrap() error {
+	return nil
+}
+
 // QueryIntent represents the classified intent of a user query.
 type QueryIntent struct {
 	// Type is the query type (explore, modify, explain, debug, refactor).
@@ -337,6 +463,53 @@ type QueryIntent struct {
 
 	// Confidence is how certain we are about the classification (0.0-1.0).
 	Confidence float64 `json:"confidence"`
+}
+
+// ValidQueryTypes contains all valid query intent types.
+var ValidQueryTypes = []string{"explore", "modify", "explain", "debug", "refactor"}
+
+// ValidQueryScopes contains all valid query scopes.
+var ValidQueryScopes = []string{"file", "function", "package", "project"}
+
+// Validate checks that the QueryIntent has valid values.
+//
+// Outputs:
+//
+//	error - Non-nil if any field is invalid
+func (q *QueryIntent) Validate() error {
+	if q.Confidence < 0.0 || q.Confidence > 1.0 {
+		return ErrInvalidSession // Reusing error for validation failures
+	}
+
+	// Type validation (empty is allowed for unknown intents)
+	if q.Type != "" {
+		valid := false
+		for _, t := range ValidQueryTypes {
+			if q.Type == t {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return ErrInvalidSession
+		}
+	}
+
+	// Scope validation (empty is allowed for unscoped queries)
+	if q.Scope != "" {
+		valid := false
+		for _, s := range ValidQueryScopes {
+			if q.Scope == s {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return ErrInvalidSession
+		}
+	}
+
+	return nil
 }
 
 // ProposedChange represents a code change the agent wants to make.

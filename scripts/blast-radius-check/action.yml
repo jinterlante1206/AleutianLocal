@@ -1,0 +1,198 @@
+# Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# See the LICENSE.txt file for the full license text.
+#
+# NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+# See the NOTICE.txt file for details regarding AI system attribution.
+
+name: 'Blast Radius Analysis'
+description: 'Analyze the blast radius of code changes in a pull request'
+author: 'Aleutian AI'
+
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
+
+inputs:
+  github_token:
+    description: 'GitHub token for posting comments and checks'
+    required: true
+    default: ${{ github.token }}
+
+  block_threshold:
+    description: 'Number of callers that triggers a block'
+    required: false
+    default: '50'
+
+  warn_threshold:
+    description: 'Number of callers that triggers a warning'
+    required: false
+    default: '20'
+
+  block_security_paths:
+    description: 'Block PRs that affect security-sensitive code'
+    required: false
+    default: 'true'
+
+  require_owner_approval:
+    description: 'Require CODEOWNERS approval for affected files'
+    required: false
+    default: 'true'
+
+  post_comment:
+    description: 'Post analysis results as a PR comment'
+    required: false
+    default: 'true'
+
+  fail_on_block:
+    description: 'Fail the action if PR should be blocked'
+    required: false
+    default: 'true'
+
+outputs:
+  risk_level:
+    description: 'Overall risk level (CRITICAL, HIGH, MEDIUM, LOW)'
+    value: ${{ steps.analyze.outputs.risk_level }}
+
+  total_callers:
+    description: 'Total number of affected callers'
+    value: ${{ steps.analyze.outputs.total_callers }}
+
+  blocked:
+    description: 'Whether the PR should be blocked'
+    value: ${{ steps.analyze.outputs.blocked }}
+
+  changed_symbols:
+    description: 'Number of symbols analyzed'
+    value: ${{ steps.analyze.outputs.changed_symbols }}
+
+  security_paths:
+    description: 'Comma-separated list of affected security paths'
+    value: ${{ steps.analyze.outputs.security_paths }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Install Aleutian CLI
+      shell: bash
+      run: |
+        # Install from release or build from source
+        if command -v aleutian &> /dev/null; then
+          echo "Aleutian CLI already installed"
+        else
+          # Build from source if in the repo
+          if [ -f "go.mod" ] && grep -q "AleutianFOSS" go.mod; then
+            go build -o /usr/local/bin/aleutian ./cmd/aleutian
+          else
+            echo "::error::Aleutian CLI not found. Please install it first."
+            exit 1
+          fi
+        fi
+
+    - name: Get changed files
+      id: changed-files
+      shell: bash
+      run: |
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          # Get changed files in PR
+          git fetch origin ${{ github.base_ref }} --depth=1
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(go|py|js|ts)$' || true)
+        else
+          # Get changed files in last commit
+          CHANGED_FILES=$(git diff --name-only HEAD~1 | grep -E '\.(go|py|js|ts)$' || true)
+        fi
+
+        # Save to file for later use
+        echo "$CHANGED_FILES" > /tmp/changed_files.txt
+        echo "Changed files:"
+        cat /tmp/changed_files.txt
+
+    - name: Run blast radius analysis
+      id: analyze
+      shell: bash
+      env:
+        BLOCK_THRESHOLD: ${{ inputs.block_threshold }}
+        WARN_THRESHOLD: ${{ inputs.warn_threshold }}
+        BLOCK_SECURITY: ${{ inputs.block_security_paths }}
+      run: |
+        # Create config file
+        cat > /tmp/blast-radius-config.json << EOF
+        {
+          "block_caller_threshold": ${BLOCK_THRESHOLD},
+          "warn_caller_threshold": ${WARN_THRESHOLD},
+          "block_security_paths": ${BLOCK_SECURITY},
+          "require_owner_approval": ${{ inputs.require_owner_approval }}
+        }
+        EOF
+
+        # Run analysis
+        RESULT=$(aleutian trace blast-radius \
+          --config /tmp/blast-radius-config.json \
+          --files /tmp/changed_files.txt \
+          --output json)
+
+        # Parse and set outputs
+        echo "risk_level=$(echo "$RESULT" | jq -r '.risk_level')" >> $GITHUB_OUTPUT
+        echo "total_callers=$(echo "$RESULT" | jq -r '.total_callers')" >> $GITHUB_OUTPUT
+        echo "blocked=$(echo "$RESULT" | jq -r '.blocked')" >> $GITHUB_OUTPUT
+        echo "changed_symbols=$(echo "$RESULT" | jq -r '.changed_symbols | length')" >> $GITHUB_OUTPUT
+
+        SECURITY_PATHS=$(echo "$RESULT" | jq -r '.security_paths | join(",")')
+        if [ "$SECURITY_PATHS" != "null" ]; then
+          echo "security_paths=$SECURITY_PATHS" >> $GITHUB_OUTPUT
+        fi
+
+        # Save full result
+        echo "$RESULT" > /tmp/blast-radius-result.json
+
+        # Generate markdown comment
+        aleutian trace format-comment \
+          --input /tmp/blast-radius-result.json \
+          --output /tmp/blast-radius-comment.md
+
+    - name: Post PR comment
+      if: inputs.post_comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        # Check if comment already exists
+        EXISTING_COMMENT=$(gh api \
+          repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+          --jq '.[] | select(.body | contains("## Blast Radius Analysis")) | .id' \
+          | head -n1)
+
+        COMMENT_BODY=$(cat /tmp/blast-radius-comment.md)
+
+        if [ -n "$EXISTING_COMMENT" ]; then
+          # Update existing comment
+          gh api \
+            --method PATCH \
+            repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT \
+            -f body="$COMMENT_BODY"
+        else
+          # Create new comment
+          gh api \
+            --method POST \
+            repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            -f body="$COMMENT_BODY"
+        fi
+
+    - name: Check for block
+      if: inputs.fail_on_block == 'true'
+      shell: bash
+      run: |
+        BLOCKED=$(cat /tmp/blast-radius-result.json | jq -r '.blocked')
+        if [ "$BLOCKED" == "true" ]; then
+          REASON=$(cat /tmp/blast-radius-result.json | jq -r '.block_reason')
+          echo "::error::PR blocked: $REASON"
+          exit 1
+        fi

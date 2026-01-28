@@ -12,6 +12,7 @@ package agent
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -152,13 +153,18 @@ func (sm *StateMachine) Transition(session *Session, to AgentState) error {
 
 // ValidTransitionsFrom returns all valid transitions from a given state.
 //
+// Description:
+//
+//	Returns a sorted slice of all valid target states for deterministic
+//	iteration order. States are sorted alphabetically by string value.
+//
 // Inputs:
 //
 //	from - The source state
 //
 // Outputs:
 //
-//	[]AgentState - All valid target states
+//	[]AgentState - All valid target states, sorted alphabetically
 //
 // Thread Safety: This method is safe for concurrent use.
 func (sm *StateMachine) ValidTransitionsFrom(from AgentState) []AgentState {
@@ -173,6 +179,12 @@ func (sm *StateMachine) ValidTransitionsFrom(from AgentState) []AgentState {
 			}
 		}
 	}
+
+	// Sort for deterministic ordering
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].String() < result[j].String()
+	})
+
 	return result
 }
 

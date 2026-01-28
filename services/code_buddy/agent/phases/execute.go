@@ -405,17 +405,17 @@ func (p *ExecutePhase) buildProposedChange(inv *agent.ToolInvocation) *safety.Pr
 	case "write_file", "edit_file":
 		return &safety.ProposedChange{
 			Type:   "file_write",
-			Target: getStringParam(inv.Parameters, "path"),
+			Target: getStringParamFromToolParams(inv.Parameters, "path"),
 		}
 	case "delete_file":
 		return &safety.ProposedChange{
 			Type:   "file_delete",
-			Target: getStringParam(inv.Parameters, "path"),
+			Target: getStringParamFromToolParams(inv.Parameters, "path"),
 		}
 	case "run_command", "shell":
 		return &safety.ProposedChange{
 			Type:   "shell_command",
-			Target: getStringParam(inv.Parameters, "command"),
+			Target: getStringParamFromToolParams(inv.Parameters, "command"),
 		}
 	default:
 		return nil
@@ -434,10 +434,11 @@ func (p *ExecutePhase) buildProposedChange(inv *agent.ToolInvocation) *safety.Pr
 //
 //	*tools.Result - The execution result.
 func (p *ExecutePhase) executeSingleTool(ctx context.Context, deps *Dependencies, inv *agent.ToolInvocation) *tools.Result {
+	// Convert ToolParameters to map for internal tool execution
 	toolInvocation := &tools.Invocation{
 		ID:         inv.ID,
 		ToolName:   inv.Tool,
-		Parameters: inv.Parameters,
+		Parameters: toolParamsToMap(inv.Parameters),
 	}
 
 	result, err := deps.ToolExecutor.Execute(ctx, toolInvocation)
@@ -521,10 +522,11 @@ func (p *ExecutePhase) emitToolInvocation(deps *Dependencies, inv *agent.ToolInv
 		return
 	}
 
+	// Convert ToolParameters to map for event data
 	deps.EventEmitter.Emit(events.TypeToolInvocation, &events.ToolInvocationData{
 		ToolName:     inv.Tool,
 		InvocationID: inv.ID,
-		Parameters:   inv.Parameters,
+		Parameters:   toolParamsToMap(inv.Parameters),
 	})
 }
 
@@ -599,15 +601,50 @@ func (p *ExecutePhase) emitError(deps *Dependencies, err error, recoverable bool
 	})
 }
 
-// getStringParam extracts a string parameter from a map.
-func getStringParam(params map[string]any, key string) string {
+// getStringParamFromToolParams extracts a string parameter from ToolParameters.
+//
+// Inputs:
+//
+//	params - The tool parameters
+//	key - The parameter name
+//
+// Outputs:
+//
+//	string - The parameter value, or empty string if not found
+func getStringParamFromToolParams(params *agent.ToolParameters, key string) string {
 	if params == nil {
 		return ""
 	}
-	if v, ok := params[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
+	if v, ok := params.GetString(key); ok {
+		return v
 	}
 	return ""
+}
+
+// toolParamsToMap converts ToolParameters to a map for internal tool execution.
+//
+// Inputs:
+//
+//	params - The tool parameters
+//
+// Outputs:
+//
+//	map[string]any - Parameters as a map
+func toolParamsToMap(params *agent.ToolParameters) map[string]any {
+	result := make(map[string]any)
+	if params == nil {
+		return result
+	}
+
+	for k, v := range params.StringParams {
+		result[k] = v
+	}
+	for k, v := range params.IntParams {
+		result[k] = v
+	}
+	for k, v := range params.BoolParams {
+		result[k] = v
+	}
+
+	return result
 }
