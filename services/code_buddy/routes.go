@@ -26,7 +26,7 @@ import (
 //	rg - Gin router group (typically /v1)
 //	handlers - The handlers instance
 //
-// Endpoints:
+// Core Endpoints:
 //
 //	POST /v1/codebuddy/init - Initialize a code graph
 //	POST /v1/codebuddy/context - Assemble context for LLM prompt
@@ -34,12 +34,50 @@ import (
 //	GET  /v1/codebuddy/callers - Find function callers
 //	GET  /v1/codebuddy/implementations - Find interface implementations
 //	POST /v1/codebuddy/seed - Seed library documentation
+//
+// Memory Endpoints:
+//
 //	GET  /v1/codebuddy/memories - List memories
 //	POST /v1/codebuddy/memories - Store a new memory
 //	POST /v1/codebuddy/memories/retrieve - Semantic memory retrieval
 //	DELETE /v1/codebuddy/memories/:id - Delete a memory
 //	POST /v1/codebuddy/memories/:id/validate - Validate a memory
 //	POST /v1/codebuddy/memories/:id/contradict - Contradict a memory
+//
+// Agentic Tool Endpoints (24 tools):
+//
+//	GET  /v1/codebuddy/tools - Discover available tools
+//
+//	POST /v1/codebuddy/explore/entry_points - Find entry points
+//	POST /v1/codebuddy/explore/data_flow - Trace data flow
+//	POST /v1/codebuddy/explore/error_flow - Trace error flow
+//	POST /v1/codebuddy/explore/config_usage - Find config usages
+//	POST /v1/codebuddy/explore/similar_code - Find similar code
+//	POST /v1/codebuddy/explore/minimal_context - Build minimal context
+//	POST /v1/codebuddy/explore/summarize_file - Summarize a file
+//	POST /v1/codebuddy/explore/summarize_package - Summarize a package
+//	POST /v1/codebuddy/explore/change_impact - Analyze change impact
+//
+//	POST /v1/codebuddy/reason/breaking_changes - Check breaking changes
+//	POST /v1/codebuddy/reason/simulate_change - Simulate a change
+//	POST /v1/codebuddy/reason/validate_change - Validate code syntax
+//	POST /v1/codebuddy/reason/test_coverage - Find test coverage
+//	POST /v1/codebuddy/reason/side_effects - Detect side effects
+//	POST /v1/codebuddy/reason/suggest_refactor - Suggest refactoring
+//
+//	POST /v1/codebuddy/coordinate/plan_changes - Plan multi-file changes
+//	POST /v1/codebuddy/coordinate/validate_plan - Validate a change plan
+//	POST /v1/codebuddy/coordinate/preview_changes - Preview changes as diffs
+//
+//	POST /v1/codebuddy/patterns/detect - Detect design patterns
+//	POST /v1/codebuddy/patterns/code_smells - Find code smells
+//	POST /v1/codebuddy/patterns/duplication - Find duplicate code
+//	POST /v1/codebuddy/patterns/circular_deps - Find circular dependencies
+//	POST /v1/codebuddy/patterns/conventions - Extract conventions
+//	POST /v1/codebuddy/patterns/dead_code - Find dead code
+//
+// Health Endpoints:
+//
 //	GET  /v1/codebuddy/health - Health check
 //	GET  /v1/codebuddy/ready - Readiness check
 //
@@ -78,5 +116,56 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		// Health checks
 		codebuddy.GET("/health", handlers.HandleHealth)
 		codebuddy.GET("/ready", handlers.HandleReady)
+
+		// =================================================================
+		// AGENTIC TOOL ENDPOINTS (CB-22b)
+		// =================================================================
+
+		// Tool discovery
+		codebuddy.GET("/tools", handlers.HandleGetTools)
+
+		// Exploration tools (9 endpoints)
+		explore := codebuddy.Group("/explore")
+		{
+			explore.POST("/entry_points", handlers.HandleFindEntryPoints)
+			explore.POST("/data_flow", handlers.HandleTraceDataFlow)
+			explore.POST("/error_flow", handlers.HandleTraceErrorFlow)
+			explore.POST("/config_usage", handlers.HandleFindConfigUsage)
+			explore.POST("/similar_code", handlers.HandleFindSimilarCode)
+			explore.POST("/minimal_context", handlers.HandleBuildMinimalContext)
+			explore.POST("/summarize_file", handlers.HandleSummarizeFile)
+			explore.POST("/summarize_package", handlers.HandleSummarizePackage)
+			explore.POST("/change_impact", handlers.HandleAnalyzeChangeImpact)
+		}
+
+		// Reasoning tools (6 endpoints)
+		reason := codebuddy.Group("/reason")
+		{
+			reason.POST("/breaking_changes", handlers.HandleCheckBreakingChanges)
+			reason.POST("/simulate_change", handlers.HandleSimulateChange)
+			reason.POST("/validate_change", handlers.HandleValidateChange)
+			reason.POST("/test_coverage", handlers.HandleFindTestCoverage)
+			reason.POST("/side_effects", handlers.HandleDetectSideEffects)
+			reason.POST("/suggest_refactor", handlers.HandleSuggestRefactor)
+		}
+
+		// Coordination tools (3 endpoints)
+		coordinate := codebuddy.Group("/coordinate")
+		{
+			coordinate.POST("/plan_changes", handlers.HandlePlanMultiFileChange)
+			coordinate.POST("/validate_plan", handlers.HandleValidatePlan)
+			coordinate.POST("/preview_changes", handlers.HandlePreviewChanges)
+		}
+
+		// Pattern tools (6 endpoints)
+		patterns := codebuddy.Group("/patterns")
+		{
+			patterns.POST("/detect", handlers.HandleDetectPatterns)
+			patterns.POST("/code_smells", handlers.HandleFindCodeSmells)
+			patterns.POST("/duplication", handlers.HandleFindDuplication)
+			patterns.POST("/circular_deps", handlers.HandleFindCircularDeps)
+			patterns.POST("/conventions", handlers.HandleExtractConventions)
+			patterns.POST("/dead_code", handlers.HandleFindDeadCode)
+		}
 	}
 }
