@@ -100,20 +100,33 @@ runs:
     - name: Get changed files
       id: changed-files
       shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+        EVENT_NAME: ${{ github.event_name }}
       run: |
-        if [ "${{ github.event_name }}" == "pull_request" ]; then
+        if [ "$EVENT_NAME" == "pull_request" ]; then
           # Get changed files in PR
-          git fetch origin ${{ github.base_ref }} --depth=1
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(go|py|js|ts)$' || true)
+          # Validate BASE_REF contains only safe characters (alphanumeric, dash, underscore, slash)
+          if ! echo "$BASE_REF" | grep -qE '^[a-zA-Z0-9/_-]+$'; then
+            echo "::error::Invalid base ref: contains unsafe characters"
+            exit 1
+          fi
+          git fetch origin "$BASE_REF" --depth=1
+          CHANGED_FILES=$(git diff --name-only origin/"$BASE_REF"...HEAD | grep -E '\.(go|py|js|ts)$') || CHANGED_FILES=""
         else
           # Get changed files in last commit
-          CHANGED_FILES=$(git diff --name-only HEAD~1 | grep -E '\.(go|py|js|ts)$' || true)
+          CHANGED_FILES=$(git diff --name-only HEAD~1 | grep -E '\.(go|py|js|ts)$') || CHANGED_FILES=""
         fi
 
-        # Save to file for later use
-        echo "$CHANGED_FILES" > /tmp/changed_files.txt
-        echo "Changed files:"
-        cat /tmp/changed_files.txt
+        # Handle case where no matching files found
+        if [ -z "$CHANGED_FILES" ]; then
+          echo "No code files changed"
+          touch /tmp/changed_files.txt
+        else
+          echo "$CHANGED_FILES" > /tmp/changed_files.txt
+          echo "Changed files:"
+          cat /tmp/changed_files.txt
+        fi
 
     - name: Run blast radius analysis
       id: analyze
@@ -122,20 +135,33 @@ runs:
         BLOCK_THRESHOLD: ${{ inputs.block_threshold }}
         WARN_THRESHOLD: ${{ inputs.warn_threshold }}
         BLOCK_SECURITY: ${{ inputs.block_security_paths }}
+        REQUIRE_OWNER_APPROVAL: ${{ inputs.require_owner_approval }}
       run: |
-        # Create config file
-        cat > /tmp/blast-radius-config.json << EOF
-        {
-          "block_caller_threshold": ${BLOCK_THRESHOLD},
-          "warn_caller_threshold": ${WARN_THRESHOLD},
-          "block_security_paths": ${BLOCK_SECURITY},
-          "require_owner_approval": ${{ inputs.require_owner_approval }}
-        }
-        EOF
+        # Validate numeric inputs
+        if ! echo "$BLOCK_THRESHOLD" | grep -qE '^[0-9]+$'; then
+          echo "::error::Invalid block_threshold: must be a positive integer"
+          exit 1
+        fi
+        if ! echo "$WARN_THRESHOLD" | grep -qE '^[0-9]+$'; then
+          echo "::error::Invalid warn_threshold: must be a positive integer"
+          exit 1
+        fi
+        # Validate boolean inputs
+        if ! echo "$BLOCK_SECURITY" | grep -qE '^(true|false)$'; then
+          echo "::error::Invalid block_security_paths: must be 'true' or 'false'"
+          exit 1
+        fi
+        if ! echo "$REQUIRE_OWNER_APPROVAL" | grep -qE '^(true|false)$'; then
+          echo "::error::Invalid require_owner_approval: must be 'true' or 'false'"
+          exit 1
+        fi
 
-        # Run analysis
+        # Run analysis using validated command-line flags
         RESULT=$(aleutian trace blast-radius \
-          --config /tmp/blast-radius-config.json \
+          --block-threshold "$BLOCK_THRESHOLD" \
+          --warn-threshold "$WARN_THRESHOLD" \
+          --block-security-paths "$BLOCK_SECURITY" \
+          --require-owner-approval "$REQUIRE_OWNER_APPROVAL" \
           --files /tmp/changed_files.txt \
           --output json)
 

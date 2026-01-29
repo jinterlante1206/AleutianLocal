@@ -11,6 +11,9 @@
 package context
 
 import (
+	"fmt"
+	"sort"
+
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 )
 
@@ -65,7 +68,7 @@ func (p *LRUPolicy) Name() string {
 
 // SelectForEviction selects the oldest entries.
 func (p *LRUPolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFree int, metadata *EvictionMetadata) []string {
-	if ctx == nil || tokensToFree <= 0 {
+	if ctx == nil || tokensToFree <= 0 || metadata == nil {
 		return nil
 	}
 
@@ -95,14 +98,10 @@ func (p *LRUPolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFree 
 		})
 	}
 
-	// Sort by age descending (oldest first)
-	for i := 0; i < len(entries)-1; i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].age > entries[i].age {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
+	// Sort by age descending (oldest first) - O(n log n)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].age > entries[j].age
+	})
 
 	// Select entries until target freed
 	var result []string
@@ -128,7 +127,7 @@ func (p *RelevancePolicy) Name() string {
 
 // SelectForEviction selects the lowest relevance entries.
 func (p *RelevancePolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFree int, metadata *EvictionMetadata) []string {
-	if ctx == nil || tokensToFree <= 0 {
+	if ctx == nil || tokensToFree <= 0 || metadata == nil {
 		return nil
 	}
 
@@ -151,14 +150,10 @@ func (p *RelevancePolicy) SelectForEviction(ctx *agent.AssembledContext, tokensT
 		})
 	}
 
-	// Sort by relevance ascending (lowest first)
-	for i := 0; i < len(entries)-1; i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].relevance < entries[i].relevance {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
+	// Sort by relevance ascending (lowest first) - O(n log n)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].relevance < entries[j].relevance
+	})
 
 	// Select entries until target freed
 	var result []string
@@ -179,12 +174,17 @@ type HybridPolicy struct {
 	// RelevanceWeight is the weight for relevance (0.0-1.0).
 	// The remaining weight goes to recency.
 	RelevanceWeight float64
+
+	// MaxAgeSteps is the maximum age (in steps) used for normalization.
+	// Ages beyond this are capped at 1.0. Default is 100.
+	MaxAgeSteps int
 }
 
 // NewHybridPolicy creates a hybrid policy with default weights.
 func NewHybridPolicy() *HybridPolicy {
 	return &HybridPolicy{
 		RelevanceWeight: 0.6,
+		MaxAgeSteps:     100,
 	}
 }
 
@@ -195,7 +195,7 @@ func (p *HybridPolicy) Name() string {
 
 // SelectForEviction uses a combined score of relevance and recency.
 func (p *HybridPolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFree int, metadata *EvictionMetadata) []string {
-	if ctx == nil || tokensToFree <= 0 {
+	if ctx == nil || tokensToFree <= 0 || metadata == nil {
 		return nil
 	}
 
@@ -203,6 +203,12 @@ func (p *HybridPolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFr
 		id     string
 		score  float64
 		tokens int
+	}
+
+	// Use configured max age or default to 100
+	maxAge := p.MaxAgeSteps
+	if maxAge <= 0 {
+		maxAge = 100
 	}
 
 	var entries []scored
@@ -219,8 +225,8 @@ func (p *HybridPolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFr
 
 		age := metadata.CurrentStep - lastAccessed
 
-		// Normalize age to 0-1 (assuming max age of 100 steps)
-		normalizedAge := float64(age) / 100.0
+		// Normalize age to 0-1 using configurable max age
+		normalizedAge := float64(age) / float64(maxAge)
 		if normalizedAge > 1.0 {
 			normalizedAge = 1.0
 		}
@@ -239,14 +245,10 @@ func (p *HybridPolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFr
 		})
 	}
 
-	// Sort by score descending (highest eviction score first)
-	for i := 0; i < len(entries)-1; i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].score > entries[i].score {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
+	// Sort by score descending (highest eviction score first) - O(n log n)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].score > entries[j].score
+	})
 
 	// Select entries until target freed
 	var result []string
@@ -263,15 +265,30 @@ func (p *HybridPolicy) SelectForEviction(ctx *agent.AssembledContext, tokensToFr
 }
 
 // GetEvictionPolicy returns an eviction policy by name.
-func GetEvictionPolicy(name string) EvictionPolicy {
+//
+// Returns an error if the policy name is not recognized.
+// Valid names: "lru", "relevance", "hybrid"
+func GetEvictionPolicy(name string) (EvictionPolicy, error) {
 	switch name {
 	case "lru":
-		return &LRUPolicy{}
+		return &LRUPolicy{}, nil
 	case "relevance":
-		return &RelevancePolicy{}
+		return &RelevancePolicy{}, nil
 	case "hybrid":
-		return NewHybridPolicy()
+		return NewHybridPolicy(), nil
 	default:
-		return NewHybridPolicy() // Default to hybrid
+		return nil, fmt.Errorf("unknown eviction policy: %q (valid: lru, relevance, hybrid)", name)
 	}
+}
+
+// MustGetEvictionPolicy returns an eviction policy by name, defaulting to hybrid
+// if the name is not recognized.
+//
+// Use GetEvictionPolicy if you want to handle unknown policy names explicitly.
+func MustGetEvictionPolicy(name string) EvictionPolicy {
+	policy, err := GetEvictionPolicy(name)
+	if err != nil {
+		return NewHybridPolicy()
+	}
+	return policy
 }
