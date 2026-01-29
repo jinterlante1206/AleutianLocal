@@ -37,6 +37,7 @@ import (
 //	REFLECT → COMPLETE           : Answer satisfactory
 //	REFLECT → CLARIFY            : Need user input
 //	REFLECT → ERROR              : Reflection failed
+//	COMPLETE → PLAN              : Multi-turn follow-up question
 //	DEGRADED → PLAN              : Limited planning without graph
 //	DEGRADED → ERROR             : Degraded mode failed
 //	* → ERROR                    : Any state can transition to ERROR
@@ -89,6 +90,9 @@ func NewStateMachine() *StateMachine {
 	sm.addTransition(StateReflect, StateComplete)
 	sm.addTransition(StateReflect, StateClarify)
 	sm.addTransition(StateReflect, StateError)
+
+	// Multi-turn conversations: allow follow-up questions after completion
+	sm.addTransition(StateComplete, StatePlan)
 
 	sm.addTransition(StateDegraded, StatePlan)
 	sm.addTransition(StateDegraded, StateError)
@@ -219,6 +223,7 @@ func (sm *StateMachine) TransitionReason(from, to AgentState) string {
 		"REFLECT->COMPLETE": "Answer satisfactory",
 		"REFLECT->CLARIFY":  "Need user input after reflection",
 		"REFLECT->ERROR":    "Reflection failed",
+		"COMPLETE->PLAN":    "Multi-turn follow-up question",
 		"DEGRADED->PLAN":    "Limited planning without graph",
 		"DEGRADED->ERROR":   "Degraded mode failed",
 	}

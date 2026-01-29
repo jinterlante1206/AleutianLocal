@@ -13,6 +13,7 @@ package phases
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
@@ -147,24 +148,58 @@ func (p *ExecutePhase) Name() string {
 //
 // Thread Safety: This method is safe for concurrent use.
 func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.AgentState, error) {
+	slog.Info("ExecutePhase starting",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("query", deps.Query),
+	)
+
 	if err := p.validateDependencies(deps); err != nil {
+		slog.Error("ExecutePhase validation failed", slog.String("error", err.Error()))
 		return agent.StateError, err
 	}
 
 	stepStart := time.Now()
-	stepNumber := deps.EventEmitter.IncrementStep()
+	stepNumber := 0
+	if deps.EventEmitter != nil {
+		stepNumber = deps.EventEmitter.IncrementStep()
+	}
+
+	slog.Info("Building LLM request",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("step", stepNumber),
+	)
 
 	// Build the LLM request
 	request := p.buildLLMRequest(deps)
 
 	// Send request to LLM
+	slog.Info("Sending LLM request",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("max_tokens", request.MaxTokens),
+		slog.Int("tool_count", len(request.Tools)),
+	)
+
 	response, err := p.callLLM(ctx, deps, request)
 	if err != nil {
+		slog.Error("LLM request failed",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
 		return p.handleLLMError(deps, err)
 	}
 
+	slog.Info("LLM response received",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("output_tokens", response.OutputTokens),
+		slog.Bool("has_tool_calls", response.HasToolCalls()),
+		slog.Int("content_len", len(response.Content)),
+	)
+
 	// Check for completion (no tool calls)
 	if !response.HasToolCalls() {
+		slog.Info("No tool calls, completing",
+			slog.String("session_id", deps.Session.ID),
+		)
 		return p.handleCompletion(deps, response, stepStart, stepNumber)
 	}
 
@@ -216,9 +251,7 @@ func (p *ExecutePhase) validateDependencies(deps *Dependencies) error {
 	if deps.LLMClient == nil {
 		return fmt.Errorf("LLM client is nil")
 	}
-	if deps.ToolExecutor == nil {
-		return fmt.Errorf("tool executor is nil")
-	}
+	// ToolExecutor is optional - if nil, we skip tool execution
 	return nil
 }
 
@@ -299,14 +332,53 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 //	agent.AgentState - COMPLETE.
 //	error - Always nil.
 func (p *ExecutePhase) handleCompletion(deps *Dependencies, response *llm.Response, stepStart time.Time, stepNumber int) (agent.AgentState, error) {
-	// Add response to context
-	deps.ContextManager.AddMessage(deps.Context, "assistant", response.Content)
+	slog.Info("Handling completion",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("output_tokens", response.OutputTokens),
+		slog.Int("response_len", len(response.Content)),
+	)
+
+	// Update session metrics with token usage
+	if response.OutputTokens > 0 {
+		deps.Session.IncrementMetric(agent.MetricTokens, response.OutputTokens)
+		slog.Info("Updated token metrics",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("tokens_added", response.OutputTokens),
+		)
+	}
+	deps.Session.IncrementMetric(agent.MetricLLMCalls, 1)
+
+	// Add response to context conversation history
+	if deps.ContextManager != nil {
+		deps.ContextManager.AddMessage(deps.Context, "assistant", response.Content)
+		slog.Debug("Added response via ContextManager")
+	} else if deps.Context != nil {
+		// In degraded mode without ContextManager, add directly to conversation history
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "assistant",
+			Content: response.Content,
+		})
+		// Persist updated context to session
+		deps.Session.SetCurrentContext(deps.Context)
+		slog.Info("Stored response in session context (degraded mode)",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("history_len", len(deps.Context.ConversationHistory)),
+		)
+	} else {
+		slog.Warn("Cannot store response - no context available",
+			slog.String("session_id", deps.Session.ID),
+		)
+	}
 
 	// Emit step complete
 	p.emitStepComplete(deps, stepStart, stepNumber, 0)
 
 	// Transition to complete
 	p.emitStateTransition(deps, agent.StateExecute, agent.StateComplete, "task completed")
+
+	slog.Info("ExecutePhase completed successfully",
+		slog.String("session_id", deps.Session.ID),
+	)
 
 	return agent.StateComplete, nil
 }
@@ -434,6 +506,14 @@ func (p *ExecutePhase) buildProposedChange(inv *agent.ToolInvocation) *safety.Pr
 //
 //	*tools.Result - The execution result.
 func (p *ExecutePhase) executeSingleTool(ctx context.Context, deps *Dependencies, inv *agent.ToolInvocation) *tools.Result {
+	// If no ToolExecutor, skip tool execution
+	if deps.ToolExecutor == nil {
+		return &tools.Result{
+			Success: false,
+			Error:   "tool execution not available (no ToolExecutor configured)",
+		}
+	}
+
 	// Convert ToolParameters to map for internal tool execution
 	toolInvocation := &tools.Invocation{
 		ID:         inv.ID,
@@ -460,6 +540,11 @@ func (p *ExecutePhase) executeSingleTool(ctx context.Context, deps *Dependencies
 //	deps - Phase dependencies.
 //	results - Tool execution results.
 func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Dependencies, results []*tools.Result) {
+	// Skip if no ContextManager (degraded mode)
+	if deps.ContextManager == nil {
+		return
+	}
+
 	for _, result := range results {
 		if result == nil {
 			continue
@@ -581,11 +666,16 @@ func (p *ExecutePhase) emitStepComplete(deps *Dependencies, stepStart time.Time,
 		return
 	}
 
+	tokensUsed := 0
+	if deps.Context != nil {
+		tokensUsed = deps.Context.TotalTokens
+	}
+
 	deps.EventEmitter.Emit(events.TypeStepComplete, &events.StepCompleteData{
 		StepNumber:   stepNumber,
 		Duration:     time.Since(stepStart),
 		ToolsInvoked: toolsInvoked,
-		TokensUsed:   deps.Context.TotalTokens,
+		TokensUsed:   tokensUsed,
 	})
 }
 

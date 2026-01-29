@@ -66,6 +66,28 @@ type Phase interface {
 	Execute(ctx context.Context, deps *Dependencies) (agent.AgentState, error)
 }
 
+// Type aliases for dependency interfaces.
+// These allow the agent package to reference types without importing sub-packages.
+type (
+	// LLMClient is the interface for LLM completion.
+	LLMClient = llm.Client
+
+	// ContextManager is the interface for context management.
+	ContextManager = agentcontext.Manager
+
+	// ToolRegistry is the interface for tool registration.
+	ToolRegistry = tools.Registry
+
+	// ToolExecutor is the interface for tool execution.
+	ToolExecutor = tools.Executor
+
+	// SafetyGate is the interface for safety checks.
+	SafetyGate = safety.Gate
+
+	// EventEmitter is the interface for event emission.
+	EventEmitter = events.Emitter
+)
+
 // Dependencies contains all dependencies needed by phases.
 //
 // This struct provides phases with access to the session state,
@@ -82,22 +104,22 @@ type Dependencies struct {
 	Context *agent.AssembledContext
 
 	// ContextManager handles context assembly and updates.
-	ContextManager *agentcontext.Manager
+	ContextManager *ContextManager
 
 	// LLMClient sends requests to the language model.
-	LLMClient llm.Client
+	LLMClient LLMClient
 
 	// ToolRegistry provides access to available tools.
-	ToolRegistry *tools.Registry
+	ToolRegistry *ToolRegistry
 
 	// ToolExecutor executes tool invocations.
-	ToolExecutor *tools.Executor
+	ToolExecutor *ToolExecutor
 
 	// SafetyGate validates proposed changes.
-	SafetyGate safety.Gate
+	SafetyGate SafetyGate
 
 	// EventEmitter broadcasts agent events.
-	EventEmitter *events.Emitter
+	EventEmitter *EventEmitter
 
 	// GraphProvider initializes and provides the code graph.
 	GraphProvider GraphProvider

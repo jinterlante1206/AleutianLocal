@@ -20,6 +20,7 @@ package llm
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
@@ -166,7 +167,16 @@ func BuildRequest(
 		return &Request{MaxTokens: maxTokens}
 	}
 
-	messages := make([]Message, 0, len(ctx.ConversationHistory)+len(ctx.ToolResults))
+	messages := make([]Message, 0, len(ctx.ConversationHistory)+len(ctx.ToolResults)+1)
+
+	// Add code context as a system message if present
+	if len(ctx.CodeContext) > 0 {
+		codeContextMsg := formatCodeContext(ctx.CodeContext)
+		messages = append(messages, Message{
+			Role:    "user",
+			Content: codeContextMsg,
+		})
+	}
 
 	// Add conversation history
 	for _, msg := range ctx.ConversationHistory {
@@ -195,6 +205,31 @@ func BuildRequest(
 		MaxTokens:    maxTokens,
 		Temperature:  0.7,
 	}
+}
+
+// formatCodeContext formats code entries into a readable message.
+func formatCodeContext(entries []agent.CodeEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Here is relevant code from the codebase:\n\n")
+
+	for _, entry := range entries {
+		sb.WriteString("--- ")
+		sb.WriteString(entry.FilePath)
+		if entry.SymbolName != "" {
+			sb.WriteString(" (")
+			sb.WriteString(entry.SymbolName)
+			sb.WriteString(")")
+		}
+		sb.WriteString(" ---\n")
+		sb.WriteString(entry.Content)
+		sb.WriteString("\n\n")
+	}
+
+	return sb.String()
 }
 
 // ParseToolCalls extracts tool invocations from an LLM response.

@@ -13,6 +13,7 @@ package phases
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
@@ -100,29 +101,86 @@ func (p *PlanPhase) Name() string {
 //
 // Thread Safety: This method is safe for concurrent use.
 func (p *PlanPhase) Execute(ctx context.Context, deps *Dependencies) (agent.AgentState, error) {
+	slog.Info("PlanPhase starting",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("query", deps.Query),
+	)
+
 	if err := p.validateDependencies(deps); err != nil {
+		slog.Error("PlanPhase validation failed", slog.String("error", err.Error()))
 		return agent.StateError, err
 	}
 
 	// Check if query needs clarification
 	if p.isQueryAmbiguous(deps.Query) {
+		slog.Info("Query is ambiguous, requesting clarification",
+			slog.String("session_id", deps.Session.ID),
+		)
 		return p.handleAmbiguousQuery(deps)
 	}
 
-	// Assemble initial context
-	assembledContext, err := p.assembleContext(ctx, deps)
-	if err != nil {
-		return p.handleAssemblyError(deps, err)
+	// If ContextManager is available, assemble initial context
+	if deps.ContextManager != nil {
+		slog.Info("Assembling context with ContextManager",
+			slog.String("session_id", deps.Session.ID),
+		)
+		assembledContext, err := p.assembleContext(ctx, deps)
+		if err != nil {
+			slog.Error("Context assembly failed",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("error", err.Error()),
+			)
+			return p.handleAssemblyError(deps, err)
+		}
+
+		// Store context in dependencies for execute phase
+		deps.Context = assembledContext
+
+		// Persist context to session for cross-phase access
+		deps.Session.SetCurrentContext(assembledContext)
+
+		slog.Info("Context assembled successfully",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("total_tokens", assembledContext.TotalTokens),
+			slog.Int("code_entries", len(assembledContext.CodeContext)),
+		)
+
+		// Emit context update event
+		p.emitContextUpdate(deps, assembledContext)
+	} else {
+		// Create minimal context without ContextManager (degraded mode)
+		slog.Info("Creating minimal context (degraded mode)",
+			slog.String("session_id", deps.Session.ID),
+		)
+		assembledContext := &agent.AssembledContext{
+			SystemPrompt: "You are a helpful code assistant. Answer questions about the codebase.",
+			CodeContext:  []agent.CodeEntry{},
+			TotalTokens:  0,
+			// Include the user's query in conversation history
+			ConversationHistory: []agent.Message{
+				{
+					Role:    "user",
+					Content: deps.Query,
+				},
+			},
+		}
+		deps.Context = assembledContext
+
+		// Persist context to session for cross-phase access
+		deps.Session.SetCurrentContext(assembledContext)
+
+		slog.Info("Minimal context created and stored in session",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("history_len", len(assembledContext.ConversationHistory)),
+		)
 	}
-
-	// Store context in dependencies for execute phase
-	deps.Context = assembledContext
-
-	// Emit context update event
-	p.emitContextUpdate(deps, assembledContext)
 
 	// Emit state transition
 	p.emitStateTransition(deps, agent.StatePlan, agent.StateExecute, "context ready")
+
+	slog.Info("PlanPhase completed, transitioning to Execute",
+		slog.String("session_id", deps.Session.ID),
+	)
 
 	return agent.StateExecute, nil
 }
@@ -146,9 +204,7 @@ func (p *PlanPhase) validateDependencies(deps *Dependencies) error {
 	if deps.Query == "" {
 		return fmt.Errorf("query is empty")
 	}
-	if deps.ContextManager == nil {
-		return fmt.Errorf("context manager is nil")
-	}
+	// ContextManager is optional - we'll skip context assembly if nil
 	return nil
 }
 

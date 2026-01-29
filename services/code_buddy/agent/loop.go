@@ -13,6 +13,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -133,6 +134,26 @@ type SessionStore interface {
 	List() []string
 }
 
+// DependenciesFactory creates Dependencies for a session.
+//
+// Description:
+//
+//	DependenciesFactory is called by the agent loop to create Dependencies
+//	for each phase execution. This allows per-session configuration of
+//	dependencies while reusing shared components like LLM clients.
+type DependenciesFactory interface {
+	// Create builds Dependencies for the given session and query.
+	//
+	// Inputs:
+	//   session - The current session.
+	//   query - The user's query.
+	//
+	// Outputs:
+	//   any - The dependencies (typically *phases.Dependencies).
+	//   error - Non-nil if creation failed.
+	Create(session *Session, query string) (any, error)
+}
+
 // DefaultAgentLoop implements the AgentLoop interface.
 //
 // Thread Safety: DefaultAgentLoop is safe for concurrent use.
@@ -148,8 +169,13 @@ type DefaultAgentLoop struct {
 	// phaseRegistry provides phase implementations.
 	phaseRegistry PhaseRegistry
 
-	// phaseDeps contains dependencies passed to phases.
+	// phaseDeps contains static dependencies passed to phases.
+	// Used when depsFactory is not set.
 	phaseDeps any
+
+	// depsFactory creates per-session dependencies.
+	// Takes precedence over phaseDeps when set.
+	depsFactory DependenciesFactory
 
 	// maxConcurrent limits concurrent sessions (0 = unlimited).
 	maxConcurrent int
@@ -206,7 +232,33 @@ func WithPhaseRegistry(registry PhaseRegistry) DefaultLoopOption {
 	}
 }
 
-// WithPhaseDependencies sets dependencies passed to phases.
+// WithDependenciesFactory sets a factory for creating per-session dependencies.
+//
+// Description:
+//
+//	When set, the factory is called to create Dependencies for each
+//	phase execution. This is preferred over WithPhaseDependencies
+//	for production use as it allows per-session configuration.
+//
+// Inputs:
+//
+//	factory - The dependencies factory.
+//
+// Outputs:
+//
+//	DefaultLoopOption - The configuration function.
+func WithDependenciesFactory(factory DependenciesFactory) DefaultLoopOption {
+	return func(l *DefaultAgentLoop) {
+		l.depsFactory = factory
+	}
+}
+
+// WithPhaseDependencies sets static dependencies passed to phases.
+//
+// Description:
+//
+//	Sets static dependencies that are passed to all phases. Use
+//	WithDependenciesFactory for per-session dependency creation.
 //
 // Inputs:
 //
@@ -270,18 +322,27 @@ func NewDefaultAgentLoop(opts ...DefaultLoopOption) *DefaultAgentLoop {
 //
 // Thread Safety: This method is safe for concurrent use with different sessions.
 func (l *DefaultAgentLoop) Run(ctx context.Context, session *Session, query string) (*RunResult, error) {
+	slog.Info("Agent loop starting",
+		slog.String("session_id", session.ID),
+		slog.String("project_root", session.ProjectRoot),
+		slog.Int("query_len", len(query)),
+	)
+
 	if err := l.validateRunInput(session, query); err != nil {
+		slog.Error("Agent loop validation failed", slog.String("error", err.Error()))
 		return nil, err
 	}
 
 	// Try to acquire the session
 	if !session.TryAcquire() {
+		slog.Warn("Session already in progress", slog.String("session_id", session.ID))
 		return nil, ErrSessionInProgress
 	}
 	defer session.Release()
 
 	// Check concurrent session limit
 	if err := l.acquireSlot(); err != nil {
+		slog.Warn("Concurrent session limit reached", slog.String("error", err.Error()))
 		return nil, err
 	}
 	defer l.releaseSlot()
@@ -305,15 +366,19 @@ func (l *DefaultAgentLoop) Run(ctx context.Context, session *Session, query stri
 //
 // Description:
 //
-//	Resumes execution after user provides clarification. The session must be
-//	in CLARIFY state. The clarification is added to the context and execution
-//	continues.
+//	Resumes execution after user provides clarification or follow-up question.
+//	Accepts sessions in CLARIFY state (waiting for clarification) or COMPLETE
+//	state (for multi-turn follow-up questions).
+//
+//	For CLARIFY state: Provides the requested clarification and continues.
+//	For COMPLETE state: Treats input as a follow-up question with conversation
+//	history preserved, enabling multi-turn conversations.
 //
 // Inputs:
 //
 //	ctx - Context for cancellation and timeout.
 //	sessionID - The session ID to continue.
-//	clarification - The user's clarification response.
+//	clarification - The user's clarification or follow-up question.
 //
 // Outputs:
 //
@@ -327,7 +392,10 @@ func (l *DefaultAgentLoop) Continue(ctx context.Context, sessionID string, clari
 		return nil, ErrSessionNotFound
 	}
 
-	if session.GetState() != StateClarify {
+	currentState := session.GetState()
+
+	// Accept both CLARIFY (awaiting clarification) and COMPLETE (follow-up question)
+	if currentState != StateClarify && currentState != StateComplete {
 		return nil, ErrNotInClarifyState
 	}
 
@@ -342,15 +410,56 @@ func (l *DefaultAgentLoop) Continue(ctx context.Context, sessionID string, clari
 	}
 	defer l.releaseSlot()
 
-	// Add clarification to context (this would be handled by the clarify phase)
-	// For now, we just store it in the session
-	session.AddHistoryEntry(HistoryEntry{
-		Type:  "clarification",
-		Input: clarification,
-		Query: clarification,
-	})
+	// Handle based on current state
+	if currentState == StateComplete {
+		// Follow-up question on completed session
+		slog.Info("Continuing completed session with follow-up",
+			slog.String("session_id", session.ID),
+			slog.Int("follow_up_len", len(clarification)),
+		)
 
-	// Run the main loop (it will transition from CLARIFY to PLAN)
+		// Update the query for the new turn
+		session.LastQuery = clarification
+
+		// Add follow-up to history
+		session.AddHistoryEntry(HistoryEntry{
+			Type:  "follow_up",
+			Input: clarification,
+			Query: clarification,
+		})
+
+		// Add to conversation context if available
+		sessionCtx := session.GetCurrentContext()
+		if sessionCtx != nil {
+			sessionCtx.ConversationHistory = append(sessionCtx.ConversationHistory, Message{
+				Role:    "user",
+				Content: clarification,
+			})
+			session.SetCurrentContext(sessionCtx)
+		}
+
+		// Transition back to PLAN to process the follow-up (via state machine)
+		if err := l.transition(session, StatePlan, "multi-turn follow-up"); err != nil {
+			return nil, err
+		}
+	} else {
+		// Clarification for ambiguous query
+		slog.Info("Continuing with clarification",
+			slog.String("session_id", session.ID),
+			slog.Int("clarification_len", len(clarification)),
+		)
+
+		session.AddHistoryEntry(HistoryEntry{
+			Type:  "clarification",
+			Input: clarification,
+			Query: clarification,
+		})
+
+		// Update the query with the clarified version
+		session.LastQuery = clarification
+	}
+
+	// Run the main loop
 	return l.runLoop(ctx, session)
 }
 
@@ -455,7 +564,18 @@ func (l *DefaultAgentLoop) releaseSlot() {
 func (l *DefaultAgentLoop) transition(session *Session, newState AgentState, reason string) error {
 	currentState := session.GetState()
 
+	slog.Info("State transition",
+		slog.String("session_id", session.ID),
+		slog.String("from", string(currentState)),
+		slog.String("to", string(newState)),
+		slog.String("reason", reason),
+	)
+
 	if err := l.stateMachine.Transition(session, newState); err != nil {
+		slog.Error("State transition failed",
+			slog.String("session_id", session.ID),
+			slog.String("error", err.Error()),
+		)
 		return err
 	}
 
@@ -527,6 +647,8 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 //
 //	Looks up the phase implementation for the current state and executes it.
 //	Falls back to default phase execution if no phase is registered.
+//	Uses depsFactory for per-session dependency creation if available,
+//	otherwise falls back to static phaseDeps.
 //
 // Inputs:
 //
@@ -540,18 +662,65 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 func (l *DefaultAgentLoop) executePhase(ctx context.Context, session *Session) (AgentState, error) {
 	currentState := session.GetState()
 
+	slog.Info("Executing phase",
+		slog.String("session_id", session.ID),
+		slog.String("state", string(currentState)),
+	)
+
 	if l.phaseRegistry == nil {
-		// No phases registered - default behavior based on state
+		slog.Debug("No phase registry, using default execution")
 		return l.defaultPhaseExecution(session)
 	}
 
 	phase, ok := l.phaseRegistry.GetPhase(currentState)
 	if !ok || phase == nil {
+		slog.Debug("No phase registered for state, using default execution",
+			slog.String("state", string(currentState)),
+		)
 		return l.defaultPhaseExecution(session)
 	}
 
+	slog.Info("Running phase implementation",
+		slog.String("phase", phase.Name()),
+		slog.String("session_id", session.ID),
+	)
+
+	// Get dependencies for phase execution
+	var deps any
+	var err error
+
+	if l.depsFactory != nil {
+		// Use factory for per-session dependencies
+		deps, err = l.depsFactory.Create(session, session.LastQuery)
+		if err != nil {
+			slog.Error("Failed to create dependencies",
+				slog.String("session_id", session.ID),
+				slog.String("error", err.Error()),
+			)
+			return StateError, fmt.Errorf("failed to create dependencies: %w", err)
+		}
+	} else {
+		// Fall back to static dependencies
+		deps = l.phaseDeps
+	}
+
 	// Execute the phase with dependencies
-	return phase.Execute(ctx, l.phaseDeps)
+	nextState, err := phase.Execute(ctx, deps)
+	if err != nil {
+		slog.Error("Phase execution failed",
+			slog.String("phase", phase.Name()),
+			slog.String("session_id", session.ID),
+			slog.String("error", err.Error()),
+		)
+	} else {
+		slog.Info("Phase execution completed",
+			slog.String("phase", phase.Name()),
+			slog.String("session_id", session.ID),
+			slog.String("next_state", string(nextState)),
+		)
+	}
+
+	return nextState, err
 }
 
 // defaultPhaseExecution provides default state transitions when no phase is registered.
