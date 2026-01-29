@@ -15,6 +15,22 @@
 //	go run ./cmd/codebuddy
 //	go run ./cmd/codebuddy -port 9090
 //
+// With Ollama (for agent loop):
+//
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy
+//
+// With context assembly (sends code to LLM):
+//
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy -with-context
+//
+// With tools enabled (LLM can use exploration tools):
+//
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy -with-tools
+//
+// Full features:
+//
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy -with-context -with-tools
+//
 // Example requests:
 //
 //	# Health check
@@ -28,27 +44,35 @@
 //	  -H "Content-Type: application/json" \
 //	  -d '{"project_root": "/path/to/project"}'
 //
-//	# Find entry points
-//	curl -X POST http://localhost:8080/v1/codebuddy/explore/entry_points \
+//	# Run agent query (requires Ollama)
+//	curl -X POST http://localhost:8080/v1/codebuddy/agent/run \
 //	  -H "Content-Type: application/json" \
-//	  -d '{"graph_id": "YOUR_GRAPH_ID"}'
+//	  -d '{"project_root": "/path/to/project", "query": "What are the main entry points?"}'
 package main
 
 import (
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/phases"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
+	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	port := flag.Int("port", 8080, "Port to listen on")
 	debug := flag.Bool("debug", false, "Enable debug mode")
+	withContext := flag.Bool("with-context", false, "Enable ContextManager for code context assembly")
+	withTools := flag.Bool("with-tools", false, "Enable tool registry for agentic exploration")
 	flag.Parse()
 
 	// Set Gin mode
@@ -76,8 +100,11 @@ func main() {
 	v1 := router.Group("/v1")
 	code_buddy.RegisterRoutes(v1, handlers)
 
+	// Setup agent loop and register routes
+	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools)
+
 	// Print startup banner
-	printBanner(*port)
+	printBanner(*port, agentEnabled)
 
 	// Handle graceful shutdown
 	quit := make(chan os.Signal, 1)
@@ -85,25 +112,105 @@ func main() {
 
 	go func() {
 		<-quit
-		log.Println("\nShutting down Code Buddy server...")
+		slog.Info("Shutting down Code Buddy server")
 		os.Exit(0)
 	}()
 
 	// Start server
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("Starting Code Buddy server on %s", addr)
+	slog.Info("Starting Code Buddy server", slog.String("address", addr))
 	if err := router.Run(addr); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+		slog.Error("Failed to start server", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 }
 
-func printBanner(port int) {
+// setupAgentLoop initializes the agent loop and registers routes.
+//
+// Returns true if the agent is fully enabled with LLM support.
+func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, withTools bool) bool {
+	ollamaClient, err := llm.NewOllamaClient()
+	if err != nil {
+		slog.Warn("Ollama not available", slog.String("error", err.Error()))
+		slog.Info("Agent endpoints will use mock mode (default state transitions only)")
+		slog.Info("Set OLLAMA_BASE_URL and OLLAMA_MODEL to enable LLM-powered agent")
+
+		// Create agent loop without LLM (uses default phase execution)
+		agentLoop := agent.NewDefaultAgentLoop()
+		agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+		code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+		return false
+	}
+
+	model := os.Getenv("OLLAMA_MODEL")
+	if model == "" {
+		model = "gpt-oss"
+	}
+	slog.Info("Ollama connected", slog.String("model", model))
+
+	// Create LLM adapter
+	llmClient := agentllm.NewOllamaAdapter(ollamaClient, model)
+
+	// Create phase registry with actual phase implementations
+	registry := agent.NewPhaseRegistry()
+	registry.Register(agent.StateInit, code_buddy.NewPhaseAdapter(phases.NewInitPhase()))
+	registry.Register(agent.StatePlan, code_buddy.NewPhaseAdapter(phases.NewPlanPhase()))
+	registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
+	registry.Register(agent.StateReflect, code_buddy.NewPhaseAdapter(phases.NewReflectPhase()))
+	registry.Register(agent.StateClarify, code_buddy.NewPhaseAdapter(phases.NewClarifyPhase()))
+	slog.Info("Registered phases", slog.Int("count", registry.Count()))
+
+	// Create graph provider wrapping the service
+	serviceAdapter := code_buddy.NewServiceAdapter(svc)
+	graphProvider := agent.NewServiceGraphProvider(serviceAdapter)
+
+	// Create event emitter
+	eventEmitter := events.NewEmitter()
+
+	// Create safety gate
+	safetyGate := safety.NewDefaultGate(nil)
+
+	// Create dependencies factory
+	depsFactory := code_buddy.NewDependenciesFactory(
+		code_buddy.WithLLMClient(llmClient),
+		code_buddy.WithGraphProvider(graphProvider),
+		code_buddy.WithEventEmitter(eventEmitter),
+		code_buddy.WithSafetyGate(safetyGate),
+		code_buddy.WithService(svc),
+		code_buddy.WithContextEnabled(withContext),
+		code_buddy.WithToolsEnabled(withTools),
+	)
+
+	if withContext {
+		slog.Info("ContextManager ENABLED (code context will be assembled)")
+	}
+	if withTools {
+		slog.Info("ToolRegistry ENABLED (agent can use exploration tools)")
+	}
+
+	// Create agent loop with phases and dependency factory
+	agentLoop := agent.NewDefaultAgentLoop(
+		agent.WithPhaseRegistry(registry),
+		agent.WithDependenciesFactory(depsFactory),
+	)
+	agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+	return true
+}
+
+func printBanner(port int, agentEnabled bool) {
+	agentStatus := "DISABLED (set OLLAMA_BASE_URL to enable)"
+	if agentEnabled {
+		agentStatus = "ENABLED (Ollama connected)"
+	}
+
 	banner := `
 ╔═══════════════════════════════════════════════════════════════════╗
 ║                     CODE BUDDY TEST SERVER                        ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║                                                                   ║
 ║  A standalone server for testing Code Buddy HTTP endpoints.       ║
+║  Agent Loop: %-50s ║
 ║                                                                   ║
 ║  Quick Start:                                                     ║
 ║  ┌─────────────────────────────────────────────────────────────┐  ║
@@ -117,6 +224,11 @@ func printBanner(port int) {
 ║  │ curl -X POST http://localhost:%d/v1/codebuddy/init \      │  ║
 ║  │   -H "Content-Type: application/json" \                     │  ║
 ║  │   -d '{"project_root": "/your/project/path"}'               │  ║
+║  │                                                             │  ║
+║  │ # Run agent query (requires Ollama)                         │  ║
+║  │ curl -X POST http://localhost:%d/v1/codebuddy/agent/run \ │  ║
+║  │   -H "Content-Type: application/json" \                     │  ║
+║  │   -d '{"project_root": ".", "query": "What does this do?"}' │  ║
 ║  └─────────────────────────────────────────────────────────────┘  ║
 ║                                                                   ║
 ║  Endpoints:                                                       ║
@@ -124,10 +236,11 @@ func printBanner(port int) {
 ║  ├── Explore (9): entry_points, data_flow, error_flow, etc.      ║
 ║  ├── Reason (6): breaking_changes, simulate, validate, etc.      ║
 ║  ├── Coordinate (3): plan_changes, validate_plan, preview        ║
-║  └── Patterns (6): detect, code_smells, duplication, etc.        ║
+║  ├── Patterns (6): detect, code_smells, duplication, etc.        ║
+║  └── Agent (4): /run, /continue, /abort, /:id                    ║
 ║                                                                   ║
 ║  Press Ctrl+C to stop                                             ║
 ╚═══════════════════════════════════════════════════════════════════╝
 `
-	fmt.Printf(banner, port, port, port)
+	fmt.Printf(banner, agentStatus, port, port, port, port)
 }

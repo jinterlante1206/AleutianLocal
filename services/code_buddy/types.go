@@ -11,6 +11,7 @@
 package code_buddy
 
 import (
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/ast"
 	cbcontext "github.com/AleutianAI/AleutianFOSS/services/code_buddy/context"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
@@ -272,7 +273,96 @@ func SymbolInfoFromAST(s *ast.Symbol) *SymbolInfo {
 }
 
 // =============================================================================
-// AGENTIC TOOL TYPES
+// Agent API Types (CB-11 Agent Loop)
+// =============================================================================
+
+// AgentRunRequest is the request body for POST /v1/codebuddy/agent/run.
+type AgentRunRequest struct {
+	// ProjectRoot is the absolute path to the project root directory.
+	// Required.
+	ProjectRoot string `json:"project_root" binding:"required"`
+
+	// Query is the user's question or task description. Required.
+	Query string `json:"query" binding:"required"`
+
+	// Config is optional session configuration overrides.
+	Config *agent.SessionConfig `json:"config,omitempty"`
+}
+
+// AgentRunResponse is the response for POST /v1/codebuddy/agent/run.
+type AgentRunResponse struct {
+	// SessionID is the unique identifier for this session.
+	SessionID string `json:"session_id"`
+
+	// State is the current session state (IDLE, INIT, PLAN, EXECUTE, etc.).
+	State string `json:"state"`
+
+	// StepsTaken is the number of agent steps completed.
+	StepsTaken int `json:"steps_taken"`
+
+	// TokensUsed is the total tokens consumed.
+	TokensUsed int `json:"tokens_used"`
+
+	// Response is the agent's final response (if complete).
+	Response string `json:"response,omitempty"`
+
+	// NeedsClarify contains clarification details if state is CLARIFY.
+	NeedsClarify *agent.ClarifyRequest `json:"needs_clarify,omitempty"`
+
+	// Error is the error message if state is ERROR.
+	Error string `json:"error,omitempty"`
+
+	// DegradedMode indicates if the session is running with limited capabilities.
+	DegradedMode bool `json:"degraded_mode"`
+}
+
+// AgentContinueRequest is the request body for POST /v1/codebuddy/agent/continue.
+type AgentContinueRequest struct {
+	// SessionID is the session to continue. Required.
+	SessionID string `json:"session_id" binding:"required"`
+
+	// Clarification is the user's response to the clarification request. Required.
+	Clarification string `json:"clarification" binding:"required"`
+}
+
+// AgentAbortRequest is the request body for POST /v1/codebuddy/agent/abort.
+type AgentAbortRequest struct {
+	// SessionID is the session to abort. Required.
+	SessionID string `json:"session_id" binding:"required"`
+}
+
+// AgentStateResponse is the response for GET /v1/codebuddy/agent/:id.
+type AgentStateResponse struct {
+	// SessionID is the unique session identifier.
+	SessionID string `json:"session_id"`
+
+	// ProjectRoot is the project root path.
+	ProjectRoot string `json:"project_root"`
+
+	// GraphID is the code graph ID (if initialized).
+	GraphID string `json:"graph_id,omitempty"`
+
+	// State is the current session state.
+	State string `json:"state"`
+
+	// StepCount is the number of steps completed.
+	StepCount int `json:"step_count"`
+
+	// TokensUsed is the total tokens consumed.
+	TokensUsed int `json:"tokens_used"`
+
+	// CreatedAt is the Unix timestamp of session creation.
+	CreatedAt int64 `json:"created_at"`
+
+	// LastActiveAt is the Unix timestamp of last activity.
+	LastActiveAt int64 `json:"last_active_at"`
+
+	// DegradedMode indicates if running with limited capabilities.
+	DegradedMode bool `json:"degraded_mode"`
+}
+
+// =============================================================================
+// AGENTIC TOOL TYPES (CB-20/21/22/23 Tool Endpoints)
 // =============================================================================
 // Request and response types for the agentic reasoning layer tools.
 // These wrap the internal package types for HTTP API consumption.

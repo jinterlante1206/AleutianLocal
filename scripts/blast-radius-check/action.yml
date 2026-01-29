@@ -1,0 +1,271 @@
+# Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# See the LICENSE.txt file for the full license text.
+#
+# NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+# See the NOTICE.txt file for details regarding AI system attribution.
+
+name: 'Blast Radius Analysis'
+description: 'Analyze the blast radius of code changes in a pull request'
+author: 'Aleutian AI'
+
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
+
+inputs:
+  github_token:
+    description: 'GitHub token for posting comments and checks'
+    required: true
+    default: ${{ github.token }}
+
+  cli_version:
+    description: 'Version of the Aleutian CLI to use'
+    required: false
+    default: 'v0.1.0'
+
+  block_threshold:
+    description: 'Number of callers that triggers a block'
+    required: false
+    default: '50'
+
+  warn_threshold:
+    description: 'Number of callers that triggers a warning'
+    required: false
+    default: '20'
+
+  block_security_paths:
+    description: 'Block PRs that affect security-sensitive code'
+    required: false
+    default: 'true'
+
+  require_owner_approval:
+    description: 'Require CODEOWNERS approval for affected files'
+    required: false
+    default: 'true'
+
+  post_comment:
+    description: 'Post analysis results as a PR comment'
+    required: false
+    default: 'true'
+
+  fail_on_block:
+    description: 'Fail the action if PR should be blocked'
+    required: false
+    default: 'true'
+
+outputs:
+  risk_level:
+    description: 'Overall risk level (CRITICAL, HIGH, MEDIUM, LOW)'
+    value: ${{ steps.analyze.outputs.risk_level }}
+
+  total_callers:
+    description: 'Total number of affected callers'
+    value: ${{ steps.analyze.outputs.total_callers }}
+
+  blocked:
+    description: 'Whether the PR should be blocked'
+    value: ${{ steps.analyze.outputs.blocked }}
+
+  changed_symbols:
+    description: 'Number of symbols analyzed'
+    value: ${{ steps.analyze.outputs.changed_symbols }}
+
+  security_paths:
+    description: 'Comma-separated list of affected security paths'
+    value: ${{ steps.analyze.outputs.security_paths }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Aleutian CLI
+      shell: bash
+      env:
+        CLI_VERSION: ${{ inputs.cli_version }}
+      run: |
+        # Skip if already installed
+        if command -v aleutian &> /dev/null; then
+          echo "Aleutian CLI already installed: $(aleutian version 2>/dev/null || echo 'unknown')"
+          exit 0
+        fi
+
+        # Validate version format (vX.Y.Z or vX.Y.Z-suffix)
+        if ! echo "$CLI_VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+          echo "::error::Invalid cli_version format: must be vX.Y.Z or vX.Y.Z-suffix"
+          exit 1
+        fi
+
+        # Determine architecture
+        ARCH="$(uname -m)"
+        case "$ARCH" in
+          x86_64)  ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+          arm64)   ARCH="arm64" ;;
+          *)
+            echo "::error::Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+        esac
+
+        # Determine OS
+        OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        case "$OS" in
+          linux|darwin) ;;
+          *)
+            echo "::error::Unsupported OS: $OS"
+            exit 1
+            ;;
+        esac
+
+        # Download pre-compiled binary
+        DOWNLOAD_URL="https://github.com/AleutianAI/AleutianFOSS/releases/download/${CLI_VERSION}/aleutian-${OS}-${ARCH}"
+        echo "Downloading Aleutian CLI ${CLI_VERSION} for ${OS}/${ARCH}..."
+
+        if ! curl -sSL --fail "$DOWNLOAD_URL" -o /usr/local/bin/aleutian; then
+          echo "::error::Failed to download Aleutian CLI from ${DOWNLOAD_URL}"
+          exit 1
+        fi
+
+        chmod +x /usr/local/bin/aleutian
+
+        # Verify installation
+        if ! aleutian version; then
+          echo "::error::Aleutian CLI installation verification failed"
+          exit 1
+        fi
+
+        echo "Aleutian CLI ${CLI_VERSION} installed successfully"
+
+    - name: Get changed files
+      id: changed-files
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        if [ "$EVENT_NAME" == "pull_request" ]; then
+          # Get changed files in PR
+          # Validate BASE_REF contains only safe characters (alphanumeric, dash, underscore, slash)
+          if ! echo "$BASE_REF" | grep -qE '^[a-zA-Z0-9/_-]+$'; then
+            echo "::error::Invalid base ref: contains unsafe characters"
+            exit 1
+          fi
+          git fetch origin "$BASE_REF" --depth=1
+          CHANGED_FILES=$(git diff --name-only origin/"$BASE_REF"...HEAD | grep -E '\.(go|py|js|ts)$') || CHANGED_FILES=""
+        else
+          # Get changed files in last commit
+          CHANGED_FILES=$(git diff --name-only HEAD~1 | grep -E '\.(go|py|js|ts)$') || CHANGED_FILES=""
+        fi
+
+        # Handle case where no matching files found
+        if [ -z "$CHANGED_FILES" ]; then
+          echo "No code files changed"
+          touch /tmp/changed_files.txt
+        else
+          echo "$CHANGED_FILES" > /tmp/changed_files.txt
+          echo "Changed files:"
+          cat /tmp/changed_files.txt
+        fi
+
+    - name: Run blast radius analysis
+      id: analyze
+      shell: bash
+      env:
+        BLOCK_THRESHOLD: ${{ inputs.block_threshold }}
+        WARN_THRESHOLD: ${{ inputs.warn_threshold }}
+        BLOCK_SECURITY: ${{ inputs.block_security_paths }}
+        REQUIRE_OWNER_APPROVAL: ${{ inputs.require_owner_approval }}
+      run: |
+        # Validate numeric inputs
+        if ! echo "$BLOCK_THRESHOLD" | grep -qE '^[0-9]+$'; then
+          echo "::error::Invalid block_threshold: must be a positive integer"
+          exit 1
+        fi
+        if ! echo "$WARN_THRESHOLD" | grep -qE '^[0-9]+$'; then
+          echo "::error::Invalid warn_threshold: must be a positive integer"
+          exit 1
+        fi
+        # Validate boolean inputs
+        if ! echo "$BLOCK_SECURITY" | grep -qE '^(true|false)$'; then
+          echo "::error::Invalid block_security_paths: must be 'true' or 'false'"
+          exit 1
+        fi
+        if ! echo "$REQUIRE_OWNER_APPROVAL" | grep -qE '^(true|false)$'; then
+          echo "::error::Invalid require_owner_approval: must be 'true' or 'false'"
+          exit 1
+        fi
+
+        # Run analysis using validated command-line flags
+        RESULT=$(aleutian trace blast-radius \
+          --block-threshold "$BLOCK_THRESHOLD" \
+          --warn-threshold "$WARN_THRESHOLD" \
+          --block-security-paths "$BLOCK_SECURITY" \
+          --require-owner-approval "$REQUIRE_OWNER_APPROVAL" \
+          --files /tmp/changed_files.txt \
+          --output json)
+
+        # Parse and set outputs
+        echo "risk_level=$(echo "$RESULT" | jq -r '.risk_level')" >> $GITHUB_OUTPUT
+        echo "total_callers=$(echo "$RESULT" | jq -r '.total_callers')" >> $GITHUB_OUTPUT
+        echo "blocked=$(echo "$RESULT" | jq -r '.blocked')" >> $GITHUB_OUTPUT
+        echo "changed_symbols=$(echo "$RESULT" | jq -r '.changed_symbols | length')" >> $GITHUB_OUTPUT
+
+        SECURITY_PATHS=$(echo "$RESULT" | jq -r '.security_paths | join(",")')
+        if [ "$SECURITY_PATHS" != "null" ]; then
+          echo "security_paths=$SECURITY_PATHS" >> $GITHUB_OUTPUT
+        fi
+
+        # Save full result
+        echo "$RESULT" > /tmp/blast-radius-result.json
+
+        # Generate markdown comment
+        aleutian trace format-comment \
+          --input /tmp/blast-radius-result.json \
+          --output /tmp/blast-radius-comment.md
+
+    - name: Post PR comment
+      if: inputs.post_comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        # Check if comment already exists
+        EXISTING_COMMENT=$(gh api \
+          repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+          --jq '.[] | select(.body | contains("## Blast Radius Analysis")) | .id' \
+          | head -n1)
+
+        COMMENT_BODY=$(cat /tmp/blast-radius-comment.md)
+
+        if [ -n "$EXISTING_COMMENT" ]; then
+          # Update existing comment
+          gh api \
+            --method PATCH \
+            repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT \
+            -f body="$COMMENT_BODY"
+        else
+          # Create new comment
+          gh api \
+            --method POST \
+            repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            -f body="$COMMENT_BODY"
+        fi
+
+    - name: Check for block
+      if: inputs.fail_on_block == 'true'
+      shell: bash
+      run: |
+        BLOCKED=$(cat /tmp/blast-radius-result.json | jq -r '.blocked')
+        if [ "$BLOCKED" == "true" ]; then
+          REASON=$(cat /tmp/blast-radius-result.json | jq -r '.block_reason')
+          # Sanitize output to prevent command injection in the GitHub Actions runner
+          # See: https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions
+          REASON="${REASON//'%'/'%25'}"
+          REASON="${REASON//$'\n'/'%0A'}"
+          REASON="${REASON//$'\r'/'%0D'}"
+          echo "::error::PR blocked: $REASON"
+          exit 1
+        fi

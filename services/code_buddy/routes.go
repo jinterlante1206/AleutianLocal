@@ -169,3 +169,44 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		}
 	}
 }
+
+// RegisterAgentRoutes registers the Code Buddy agent routes with the router.
+//
+// Description:
+//
+//	Registers all /v1/codebuddy/agent/* endpoints with the given Gin router group.
+//	These endpoints provide the agent loop functionality for AI-driven code
+//	assistance with multi-step reasoning, tool execution, and clarification.
+//
+// Inputs:
+//
+//	rg - Gin router group (typically /v1)
+//	handlers - The agent handlers instance
+//
+// Endpoints:
+//
+//	POST /v1/codebuddy/agent/run - Start a new agent session
+//	POST /v1/codebuddy/agent/continue - Continue from CLARIFY state
+//	POST /v1/codebuddy/agent/abort - Abort an active session
+//	GET  /v1/codebuddy/agent/:id - Get session state
+//
+// Example:
+//
+//	loop := agent.NewDefaultAgentLoop()
+//	service := code_buddy.NewService(config)
+//	agentHandlers := code_buddy.NewAgentHandlers(loop, service)
+//
+//	v1 := router.Group("/v1")
+//	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+func RegisterAgentRoutes(rg *gin.RouterGroup, handlers *AgentHandlers) {
+	agent := rg.Group("/codebuddy/agent")
+	{
+		// Session lifecycle
+		agent.POST("/run", handlers.HandleAgentRun)
+		agent.POST("/continue", handlers.HandleAgentContinue)
+		agent.POST("/abort", handlers.HandleAgentAbort)
+
+		// Session state
+		agent.GET("/:id", handlers.HandleAgentState)
+	}
+}
