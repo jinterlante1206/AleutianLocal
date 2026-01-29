@@ -53,7 +53,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -100,74 +100,8 @@ func main() {
 	v1 := router.Group("/v1")
 	code_buddy.RegisterRoutes(v1, handlers)
 
-	// Try to initialize Ollama client for agent loop
-	agentEnabled := false
-	ollamaClient, err := llm.NewOllamaClient()
-	if err != nil {
-		log.Printf("Ollama not available: %v", err)
-		log.Println("Agent endpoints will use mock mode (default state transitions only)")
-		log.Println("Set OLLAMA_BASE_URL and OLLAMA_MODEL to enable LLM-powered agent")
-
-		// Create agent loop without LLM (uses default phase execution)
-		agentLoop := agent.NewDefaultAgentLoop()
-		agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
-		code_buddy.RegisterAgentRoutes(v1, agentHandlers)
-	} else {
-		agentEnabled = true
-		model := os.Getenv("OLLAMA_MODEL")
-		if model == "" {
-			model = "gpt-oss"
-		}
-		log.Printf("Ollama connected: model=%s", model)
-
-		// Create LLM adapter
-		llmClient := agentllm.NewOllamaAdapter(ollamaClient, model)
-
-		// Create phase registry with actual phase implementations
-		registry := agent.NewPhaseRegistry()
-		registry.Register(agent.StateInit, code_buddy.NewPhaseAdapter(phases.NewInitPhase()))
-		registry.Register(agent.StatePlan, code_buddy.NewPhaseAdapter(phases.NewPlanPhase()))
-		registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
-		registry.Register(agent.StateReflect, code_buddy.NewPhaseAdapter(phases.NewReflectPhase()))
-		registry.Register(agent.StateClarify, code_buddy.NewPhaseAdapter(phases.NewClarifyPhase()))
-		log.Printf("Registered %d phases", registry.Count())
-
-		// Create graph provider wrapping the service
-		serviceAdapter := code_buddy.NewServiceAdapter(svc)
-		graphProvider := agent.NewServiceGraphProvider(serviceAdapter)
-
-		// Create event emitter
-		eventEmitter := events.NewEmitter()
-
-		// Create safety gate
-		safetyGate := safety.NewDefaultGate(nil)
-
-		// Create dependencies factory
-		depsFactory := code_buddy.NewDependenciesFactory(
-			code_buddy.WithLLMClient(llmClient),
-			code_buddy.WithGraphProvider(graphProvider),
-			code_buddy.WithEventEmitter(eventEmitter),
-			code_buddy.WithSafetyGate(safetyGate),
-			code_buddy.WithService(svc),
-			code_buddy.WithContextEnabled(*withContext),
-			code_buddy.WithToolsEnabled(*withTools),
-		)
-
-		if *withContext {
-			log.Println("ContextManager ENABLED (code context will be assembled)")
-		}
-		if *withTools {
-			log.Println("ToolRegistry ENABLED (agent can use exploration tools)")
-		}
-
-		// Create agent loop with phases and dependency factory
-		agentLoop := agent.NewDefaultAgentLoop(
-			agent.WithPhaseRegistry(registry),
-			agent.WithDependenciesFactory(depsFactory),
-		)
-		agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
-		code_buddy.RegisterAgentRoutes(v1, agentHandlers)
-	}
+	// Setup agent loop and register routes
+	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools)
 
 	// Print startup banner
 	printBanner(*port, agentEnabled)
@@ -178,16 +112,90 @@ func main() {
 
 	go func() {
 		<-quit
-		log.Println("\nShutting down Code Buddy server...")
+		slog.Info("Shutting down Code Buddy server")
 		os.Exit(0)
 	}()
 
 	// Start server
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("Starting Code Buddy server on %s", addr)
+	slog.Info("Starting Code Buddy server", slog.String("address", addr))
 	if err := router.Run(addr); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+		slog.Error("Failed to start server", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
+}
+
+// setupAgentLoop initializes the agent loop and registers routes.
+//
+// Returns true if the agent is fully enabled with LLM support.
+func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, withTools bool) bool {
+	ollamaClient, err := llm.NewOllamaClient()
+	if err != nil {
+		slog.Warn("Ollama not available", slog.String("error", err.Error()))
+		slog.Info("Agent endpoints will use mock mode (default state transitions only)")
+		slog.Info("Set OLLAMA_BASE_URL and OLLAMA_MODEL to enable LLM-powered agent")
+
+		// Create agent loop without LLM (uses default phase execution)
+		agentLoop := agent.NewDefaultAgentLoop()
+		agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+		code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+		return false
+	}
+
+	model := os.Getenv("OLLAMA_MODEL")
+	if model == "" {
+		model = "gpt-oss"
+	}
+	slog.Info("Ollama connected", slog.String("model", model))
+
+	// Create LLM adapter
+	llmClient := agentllm.NewOllamaAdapter(ollamaClient, model)
+
+	// Create phase registry with actual phase implementations
+	registry := agent.NewPhaseRegistry()
+	registry.Register(agent.StateInit, code_buddy.NewPhaseAdapter(phases.NewInitPhase()))
+	registry.Register(agent.StatePlan, code_buddy.NewPhaseAdapter(phases.NewPlanPhase()))
+	registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
+	registry.Register(agent.StateReflect, code_buddy.NewPhaseAdapter(phases.NewReflectPhase()))
+	registry.Register(agent.StateClarify, code_buddy.NewPhaseAdapter(phases.NewClarifyPhase()))
+	slog.Info("Registered phases", slog.Int("count", registry.Count()))
+
+	// Create graph provider wrapping the service
+	serviceAdapter := code_buddy.NewServiceAdapter(svc)
+	graphProvider := agent.NewServiceGraphProvider(serviceAdapter)
+
+	// Create event emitter
+	eventEmitter := events.NewEmitter()
+
+	// Create safety gate
+	safetyGate := safety.NewDefaultGate(nil)
+
+	// Create dependencies factory
+	depsFactory := code_buddy.NewDependenciesFactory(
+		code_buddy.WithLLMClient(llmClient),
+		code_buddy.WithGraphProvider(graphProvider),
+		code_buddy.WithEventEmitter(eventEmitter),
+		code_buddy.WithSafetyGate(safetyGate),
+		code_buddy.WithService(svc),
+		code_buddy.WithContextEnabled(withContext),
+		code_buddy.WithToolsEnabled(withTools),
+	)
+
+	if withContext {
+		slog.Info("ContextManager ENABLED (code context will be assembled)")
+	}
+	if withTools {
+		slog.Info("ToolRegistry ENABLED (agent can use exploration tools)")
+	}
+
+	// Create agent loop with phases and dependency factory
+	agentLoop := agent.NewDefaultAgentLoop(
+		agent.WithPhaseRegistry(registry),
+		agent.WithDependenciesFactory(depsFactory),
+	)
+	agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+	return true
 }
 
 func printBanner(port int, agentEnabled bool) {

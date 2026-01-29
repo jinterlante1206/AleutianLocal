@@ -22,6 +22,11 @@ inputs:
     required: true
     default: ${{ github.token }}
 
+  cli_version:
+    description: 'Version of the Aleutian CLI to use'
+    required: false
+    default: 'v0.1.0'
+
   block_threshold:
     description: 'Number of callers that triggers a block'
     required: false
@@ -76,26 +81,63 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Setup Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
-
     - name: Install Aleutian CLI
       shell: bash
+      env:
+        CLI_VERSION: ${{ inputs.cli_version }}
       run: |
-        # Install from release or build from source
+        # Skip if already installed
         if command -v aleutian &> /dev/null; then
-          echo "Aleutian CLI already installed"
-        else
-          # Build from source if in the repo
-          if [ -f "go.mod" ] && grep -q "AleutianFOSS" go.mod; then
-            go build -o /usr/local/bin/aleutian ./cmd/aleutian
-          else
-            echo "::error::Aleutian CLI not found. Please install it first."
-            exit 1
-          fi
+          echo "Aleutian CLI already installed: $(aleutian version 2>/dev/null || echo 'unknown')"
+          exit 0
         fi
+
+        # Validate version format (vX.Y.Z or vX.Y.Z-suffix)
+        if ! echo "$CLI_VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+          echo "::error::Invalid cli_version format: must be vX.Y.Z or vX.Y.Z-suffix"
+          exit 1
+        fi
+
+        # Determine architecture
+        ARCH="$(uname -m)"
+        case "$ARCH" in
+          x86_64)  ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+          arm64)   ARCH="arm64" ;;
+          *)
+            echo "::error::Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+        esac
+
+        # Determine OS
+        OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        case "$OS" in
+          linux|darwin) ;;
+          *)
+            echo "::error::Unsupported OS: $OS"
+            exit 1
+            ;;
+        esac
+
+        # Download pre-compiled binary
+        DOWNLOAD_URL="https://github.com/AleutianAI/AleutianFOSS/releases/download/${CLI_VERSION}/aleutian-${OS}-${ARCH}"
+        echo "Downloading Aleutian CLI ${CLI_VERSION} for ${OS}/${ARCH}..."
+
+        if ! curl -sSL --fail "$DOWNLOAD_URL" -o /usr/local/bin/aleutian; then
+          echo "::error::Failed to download Aleutian CLI from ${DOWNLOAD_URL}"
+          exit 1
+        fi
+
+        chmod +x /usr/local/bin/aleutian
+
+        # Verify installation
+        if ! aleutian version; then
+          echo "::error::Aleutian CLI installation verification failed"
+          exit 1
+        fi
+
+        echo "Aleutian CLI ${CLI_VERSION} installed successfully"
 
     - name: Get changed files
       id: changed-files
@@ -219,6 +261,11 @@ runs:
         BLOCKED=$(cat /tmp/blast-radius-result.json | jq -r '.blocked')
         if [ "$BLOCKED" == "true" ]; then
           REASON=$(cat /tmp/blast-radius-result.json | jq -r '.block_reason')
+          # Sanitize output to prevent command injection in the GitHub Actions runner
+          # See: https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions
+          REASON="${REASON//'%'/'%25'}"
+          REASON="${REASON//$'\n'/'%0A'}"
+          REASON="${REASON//$'\r'/'%0D'}"
           echo "::error::PR blocked: $REASON"
           exit 1
         fi
