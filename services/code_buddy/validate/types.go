@@ -21,6 +21,7 @@ const (
 	ErrorTypeSyntax     ErrorType = "SYNTAX"
 	ErrorTypePermission ErrorType = "PERMISSION"
 	ErrorTypeInternal   ErrorType = "INTERNAL"
+	ErrorTypeLint       ErrorType = "LINT"
 )
 
 // WarnType represents the type of validation warning.
@@ -35,6 +36,7 @@ const (
 	WarnTypePrototypePollute WarnType = "PROTOTYPE_POLLUTION"
 	WarnTypeDeserialization  WarnType = "DESERIALIZATION"
 	WarnTypePathTraversal    WarnType = "PATH_TRAVERSAL"
+	WarnTypeLint             WarnType = "LINT"
 )
 
 // Severity represents the severity level of a warning.
@@ -153,6 +155,14 @@ type ValidatorConfig struct {
 
 	// MinSecretEntropy is the minimum entropy for secret detection.
 	MinSecretEntropy float64
+
+	// EnableLinter enables the linter integration.
+	// When enabled, linting is performed on patched files.
+	EnableLinter bool
+
+	// BlockOnLintErrors blocks patches that have linter errors.
+	// Only applies when EnableLinter is true.
+	BlockOnLintErrors bool
 }
 
 // DefaultValidatorConfig returns the default configuration.

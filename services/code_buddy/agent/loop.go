@@ -322,16 +322,16 @@ func NewDefaultAgentLoop(opts ...DefaultLoopOption) *DefaultAgentLoop {
 //
 // Thread Safety: This method is safe for concurrent use with different sessions.
 func (l *DefaultAgentLoop) Run(ctx context.Context, session *Session, query string) (*RunResult, error) {
+	if err := l.validateRunInput(session, query); err != nil {
+		slog.Error("Agent loop validation failed", slog.String("error", err.Error()))
+		return nil, err
+	}
+
 	slog.Info("Agent loop starting",
 		slog.String("session_id", session.ID),
 		slog.String("project_root", session.ProjectRoot),
 		slog.Int("query_len", len(query)),
 	)
-
-	if err := l.validateRunInput(session, query); err != nil {
-		slog.Error("Agent loop validation failed", slog.String("error", err.Error()))
-		return nil, err
-	}
 
 	// Try to acquire the session
 	if !session.TryAcquire() {

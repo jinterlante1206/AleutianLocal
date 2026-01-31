@@ -101,15 +101,15 @@ func (p *PlanPhase) Name() string {
 //
 // Thread Safety: This method is safe for concurrent use.
 func (p *PlanPhase) Execute(ctx context.Context, deps *Dependencies) (agent.AgentState, error) {
-	slog.Info("PlanPhase starting",
-		slog.String("session_id", deps.Session.ID),
-		slog.String("query", deps.Query),
-	)
-
 	if err := p.validateDependencies(deps); err != nil {
 		slog.Error("PlanPhase validation failed", slog.String("error", err.Error()))
 		return agent.StateError, err
 	}
+
+	slog.Info("PlanPhase starting",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("query", deps.Query),
+	)
 
 	// Check if query needs clarification
 	if p.isQueryAmbiguous(deps.Query) {

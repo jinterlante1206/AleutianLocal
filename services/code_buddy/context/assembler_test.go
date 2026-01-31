@@ -553,9 +553,4 @@ func TestAssembler_Assemble_Performance(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// min function removed - using the one from summarizer.go

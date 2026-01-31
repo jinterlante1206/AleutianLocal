@@ -13,6 +13,7 @@ package validate
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,8 @@ import (
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 	"github.com/sourcegraph/go-diff/diff"
+
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/lint"
 )
 
 // PatchValidator validates patches for safety.
@@ -35,6 +38,7 @@ type PatchValidator struct {
 	config        ValidatorConfig
 	astScanner    *ASTScanner
 	secretScanner *SecretScanner
+	lintRunner    *lint.LintRunner
 }
 
 // NewPatchValidator creates a new patch validator.
@@ -61,11 +65,35 @@ func NewPatchValidator(config ValidatorConfig) (*PatchValidator, error) {
 		return nil, fmt.Errorf("creating secret scanner: %w", err)
 	}
 
-	return &PatchValidator{
+	pv := &PatchValidator{
 		config:        config,
 		astScanner:    NewASTScanner(),
 		secretScanner: secretScanner,
-	}, nil
+	}
+
+	// Initialize linter if enabled
+	if config.EnableLinter {
+		pv.lintRunner = lint.NewLintRunner()
+		pv.lintRunner.DetectAvailableLinters()
+	}
+
+	return pv, nil
+}
+
+// SetLintRunner sets a custom lint runner for the validator.
+//
+// Description:
+//
+//	Allows injection of a pre-configured lint runner, useful for
+//	testing or sharing a runner across validators.
+//
+// Inputs:
+//
+//	runner - The lint runner to use
+//
+// Thread Safety: Not safe to call concurrently with Validate.
+func (v *PatchValidator) SetLintRunner(runner *lint.LintRunner) {
+	v.lintRunner = runner
 }
 
 // Validate validates a patch for safety.
@@ -76,9 +104,10 @@ func NewPatchValidator(config ValidatorConfig) (*PatchValidator, error) {
 //	1. Size check - reject patches over maxLines
 //	2. Diff parsing - validate diff format
 //	3. Syntax validation - parse full file after applying patch
-//	4. Pattern scanning - AST-based dangerous pattern detection
-//	5. Secret scanning - check for hardcoded secrets
-//	6. Permission check - verify files are writable
+//	4. Linter check - run external linters (golangci-lint, ruff, eslint)
+//	5. Pattern scanning - AST-based dangerous pattern detection
+//	6. Secret scanning - check for hardcoded secrets
+//	7. Permission check - verify files are writable
 //
 // Inputs:
 //
@@ -160,7 +189,12 @@ func (v *PatchValidator) Validate(ctx context.Context, patchContent, projectRoot
 			return nil, fmt.Errorf("checking syntax for %s: %w", filePath, err)
 		}
 
-		// 4. Pattern scanning
+		// 4. Linter check (if enabled and available)
+		if v.lintRunner != nil && language != "" {
+			v.checkLint(ctx, absPath, fileDiff, language, filePath, result)
+		}
+
+		// 5. Pattern scanning
 		if err := v.scanPatterns(ctx, absPath, fileDiff, language, filePath, result); err != nil {
 			return nil, fmt.Errorf("scanning patterns for %s: %w", filePath, err)
 		}
@@ -348,6 +382,111 @@ func (v *PatchValidator) applyDiff(original []byte, fileDiff *diff.FileDiff) ([]
 	}
 
 	return []byte(strings.Join(newLines, "\n")), nil
+}
+
+// checkLint runs external linters on the patched file.
+func (v *PatchValidator) checkLint(ctx context.Context, absPath string, fileDiff *diff.FileDiff, language, relPath string, result *ValidationResult) {
+	if v.lintRunner == nil {
+		return
+	}
+
+	// Skip if linter not available for this language
+	if !v.lintRunner.IsAvailable(language) {
+		slog.Debug("Linter not available for language",
+			slog.String("language", language),
+			slog.String("file", relPath),
+		)
+		return
+	}
+
+	// Get full file content after patch is applied
+	var original []byte
+	if _, err := os.Stat(absPath); err == nil {
+		original, err = os.ReadFile(absPath)
+		if err != nil {
+			slog.Warn("Failed to read file for linting",
+				slog.String("file", relPath),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+	}
+
+	// Apply diff to get new content
+	newContent, err := v.applyDiff(original, fileDiff)
+	if err != nil {
+		slog.Warn("Failed to apply diff for linting",
+			slog.String("file", relPath),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	// Skip empty content
+	if len(newContent) == 0 {
+		return
+	}
+
+	// Run linter on content
+	lintResult, err := v.lintRunner.LintContent(ctx, newContent, language)
+	if err != nil {
+		slog.Warn("Linter execution failed",
+			slog.String("file", relPath),
+			slog.String("language", language),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	// Skip if linter was unavailable
+	if !lintResult.LinterAvailable {
+		return
+	}
+
+	// Convert lint errors to validation errors
+	if v.config.BlockOnLintErrors {
+		for _, lintErr := range lintResult.Errors {
+			result.Errors = append(result.Errors, ValidationError{
+				Type:    ErrorTypeLint,
+				File:    relPath,
+				Line:    lintErr.Line,
+				Message: fmt.Sprintf("[%s] %s", lintErr.Rule, lintErr.Message),
+			})
+		}
+	}
+
+	// Convert lint warnings to validation warnings
+	for _, lintWarn := range lintResult.Warnings {
+		result.Warnings = append(result.Warnings, ValidationWarning{
+			Type:       WarnTypeLint,
+			Pattern:    lintWarn.Rule,
+			File:       relPath,
+			Line:       lintWarn.Line,
+			Severity:   mapLintSeverity(lintWarn.Severity),
+			Message:    lintWarn.Message,
+			Suggestion: lintWarn.Suggestion,
+			Blocking:   false,
+		})
+	}
+
+	slog.Debug("Lint check completed",
+		slog.String("file", relPath),
+		slog.String("linter", lintResult.Linter),
+		slog.Int("errors", len(lintResult.Errors)),
+		slog.Int("warnings", len(lintResult.Warnings)),
+	)
+}
+
+// mapLintSeverity maps lint severity to validation severity.
+func mapLintSeverity(s lint.Severity) Severity {
+	switch s {
+	case lint.SeverityError:
+		return SeverityHigh
+	case lint.SeverityWarning:
+		return SeverityMedium
+	default:
+		return SeverityLow
+	}
 }
 
 // scanPatterns scans for dangerous patterns.

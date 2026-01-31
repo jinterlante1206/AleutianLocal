@@ -232,6 +232,10 @@ type buildState struct {
 //  2. EXTRACT EDGES: Create edges for imports, calls, implements, etc.
 //  3. FINALIZE: Freeze graph and compute statistics
 func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*BuildResult, error) {
+	// Start tracing span
+	ctx, span := startBuildSpan(ctx, len(results))
+	defer span.End()
+
 	state := &buildState{
 		graph: NewGraph(b.options.ProjectRoot,
 			WithMaxNodes(b.options.MaxNodes),
@@ -253,6 +257,8 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	if err := b.collectPhase(ctx, state, results); err != nil {
 		state.result.Incomplete = true
 		state.result.Stats.DurationMilli = time.Since(state.startTime).Milliseconds()
+		setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
+		recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
 		return state.result, nil
 	}
 
@@ -260,6 +266,8 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	if err := b.extractEdgesPhase(ctx, state, results); err != nil {
 		state.result.Incomplete = true
 		state.result.Stats.DurationMilli = time.Since(state.startTime).Milliseconds()
+		setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
+		recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
 		return state.result, nil
 	}
 
@@ -268,6 +276,10 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	state.result.Stats.DurationMilli = time.Since(state.startTime).Milliseconds()
 
 	b.reportProgress(state, ProgressPhaseFinalizing, len(results), len(results))
+
+	// Record success metrics
+	setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
+	recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
 
 	return state.result, nil
 }

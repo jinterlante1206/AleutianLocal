@@ -117,10 +117,14 @@ func (a *Assembler) WithLibraryDocProvider(p LibraryDocProvider) *Assembler {
 //	}
 //	fmt.Println(result.Context)
 func (a *Assembler) Assemble(ctx context.Context, query string, budget int) (*ContextResult, error) {
+	// Start tracing span
+	ctx, span := startAssembleSpan(ctx, len(query), budget)
+	defer span.End()
 	start := time.Now()
 
 	// Validate inputs
 	if err := a.validateInputs(query, budget); err != nil {
+		recordAssembleMetrics(ctx, time.Since(start), 0, 0, false)
 		return nil, err
 	}
 
@@ -140,8 +144,10 @@ func (a *Assembler) Assemble(ctx context.Context, query string, budget int) (*Co
 	// Step 1: Find entry points from query
 	entryPoints, err := a.findEntryPoints(ctx, query)
 	if err != nil {
+		recordAssembleMetrics(ctx, time.Since(start), 0, 0, false)
 		return nil, err
 	}
+	recordEntryPointsMetrics(ctx, len(entryPoints))
 
 	if len(entryPoints) == 0 {
 		// No matches - return helpful suggestions
@@ -156,8 +162,10 @@ func (a *Assembler) Assemble(ctx context.Context, query string, budget int) (*Co
 	// Step 2: Graph walk to find related symbols
 	relatedSymbols, err := a.walkGraph(ctx, entryPoints)
 	if err != nil {
+		recordAssembleMetrics(ctx, time.Since(start), 0, 0, false)
 		return nil, err
 	}
+	recordGraphWalkMetrics(ctx, len(relatedSymbols))
 
 	// Step 3: Score and rank symbols
 	scoredSymbols := a.scoreSymbols(query, relatedSymbols)
@@ -215,6 +223,10 @@ func (a *Assembler) Assemble(ctx context.Context, query string, budget int) (*Co
 			}
 		}
 	}
+
+	// Record successful assembly metrics
+	setAssembleSpanResult(span, result.TokensUsed, len(result.SymbolsIncluded), result.Truncated)
+	recordAssembleMetrics(ctx, time.Since(start), result.TokensUsed, len(result.SymbolsIncluded), true)
 
 	return result, nil
 }

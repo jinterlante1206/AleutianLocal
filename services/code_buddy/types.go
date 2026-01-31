@@ -572,3 +572,196 @@ type AgenticResponse struct {
 	// Limitations documents what couldn't be analyzed.
 	Limitations []string `json:"limitations,omitempty"`
 }
+
+// =============================================================================
+// LSP INTEGRATION TYPES (CB-24)
+// =============================================================================
+
+// LSPDefinitionRequest is the request for POST /v1/codebuddy/lsp/definition.
+type LSPDefinitionRequest struct {
+	// GraphID is the graph to use for project context. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// FilePath is the absolute path to the file. Required.
+	FilePath string `json:"file_path" binding:"required"`
+
+	// Line is the 1-indexed line number. Required.
+	Line int `json:"line" binding:"required,min=1"`
+
+	// Column is the 0-indexed column number. Required.
+	Column int `json:"column" binding:"required,min=0"`
+}
+
+// LSPReferencesRequest is the request for POST /v1/codebuddy/lsp/references.
+type LSPReferencesRequest struct {
+	// GraphID is the graph to use for project context. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// FilePath is the absolute path to the file. Required.
+	FilePath string `json:"file_path" binding:"required"`
+
+	// Line is the 1-indexed line number. Required.
+	Line int `json:"line" binding:"required,min=1"`
+
+	// Column is the 0-indexed column number. Required.
+	Column int `json:"column" binding:"required,min=0"`
+
+	// IncludeDeclaration includes the declaration in results.
+	IncludeDeclaration bool `json:"include_declaration"`
+}
+
+// LSPHoverRequest is the request for POST /v1/codebuddy/lsp/hover.
+type LSPHoverRequest struct {
+	// GraphID is the graph to use for project context. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// FilePath is the absolute path to the file. Required.
+	FilePath string `json:"file_path" binding:"required"`
+
+	// Line is the 1-indexed line number. Required.
+	Line int `json:"line" binding:"required,min=1"`
+
+	// Column is the 0-indexed column number. Required.
+	Column int `json:"column" binding:"required,min=0"`
+}
+
+// LSPRenameRequest is the request for POST /v1/codebuddy/lsp/rename.
+type LSPRenameRequest struct {
+	// GraphID is the graph to use for project context. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// FilePath is the absolute path to the file. Required.
+	FilePath string `json:"file_path" binding:"required"`
+
+	// Line is the 1-indexed line number. Required.
+	Line int `json:"line" binding:"required,min=1"`
+
+	// Column is the 0-indexed column number. Required.
+	Column int `json:"column" binding:"required,min=0"`
+
+	// NewName is the new name for the symbol. Required.
+	NewName string `json:"new_name" binding:"required"`
+}
+
+// LSPWorkspaceSymbolRequest is the request for POST /v1/codebuddy/lsp/symbols.
+type LSPWorkspaceSymbolRequest struct {
+	// GraphID is the graph to use for project context. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// Query is the symbol search query. Required.
+	Query string `json:"query" binding:"required"`
+
+	// Language is the language to search (defaults to project primary language).
+	Language string `json:"language"`
+}
+
+// LSPLocation represents a location in a document.
+type LSPLocation struct {
+	// FilePath is the absolute path to the file.
+	FilePath string `json:"file_path"`
+
+	// StartLine is the 1-indexed start line.
+	StartLine int `json:"start_line"`
+
+	// StartColumn is the 0-indexed start column.
+	StartColumn int `json:"start_column"`
+
+	// EndLine is the 1-indexed end line.
+	EndLine int `json:"end_line"`
+
+	// EndColumn is the 0-indexed end column.
+	EndColumn int `json:"end_column"`
+}
+
+// LSPDefinitionResponse is the response for POST /v1/codebuddy/lsp/definition.
+type LSPDefinitionResponse struct {
+	// Locations contains the definition location(s).
+	Locations []LSPLocation `json:"locations"`
+
+	// LatencyMs is the request latency in milliseconds.
+	LatencyMs int64 `json:"latency_ms"`
+}
+
+// LSPReferencesResponse is the response for POST /v1/codebuddy/lsp/references.
+type LSPReferencesResponse struct {
+	// Locations contains the reference location(s).
+	Locations []LSPLocation `json:"locations"`
+
+	// LatencyMs is the request latency in milliseconds.
+	LatencyMs int64 `json:"latency_ms"`
+}
+
+// LSPHoverResponse is the response for POST /v1/codebuddy/lsp/hover.
+type LSPHoverResponse struct {
+	// Content is the hover content (documentation, type info).
+	Content string `json:"content"`
+
+	// Kind is the content format ("plaintext" or "markdown").
+	Kind string `json:"kind"`
+
+	// Range is the range this hover applies to (optional).
+	Range *LSPLocation `json:"range,omitempty"`
+
+	// LatencyMs is the request latency in milliseconds.
+	LatencyMs int64 `json:"latency_ms"`
+}
+
+// LSPRenameResponse is the response for POST /v1/codebuddy/lsp/rename.
+type LSPRenameResponse struct {
+	// Edits is a map from file path to list of text edits.
+	Edits map[string][]LSPTextEdit `json:"edits"`
+
+	// FileCount is the number of files affected.
+	FileCount int `json:"file_count"`
+
+	// EditCount is the total number of edits.
+	EditCount int `json:"edit_count"`
+
+	// LatencyMs is the request latency in milliseconds.
+	LatencyMs int64 `json:"latency_ms"`
+}
+
+// LSPTextEdit represents a text edit.
+type LSPTextEdit struct {
+	// Range is the range to replace.
+	Range LSPLocation `json:"range"`
+
+	// NewText is the replacement text.
+	NewText string `json:"new_text"`
+}
+
+// LSPSymbolInfo represents information about a workspace symbol.
+type LSPSymbolInfo struct {
+	// Name is the symbol name.
+	Name string `json:"name"`
+
+	// Kind is the symbol kind (function, class, etc.).
+	Kind string `json:"kind"`
+
+	// Location is where the symbol is defined.
+	Location LSPLocation `json:"location"`
+
+	// ContainerName is the name of the containing symbol.
+	ContainerName string `json:"container_name,omitempty"`
+}
+
+// LSPWorkspaceSymbolResponse is the response for POST /v1/codebuddy/lsp/symbols.
+type LSPWorkspaceSymbolResponse struct {
+	// Symbols contains the matching symbols.
+	Symbols []LSPSymbolInfo `json:"symbols"`
+
+	// LatencyMs is the request latency in milliseconds.
+	LatencyMs int64 `json:"latency_ms"`
+}
+
+// LSPStatusResponse is the response for GET /v1/codebuddy/lsp/status.
+type LSPStatusResponse struct {
+	// Available indicates if LSP is available for the project.
+	Available bool `json:"available"`
+
+	// RunningServers lists languages with running servers.
+	RunningServers []string `json:"running_servers"`
+
+	// SupportedLanguages lists all supported languages.
+	SupportedLanguages []string `json:"supported_languages"`
+}

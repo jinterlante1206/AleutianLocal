@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/ast"
 )
@@ -425,11 +426,19 @@ func (idx *SymbolIndex) copySlice(src []*ast.Symbol) []*ast.Symbol {
 //
 //	This method is safe for concurrent use.
 func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]*ast.Symbol, error) {
+	ctx, span := startOperationSpan(ctx, "Search")
+	defer span.End()
+	start := time.Now()
+
 	if err := ctx.Err(); err != nil {
+		setOperationSpanResult(span, 0, false)
+		recordOperationMetrics(ctx, "search", time.Since(start), 0, false)
 		return nil, err
 	}
 
 	if query == "" {
+		setOperationSpanResult(span, 0, true)
+		recordOperationMetrics(ctx, "search", time.Since(start), 0, true)
 		return nil, nil
 	}
 
@@ -493,6 +502,10 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 	for i, r := range results {
 		symbols[i] = r.symbol
 	}
+
+	setOperationSpanResult(span, len(symbols), true)
+	recordOperationMetrics(ctx, "search", time.Since(start), len(symbols), true)
+	recordSearchResults(ctx, len(symbols))
 
 	return symbols, nil
 }

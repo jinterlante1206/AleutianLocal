@@ -181,13 +181,21 @@ func NewGoParser(opts ...GoParserOption) *GoParser {
 //
 //	This method is safe for concurrent use.
 func (p *GoParser) Parse(ctx context.Context, content []byte, filePath string) (*ParseResult, error) {
+	// Start tracing span
+	ctx, span := startParseSpan(ctx, "go", filePath, len(content))
+	defer span.End()
+
+	start := time.Now()
+
 	// Check context before starting
 	if err := ctx.Err(); err != nil {
+		recordParseMetrics(ctx, "go", time.Since(start), 0, false)
 		return nil, fmt.Errorf("parse canceled before start: %w", err)
 	}
 
 	// Validate file size
 	if int64(len(content)) > p.maxFileSize {
+		recordParseMetrics(ctx, "go", time.Since(start), 0, false)
 		return nil, fmt.Errorf("%w: size %d exceeds limit %d", ErrFileTooLarge, len(content), p.maxFileSize)
 	}
 
@@ -200,6 +208,7 @@ func (p *GoParser) Parse(ctx context.Context, content []byte, filePath string) (
 
 	// Validate UTF-8
 	if !utf8.Valid(content) {
+		recordParseMetrics(ctx, "go", time.Since(start), 0, false)
 		return nil, fmt.Errorf("%w: content is not valid UTF-8", ErrInvalidContent)
 	}
 
@@ -214,12 +223,14 @@ func (p *GoParser) Parse(ctx context.Context, content []byte, filePath string) (
 	// Parse the content
 	tree, err := parser.ParseCtx(ctx, nil, content)
 	if err != nil {
+		recordParseMetrics(ctx, "go", time.Since(start), 0, false)
 		return nil, fmt.Errorf("tree-sitter parse failed: %w", err)
 	}
 	defer tree.Close()
 
 	// Check context after parsing
 	if err := ctx.Err(); err != nil {
+		recordParseMetrics(ctx, "go", time.Since(start), 0, false)
 		return nil, fmt.Errorf("parse canceled after tree-sitter: %w", err)
 	}
 
@@ -267,13 +278,19 @@ func (p *GoParser) Parse(ctx context.Context, content []byte, filePath string) (
 
 	// Validate result before returning
 	if err := result.Validate(); err != nil {
+		recordParseMetrics(ctx, "go", time.Since(start), 0, false)
 		return nil, fmt.Errorf("result validation failed: %w", err)
 	}
 
 	// Check context one final time
 	if err := ctx.Err(); err != nil {
+		recordParseMetrics(ctx, "go", time.Since(start), len(result.Symbols), false)
 		return nil, fmt.Errorf("parse canceled after extraction: %w", err)
 	}
+
+	// Record successful parse metrics
+	setParseSpanResult(span, len(result.Symbols), len(result.Errors))
+	recordParseMetrics(ctx, "go", time.Since(start), len(result.Symbols), true)
 
 	return result, nil
 }
