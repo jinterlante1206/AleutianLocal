@@ -300,6 +300,10 @@ type AleutianConfig struct {
 	// Profiles defines custom optimization profiles.
 	// These extend the built-in profiles (low, standard, performance, ultra).
 	Profiles []ProfileConfig `yaml:"profiles,omitempty"`
+
+	// Observability configures the observability stack (Prometheus, Grafana).
+	// Enabled by default; set enabled: false to disable.
+	Observability ObservabilityConfig `yaml:"observability"`
 }
 
 // -----------------------------------------------------------------------------
@@ -1447,6 +1451,49 @@ type ForecastConfig struct {
 
 	// Mode determines deployment: "standalone" or "sapheneia".
 	Mode ForecastMode `yaml:"mode"`
+}
+
+// -----------------------------------------------------------------------------
+// Observability Configuration
+// -----------------------------------------------------------------------------
+
+// ObservabilityConfig configures the observability stack.
+//
+// # Description
+//
+// Controls the Prometheus and Grafana services that provide metrics
+// collection and visualization. Enabled by default.
+//
+// # Fields
+//
+//   - Enabled: Toggle observability stack (default: true)
+//   - PrometheusPort: Host port for Prometheus UI (default: 9091)
+//   - GrafanaPort: Host port for Grafana UI (default: 3000)
+//
+// # Example YAML
+//
+//	observability:
+//	  enabled: true
+//	  prometheus_port: 12215
+//	  grafana_port: 12216
+type ObservabilityConfig struct {
+	// Enabled toggles the observability stack on/off.
+	// Default: true (observability is enabled by default)
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// PrometheusPort is the host port for Prometheus UI.
+	// Default: 12215
+	PrometheusPort int `yaml:"prometheus_port,omitempty"`
+
+	// GrafanaPort is the host port for Grafana UI.
+	// Default: 12216
+	GrafanaPort int `yaml:"grafana_port,omitempty"`
+}
+
+// IsEnabled returns whether observability is enabled.
+// Returns true if Enabled is nil (default) or explicitly true.
+func (o ObservabilityConfig) IsEnabled() bool {
+	return o.Enabled == nil || *o.Enabled
 }
 
 // -----------------------------------------------------------------------------

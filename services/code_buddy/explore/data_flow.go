@@ -13,6 +13,7 @@ package explore
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/index"
@@ -137,11 +138,19 @@ func (t *DataFlowTracer) TraceDataFlow(ctx context.Context, symbolID string, opt
 		return nil, ErrInvalidInput
 	}
 
+	ctx, span := startTraceSpan(ctx, "TraceDataFlow", symbolID)
+	defer span.End()
+	start := time.Now()
+
 	if err := ctx.Err(); err != nil {
+		setTraceSpanResult(span, 0, 0, false)
+		recordTraceMetrics(ctx, "trace_data_flow", time.Since(start), 0, 0, false)
 		return nil, ErrContextCanceled
 	}
 
 	if !t.graph.IsFrozen() {
+		setTraceSpanResult(span, 0, 0, false)
+		recordTraceMetrics(ctx, "trace_data_flow", time.Since(start), 0, 0, false)
 		return nil, ErrGraphNotReady
 	}
 
@@ -241,6 +250,9 @@ func (t *DataFlowTracer) TraceDataFlow(ctx context.Context, symbolID string, opt
 		flow.Limitations = append(flow.Limitations,
 			fmt.Sprintf("Traversal truncated at %d nodes", options.MaxNodes))
 	}
+
+	setTraceSpanResult(span, nodesVisited, len(flow.Sinks), true)
+	recordTraceMetrics(ctx, "trace_data_flow", time.Since(start), nodesVisited, len(flow.Sinks), true)
 
 	return flow, nil
 }

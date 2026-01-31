@@ -148,15 +148,15 @@ func (p *ExecutePhase) Name() string {
 //
 // Thread Safety: This method is safe for concurrent use.
 func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.AgentState, error) {
-	slog.Info("ExecutePhase starting",
-		slog.String("session_id", deps.Session.ID),
-		slog.String("query", deps.Query),
-	)
-
 	if err := p.validateDependencies(deps); err != nil {
 		slog.Error("ExecutePhase validation failed", slog.String("error", err.Error()))
 		return agent.StateError, err
 	}
+
+	slog.Info("ExecutePhase starting",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("query", deps.Query),
+	)
 
 	stepStart := time.Now()
 	stepNumber := 0

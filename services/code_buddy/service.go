@@ -32,6 +32,7 @@ import (
 	cbcontext "github.com/AleutianAI/AleutianFOSS/services/code_buddy/context"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/index"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/lsp"
 )
 
 // ServiceConfig configures the Code Buddy service.
@@ -59,16 +60,31 @@ type ServiceConfig struct {
 	// AllowedRoots is an optional list of allowed project root prefixes.
 	// If empty, all paths are allowed. Security feature.
 	AllowedRoots []string
+
+	// LSPIdleTimeout is how long an LSP server can be idle before shutdown.
+	// Default: 10 minutes
+	LSPIdleTimeout time.Duration
+
+	// LSPStartupTimeout is the maximum time to wait for LSP server startup.
+	// Default: 30 seconds
+	LSPStartupTimeout time.Duration
+
+	// LSPRequestTimeout is the default timeout for LSP requests.
+	// Default: 10 seconds
+	LSPRequestTimeout time.Duration
 }
 
 // DefaultServiceConfig returns sensible defaults.
 func DefaultServiceConfig() ServiceConfig {
 	return ServiceConfig{
-		MaxInitDuration: 30 * time.Second,
-		MaxProjectFiles: 10000,
-		MaxProjectSize:  100 * 1024 * 1024, // 100MB
-		MaxCachedGraphs: 5,
-		GraphTTL:        0, // No expiry
+		MaxInitDuration:   30 * time.Second,
+		MaxProjectFiles:   10000,
+		MaxProjectSize:    100 * 1024 * 1024, // 100MB
+		MaxCachedGraphs:   5,
+		GraphTTL:          0, // No expiry
+		LSPIdleTimeout:    10 * time.Minute,
+		LSPStartupTimeout: 30 * time.Second,
+		LSPRequestTimeout: 10 * time.Second,
 	}
 }
 
@@ -93,6 +109,10 @@ type Service struct {
 	// plans holds cached change plans for validation and preview
 	plans   map[string]*CachedPlan
 	plansMu sync.RWMutex
+
+	// lspManagers holds LSP managers per graph (graphID -> manager)
+	lspManagers map[string]*lsp.Manager
+	lspMu       sync.RWMutex
 }
 
 // CachedPlan holds a change plan and its associated graph ID.
@@ -123,10 +143,11 @@ type CachedPlan struct {
 //	*Service - The configured service
 func NewService(config ServiceConfig) *Service {
 	svc := &Service{
-		config:   config,
-		graphs:   make(map[string]*CachedGraph),
-		registry: ast.NewParserRegistry(),
-		plans:    make(map[string]*CachedPlan),
+		config:      config,
+		graphs:      make(map[string]*CachedGraph),
+		registry:    ast.NewParserRegistry(),
+		plans:       make(map[string]*CachedPlan),
+		lspManagers: make(map[string]*lsp.Manager),
 	}
 
 	// Register default parsers
@@ -826,5 +847,553 @@ func (s *Service) evictOldPlans() {
 		if oldestID != "" {
 			delete(s.plans, oldestID)
 		}
+	}
+}
+
+// =============================================================================
+// LSP INTEGRATION METHODS (CB-24)
+// =============================================================================
+
+// getOrCreateLSPManager returns or creates an LSP manager for a graph.
+//
+// Description:
+//
+//	Returns an existing LSP manager for the graph if one exists, or creates
+//	a new one based on the graph's project root. The manager is configured
+//	with the service's LSP settings.
+//
+// Inputs:
+//
+//	graphID - The graph to get/create a manager for
+//
+// Outputs:
+//
+//	*lsp.Manager - The LSP manager
+//	error - Non-nil if graph not found
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) getOrCreateLSPManager(graphID string) (*lsp.Manager, error) {
+	// Check if manager already exists
+	s.lspMu.RLock()
+	mgr, ok := s.lspManagers[graphID]
+	s.lspMu.RUnlock()
+
+	if ok {
+		return mgr, nil
+	}
+
+	// Get the graph to find project root
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create new manager
+	s.lspMu.Lock()
+	defer s.lspMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if mgr, ok := s.lspManagers[graphID]; ok {
+		return mgr, nil
+	}
+
+	config := lsp.ManagerConfig{
+		IdleTimeout:    s.config.LSPIdleTimeout,
+		StartupTimeout: s.config.LSPStartupTimeout,
+		RequestTimeout: s.config.LSPRequestTimeout,
+	}
+
+	mgr = lsp.NewManager(cached.ProjectRoot, config)
+	mgr.StartIdleMonitor()
+	s.lspManagers[graphID] = mgr
+
+	return mgr, nil
+}
+
+// getLSPOperations returns LSP operations for a graph.
+//
+// Description:
+//
+//	Returns an Operations instance for performing LSP queries on the
+//	graph's project.
+//
+// Inputs:
+//
+//	graphID - The graph ID
+//
+// Outputs:
+//
+//	*lsp.Operations - The operations instance
+//	error - Non-nil if graph not found
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) getLSPOperations(graphID string) (*lsp.Operations, error) {
+	mgr, err := s.getOrCreateLSPManager(graphID)
+	if err != nil {
+		return nil, err
+	}
+	return lsp.NewOperations(mgr), nil
+}
+
+// LSPDefinition returns the definition location(s) for a symbol.
+//
+// Description:
+//
+//	Uses the LSP server to find the definition of the symbol at the
+//	given position. More accurate than graph-based lookup for cross-file
+//	and type-based resolution.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout
+//	graphID - The graph to use for project context
+//	filePath - Absolute path to the file
+//	line - 1-indexed line number
+//	col - 0-indexed column number
+//
+// Outputs:
+//
+//	*LSPDefinitionResponse - Definition locations with latency
+//	error - Non-nil on failure
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) LSPDefinition(ctx context.Context, graphID, filePath string, line, col int) (*LSPDefinitionResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ctx must not be nil")
+	}
+
+	start := time.Now()
+
+	ops, err := s.getLSPOperations(graphID)
+	if err != nil {
+		return nil, fmt.Errorf("get lsp operations: %w", err)
+	}
+
+	locs, err := ops.Definition(ctx, filePath, line, col)
+	if err != nil {
+		return nil, fmt.Errorf("lsp definition: %w", err)
+	}
+
+	return &LSPDefinitionResponse{
+		Locations: lspLocationsToAPI(locs),
+		LatencyMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// LSPReferences returns all references to a symbol.
+//
+// Description:
+//
+//	Uses the LSP server to find all references to the symbol at the
+//	given position. More accurate than graph-based lookup.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout
+//	graphID - The graph to use for project context
+//	filePath - Absolute path to the file
+//	line - 1-indexed line number
+//	col - 0-indexed column number
+//	includeDecl - Whether to include the declaration in results
+//
+// Outputs:
+//
+//	*LSPReferencesResponse - Reference locations with latency
+//	error - Non-nil on failure
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) LSPReferences(ctx context.Context, graphID, filePath string, line, col int, includeDecl bool) (*LSPReferencesResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ctx must not be nil")
+	}
+
+	start := time.Now()
+
+	ops, err := s.getLSPOperations(graphID)
+	if err != nil {
+		return nil, fmt.Errorf("get lsp operations: %w", err)
+	}
+
+	locs, err := ops.References(ctx, filePath, line, col, includeDecl)
+	if err != nil {
+		return nil, fmt.Errorf("lsp references: %w", err)
+	}
+
+	return &LSPReferencesResponse{
+		Locations: lspLocationsToAPI(locs),
+		LatencyMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// LSPHover returns type and documentation info for a symbol.
+//
+// Description:
+//
+//	Uses the LSP server to get hover information (type, documentation)
+//	for the symbol at the given position.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout
+//	graphID - The graph to use for project context
+//	filePath - Absolute path to the file
+//	line - 1-indexed line number
+//	col - 0-indexed column number
+//
+// Outputs:
+//
+//	*LSPHoverResponse - Hover content with latency
+//	error - Non-nil on failure
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) LSPHover(ctx context.Context, graphID, filePath string, line, col int) (*LSPHoverResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ctx must not be nil")
+	}
+
+	start := time.Now()
+
+	ops, err := s.getLSPOperations(graphID)
+	if err != nil {
+		return nil, fmt.Errorf("get lsp operations: %w", err)
+	}
+
+	info, err := ops.Hover(ctx, filePath, line, col)
+	if err != nil {
+		return nil, fmt.Errorf("lsp hover: %w", err)
+	}
+
+	resp := &LSPHoverResponse{
+		LatencyMs: time.Since(start).Milliseconds(),
+	}
+
+	if info != nil {
+		resp.Content = info.Content
+		resp.Kind = info.Kind
+		if info.Range != nil {
+			resp.Range = &LSPLocation{
+				StartLine:   info.Range.Start.Line + 1, // Convert to 1-indexed
+				StartColumn: info.Range.Start.Character,
+				EndLine:     info.Range.End.Line + 1,
+				EndColumn:   info.Range.End.Character,
+			}
+		}
+	}
+
+	return resp, nil
+}
+
+// LSPRename computes edits for renaming a symbol.
+//
+// Description:
+//
+//	Uses the LSP server to compute all edits needed to rename the symbol
+//	at the given position. Returns the edits but does NOT apply them.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout
+//	graphID - The graph to use for project context
+//	filePath - Absolute path to the file
+//	line - 1-indexed line number
+//	col - 0-indexed column number
+//	newName - The new name for the symbol
+//
+// Outputs:
+//
+//	*LSPRenameResponse - Edits with file count and latency
+//	error - Non-nil on failure
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) LSPRename(ctx context.Context, graphID, filePath string, line, col int, newName string) (*LSPRenameResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ctx must not be nil")
+	}
+	if newName == "" {
+		return nil, fmt.Errorf("newName must not be empty")
+	}
+
+	start := time.Now()
+
+	ops, err := s.getLSPOperations(graphID)
+	if err != nil {
+		return nil, fmt.Errorf("get lsp operations: %w", err)
+	}
+
+	edit, err := ops.Rename(ctx, filePath, line, col, newName)
+	if err != nil {
+		return nil, fmt.Errorf("lsp rename: %w", err)
+	}
+
+	edits := lspWorkspaceEditToAPI(edit)
+	editCount := 0
+	for _, fileEdits := range edits {
+		editCount += len(fileEdits)
+	}
+
+	return &LSPRenameResponse{
+		Edits:     edits,
+		FileCount: len(edits),
+		EditCount: editCount,
+		LatencyMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// LSPWorkspaceSymbol finds symbols matching a query.
+//
+// Description:
+//
+//	Uses the LSP server to find symbols matching the query across
+//	the workspace.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout
+//	graphID - The graph to use for project context
+//	language - The language to search (required)
+//	query - The symbol search query
+//
+// Outputs:
+//
+//	*LSPWorkspaceSymbolResponse - Matching symbols with latency
+//	error - Non-nil on failure
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) LSPWorkspaceSymbol(ctx context.Context, graphID, language, query string) (*LSPWorkspaceSymbolResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ctx must not be nil")
+	}
+	if language == "" {
+		return nil, fmt.Errorf("language must not be empty")
+	}
+
+	start := time.Now()
+
+	ops, err := s.getLSPOperations(graphID)
+	if err != nil {
+		return nil, fmt.Errorf("get lsp operations: %w", err)
+	}
+
+	symbols, err := ops.WorkspaceSymbol(ctx, language, query)
+	if err != nil {
+		return nil, fmt.Errorf("lsp workspace symbol: %w", err)
+	}
+
+	return &LSPWorkspaceSymbolResponse{
+		Symbols:   lspSymbolsToAPI(symbols),
+		LatencyMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
+// LSPStatus returns the status of LSP for a graph.
+//
+// Description:
+//
+//	Returns information about LSP availability and running servers
+//	for the given graph.
+//
+// Inputs:
+//
+//	graphID - The graph to check status for
+//
+// Outputs:
+//
+//	*LSPStatusResponse - Status information
+//	error - Non-nil if graph not found
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) LSPStatus(graphID string) (*LSPStatusResponse, error) {
+	// Check if graph exists
+	if _, err := s.GetGraph(graphID); err != nil {
+		return nil, err
+	}
+
+	// Check if we have a manager
+	s.lspMu.RLock()
+	mgr, ok := s.lspManagers[graphID]
+	s.lspMu.RUnlock()
+
+	resp := &LSPStatusResponse{
+		Available:          true,
+		RunningServers:     []string{},
+		SupportedLanguages: []string{},
+	}
+
+	if ok {
+		resp.RunningServers = mgr.RunningServers()
+		resp.SupportedLanguages = mgr.Configs().Languages()
+	} else {
+		// No manager yet, get supported languages from a temp registry
+		registry := lsp.NewConfigRegistry()
+		resp.SupportedLanguages = registry.Languages()
+	}
+
+	return resp, nil
+}
+
+// Close shuts down all LSP managers and cleans up resources.
+//
+// Description:
+//
+//	Gracefully shuts down all running LSP servers. Should be called
+//	when the service is being stopped.
+//
+// Inputs:
+//
+//	ctx - Context for shutdown timeout
+//
+// Outputs:
+//
+//	error - Non-nil if any shutdown encountered errors
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (s *Service) Close(ctx context.Context) error {
+	s.lspMu.Lock()
+	managers := make(map[string]*lsp.Manager)
+	for id, mgr := range s.lspManagers {
+		managers[id] = mgr
+	}
+	s.lspManagers = make(map[string]*lsp.Manager)
+	s.lspMu.Unlock()
+
+	var lastErr error
+	for _, mgr := range managers {
+		if err := mgr.ShutdownAll(ctx); err != nil {
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
+// =============================================================================
+// LSP TYPE CONVERSION HELPERS
+// =============================================================================
+
+// lspLocationsToAPI converts LSP locations to API locations.
+func lspLocationsToAPI(locs []lsp.Location) []LSPLocation {
+	if locs == nil {
+		return []LSPLocation{}
+	}
+
+	result := make([]LSPLocation, len(locs))
+	for i, loc := range locs {
+		result[i] = LSPLocation{
+			FilePath:    strings.TrimPrefix(loc.URI, "file://"),
+			StartLine:   loc.Range.Start.Line + 1, // Convert to 1-indexed
+			StartColumn: loc.Range.Start.Character,
+			EndLine:     loc.Range.End.Line + 1,
+			EndColumn:   loc.Range.End.Character,
+		}
+	}
+	return result
+}
+
+// lspWorkspaceEditToAPI converts LSP workspace edit to API format.
+func lspWorkspaceEditToAPI(edit *lsp.WorkspaceEdit) map[string][]LSPTextEdit {
+	if edit == nil {
+		return make(map[string][]LSPTextEdit)
+	}
+
+	result := make(map[string][]LSPTextEdit)
+
+	for uri, edits := range edit.Changes {
+		filePath := strings.TrimPrefix(uri, "file://")
+		apiEdits := make([]LSPTextEdit, len(edits))
+		for i, e := range edits {
+			apiEdits[i] = LSPTextEdit{
+				Range: LSPLocation{
+					FilePath:    filePath,
+					StartLine:   e.Range.Start.Line + 1,
+					StartColumn: e.Range.Start.Character,
+					EndLine:     e.Range.End.Line + 1,
+					EndColumn:   e.Range.End.Character,
+				},
+				NewText: e.NewText,
+			}
+		}
+		result[filePath] = apiEdits
+	}
+
+	return result
+}
+
+// lspSymbolsToAPI converts LSP symbols to API format.
+func lspSymbolsToAPI(symbols []lsp.SymbolInformation) []LSPSymbolInfo {
+	if symbols == nil {
+		return []LSPSymbolInfo{}
+	}
+
+	result := make([]LSPSymbolInfo, len(symbols))
+	for i, sym := range symbols {
+		result[i] = LSPSymbolInfo{
+			Name:          sym.Name,
+			Kind:          symbolKindToString(sym.Kind),
+			ContainerName: sym.ContainerName,
+			Location: LSPLocation{
+				FilePath:    strings.TrimPrefix(sym.Location.URI, "file://"),
+				StartLine:   sym.Location.Range.Start.Line + 1,
+				StartColumn: sym.Location.Range.Start.Character,
+				EndLine:     sym.Location.Range.End.Line + 1,
+				EndColumn:   sym.Location.Range.End.Character,
+			},
+		}
+	}
+	return result
+}
+
+// symbolKindToString converts LSP symbol kind to string.
+func symbolKindToString(kind lsp.SymbolKind) string {
+	switch kind {
+	case lsp.SymbolKindFile:
+		return "file"
+	case lsp.SymbolKindModule:
+		return "module"
+	case lsp.SymbolKindNamespace:
+		return "namespace"
+	case lsp.SymbolKindPackage:
+		return "package"
+	case lsp.SymbolKindClass:
+		return "class"
+	case lsp.SymbolKindMethod:
+		return "method"
+	case lsp.SymbolKindProperty:
+		return "property"
+	case lsp.SymbolKindField:
+		return "field"
+	case lsp.SymbolKindConstructor:
+		return "constructor"
+	case lsp.SymbolKindEnum:
+		return "enum"
+	case lsp.SymbolKindInterface:
+		return "interface"
+	case lsp.SymbolKindFunction:
+		return "function"
+	case lsp.SymbolKindVariable:
+		return "variable"
+	case lsp.SymbolKindConstant:
+		return "constant"
+	case lsp.SymbolKindStruct:
+		return "struct"
+	default:
+		return "unknown"
 	}
 }

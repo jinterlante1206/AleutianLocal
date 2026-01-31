@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/analysis"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/ast"
@@ -155,13 +156,23 @@ func (a *ChangeImpactAnalyzer) AnalyzeImpact(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	ctx, span := startAnalysisSpan(ctx, targetID)
+	defer span.End()
+	start := time.Now()
 	if err := ctx.Err(); err != nil {
+		setAnalysisSpanResult(span, "", 0, 0, 0, false)
+		recordAnalysisMetrics(ctx, time.Since(start), "", 0, 0, 0, false)
 		return nil, ErrContextCanceled
 	}
 	if targetID == "" {
+		setAnalysisSpanResult(span, "", 0, 0, 0, false)
+		recordAnalysisMetrics(ctx, time.Since(start), "", 0, 0, 0, false)
 		return nil, fmt.Errorf("%w: targetID is empty", ErrInvalidInput)
 	}
 	if a.graph != nil && !a.graph.IsFrozen() {
+		setAnalysisSpanResult(span, "", 0, 0, 0, false)
+		recordAnalysisMetrics(ctx, time.Since(start), "", 0, 0, 0, false)
 		return nil, ErrGraphNotReady
 	}
 
@@ -269,6 +280,8 @@ func (a *ChangeImpactAnalyzer) AnalyzeImpact(
 
 	// Check if context was canceled
 	if ctx.Err() != nil {
+		setAnalysisSpanResult(span, "", 0, 0, 0, false)
+		recordAnalysisMetrics(ctx, time.Since(start), "", 0, 0, 0, false)
 		return nil, ErrContextCanceled
 	}
 
@@ -280,8 +293,13 @@ func (a *ChangeImpactAnalyzer) AnalyzeImpact(
 
 	// If all analyses failed, return error
 	if len(analysisErrors) > 0 && len(result.Limitations) >= 5 {
+		setAnalysisSpanResult(span, string(result.RiskLevel), result.RiskScore, result.DirectCallers, result.TotalImpact, false)
+		recordAnalysisMetrics(ctx, time.Since(start), string(result.RiskLevel), result.RiskScore, result.DirectCallers, result.TotalImpact, false)
 		return result, ErrAnalysisFailed
 	}
+
+	setAnalysisSpanResult(span, string(result.RiskLevel), result.RiskScore, result.DirectCallers, result.TotalImpact, true)
+	recordAnalysisMetrics(ctx, time.Since(start), string(result.RiskLevel), result.RiskScore, result.DirectCallers, result.TotalImpact, true)
 
 	return result, nil
 }

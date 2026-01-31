@@ -10,11 +10,14 @@
 #   aleutian ingest ./docs                  # Ingest documents
 #   aleutian chat                           # Start chatting
 #
-# Ports:
+# Ports (12210 block):
 #   12210 - Orchestrator API
-#   12125 - RAG Engine
-#   12127 - Weaviate
-#   16686 - Jaeger UI (tracing)
+#   12211 - RAG Engine
+#   12212 - Weaviate HTTP
+#   12213 - Weaviate gRPC
+#   12214 - Jaeger UI
+#   12215 - Prometheus
+#   12216 - Grafana
 #
 # Network:
 #   Creates "aleutian-shared" network for cross-project connectivity.
@@ -33,8 +36,8 @@ services:
     image: cr.weaviate.io/semitechnologies/weaviate:1.35.1
     container_name: aleutian-weaviate
     ports:
-      - "12127:8080"
-      - "50051:50051"
+      - "12212:8080"
+      - "12213:50051"
     volumes:
       - weaviate_data:/var/lib/weaviate
     environment:
@@ -59,7 +62,7 @@ services:
       dockerfile: Dockerfile
     container_name: aleutian-rag-engine
     ports:
-      - "12125:8000"
+      - "12211:8000"
     environment:
       # Connections
       WEAVIATE_SERVICE_URL: http://weaviate:8080
@@ -140,7 +143,7 @@ services:
     image: jaegertracing/all-in-one:latest
     container_name: aleutian-jaeger
     ports:
-      - "16686:16686"   # UI
+      - "12214:16686"   # UI
       - "4317:4317"     # OTLP gRPC
       - "4318:4318"     # OTLP HTTP
     environment:

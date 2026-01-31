@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/index"
@@ -125,7 +126,14 @@ func (d *PatternDetector) DetectPatterns(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	ctx, span := startDetectSpan(ctx, scope)
+	defer span.End()
+	start := time.Now()
+
 	if err := ctx.Err(); err != nil {
+		setDetectSpanResult(span, 0, false)
+		recordDetectMetrics(ctx, time.Since(start), 0, false)
 		return nil, ErrContextCanceled
 	}
 
@@ -198,8 +206,12 @@ func (d *PatternDetector) DetectPatterns(
 				continue
 			}
 			allPatterns = append(allPatterns, p)
+			recordPatternByType(ctx, string(p.Type))
 		}
 	}
+
+	setDetectSpanResult(span, len(allPatterns), true)
+	recordDetectMetrics(ctx, time.Since(start), len(allPatterns), true)
 
 	return allPatterns, nil
 }

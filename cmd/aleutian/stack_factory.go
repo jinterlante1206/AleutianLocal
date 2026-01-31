@@ -395,12 +395,13 @@ func (f *DefaultStackFactory) createCachePathResolver(
 // # Description
 //
 // Creates executor for running podman-compose operations (up, down, logs, ps).
-// When ForecastMode is "sapheneia", includes podman-compose.timeseries.yml
-// to start InfluxDB and data-fetcher services for timeseries forecasting.
+// Includes extension compose files based on configuration:
+//   - podman-compose.observability.yml: Prometheus + Grafana (enabled by default)
+//   - podman-compose.timeseries.yml: InfluxDB (when ForecastMode is "sapheneia")
 //
 // # Inputs
 //
-//   - cfg: Configuration containing ForecastMode setting.
+//   - cfg: Configuration containing ForecastMode and Observability settings.
 //   - stackDir: Directory containing compose files.
 //   - proc: process.Manager for executing compose commands.
 //
@@ -424,6 +425,13 @@ func (f *DefaultStackFactory) createComposeExecutor(
 	composeConfig := compose.ComposeConfig{
 		StackDir:    stackDir,
 		ProjectName: "aleutian",
+	}
+
+	// Include observability stack (Prometheus + Grafana) by default
+	// Users can disable via: observability: { enabled: false }
+	if cfg.Observability.IsEnabled() {
+		composeConfig.ExtensionFiles = append(composeConfig.ExtensionFiles,
+			"podman-compose.observability.yml")
 	}
 
 	// When using Sapheneia integration, include the timeseries compose file

@@ -92,6 +92,15 @@ func NewGitAwareExecutor(config ExecutorConfig) (*GitAwareExecutor, error) {
 //	fmt.Println(result.Output)
 //	// Cache was automatically invalidated (InvalidationFull)
 func (e *GitAwareExecutor) Execute(ctx context.Context, args ...string) (*ExecuteResult, error) {
+	// Start tracing span
+	command := ""
+	if len(args) > 0 {
+		command = args[0]
+	}
+	ctx, span := startExecuteSpan(ctx, command, e.config.WorkDir)
+	defer span.End()
+	start := time.Now()
+
 	// Classify command before execution
 	invType := classifyCommand(ctx, args, e.config.WorkDir)
 
@@ -113,12 +122,16 @@ func (e *GitAwareExecutor) Execute(ctx context.Context, args ...string) (*Execut
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
 		} else {
+			setExecuteSpanResult(span, -1, invType.String())
+			recordExecuteMetrics(ctx, command, time.Since(start), -1, invType.String())
 			return nil, fmt.Errorf("executing git command: %w", err)
 		}
 		// Don't invalidate on failure
 		slog.Debug("Git command failed, skipping invalidation",
 			"args", args,
 			"exit_code", result.ExitCode)
+		setExecuteSpanResult(span, result.ExitCode, invType.String())
+		recordExecuteMetrics(ctx, command, time.Since(start), result.ExitCode, invType.String())
 		return result, nil
 	}
 
@@ -131,6 +144,9 @@ func (e *GitAwareExecutor) Execute(ctx context.Context, args ...string) (*Execut
 			// Continue - command succeeded, just log the invalidation failure
 		}
 	}
+
+	setExecuteSpanResult(span, result.ExitCode, invType.String())
+	recordExecuteMetrics(ctx, command, time.Since(start), result.ExitCode, invType.String())
 
 	return result, nil
 }

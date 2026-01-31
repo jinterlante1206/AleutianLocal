@@ -13,6 +13,7 @@ package reason
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
@@ -108,13 +109,24 @@ func (a *BreakingChangeAnalyzer) AnalyzeBreaking(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	ctx, span := startAnalysisSpan(ctx, "AnalyzeBreaking", targetID)
+	defer span.End()
+	start := time.Now()
+
 	if err := ctx.Err(); err != nil {
+		setAnalysisSpanResult(span, false, 0, false)
+		recordAnalysisMetrics(ctx, "analyze_breaking", time.Since(start), false, 0, false)
 		return nil, ErrContextCanceled
 	}
 	if targetID == "" || proposedSig == "" {
+		setAnalysisSpanResult(span, false, 0, false)
+		recordAnalysisMetrics(ctx, "analyze_breaking", time.Since(start), false, 0, false)
 		return nil, ErrInvalidInput
 	}
 	if a.graph != nil && !a.graph.IsFrozen() {
+		setAnalysisSpanResult(span, false, 0, false)
+		recordAnalysisMetrics(ctx, "analyze_breaking", time.Since(start), false, 0, false)
 		return nil, ErrGraphNotReady
 	}
 
@@ -184,6 +196,9 @@ func (a *BreakingChangeAnalyzer) AnalyzeBreaking(
 
 	// Identify safe changes
 	result.SafeChanges = a.identifySafeChanges(currentSig, proposedParsed)
+
+	setAnalysisSpanResult(span, result.IsBreaking, result.CallersAffected, true)
+	recordAnalysisMetrics(ctx, "analyze_breaking", time.Since(start), result.IsBreaking, result.CallersAffected, true)
 
 	return result, nil
 }
