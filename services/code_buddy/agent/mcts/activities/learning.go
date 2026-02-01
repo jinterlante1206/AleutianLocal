@@ -18,6 +18,9 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/algorithms/search"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/eval"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // -----------------------------------------------------------------------------
@@ -148,8 +151,17 @@ func (a *LearningActivity) Execute(
 	snapshot crs.Snapshot,
 	input ActivityInput,
 ) (ActivityResult, crs.Delta, error) {
+	// Create OTel span for activity execution
+	ctx, span := otel.Tracer("activities").Start(ctx, "activities.LearningActivity.Execute",
+		trace.WithAttributes(
+			attribute.String("activity", a.Name()),
+		),
+	)
+	defer span.End()
+
 	learningInput, ok := input.(*LearningInput)
 	if !ok {
+		span.RecordError(ErrNilInput)
 		return ActivityResult{}, nil, &ActivityError{
 			Activity:  a.Name(),
 			Operation: "Execute",
@@ -157,8 +169,14 @@ func (a *LearningActivity) Execute(
 		}
 	}
 
+	span.SetAttributes(
+		attribute.String("conflict_node", learningInput.ConflictNodeID),
+		attribute.Bool("is_hard_signal", learningInput.Source().IsHard()),
+	)
+
 	// CRITICAL: Only learn from hard signals
 	if !learningInput.Source().IsHard() {
+		span.AddEvent("skipping_soft_signal")
 		// Skip clause learning for soft signals, but still update watched literals
 		return a.executeWatchedOnly(ctx, snapshot, learningInput)
 	}
@@ -214,7 +232,11 @@ func (a *LearningActivity) executeWatchedOnly(
 	result.Duration = result.EndTime.Sub(startTime)
 
 	if err != nil {
-		return result, nil, err
+		return result, nil, &ActivityError{
+			Activity:  a.Name(),
+			Operation: "executeWatchedOnly",
+			Err:       err,
+		}
 	}
 
 	result.Success = result.SuccessCount() > 0

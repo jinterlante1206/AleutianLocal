@@ -14,9 +14,13 @@ import (
 	"context"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/algorithms"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/eval"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // -----------------------------------------------------------------------------
@@ -169,16 +173,27 @@ func (a *MemoryActivity) Execute(
 	snapshot crs.Snapshot,
 	input ActivityInput,
 ) (ActivityResult, crs.Delta, error) {
+	// Create OTel span for activity execution
+	ctx, span := otel.Tracer("activities").Start(ctx, "activities.MemoryActivity.Execute",
+		trace.WithAttributes(
+			attribute.String("activity", a.name),
+		),
+	)
+	defer span.End()
+
 	startTime := time.Now()
 
 	memoryInput, ok := input.(*MemoryInput)
 	if !ok {
+		span.RecordError(ErrNilInput)
 		return ActivityResult{}, nil, &ActivityError{
 			Activity:  a.name,
 			Operation: "Execute",
 			Err:       ErrNilInput,
 		}
 	}
+
+	span.SetAttributes(attribute.String("operation", memoryInput.Operation))
 
 	result := ActivityResult{
 		ActivityName: a.name,

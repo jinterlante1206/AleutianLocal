@@ -13,6 +13,7 @@ package integration
 import (
 	"context"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -482,4 +483,64 @@ func (m *mockAlgorithm) Metrics() []eval.MetricDefinition {
 
 func (m *mockAlgorithm) HealthCheck(ctx context.Context) error {
 	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Concurrent A/B Testing Tests (CR-11-23)
+// -----------------------------------------------------------------------------
+
+func TestABHarness_ConcurrentProcess(t *testing.T) {
+	exp := &mockAlgorithm{name: "experiment", output: "exp_result"}
+	ctrl := &mockAlgorithm{name: "control", output: "ctrl_result"}
+
+	harness := NewABHarness(exp, ctrl, &ABConfig{SampleRate: 1.0})
+
+	t.Run("concurrent calls are thread-safe", func(t *testing.T) {
+		const numGoroutines = 100
+		var wg sync.WaitGroup
+
+		for i := 0; i < numGoroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _, err := harness.Process(context.Background(), nil, nil)
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}()
+		}
+
+		wg.Wait()
+
+		stats := harness.Stats()
+		if stats.TotalRequests != numGoroutines {
+			t.Errorf("expected %d total requests, got %d", numGoroutines, stats.TotalRequests)
+		}
+	})
+}
+
+// -----------------------------------------------------------------------------
+// Nil Handling Tests (CR-11-22)
+// -----------------------------------------------------------------------------
+
+func TestActivity_HandlesNilEvaluableReturns(t *testing.T) {
+	bridge := NewBridge(crs.New(nil), nil)
+	coord := NewCoordinator(bridge, nil)
+
+	// Register activities that return nil from Properties/Metrics
+	searchActivity := activities.NewSearchActivity(nil)
+	coord.Register(searchActivity)
+
+	t.Run("coordinator handles activities with nil properties", func(t *testing.T) {
+		// This should not panic
+		for _, activity := range coord.All() {
+			props := activity.Properties()
+			// Properties may be nil or empty, both are valid
+			_ = props
+
+			metrics := activity.Metrics()
+			// Metrics may be nil or empty, both are valid
+			_ = metrics
+		}
+	})
 }

@@ -17,6 +17,9 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/algorithms/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/eval"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // -----------------------------------------------------------------------------
@@ -152,14 +155,28 @@ func (a *AwarenessActivity) Execute(
 	snapshot crs.Snapshot,
 	input ActivityInput,
 ) (ActivityResult, crs.Delta, error) {
+	// Create OTel span for activity execution
+	ctx, span := otel.Tracer("activities").Start(ctx, "activities.AwarenessActivity.Execute",
+		trace.WithAttributes(
+			attribute.String("activity", a.Name()),
+		),
+	)
+	defer span.End()
+
 	awarenessInput, ok := input.(*AwarenessInput)
 	if !ok {
+		span.RecordError(ErrNilInput)
 		return ActivityResult{}, nil, &ActivityError{
 			Activity:  a.Name(),
 			Operation: "Execute",
 			Err:       ErrNilInput,
 		}
 	}
+
+	span.SetAttributes(
+		attribute.Int("graph_nodes", len(awarenessInput.GraphNodes)),
+		attribute.Int("graph_edges", len(awarenessInput.GraphEdges)),
+	)
 
 	// Create algorithm-specific inputs
 	makeInput := func(algo algorithms.Algorithm) any {

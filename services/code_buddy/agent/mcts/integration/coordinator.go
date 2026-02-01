@@ -279,11 +279,24 @@ func (c *Coordinator) RunOnce(ctx context.Context) ([]activities.ActivityResult,
 	scheduled = scheduled[:limit]
 
 	// Run activities in parallel
+	// Channel buffers are sized to scheduled count (expected max: 8 activities).
+	// This prevents blocking but assumes bounded activity registration.
 	var wg sync.WaitGroup
 	resultsCh := make(chan activities.ActivityResult, len(scheduled))
 	errorsCh := make(chan error, len(scheduled))
 
 	for _, sa := range scheduled {
+		// Check for cancellation before spawning to avoid goroutine pile-up
+		select {
+		case <-ctx.Done():
+			// Context cancelled, stop spawning new goroutines
+			c.logger.Debug("run cycle cancelled before all activities spawned",
+				slog.Int("spawned", len(scheduled)-len(scheduled)),
+			)
+			break
+		default:
+		}
+
 		wg.Add(1)
 		go func(sa scheduledActivity) {
 			defer wg.Done()
@@ -317,11 +330,18 @@ func (c *Coordinator) RunOnce(ctx context.Context) ([]activities.ActivityResult,
 		results = append(results, result)
 	}
 
-	// Log errors
+	// Log errors with trace context
 	for err := range errorsCh {
-		c.logger.Warn("activity execution failed",
-			slog.String("error", err.Error()),
-		)
+		// Extract trace context for correlation
+		spanCtx := trace.SpanContextFromContext(ctx)
+		attrs := []any{slog.String("error", err.Error())}
+		if spanCtx.IsValid() {
+			attrs = append(attrs,
+				slog.String("trace_id", spanCtx.TraceID().String()),
+				slog.String("span_id", spanCtx.SpanID().String()),
+			)
+		}
+		c.logger.Warn("activity execution failed", attrs...)
 	}
 
 	if span != nil {

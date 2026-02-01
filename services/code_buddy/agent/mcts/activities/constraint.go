@@ -17,6 +17,9 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/algorithms/constraints"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/eval"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // -----------------------------------------------------------------------------
@@ -159,14 +162,25 @@ func (a *ConstraintActivity) Execute(
 	snapshot crs.Snapshot,
 	input ActivityInput,
 ) (ActivityResult, crs.Delta, error) {
+	// Create OTel span for activity execution
+	ctx, span := otel.Tracer("activities").Start(ctx, "activities.ConstraintActivity.Execute",
+		trace.WithAttributes(
+			attribute.String("activity", a.Name()),
+		),
+	)
+	defer span.End()
+
 	constraintInput, ok := input.(*ConstraintInput)
 	if !ok {
+		span.RecordError(ErrNilInput)
 		return ActivityResult{}, nil, &ActivityError{
 			Activity:  a.Name(),
 			Operation: "Execute",
 			Err:       ErrNilInput,
 		}
 	}
+
+	span.SetAttributes(attribute.String("operation", constraintInput.Operation))
 
 	// Create algorithm-specific inputs
 	makeInput := func(algo algorithms.Algorithm) any {

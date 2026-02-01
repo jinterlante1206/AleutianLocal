@@ -83,8 +83,7 @@ type Bridge struct {
 	logger *slog.Logger
 
 	// State
-	closed     bool
-	generation int64
+	closed bool
 
 	// Metrics
 	activitiesRun  int64
@@ -218,7 +217,8 @@ func (b *Bridge) RunActivity(
 		b.conflictsFound++
 		b.mu.Unlock()
 
-		b.logger.Warn("activity apply conflict, retrying",
+		// Conflicts and retries are expected behavior, log at Debug level
+		b.logger.Debug("activity apply conflict, retrying",
 			slog.String("activity", activity.Name()),
 			slog.Int("attempt", attempt+1),
 			slog.String("error", err.Error()),
@@ -253,7 +253,6 @@ func (b *Bridge) runActivityOnce(
 
 		b.mu.Lock()
 		b.deltasApplied++
-		b.generation = metrics.NewGeneration
 		b.mu.Unlock()
 
 		b.logger.Debug("delta applied",
@@ -290,6 +289,12 @@ func (b *Bridge) Apply(ctx context.Context, delta crs.Delta) (crs.ApplyMetrics, 
 	}
 	b.mu.RUnlock()
 
+	// Validate delta before applying per Rule #6
+	snapshot := b.crs.Snapshot()
+	if err := delta.Validate(snapshot); err != nil {
+		return crs.ApplyMetrics{}, &BridgeError{Operation: "Apply.Validate", Err: err}
+	}
+
 	metrics, err := b.crs.Apply(ctx, delta)
 	if err != nil {
 		return metrics, &BridgeError{Operation: "Apply", Err: err}
@@ -297,7 +302,6 @@ func (b *Bridge) Apply(ctx context.Context, delta crs.Delta) (crs.ApplyMetrics, 
 
 	b.mu.Lock()
 	b.deltasApplied++
-	b.generation = metrics.NewGeneration
 	b.mu.Unlock()
 
 	return metrics, nil
@@ -330,7 +334,7 @@ func (b *Bridge) Stats() BridgeStats {
 		ActivitiesRun:  b.activitiesRun,
 		DeltasApplied:  b.deltasApplied,
 		ConflictsFound: b.conflictsFound,
-		Generation:     b.generation,
+		Generation:     b.crs.Generation(), // Get current generation from CRS directly
 	}
 }
 
