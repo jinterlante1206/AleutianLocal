@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 )
@@ -67,6 +68,7 @@ func NewOllamaAdapter(client *llm.OllamaClient, model string) *OllamaAdapter {
 //
 //	Sends a completion request to Ollama and returns the response.
 //	Converts between agent message format and Ollama's datatypes.Message format.
+//	If tools are provided in the request, uses ChatWithTools to enable function calling.
 //
 // Inputs:
 //
@@ -94,6 +96,7 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 	slog.Info("OllamaAdapter sending request",
 		slog.String("model", a.model),
 		slog.Int("message_count", len(messages)),
+		slog.Int("tool_count", len(request.Tools)),
 		slog.String("system_prompt_preview", truncate(request.SystemPrompt, 100)),
 	)
 
@@ -109,9 +112,14 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 
 	// Build generation params
 	params := a.buildParams(request)
-
-	// Call Ollama
 	startTime := time.Now()
+
+	// Use ChatWithTools if tools are provided
+	if len(request.Tools) > 0 {
+		return a.completeWithTools(ctx, messages, params, request.Tools, startTime)
+	}
+
+	// Call Ollama without tools
 	content, err := a.client.Chat(ctx, messages, params)
 	if err != nil {
 		slog.Error("OllamaAdapter.Chat failed",
@@ -137,6 +145,132 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 		Duration:     duration,
 		Model:        a.model,
 	}, nil
+}
+
+// completeWithTools handles requests with tool definitions.
+//
+// Description:
+//
+//	Converts tool definitions to Ollama format, calls ChatWithTools,
+//	and parses tool calls from the response.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout.
+//	messages - Converted messages in Ollama format.
+//	params - Generation parameters.
+//	toolDefs - Tool definitions from the request.
+//	startTime - When the request started (for duration tracking).
+//
+// Outputs:
+//
+//	*Response - The LLM response with tool calls if present.
+//	error - Non-nil if the request failed.
+func (a *OllamaAdapter) completeWithTools(
+	ctx context.Context,
+	messages []datatypes.Message,
+	params llm.GenerationParams,
+	toolDefs []tools.ToolDefinition,
+	startTime time.Time,
+) (*Response, error) {
+	// Convert tool definitions to Ollama format
+	ollamaTools := convertToolDefinitions(toolDefs)
+
+	slog.Debug("OllamaAdapter calling ChatWithTools",
+		slog.Int("num_tools", len(ollamaTools)),
+	)
+
+	// Call Ollama with tools
+	result, err := a.client.ChatWithTools(ctx, messages, params, ollamaTools)
+	if err != nil {
+		slog.Error("OllamaAdapter.ChatWithTools failed",
+			slog.String("error", err.Error()),
+		)
+		return nil, err
+	}
+
+	slog.Info("OllamaAdapter received tool response",
+		slog.Int("content_len", len(result.Content)),
+		slog.Int("tool_calls", len(result.ToolCalls)),
+		slog.String("stop_reason", result.StopReason),
+		slog.Duration("duration", time.Since(startTime)),
+	)
+
+	// Convert Ollama tool calls to agent format
+	var agentToolCalls []ToolCall
+	for _, tc := range result.ToolCalls {
+		agentToolCalls = append(agentToolCalls, ToolCall{
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+
+	duration := time.Since(startTime)
+	return &Response{
+		Content:      result.Content,
+		ToolCalls:    agentToolCalls,
+		StopReason:   result.StopReason,
+		TokensUsed:   estimateTokens(result.Content),
+		InputTokens:  estimateInputTokens(messages),
+		OutputTokens: estimateTokens(result.Content),
+		Duration:     duration,
+		Model:        a.model,
+	}, nil
+}
+
+// convertToolDefinitions converts agent tool definitions to Ollama format.
+//
+// Description:
+//
+//	Maps tools.ToolDefinition to llm.OllamaTool for the Ollama API.
+//	Preserves parameter types, descriptions, and required fields.
+//
+// Inputs:
+//
+//	defs - Tool definitions in agent format.
+//
+// Outputs:
+//
+//	[]llm.OllamaTool - Tools in Ollama API format.
+func convertToolDefinitions(defs []tools.ToolDefinition) []llm.OllamaTool {
+	if len(defs) == 0 {
+		return nil
+	}
+
+	result := make([]llm.OllamaTool, 0, len(defs))
+	for _, def := range defs {
+		// Convert parameters
+		properties := make(map[string]llm.OllamaParamDef)
+		var required []string
+
+		for paramName, paramDef := range def.Parameters {
+			properties[paramName] = llm.OllamaParamDef{
+				Type:        string(paramDef.Type),
+				Description: paramDef.Description,
+				Enum:        paramDef.Enum,
+				Default:     paramDef.Default,
+			}
+			if paramDef.Required {
+				required = append(required, paramName)
+			}
+		}
+
+		result = append(result, llm.OllamaTool{
+			Type: "function",
+			Function: llm.OllamaToolFunction{
+				Name:        def.Name,
+				Description: def.Description,
+				Parameters: llm.OllamaToolParameters{
+					Type:       "object",
+					Properties: properties,
+					Required:   required,
+				},
+			},
+		})
+	}
+
+	return result
 }
 
 // truncate truncates a string to maxLen chars.

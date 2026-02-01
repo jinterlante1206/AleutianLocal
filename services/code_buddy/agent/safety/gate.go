@@ -295,7 +295,9 @@ func (g *DefaultGate) Check(ctx context.Context, changes []ProposedChange) (*Res
 		Issues: make([]Issue, 0),
 	}
 
-	for _, change := range changes {
+	for i := range changes {
+		// SG-001: Use index to avoid loop variable capture issues
+		change := &changes[i]
 		for _, checker := range g.checkers {
 			select {
 			case <-ctx.Done():
@@ -303,14 +305,15 @@ func (g *DefaultGate) Check(ctx context.Context, changes []ProposedChange) (*Res
 			default:
 			}
 
-			issues := checker.Check(ctx, &change)
+			issues := checker.Check(ctx, change)
 			result.ChecksRun++
 
-			for _, issue := range issues {
-				issue.Change = &change
-				result.Issues = append(result.Issues, issue)
+			for j := range issues {
+				// SG-001: Set Change at creation, avoid mutation after append
+				issues[j].Change = change
+				result.Issues = append(result.Issues, issues[j])
 
-				switch issue.Severity {
+				switch issues[j].Severity {
 				case SeverityCritical:
 					result.CriticalCount++
 				case SeverityWarning:

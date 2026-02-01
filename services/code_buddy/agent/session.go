@@ -295,6 +295,50 @@ type AssembledContext struct {
 	Relevance map[string]float64 `json:"relevance"`
 }
 
+// GetRelevance returns the relevance score for an entry ID.
+// Returns 0.0 if the entry ID doesn't exist or if Relevance map is nil.
+//
+// Thread Safety: This method is NOT safe for concurrent use.
+func (c *AssembledContext) GetRelevance(entryID string) float64 {
+	if c.Relevance == nil {
+		return 0.0
+	}
+	return c.Relevance[entryID]
+}
+
+// SetRelevance sets the relevance score for an entry ID.
+// Initializes the Relevance map if nil (CT-001 fix).
+//
+// Thread Safety: This method is NOT safe for concurrent use.
+func (c *AssembledContext) SetRelevance(entryID string, score float64) {
+	if c.Relevance == nil {
+		c.Relevance = make(map[string]float64)
+	}
+	c.Relevance[entryID] = score
+}
+
+// EnsureInitialized ensures all slice/map fields are non-nil.
+// Call this after unmarshalling or constructing AssembledContext.
+//
+// Thread Safety: This method is NOT safe for concurrent use.
+func (c *AssembledContext) EnsureInitialized() {
+	if c.CodeContext == nil {
+		c.CodeContext = []CodeEntry{}
+	}
+	if c.LibraryDocs == nil {
+		c.LibraryDocs = []DocEntry{}
+	}
+	if c.ToolResults == nil {
+		c.ToolResults = []ToolResult{}
+	}
+	if c.ConversationHistory == nil {
+		c.ConversationHistory = []Message{}
+	}
+	if c.Relevance == nil {
+		c.Relevance = make(map[string]float64)
+	}
+}
+
 // CodeEntry represents a code snippet in context.
 type CodeEntry struct {
 	// ID is a unique identifier for this entry.

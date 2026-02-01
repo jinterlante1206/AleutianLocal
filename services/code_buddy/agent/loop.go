@@ -595,13 +595,29 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 	for {
 		// Check context cancellation
 		if err := ctx.Err(); err != nil {
-			session.SetState(StateError)
+			// LP-001: Record audit trail before setting error state
+			session.AddHistoryEntry(HistoryEntry{
+				Type:  "context_cancelled",
+				Input: err.Error(),
+				Error: ErrCanceled.Error(),
+			})
+			if transErr := l.transition(session, StateError, "context cancelled"); transErr != nil {
+				slog.Warn("Failed to transition to error state", slog.String("error", transErr.Error()))
+			}
 			return l.buildErrorResult(session, ErrCanceled, startTime), nil
 		}
 
 		// Check timeout
 		if session.Config.TotalTimeout > 0 && time.Since(startTime) > session.Config.TotalTimeout {
-			session.SetState(StateError)
+			// LP-001: Record audit trail before setting error state
+			session.AddHistoryEntry(HistoryEntry{
+				Type:  "timeout",
+				Input: fmt.Sprintf("exceeded %v", session.Config.TotalTimeout),
+				Error: ErrTimeout.Error(),
+			})
+			if transErr := l.transition(session, StateError, "timeout exceeded"); transErr != nil {
+				slog.Warn("Failed to transition to error state", slog.String("error", transErr.Error()))
+			}
 			return l.buildErrorResult(session, ErrTimeout, startTime), nil
 		}
 
@@ -625,14 +641,33 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 				return l.buildClarifyResult(session, startTime), nil
 			}
 
-			session.SetState(StateError)
+			// LP-002: Use transition() to validate state change and record history
+			session.AddHistoryEntry(HistoryEntry{
+				Type:  "phase_error",
+				Input: fmt.Sprintf("phase %s failed", currentState),
+				Error: err.Error(),
+			})
+			if transErr := l.transition(session, StateError, fmt.Sprintf("phase error: %v", err)); transErr != nil {
+				slog.Warn("Failed to transition to error state", slog.String("error", transErr.Error()))
+				// Fallback: force state if transition fails (edge case)
+				session.SetState(StateError)
+			}
 			return l.buildErrorResult(session, err, startTime), nil
 		}
 
 		// Transition to the next state
 		if nextState != currentState {
 			if err := l.transition(session, nextState, "phase completed"); err != nil {
-				session.SetState(StateError)
+				// LP-002: Record history for transition failure
+				session.AddHistoryEntry(HistoryEntry{
+					Type:  "transition_error",
+					Input: fmt.Sprintf("%s -> %s", currentState, nextState),
+					Error: err.Error(),
+				})
+				if transErr := l.transition(session, StateError, fmt.Sprintf("transition error: %v", err)); transErr != nil {
+					slog.Warn("Failed to transition to error state", slog.String("error", transErr.Error()))
+					session.SetState(StateError)
+				}
 				return l.buildErrorResult(session, err, startTime), nil
 			}
 		}

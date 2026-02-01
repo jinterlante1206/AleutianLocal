@@ -113,6 +113,11 @@ func NewExecutor(registry *Registry, opts *ExecutorOptions) *Executor {
 //
 // Thread Safety: This method is safe for concurrent use.
 func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result, error) {
+	// TO-001: Check context cancellation early to avoid wasted work
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled before execution: %w", err)
+	}
+
 	if invocation == nil {
 		return nil, fmt.Errorf("%w: nil invocation", ErrValidationFailed)
 	}
