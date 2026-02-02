@@ -58,6 +58,58 @@ const (
 	StateError AgentState = "ERROR"
 )
 
+// ModelType identifies the LLM model for format-aware processing.
+//
+// Description:
+//
+//	Used by control flow hardening layers to apply model-specific logic:
+//	- Parser: Different models output tool calls in different formats
+//	- Sanitizer: Some formats are native to certain models and shouldn't be stripped
+//
+// Thread Safety: Safe for concurrent use (immutable string type).
+type ModelType string
+
+const (
+	// ModelClaude represents Anthropic Claude models.
+	// Native format: <function_calls>/<invoke> - should not be stripped by sanitizer.
+	ModelClaude ModelType = "claude"
+
+	// ModelGLM4 represents GLM-4 models.
+	// Uses <execute><command> format for tool calls.
+	ModelGLM4 ModelType = "glm4"
+
+	// ModelGPT4 represents OpenAI GPT-4 models.
+	// Uses JSON function_call format.
+	ModelGPT4 ModelType = "gpt4"
+
+	// ModelGeneric represents unknown/generic models.
+	// Default: strip all non-standard formats.
+	ModelGeneric ModelType = "generic"
+)
+
+// String returns the string representation of the model type.
+//
+// Outputs:
+//
+//	string - The model type as a string (e.g., "claude", "gpt4")
+func (m ModelType) String() string {
+	return string(m)
+}
+
+// IsAnthropicModel returns true if this is an Anthropic model.
+//
+// Description:
+//
+//	Anthropic models use native function_calls format that should be preserved
+//	by the sanitizer rather than stripped as leaked markup.
+//
+// Outputs:
+//
+//	bool - True if model is Claude
+func (m ModelType) IsAnthropicModel() bool {
+	return m == ModelClaude
+}
+
 // String returns the string representation of the state.
 //
 // Outputs:

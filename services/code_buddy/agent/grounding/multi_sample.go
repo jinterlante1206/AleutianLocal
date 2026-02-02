@@ -12,9 +12,19 @@ package grounding
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
+)
+
+// Package-level compiled regexes for claim normalization (compiled once).
+var (
+	// normalizeNonWordRegex removes non-word characters except dots.
+	normalizeNonWordRegex = regexp.MustCompile(`[^\w\s.]`)
+
+	// normalizeWhitespaceRegex collapses whitespace.
+	normalizeWhitespaceRegex = regexp.MustCompile(`\s+`)
 )
 
 // MultiSampleConfig configures the multi-sample consistency verifier.
@@ -303,6 +313,7 @@ func (v *MultiSampleVerifier) ConvertToViolations(result *ConsensusResult) []Vio
 }
 
 // normalizeClaim creates a canonical representation for comparison.
+// Uses package-level compiled regexes for performance.
 func normalizeClaim(claim Claim) string {
 	// Normalize: lowercase, remove punctuation, keep key entities
 	normalized := strings.ToLower(claim.RawText)
@@ -313,11 +324,11 @@ func normalizeClaim(claim Claim) string {
 		normalized = strings.ReplaceAll(normalized, filler, " ")
 	}
 
-	// Remove punctuation except for file extensions
-	normalized = regexp.MustCompile(`[^\w\s.]`).ReplaceAllString(normalized, " ")
+	// Remove punctuation except for file extensions (use pre-compiled regex)
+	normalized = normalizeNonWordRegex.ReplaceAllString(normalized, " ")
 
-	// Collapse whitespace
-	normalized = regexp.MustCompile(`\s+`).ReplaceAllString(normalized, " ")
+	// Collapse whitespace (use pre-compiled regex)
+	normalized = normalizeWhitespaceRegex.ReplaceAllString(normalized, " ")
 	normalized = strings.TrimSpace(normalized)
 
 	// Add type prefix for better disambiguation
@@ -334,8 +345,9 @@ func normalizeClaim(claim Claim) string {
 }
 
 // formatSampleCount formats sample indices for display.
+// Example: 2 out of 3 samples -> "2/3 samples"
 func formatSampleCount(indices []int, total int) string {
-	return strings.TrimSpace(strings.Repeat(".", len(indices)) + "/" + strings.Repeat(".", total))
+	return fmt.Sprintf("%d/%d samples", len(indices), total)
 }
 
 // GetConfig returns the verifier configuration.

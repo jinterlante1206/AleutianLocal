@@ -417,34 +417,4 @@ func ExtractClaimsForVerification(response string) []ExtractedClaim {
 	return extracted
 }
 
-// extractJSONBlock attempts to extract a JSON block from text.
-func extractJSONBlock(text string) string {
-	// Look for ```json blocks
-	startMarkers := []string{"```json\n", "```json\r\n", "```\n", "```\r\n"}
-	endMarker := "```"
-
-	for _, startMarker := range startMarkers {
-		startIdx := strings.Index(text, startMarker)
-		if startIdx == -1 {
-			continue
-		}
-
-		contentStart := startIdx + len(startMarker)
-		remaining := text[contentStart:]
-		endIdx := strings.Index(remaining, endMarker)
-		if endIdx == -1 {
-			continue
-		}
-
-		return strings.TrimSpace(remaining[:endIdx])
-	}
-
-	// Try to find bare JSON object
-	startIdx := strings.Index(text, "{")
-	endIdx := strings.LastIndex(text, "}")
-	if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
-		return text[startIdx : endIdx+1]
-	}
-
-	return ""
-}
+// Note: extractJSONBlock is defined in structured_output.go as a shared utility.

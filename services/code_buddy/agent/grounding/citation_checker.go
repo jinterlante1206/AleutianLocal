@@ -19,6 +19,24 @@ import (
 	"strings"
 )
 
+// Package-level compiled regexes for citation parsing (compiled once).
+var (
+	// citationPatternCompiled matches [file.go:45] or [file.go:45-50] citations.
+	citationPatternCompiled = regexp.MustCompile(
+		`\[([^\[\]:]+\.(go|py|js|ts|jsx|tsx|java|rs|c|cpp|h|hpp|md|yaml|yml|json)):(\d+)(?:-(\d+))?\]`,
+	)
+
+	// claimPatternsCompiled detects code claims in response text.
+	claimPatternsCompiled = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)the\s+(\w+)\s+function`),
+		regexp.MustCompile(`(?i)function\s+(\w+)`),
+		regexp.MustCompile(`(?i)in\s+(\w+\.go)`),
+		regexp.MustCompile(`(?i)the\s+file\s+(\w+\.\w+)`),
+		regexp.MustCompile(`(?i)this\s+(code|file|function|method)`),
+		regexp.MustCompile(`(?i)the\s+(main|init|setup|handle\w*)\s+function`),
+	}
+)
+
 // CitationChecker validates [file:line] citations in responses.
 //
 // This checker extracts citations from the LLM response and validates:
@@ -28,9 +46,7 @@ import (
 //
 // Thread Safety: Safe for concurrent use (stateless after construction).
 type CitationChecker struct {
-	config          *CitationCheckerConfig
-	citationPattern *regexp.Regexp
-	claimPatterns   []*regexp.Regexp
+	config *CitationCheckerConfig
 }
 
 // NewCitationChecker creates a new citation checker.
@@ -49,18 +65,6 @@ func NewCitationChecker(config *CitationCheckerConfig) *CitationChecker {
 
 	return &CitationChecker{
 		config: config,
-		// Matches [file.go:45] or [file.go:45-50]
-		citationPattern: regexp.MustCompile(
-			`\[([^\[\]:]+\.(go|py|js|ts|jsx|tsx|java|rs|c|cpp|h|hpp|md|yaml|yml|json)):(\d+)(?:-(\d+))?\]`,
-		),
-		claimPatterns: []*regexp.Regexp{
-			regexp.MustCompile(`(?i)the\s+(\w+)\s+function`),
-			regexp.MustCompile(`(?i)function\s+(\w+)`),
-			regexp.MustCompile(`(?i)in\s+(\w+\.go)`),
-			regexp.MustCompile(`(?i)the\s+file\s+(\w+\.\w+)`),
-			regexp.MustCompile(`(?i)this\s+(code|file|function|method)`),
-			regexp.MustCompile(`(?i)the\s+(main|init|setup|handle\w*)\s+function`),
-		},
 	}
 }
 
@@ -164,7 +168,7 @@ func (c *CitationChecker) Check(ctx context.Context, input *CheckInput) []Violat
 func (c *CitationChecker) extractCitations(response string) []Citation {
 	var citations []Citation
 
-	matches := c.citationPattern.FindAllStringSubmatchIndex(response, -1)
+	matches := citationPatternCompiled.FindAllStringSubmatchIndex(response, -1)
 	for _, match := range matches {
 		if len(match) < 8 {
 			continue
@@ -264,7 +268,7 @@ func (c *CitationChecker) getFileContent(filePath string, input *CheckInput) str
 
 // containsCodeClaims detects if response makes claims about code.
 func (c *CitationChecker) containsCodeClaims(response string) bool {
-	for _, pattern := range c.claimPatterns {
+	for _, pattern := range claimPatternsCompiled {
 		if pattern.MatchString(response) {
 			return true
 		}

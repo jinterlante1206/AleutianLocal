@@ -14,8 +14,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// Package-level compiled regex for whitespace normalization.
+var collapseSpacesRegex = regexp.MustCompile(`[ ]+`)
 
 // StructuredOutputConfig configures the structured output validator.
 type StructuredOutputConfig struct {
@@ -180,19 +184,26 @@ func (c *StructuredOutputChecker) parseResponse(response string) (*StructuredRes
 }
 
 // extractJSON tries to extract JSON from markdown code blocks.
+// Delegates to shared extractJSONBlock function to avoid duplication.
 func (c *StructuredOutputChecker) extractJSON(response string) string {
+	return extractJSONBlock(response)
+}
+
+// extractJSONBlock attempts to extract a JSON block from text.
+// This is a shared utility used by multiple checkers.
+func extractJSONBlock(text string) string {
 	// Look for ```json blocks
 	startMarkers := []string{"```json\n", "```json\r\n", "```\n", "```\r\n"}
 	endMarker := "```"
 
 	for _, startMarker := range startMarkers {
-		startIdx := strings.Index(response, startMarker)
+		startIdx := strings.Index(text, startMarker)
 		if startIdx == -1 {
 			continue
 		}
 
 		contentStart := startIdx + len(startMarker)
-		remaining := response[contentStart:]
+		remaining := text[contentStart:]
 		endIdx := strings.Index(remaining, endMarker)
 		if endIdx == -1 {
 			continue
@@ -202,10 +213,10 @@ func (c *StructuredOutputChecker) extractJSON(response string) string {
 	}
 
 	// Try to find bare JSON object
-	startIdx := strings.Index(response, "{")
-	endIdx := strings.LastIndex(response, "}")
+	startIdx := strings.Index(text, "{")
+	endIdx := strings.LastIndex(text, "}")
 	if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
-		return response[startIdx : endIdx+1]
+		return text[startIdx : endIdx+1]
 	}
 
 	return ""
@@ -349,15 +360,14 @@ func (c *StructuredOutputChecker) evidenceExistsInFile(claim StructuredClaim, ev
 }
 
 // normalizeForComparison normalizes a string for fuzzy comparison.
+// Uses O(n) regex replacement instead of O(n²) loop.
 func normalizeForComparison(s string) string {
 	// Remove extra whitespace and normalize line endings
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\t", " ")
 
-	// Collapse multiple spaces to single space
-	for strings.Contains(s, "  ") {
-		s = strings.ReplaceAll(s, "  ", " ")
-	}
+	// Collapse multiple spaces to single space (O(n) with pre-compiled regex)
+	s = collapseSpacesRegex.ReplaceAllString(s, " ")
 
 	return strings.TrimSpace(s)
 }

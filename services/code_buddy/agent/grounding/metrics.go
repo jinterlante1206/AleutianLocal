@@ -289,7 +289,13 @@ const (
 	CircuitBreakerOpen     CircuitBreakerStateValue = 2
 )
 
+// lastCircuitBreakerState tracks the previous state for delta calculation.
+var lastCircuitBreakerState CircuitBreakerStateValue
+
 // RecordCircuitBreakerState records the circuit breaker state change.
+//
+// Uses delta approach: subtracts old state value and adds new state value
+// so the metric reflects current state, not cumulative.
 //
 // Inputs:
 //   - ctx: Context for metric recording.
@@ -300,7 +306,10 @@ func RecordCircuitBreakerState(ctx context.Context, state CircuitBreakerStateVal
 	if err := initMetrics(); err != nil {
 		return
 	}
-	circuitBreakerState.Add(ctx, int64(state))
+	// Subtract old state, add new state to maintain current value
+	oldState := lastCircuitBreakerState
+	lastCircuitBreakerState = state
+	circuitBreakerState.Add(ctx, int64(state)-int64(oldState))
 }
 
 // RecordRetriesExhausted records when hallucination retries are exhausted.

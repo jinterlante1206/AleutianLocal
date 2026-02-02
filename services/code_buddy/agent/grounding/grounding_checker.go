@@ -18,6 +18,59 @@ import (
 	"strings"
 )
 
+// Package-level compiled regexes for claim extraction (compiled once).
+var (
+	// filePatternsCompiled detects file path references.
+	filePatternsCompiled = []*regexp.Regexp{
+		// File paths with extensions: "in main.go", "the file.py file"
+		regexp.MustCompile(`\b([\w/.-]+\.(go|py|js|ts|jsx|tsx|java|rs|c|cpp|h|hpp|cc))\b`),
+	}
+
+	// symbolPatternsCompiled detects symbol references.
+	symbolPatternsCompiled = []*regexp.Regexp{
+		// "the X function" - requires "the" prefix to avoid false matches
+		regexp.MustCompile(`(?i)the\s+([A-Z]\w*)\s+function`),
+		// "`X` function" or "X() function" - code-like references
+		regexp.MustCompile("(?i)`([A-Za-z_]\\w*)`\\s+function"),
+		regexp.MustCompile(`(?i)([A-Z]\w*)\(\)\s+function`),
+		// "type X", "struct X", "class X", "interface X" - definitions
+		regexp.MustCompile(`(?i)type\s+([A-Z]\w*)`),
+		regexp.MustCompile(`(?i)struct\s+([A-Z]\w*)`),
+		regexp.MustCompile(`(?i)class\s+([A-Z]\w*)`),
+		regexp.MustCompile(`(?i)interface\s+([A-Z]\w*)`),
+		// "the X method" - requires "the" prefix
+		regexp.MustCompile(`(?i)the\s+([A-Z]\w*)\s+method`),
+		// "`X` method" - code-like references
+		regexp.MustCompile("(?i)`([A-Za-z_]\\w*)`\\s+method"),
+	}
+
+	// frameworkPatternCompiled detects framework/library mentions.
+	frameworkPatternCompiled = regexp.MustCompile(`(?i)\b(flask|django|fastapi|pyramid|tornado|express|koa|nest|gin|echo|fiber|chi|gorilla|beego|spring|micronaut|quarkus|rails|sinatra|laravel|symfony)\b`)
+
+	// commonWordsSet is a package-level set of words to filter from symbol claims.
+	// Kept as package-level to avoid allocating a new map on every call.
+	commonWordsSet = map[string]bool{
+		// Articles and pronouns
+		"the": true, "a": true, "an": true, "this": true, "that": true,
+		// Common verbs
+		"get": true, "set": true, "run": true, "do": true, "make": true,
+		"is": true, "are": true, "was": true, "be": true, "have": true,
+		// Common adjectives
+		"new": true, "old": true, "main": true, "test": true, "default": true,
+		// Common nouns
+		"data": true, "value": true, "error": true, "result": true, "input": true,
+		"output": true, "file": true, "string": true, "int": true, "bool": true,
+		// Code-related keywords
+		"function": true, "method": true, "type": true, "struct": true, "class": true,
+		"interface": true, "package": true, "module": true, "import": true,
+		// Too short or generic
+		"i": true, "j": true, "k": true, "x": true, "y": true, "n": true,
+		"id": true, "db": true, "io": true, "ok": true, "err": true,
+		// Common Go types/packages that are too generic
+		"context": true, "http": true, "fmt": true, "log": true,
+	}
+)
+
 // GroundingCheckerConfig configures the grounding checker.
 type GroundingCheckerConfig struct {
 	// CheckFiles enables file reference validation.
@@ -62,11 +115,7 @@ func DefaultGroundingCheckerConfig() *GroundingCheckerConfig {
 //
 // Thread Safety: Safe for concurrent use after construction.
 type GroundingChecker struct {
-	config           *GroundingCheckerConfig
-	filePatterns     []*regexp.Regexp
-	symbolPatterns   []*regexp.Regexp
-	frameworkPattern *regexp.Regexp
-	frameworks       map[string]bool
+	config *GroundingCheckerConfig
 }
 
 // NewGroundingChecker creates a new grounding checker.
@@ -85,35 +134,6 @@ func NewGroundingChecker(config *GroundingCheckerConfig) *GroundingChecker {
 
 	return &GroundingChecker{
 		config: config,
-		filePatterns: []*regexp.Regexp{
-			// File paths with extensions: "in main.go", "the file.py file"
-			regexp.MustCompile(`\b([\w/.-]+\.(go|py|js|ts|jsx|tsx|java|rs|c|cpp|h|hpp|cc))\b`),
-		},
-		symbolPatterns: []*regexp.Regexp{
-			// "the X function" - requires "the" prefix to avoid false matches
-			regexp.MustCompile(`(?i)the\s+([A-Z]\w*)\s+function`),
-			// "`X` function" or "X() function" - code-like references
-			regexp.MustCompile("(?i)`([A-Za-z_]\\w*)`\\s+function"),
-			regexp.MustCompile(`(?i)([A-Z]\w*)\(\)\s+function`),
-			// "type X", "struct X", "class X", "interface X" - definitions
-			regexp.MustCompile(`(?i)type\s+([A-Z]\w*)`),
-			regexp.MustCompile(`(?i)struct\s+([A-Z]\w*)`),
-			regexp.MustCompile(`(?i)class\s+([A-Z]\w*)`),
-			regexp.MustCompile(`(?i)interface\s+([A-Z]\w*)`),
-			// "the X method" - requires "the" prefix
-			regexp.MustCompile(`(?i)the\s+([A-Z]\w*)\s+method`),
-			// "`X` method" - code-like references
-			regexp.MustCompile("(?i)`([A-Za-z_]\\w*)`\\s+method"),
-		},
-		frameworkPattern: regexp.MustCompile(`(?i)\b(flask|django|fastapi|pyramid|tornado|express|koa|nest|gin|echo|fiber|chi|gorilla|beego|spring|micronaut|quarkus|rails|sinatra|laravel|symfony)\b`),
-		frameworks: map[string]bool{
-			"flask": true, "django": true, "fastapi": true, "pyramid": true, "tornado": true,
-			"express": true, "koa": true, "nest": true,
-			"gin": true, "echo": true, "fiber": true, "chi": true, "gorilla": true, "beego": true,
-			"spring": true, "micronaut": true, "quarkus": true,
-			"rails": true, "sinatra": true,
-			"laravel": true, "symfony": true,
-		},
 	}
 }
 
@@ -169,7 +189,7 @@ func (c *GroundingChecker) extractClaims(response string) []Claim {
 
 	// Extract file claims
 	if c.config.CheckFiles {
-		for _, pattern := range c.filePatterns {
+		for _, pattern := range filePatternsCompiled {
 			matches := pattern.FindAllStringSubmatchIndex(response, -1)
 			for _, match := range matches {
 				if len(match) >= 4 {
@@ -191,13 +211,13 @@ func (c *GroundingChecker) extractClaims(response string) []Claim {
 
 	// Extract symbol claims
 	if c.config.CheckSymbols {
-		for _, pattern := range c.symbolPatterns {
+		for _, pattern := range symbolPatternsCompiled {
 			matches := pattern.FindAllStringSubmatchIndex(response, -1)
 			for _, match := range matches {
 				if len(match) >= 4 {
 					symbol := response[match[2]:match[3]]
 					// Skip common words that aren't symbols
-					if c.isCommonWord(symbol) {
+					if isCommonWord(symbol) {
 						continue
 					}
 					key := "symbol:" + strings.ToLower(symbol)
@@ -217,7 +237,7 @@ func (c *GroundingChecker) extractClaims(response string) []Claim {
 
 	// Extract framework claims
 	if c.config.CheckFrameworks {
-		matches := c.frameworkPattern.FindAllStringSubmatchIndex(response, -1)
+		matches := frameworkPatternCompiled.FindAllStringSubmatchIndex(response, -1)
 		for _, match := range matches {
 			if len(match) >= 4 {
 				framework := strings.ToLower(response[match[2]:match[3]])
@@ -345,29 +365,9 @@ func (c *GroundingChecker) validateFrameworkClaim(claim Claim, evidence *Evidenc
 }
 
 // isCommonWord checks if a word is too common to be a meaningful symbol claim.
-func (c *GroundingChecker) isCommonWord(word string) bool {
-	lowerWord := strings.ToLower(word)
-	commonWords := map[string]bool{
-		// Articles and pronouns
-		"the": true, "a": true, "an": true, "this": true, "that": true,
-		// Common verbs
-		"get": true, "set": true, "run": true, "do": true, "make": true,
-		"is": true, "are": true, "was": true, "be": true, "have": true,
-		// Common adjectives
-		"new": true, "old": true, "main": true, "test": true, "default": true,
-		// Common nouns
-		"data": true, "value": true, "error": true, "result": true, "input": true,
-		"output": true, "file": true, "string": true, "int": true, "bool": true,
-		// Code-related keywords
-		"function": true, "method": true, "type": true, "struct": true, "class": true,
-		"interface": true, "package": true, "module": true, "import": true,
-		// Too short or generic
-		"i": true, "j": true, "k": true, "x": true, "y": true, "n": true,
-		"id": true, "db": true, "io": true, "ok": true, "err": true,
-		// Common Go types/packages that are too generic
-		"context": true, "http": true, "fmt": true, "log": true,
-	}
-	return commonWords[lowerWord]
+// Uses package-level commonWordsSet to avoid allocation per call.
+func isCommonWord(word string) bool {
+	return commonWordsSet[strings.ToLower(word)]
 }
 
 // formatExpectedFiles creates a summary of expected files for error messages.

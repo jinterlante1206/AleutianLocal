@@ -13,6 +13,7 @@ package grounding
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/algorithms/constraints"
@@ -49,8 +50,9 @@ func DefaultTMSVerifierConfig() *TMSVerifierConfig {
 //
 // Thread Safety: Safe for concurrent use after construction.
 type TMSVerifier struct {
-	config *TMSVerifierConfig
-	tms    *constraints.TMS
+	config         *TMSVerifierConfig
+	tms            *constraints.TMS
+	claimExtractor *GroundingChecker // Cached for reuse
 }
 
 // NewTMSVerifier creates a new TMS-based claim verifier.
@@ -71,8 +73,9 @@ func NewTMSVerifier(config *TMSVerifierConfig) *TMSVerifier {
 	tmsConfig.MaxIterations = config.MaxIterations
 
 	return &TMSVerifier{
-		config: config,
-		tms:    constraints.NewTMS(tmsConfig),
+		config:         config,
+		tms:            constraints.NewTMS(tmsConfig),
+		claimExtractor: NewGroundingChecker(nil), // Cache for reuse
 	}
 }
 
@@ -445,9 +448,8 @@ func (v *TMSVerifier) Check(ctx context.Context, input *CheckInput) []Violation 
 		return nil
 	}
 
-	// Extract claims using GroundingChecker's extraction logic
-	checker := NewGroundingChecker(nil)
-	claims := checker.extractClaims(input.Response)
+	// Extract claims using cached GroundingChecker
+	claims := v.claimExtractor.extractClaims(input.Response)
 
 	if len(claims) == 0 {
 		return nil
@@ -462,7 +464,11 @@ func (v *TMSVerifier) Check(ctx context.Context, input *CheckInput) []Violation 
 	// Verify claims using TMS
 	result, err := v.VerifyClaims(ctx, claims, evidence)
 	if err != nil {
-		// Log error but don't fail the check
+		// Log error for debugging but don't fail the check
+		slog.Warn("TMS verification failed",
+			slog.String("error", err.Error()),
+			slog.Int("claims_count", len(claims)),
+		)
 		return nil
 	}
 

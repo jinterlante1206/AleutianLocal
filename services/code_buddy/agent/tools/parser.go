@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/google/uuid"
 )
 
@@ -409,4 +410,203 @@ func (p *Parser) parseAnthropicXML(text string) ([]ToolCall, string, error) {
 func (p *Parser) ExtractTextBetweenToolCalls(text string) string {
 	_, remaining, _ := p.Parse(text)
 	return remaining
+}
+
+// =============================================================================
+// ENHANCED PARSING (Model-Aware, Execute Tag Support)
+// =============================================================================
+
+// ParseResult contains the result of parsing with full metadata.
+type ParseResult struct {
+	// ToolCalls contains extracted tool calls.
+	ToolCalls []ToolCall
+
+	// CleanedText is the text with tool calls removed.
+	CleanedText string
+
+	// Fallback indicates no format matched.
+	Fallback bool
+
+	// Partial indicates format partially matched (malformed).
+	Partial bool
+
+	// Error is non-nil if parse error occurred.
+	Error error
+}
+
+// EnhancedParser extends Parser with model-aware parsing.
+//
+// Description:
+//
+//	Provides model-aware parsing that handles multiple tool call formats
+//	and includes detailed parse results with fallback/partial information.
+//
+// Thread Safety: Safe for concurrent use.
+type EnhancedParser struct {
+	*Parser
+	model agent.ModelType
+}
+
+// NewEnhancedParser creates a model-aware parser.
+//
+// Inputs:
+//
+//	model - The LLM model type for format-aware parsing.
+//	formats - Formats to try (nil uses defaults).
+//
+// Outputs:
+//
+//	*EnhancedParser - The configured parser.
+func NewEnhancedParser(model agent.ModelType, formats ...ParseFormat) *EnhancedParser {
+	return &EnhancedParser{
+		Parser: NewParser(formats...),
+		model:  model,
+	}
+}
+
+// ParseWithResult parses with full result metadata.
+//
+// Description:
+//
+//	Parses tool calls from text and returns detailed result including
+//	whether this was a fallback (no format matched) or partial parse.
+//
+// Inputs:
+//
+//	text - The LLM output text to parse.
+//
+// Outputs:
+//
+//	ParseResult - Full parse result with metadata.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *EnhancedParser) ParseWithResult(text string) ParseResult {
+	result := ParseResult{
+		CleanedText: text,
+	}
+
+	// Early exit: no < means no XML tags
+	if !strings.Contains(text, "<") {
+		result.Fallback = true
+		return result
+	}
+
+	// Try execute format first (GLM-4)
+	executeCalls, remaining, executeErr := p.parseExecuteTags(text)
+	if executeErr == nil && len(executeCalls) > 0 {
+		result.ToolCalls = append(result.ToolCalls, executeCalls...)
+		text = remaining
+	}
+
+	// Then try standard formats
+	calls, remaining, err := p.Parse(text)
+	if err == nil && len(calls) > 0 {
+		result.ToolCalls = append(result.ToolCalls, calls...)
+		result.CleanedText = remaining
+	} else if len(result.ToolCalls) == 0 {
+		// Check if this looks like it was trying to be a tool call
+		if p.looksLikeMalformedToolCall(text) {
+			result.Partial = true
+		} else {
+			result.Fallback = true
+		}
+		result.CleanedText = text
+	} else {
+		result.CleanedText = remaining
+	}
+
+	// Strip reasoning tags that aren't tool calls
+	result.CleanedText = p.stripReasoningTags(result.CleanedText)
+
+	return result
+}
+
+// Execute tag parsing for GLM-4 format.
+// Pattern: <execute><command>...</command></execute>
+var executeTagRegex = regexp.MustCompile(`(?s)<execute>\s*<command>(.*?)</command>\s*</execute>`)
+
+// parseExecuteTags parses GLM-4 style execute tags.
+func (p *EnhancedParser) parseExecuteTags(text string) ([]ToolCall, string, error) {
+	matches := executeTagRegex.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return nil, text, ErrNoToolCalls
+	}
+
+	var calls []ToolCall
+	remaining := text
+
+	for i := len(matches) - 1; i >= 0; i-- {
+		match := matches[i]
+		fullStart, fullEnd := match[0], match[1]
+		cmdStart, cmdEnd := match[2], match[3]
+
+		command := strings.TrimSpace(text[cmdStart:cmdEnd])
+
+		// Convert to bash tool call
+		params := map[string]any{"command": command}
+		paramsJSON, _ := json.Marshal(params)
+
+		calls = append([]ToolCall{{
+			ID:     uuid.NewString(),
+			Name:   "bash",
+			Params: paramsJSON,
+			Raw:    text[fullStart:fullEnd],
+		}}, calls...)
+
+		remaining = remaining[:fullStart] + remaining[fullEnd:]
+	}
+
+	return calls, strings.TrimSpace(remaining), nil
+}
+
+// Patterns that suggest malformed tool calls.
+var malformedToolCallPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`<tool_call>`),
+	regexp.MustCompile(`<execute>`),
+	regexp.MustCompile(`<function_calls>`),
+	regexp.MustCompile(`<invoke\s+name=`),
+	regexp.MustCompile(`\{\s*"tool"\s*:`),
+}
+
+// looksLikeMalformedToolCall checks if text looks like a failed tool call.
+func (p *EnhancedParser) looksLikeMalformedToolCall(text string) bool {
+	for _, pattern := range malformedToolCallPatterns {
+		if pattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+// Reasoning tags to strip (not tool calls).
+// Go RE2 doesn't support backreferences, so we use separate patterns.
+var reasoningTagsRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)<think>.*?</think>`),
+	regexp.MustCompile(`(?s)<thought>.*?</thought>`),
+	regexp.MustCompile(`(?s)<reasoning>.*?</reasoning>`),
+	regexp.MustCompile(`(?s)<reflection>.*?</reflection>`),
+}
+
+// stripReasoningTags removes thinking/reasoning tags from text.
+func (p *EnhancedParser) stripReasoningTags(text string) string {
+	result := text
+	for _, pattern := range reasoningTagsRegexes {
+		result = pattern.ReplaceAllString(result, "")
+	}
+	return strings.TrimSpace(result)
+}
+
+// GetModel returns the configured model type.
+func (p *EnhancedParser) GetModel() agent.ModelType {
+	return p.model
+}
+
+// ShouldPreserveAnthropicFormat returns true if Anthropic format should be preserved.
+//
+// Description:
+//
+//	For Claude models, the Anthropic function_calls format is native and
+//	should be preserved rather than stripped as leaked markup.
+func (p *EnhancedParser) ShouldPreserveAnthropicFormat() bool {
+	return p.model == agent.ModelClaude
 }

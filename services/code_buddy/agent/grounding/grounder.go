@@ -262,14 +262,16 @@ func (g *DefaultGrounder) buildEvidenceIndex(assembledCtx *agent.AssembledContex
 
 	// Index code context
 	for _, entry := range assembledCtx.CodeContext {
+		normalizedPath := normalizePath(entry.FilePath)
+
 		// Add file paths
 		idx.Files[entry.FilePath] = true
-		idx.Files[normalizePath(entry.FilePath)] = true
+		idx.Files[normalizedPath] = true
 		idx.FileBasenames[filepath.Base(entry.FilePath)] = true
 
-		// Store content for line validation
-		idx.FileContents[entry.FilePath] = entry.Content
-		idx.FileContents[normalizePath(entry.FilePath)] = entry.Content
+		// Store content for line validation (use normalized path as canonical key)
+		// Only store once to save memory; lookups should normalize paths first
+		idx.FileContents[normalizedPath] = entry.Content
 
 		// Add symbols
 		if entry.SymbolName != "" {
