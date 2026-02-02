@@ -8,44 +8,50 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Command codebuddy starts a standalone Code Buddy API server for testing.
+// Command trace starts the Aleutian Trace API server.
+//
+// Aleutian Trace provides AST-powered code intelligence with:
+//   - Ephemeral code graphs (in-memory, rebuilt from source)
+//   - Multi-language support (Go, Python, TypeScript, JavaScript, HTML, CSS)
+//   - 30+ agentic tools for exploration, reasoning, and safety
+//   - LLM-powered agent loop with tool calling
 //
 // Usage:
 //
-//	go run ./cmd/codebuddy
-//	go run ./cmd/codebuddy -port 9090
+//	go run ./cmd/trace
+//	go run ./cmd/trace -port 9090
 //
 // With Ollama (for agent loop):
 //
-//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=glm-4.7-flash go run ./cmd/trace
 //
 // With context assembly (sends code to LLM):
 //
-//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy -with-context
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=glm-4.7-flash go run ./cmd/trace -with-context
 //
 // With tools enabled (LLM can use exploration tools):
 //
-//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy -with-tools
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=glm-4.7-flash go run ./cmd/trace -with-tools
 //
 // Full features:
 //
-//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=gpt-oss:20b go run ./cmd/codebuddy -with-context -with-tools
+//	OLLAMA_BASE_URL=http://localhost:11434 OLLAMA_MODEL=glm-4.7-flash go run ./cmd/trace -with-context -with-tools
 //
 // Example requests:
 //
 //	# Health check
-//	curl http://localhost:8080/v1/codebuddy/health
+//	curl http://localhost:8080/v1/trace/health
 //
 //	# Get all available tools
-//	curl http://localhost:8080/v1/codebuddy/tools | jq
+//	curl http://localhost:8080/v1/trace/tools | jq
 //
 //	# Initialize a code graph
-//	curl -X POST http://localhost:8080/v1/codebuddy/init \
+//	curl -X POST http://localhost:8080/v1/trace/init \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"project_root": "/path/to/project"}'
 //
 //	# Run agent query (requires Ollama)
-//	curl -X POST http://localhost:8080/v1/codebuddy/agent/run \
+//	curl -X POST http://localhost:8080/v1/trace/agent/run \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"project_root": "/path/to/project", "query": "What are the main entry points?"}'
 package main
@@ -96,7 +102,7 @@ func main() {
 		router.Use(gin.Logger())
 	}
 
-	// Register routes
+	// Register routes under /v1/trace (aliased from code_buddy for compatibility)
 	v1 := router.Group("/v1")
 	code_buddy.RegisterRoutes(v1, handlers)
 
@@ -112,13 +118,13 @@ func main() {
 
 	go func() {
 		<-quit
-		slog.Info("Shutting down Code Buddy server")
+		slog.Info("Shutting down Aleutian Trace server")
 		os.Exit(0)
 	}()
 
 	// Start server
 	addr := fmt.Sprintf(":%d", *port)
-	slog.Info("Starting Code Buddy server", slog.String("address", addr))
+	slog.Info("Starting Aleutian Trace server", slog.String("address", addr))
 	if err := router.Run(addr); err != nil {
 		slog.Error("Failed to start server", slog.String("error", err.Error()))
 		os.Exit(1)
@@ -144,7 +150,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 
 	model := os.Getenv("OLLAMA_MODEL")
 	if model == "" {
-		model = "gpt-oss"
+		model = "glm-4.7-flash"
 	}
 	slog.Info("Ollama connected", slog.String("model", model))
 
@@ -206,10 +212,10 @@ func printBanner(port int, agentEnabled bool) {
 
 	banner := `
 ╔═══════════════════════════════════════════════════════════════════╗
-║                     CODE BUDDY TEST SERVER                        ║
+║                      ALEUTIAN TRACE SERVER                        ║
 ╠═══════════════════════════════════════════════════════════════════╣
 ║                                                                   ║
-║  A standalone server for testing Code Buddy HTTP endpoints.       ║
+║  AST-powered code intelligence with LLM agent capabilities.       ║
 ║  Agent Loop: %-50s ║
 ║                                                                   ║
 ║  Quick Start:                                                     ║
@@ -217,7 +223,7 @@ func printBanner(port int, agentEnabled bool) {
 ║  │ # Health check                                              │  ║
 ║  │ curl http://localhost:%d/v1/codebuddy/health              │  ║
 ║  │                                                             │  ║
-║  │ # List all 24 agentic tools                                 │  ║
+║  │ # List all 30+ agentic tools                                │  ║
 ║  │ curl http://localhost:%d/v1/codebuddy/tools | jq          │  ║
 ║  │                                                             │  ║
 ║  │ # Initialize a graph (required first!)                      │  ║

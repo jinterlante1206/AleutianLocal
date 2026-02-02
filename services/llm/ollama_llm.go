@@ -120,9 +120,33 @@ type OllamaToolCall struct {
 }
 
 // OllamaFunctionCall contains the function name and arguments.
+//
+// Note: Arguments can be either a JSON string or a JSON object depending on the model.
+// Some models (like glm-4.7-flash) return arguments as an object, while others
+// (OpenAI-compatible) return it as a JSON-encoded string.
 type OllamaFunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// ArgumentsString returns the arguments as a JSON string.
+// If arguments is already a string, it returns the unquoted string.
+// If arguments is an object, it returns the JSON-encoded string.
+func (f *OllamaFunctionCall) ArgumentsString() string {
+	if len(f.Arguments) == 0 {
+		return "{}"
+	}
+
+	// Check if it's a JSON string (starts with quote)
+	if f.Arguments[0] == '"' {
+		var s string
+		if err := json.Unmarshal(f.Arguments, &s); err == nil {
+			return s
+		}
+	}
+
+	// It's an object or other JSON value, return as-is
+	return string(f.Arguments)
 }
 
 type ollamaChatResponse struct {

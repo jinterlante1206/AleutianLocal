@@ -26,6 +26,26 @@ import (
 //   - Processing user clarification responses
 //   - Updating context with clarified information
 //
+// # When to Use CLARIFY State
+//
+// The CLARIFY state should ONLY be used when the agent genuinely cannot proceed
+// without user input. It should NOT be used as a lazy fallback for broad questions.
+//
+// APPROPRIATE uses of CLARIFY:
+//   - Project root not provided or invalid path
+//   - User request contains contradictory requirements
+//   - Multiple mutually exclusive interpretations exist (e.g., "fix the bug" when multiple bugs exist)
+//   - Required information is truly missing (e.g., API keys, credentials)
+//
+// INAPPROPRIATE uses of CLARIFY (agent should explore instead):
+//   - "Which file should I look at?" - explore the codebase
+//   - "Which function do you mean?" - search for matches
+//   - "What security concerns?" - analyze the code and report findings
+//   - "Trace data flow" - start from entry points and explore
+//
+// The agent should be proactive: use tools to explore the codebase and provide
+// comprehensive answers rather than asking the user to narrow the scope.
+//
 // Thread Safety: ClarifyPhase is safe for concurrent use.
 type ClarifyPhase struct {
 	mu sync.RWMutex
@@ -227,6 +247,8 @@ func (p *ClarifyPhase) addClarificationToContext(deps *Dependencies, clarificati
 
 	// Add as a user message
 	deps.ContextManager.AddMessage(deps.Context, "user", clarification)
+	// Persist updated context to session
+	deps.Session.SetCurrentContext(deps.Context)
 }
 
 // GetClarificationPrompt returns the prompt to show the user.

@@ -11,6 +11,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
@@ -276,7 +277,7 @@ func TestOllamaToolCall(t *testing.T) {
 		Type: "function",
 		Function: llm.OllamaFunctionCall{
 			Name:      "read_file",
-			Arguments: `{"path": "/test.go"}`,
+			Arguments: json.RawMessage(`{"path": "/test.go"}`),
 		},
 	}
 
@@ -286,8 +287,8 @@ func TestOllamaToolCall(t *testing.T) {
 	if tc.Function.Name != "read_file" {
 		t.Errorf("tc.Function.Name = %q, want 'read_file'", tc.Function.Name)
 	}
-	if tc.Function.Arguments != `{"path": "/test.go"}` {
-		t.Errorf("tc.Function.Arguments = %q, want '{\"path\": \"/test.go\"}'", tc.Function.Arguments)
+	if tc.Function.ArgumentsString() != `{"path": "/test.go"}` {
+		t.Errorf("tc.Function.ArgumentsString() = %q, want '{\"path\": \"/test.go\"}'", tc.Function.ArgumentsString())
 	}
 }
 
@@ -302,7 +303,7 @@ func TestChatWithToolsResult(t *testing.T) {
 				Type: "function",
 				Function: llm.OllamaFunctionCall{
 					Name:      "read_file",
-					Arguments: `{"path": "/main.go"}`,
+					Arguments: json.RawMessage(`{"path": "/main.go"}`),
 				},
 			},
 		},

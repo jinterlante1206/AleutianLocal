@@ -11,10 +11,14 @@
 package context
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/ast"
@@ -30,10 +34,16 @@ import (
 //	Assembler is safe for concurrent use after construction.
 //	The underlying graph and index must be frozen/read-only.
 type Assembler struct {
-	graph   *graph.Graph
-	index   *index.SymbolIndex
-	libDocs LibraryDocProvider
-	options AssembleOptions
+	graph       *graph.Graph
+	index       *index.SymbolIndex
+	libDocs     LibraryDocProvider
+	options     AssembleOptions
+	projectRoot string
+
+	// fileCache caches file contents to avoid repeated disk reads.
+	// Key is file path, value is file lines.
+	fileCache   map[string][]string
+	fileCacheMu sync.RWMutex
 }
 
 // NewAssembler creates a new context assembler.
@@ -65,10 +75,18 @@ func NewAssembler(g *graph.Graph, idx *index.SymbolIndex, opts ...AssembleOption
 		opt(&options)
 	}
 
+	// Get project root from graph if available
+	projectRoot := ""
+	if g != nil {
+		projectRoot = g.ProjectRoot
+	}
+
 	return &Assembler{
-		graph:   g,
-		index:   idx,
-		options: options,
+		graph:       g,
+		index:       idx,
+		options:     options,
+		projectRoot: projectRoot,
+		fileCache:   make(map[string][]string),
 	}
 }
 
@@ -502,8 +520,8 @@ func (a *Assembler) packCodeSection(ctx context.Context, symbols []*ScoredSymbol
 			continue
 		}
 
-		// Format symbol as markdown code block
-		section := formatCodeSymbol(scored.Symbol)
+		// Format symbol as markdown code block with full source
+		section := a.formatCodeSymbol(scored.Symbol)
 		sectionTokens := estimateTokens(section)
 
 		if tokensUsed+sectionTokens > budget {
@@ -519,8 +537,16 @@ func (a *Assembler) packCodeSection(ctx context.Context, symbols []*ScoredSymbol
 	return builder.String(), tokensUsed, included
 }
 
-// formatCodeSymbol formats a symbol as a markdown code block.
-func formatCodeSymbol(sym *ast.Symbol) string {
+// formatCodeSymbol formats a symbol as a markdown code block with full source.
+//
+// Description:
+//
+//	Reads the actual source code from disk using the symbol's file path
+//	and line range (StartLine to EndLine). Falls back to signature-only
+//	if the file cannot be read.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (a *Assembler) formatCodeSymbol(sym *ast.Symbol) string {
 	var builder strings.Builder
 
 	// Header with file path and lines
@@ -534,23 +560,147 @@ func formatCodeSymbol(sym *ast.Symbol) string {
 	}
 	builder.WriteString(fmt.Sprintf("```%s\n", lang))
 
-	// Include doc comment if available
-	if sym.DocComment != "" {
-		builder.WriteString(sym.DocComment)
-		builder.WriteString("\n")
-	}
-
-	// Include signature
-	if sym.Signature != "" {
-		builder.WriteString(sym.Signature)
+	// Try to read the actual source code
+	sourceCode, err := a.readSourceLines(sym.FilePath, sym.StartLine, sym.EndLine)
+	if err == nil && sourceCode != "" {
+		// Include doc comment if it's not already part of the source
+		if sym.DocComment != "" && !strings.Contains(sourceCode, sym.DocComment) {
+			builder.WriteString(sym.DocComment)
+			builder.WriteString("\n")
+		}
+		builder.WriteString(sourceCode)
 	} else {
-		// Fallback: construct from available info
-		builder.WriteString(fmt.Sprintf("%s %s", sym.Kind.String(), sym.Name))
+		// Fallback to signature-only if file read fails
+		if sym.DocComment != "" {
+			builder.WriteString(sym.DocComment)
+			builder.WriteString("\n")
+		}
+		if sym.Signature != "" {
+			builder.WriteString(sym.Signature)
+		} else {
+			builder.WriteString(fmt.Sprintf("%s %s", sym.Kind.String(), sym.Name))
+		}
 	}
 
 	builder.WriteString("\n```\n")
 
 	return builder.String()
+}
+
+// GetSymbolSourceCode returns the source code for a symbol.
+//
+// Description:
+//
+//	Reads the actual source code from disk using the symbol's file path
+//	and line range. Returns the signature as fallback if file read fails.
+//
+// Inputs:
+//
+//	sym - The symbol to get source code for.
+//
+// Outputs:
+//
+//	string - The source code (or signature as fallback).
+//
+// Thread Safety: This method is safe for concurrent use.
+func (a *Assembler) GetSymbolSourceCode(sym *ast.Symbol) string {
+	if sym == nil {
+		return ""
+	}
+
+	// Try to read the actual source code
+	sourceCode, err := a.readSourceLines(sym.FilePath, sym.StartLine, sym.EndLine)
+	if err == nil && sourceCode != "" {
+		return sourceCode
+	}
+
+	// Fallback to signature
+	if sym.Signature != "" {
+		return sym.Signature
+	}
+
+	return fmt.Sprintf("%s %s", sym.Kind.String(), sym.Name)
+}
+
+// readSourceLines reads lines from a source file, using cache when available.
+//
+// Description:
+//
+//	Reads the specified line range from a source file. Uses an internal
+//	cache to avoid repeated disk reads for the same file.
+//
+// Inputs:
+//
+//	filePath - Relative path to the source file (from project root)
+//	startLine - First line to read (1-indexed, inclusive)
+//	endLine - Last line to read (1-indexed, inclusive)
+//
+// Outputs:
+//
+//	string - The source code lines joined with newlines
+//	error - Non-nil if file cannot be read
+//
+// Thread Safety: This method is safe for concurrent use.
+func (a *Assembler) readSourceLines(filePath string, startLine, endLine int) (string, error) {
+	if a.projectRoot == "" {
+		return "", fmt.Errorf("project root not set")
+	}
+
+	// Get file lines from cache or read from disk
+	lines, err := a.getFileLines(filePath)
+	if err != nil {
+		return "", err
+	}
+
+	// Validate line range
+	if startLine < 1 {
+		startLine = 1
+	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	if startLine > endLine || startLine > len(lines) {
+		return "", fmt.Errorf("invalid line range: %d-%d (file has %d lines)", startLine, endLine, len(lines))
+	}
+
+	// Extract the requested lines (convert to 0-indexed)
+	selectedLines := lines[startLine-1 : endLine]
+	return strings.Join(selectedLines, "\n"), nil
+}
+
+// getFileLines returns the lines of a file, using cache when available.
+func (a *Assembler) getFileLines(filePath string) ([]string, error) {
+	// Check cache first
+	a.fileCacheMu.RLock()
+	if lines, ok := a.fileCache[filePath]; ok {
+		a.fileCacheMu.RUnlock()
+		return lines, nil
+	}
+	a.fileCacheMu.RUnlock()
+
+	// Read file from disk
+	fullPath := filepath.Join(a.projectRoot, filePath)
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("open file %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read file %s: %w", filePath, err)
+	}
+
+	// Cache the result
+	a.fileCacheMu.Lock()
+	a.fileCache[filePath] = lines
+	a.fileCacheMu.Unlock()
+
+	return lines, nil
 }
 
 // packTypesSection extracts and formats type definitions within budget.
@@ -581,7 +731,7 @@ func (a *Assembler) packTypesSection(ctx context.Context, symbols []*ScoredSymbo
 		}
 		seen[scored.Symbol.ID] = true
 
-		section := formatTypeSymbol(scored.Symbol)
+		section := a.formatTypeSymbol(scored.Symbol)
 		sectionTokens := estimateTokens(section)
 
 		if tokensUsed+sectionTokens > budget {
@@ -596,16 +746,25 @@ func (a *Assembler) packTypesSection(ctx context.Context, symbols []*ScoredSymbo
 	return builder.String(), tokensUsed
 }
 
-// formatTypeSymbol formats a type symbol as markdown.
-func formatTypeSymbol(sym *ast.Symbol) string {
+// formatTypeSymbol formats a type symbol as markdown with full definition.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (a *Assembler) formatTypeSymbol(sym *ast.Symbol) string {
 	var builder strings.Builder
 
-	builder.WriteString(fmt.Sprintf("// From %s\n", sym.FilePath))
+	builder.WriteString(fmt.Sprintf("// From %s (lines %d-%d)\n", sym.FilePath, sym.StartLine, sym.EndLine))
 
-	if sym.Signature != "" {
-		builder.WriteString(sym.Signature)
+	// Try to read the actual type definition from source
+	sourceCode, err := a.readSourceLines(sym.FilePath, sym.StartLine, sym.EndLine)
+	if err == nil && sourceCode != "" {
+		builder.WriteString(sourceCode)
 	} else {
-		builder.WriteString(fmt.Sprintf("type %s %s { /* ... */ }", sym.Name, sym.Kind.String()))
+		// Fallback to signature-only
+		if sym.Signature != "" {
+			builder.WriteString(sym.Signature)
+		} else {
+			builder.WriteString(fmt.Sprintf("type %s %s { /* ... */ }", sym.Name, sym.Kind.String()))
+		}
 	}
 
 	builder.WriteString("\n")

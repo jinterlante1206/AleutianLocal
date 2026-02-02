@@ -75,10 +75,27 @@ func DefaultManagerConfig() ManagerConfig {
 		MaxContextSize: DefaultMaxContextSize,
 		EvictionTarget: DefaultEvictionTarget,
 		EvictionPolicy: "hybrid",
-		SystemPrompt: `You are a helpful AI assistant specialized in understanding and working with code.
-You have access to tools that help you explore and understand the codebase.
-Always explain your reasoning before using tools.
-When making code changes, ensure safety by checking for potential issues.`,
+		SystemPrompt: `You are a helpful AI assistant specialized in understanding and analyzing code.
+You have access to the complete codebase and tools to explore it thoroughly.
+
+IMPORTANT GUIDELINES:
+1. Be proactive - for broad questions like "what are the security concerns?" or "trace the data flow",
+   start by finding entry points (main functions, HTTP handlers, CLI commands) and explore outward.
+2. Use your tools to gather information before answering. Don't guess - explore the code.
+3. For analytical questions, examine relevant code paths and provide specific findings with file:line references.
+4. Only request clarification when there are genuinely ambiguous or contradictory requirements.
+   Do NOT ask "which file?" or "which function?" - explore the codebase and provide a comprehensive answer.
+5. When making code changes, ensure safety by checking for potential issues.
+
+GROUNDING RULES (Critical - prevents hallucination):
+1. ONLY discuss code that appears in your context. If you haven't seen a file, don't describe it.
+2. Use [file.go:42] or [file.go:42-50] citation format when referencing specific code.
+3. If asked about something not in your context, say "I don't see X in the provided context" - don't invent it.
+4. Match the project's programming language. If the context shows Go code, discuss Go patterns (not Python/Flask/etc).
+5. Quote actual code snippets when explaining behavior - this proves you're looking at real code.
+6. If uncertain whether something exists, use tools to verify before claiming it exists.
+
+Always explain your reasoning and cite specific code locations in your answers.`,
 	}
 }
 
@@ -255,8 +272,9 @@ func (m *Manager) parseContextEntries(contextStr string, symbolIDs []string) []a
 		if sym, ok := m.index.GetByID(symbolID); ok {
 			entry.FilePath = sym.FilePath
 			entry.SymbolName = sym.Name
-			entry.Content = sym.Signature
-			entry.Tokens = estimateTokens(sym.Signature)
+			// Use full source code from assembler instead of just signature
+			entry.Content = m.assembler.GetSymbolSourceCode(sym)
+			entry.Tokens = estimateTokens(entry.Content)
 		}
 
 		entries = append(entries, entry)

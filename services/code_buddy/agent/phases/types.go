@@ -28,6 +28,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	agentcontext "github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/context"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
@@ -86,6 +87,9 @@ type (
 
 	// EventEmitter is the interface for event emission.
 	EventEmitter = events.Emitter
+
+	// ResponseGrounder is the interface for grounding validation.
+	ResponseGrounder = grounding.Grounder
 )
 
 // Dependencies contains all dependencies needed by phases.
@@ -123,6 +127,10 @@ type Dependencies struct {
 
 	// GraphProvider initializes and provides the code graph.
 	GraphProvider GraphProvider
+
+	// ResponseGrounder validates LLM responses against project reality.
+	// Optional - if nil, grounding validation is skipped.
+	ResponseGrounder ResponseGrounder
 }
 
 // GraphProvider initializes and provides access to the code graph.

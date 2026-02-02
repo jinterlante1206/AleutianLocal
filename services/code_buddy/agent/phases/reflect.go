@@ -13,9 +13,11 @@ package phases
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 )
 
 // ReflectPhase handles progress evaluation and decision making.
@@ -248,6 +250,9 @@ func (p *ReflectPhase) handleLimitExceeded(deps *Dependencies, input *Reflection
 		reason = "maximum tokens reached"
 	}
 
+	// Synthesize a final response before completing
+	p.synthesizeResponse(context.Background(), deps, reason)
+
 	p.emitReflection(deps, input, &ReflectionOutput{
 		Decision: DecisionComplete,
 		Reason:   reason,
@@ -274,6 +279,19 @@ func (p *ReflectPhase) handleLimitExceeded(deps *Dependencies, input *Reflection
 // Outputs:
 //
 //	*ReflectionOutput - The decision and reasoning.
+//
+// CLARIFY Policy:
+//
+//	CLARIFY should only be triggered when the agent is genuinely stuck after
+//	multiple failed attempts. It should NOT be used for:
+//	  - Broad questions (agent should explore the codebase)
+//	  - "Which file/function?" questions (agent should search)
+//	  - Requests that can be answered by exploration
+//
+//	CLARIFY IS appropriate when:
+//	  - Multiple tool calls have failed repeatedly
+//	  - The agent cannot make progress despite trying
+//	  - There's a genuine blocker (missing permissions, invalid paths, etc.)
 func (p *ReflectPhase) analyzeProgress(deps *Dependencies, input *ReflectionInput) *ReflectionOutput {
 	// Check if recent results indicate completion
 	if p.looksComplete(input) {
@@ -283,7 +301,10 @@ func (p *ReflectPhase) analyzeProgress(deps *Dependencies, input *ReflectionInpu
 		}
 	}
 
-	// Check if we're stuck (repeated failures)
+	// Check if we're stuck (repeated failures indicate a genuine blocker)
+	// Note: This is the ONLY path to CLARIFY from Reflect - we don't go to
+	// CLARIFY just because a question is broad or vague. The agent should
+	// explore the codebase and provide comprehensive answers.
 	if p.looksStuck(input) {
 		return &ReflectionOutput{
 			Decision:            DecisionClarify,
@@ -386,6 +407,8 @@ func (p *ReflectPhase) handleDecision(deps *Dependencies, output *ReflectionOutp
 	case DecisionContinue:
 		nextState = agent.StateExecute
 	case DecisionComplete:
+		// Synthesize a final response before completing
+		p.synthesizeResponse(context.Background(), deps, output.Reason)
 		nextState = agent.StateComplete
 	case DecisionClarify:
 		nextState = agent.StateClarify
@@ -436,4 +459,94 @@ func (p *ReflectPhase) emitStateTransition(deps *Dependencies, from, to agent.Ag
 		ToState:   to,
 		Reason:    reason,
 	})
+}
+
+// synthesizeResponse generates a final response when completing without one.
+//
+// Description:
+//
+//	When the Reflect phase decides to complete (due to limits or decision),
+//	but the agent hasn't produced a final text response yet, this method
+//	asks the LLM to synthesize a summary of what was learned.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies.
+//	reason - The reason for completion.
+func (p *ReflectPhase) synthesizeResponse(ctx context.Context, deps *Dependencies, reason string) {
+	// Check if we already have a response
+	if deps.Context != nil {
+		for i := len(deps.Context.ConversationHistory) - 1; i >= 0; i-- {
+			msg := deps.Context.ConversationHistory[i]
+			if msg.Role == "assistant" && msg.Content != "" {
+				// Already have a response, no need to synthesize
+				slog.Debug("Skipping synthesis - response already exists",
+					slog.String("session_id", deps.Session.ID),
+				)
+				return
+			}
+			// Stop if we hit a user message (no assistant response after it)
+			if msg.Role == "user" {
+				break
+			}
+		}
+	}
+
+	// No LLM client available, skip synthesis
+	if deps.LLMClient == nil {
+		slog.Warn("Cannot synthesize response - no LLM client",
+			slog.String("session_id", deps.Session.ID),
+		)
+		return
+	}
+
+	slog.Info("Synthesizing final response",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("reason", reason),
+	)
+
+	// Build synthesis prompt
+	synthesisPrompt := "Based on the tools you used and information you gathered, please provide a concise summary answering the user's original question. Focus on the key findings and insights."
+
+	// Add synthesis prompt to context
+	if deps.Context != nil {
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "user",
+			Content: synthesisPrompt,
+		})
+	}
+
+	// Build and send LLM request (no tools - just get a text response)
+	request := llm.BuildRequest(deps.Context, nil, 4096)
+
+	response, err := deps.LLMClient.Complete(ctx, request)
+	if err != nil {
+		slog.Error("Failed to synthesize response",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	// Store the synthesized response
+	if response.Content != "" && deps.Context != nil {
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "assistant",
+			Content: response.Content,
+		})
+		// Persist to session
+		deps.Session.SetCurrentContext(deps.Context)
+
+		// Update token metrics
+		if response.OutputTokens > 0 {
+			deps.Session.IncrementMetric(agent.MetricTokens, response.OutputTokens)
+		}
+
+		slog.Info("Synthesized response stored",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("response_len", len(response.Content)),
+			slog.Int("tokens", response.OutputTokens),
+		)
+	}
 }

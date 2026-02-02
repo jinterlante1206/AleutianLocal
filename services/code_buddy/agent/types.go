@@ -174,6 +174,9 @@ type SessionMetrics struct {
 	// DegradedMode indicates if running in degraded mode.
 	DegradedMode bool `json:"degraded_mode"`
 
+	// GroundingRetries is the number of grounding validation retries.
+	GroundingRetries int `json:"grounding_retries"`
+
 	// GraphStats contains Code Buddy graph statistics.
 	GraphStats *GraphStats `json:"graph_stats,omitempty"`
 }

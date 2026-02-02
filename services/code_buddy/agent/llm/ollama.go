@@ -202,7 +202,7 @@ func (a *OllamaAdapter) completeWithTools(
 		agentToolCalls = append(agentToolCalls, ToolCall{
 			ID:        tc.ID,
 			Name:      tc.Function.Name,
-			Arguments: tc.Function.Arguments,
+			Arguments: tc.Function.ArgumentsString(),
 		})
 	}
 
