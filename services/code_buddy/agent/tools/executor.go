@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/transaction"
 	"github.com/google/uuid"
 )
 
@@ -55,6 +56,33 @@ type Executor struct {
 	// satisfiedRequirements tracks which requirements are currently met.
 	mu                    sync.RWMutex
 	satisfiedRequirements map[string]bool
+
+	// transactionManager provides transactional file operations for side-effect tools.
+	// Optional - if nil, side-effect tools execute without transaction protection.
+	transactionManager *transaction.Manager
+
+	// sessionID correlates transactions with agent sessions for tracing.
+	sessionID string
+}
+
+// ExecutorOption configures an Executor.
+type ExecutorOption func(*Executor)
+
+// WithTransactionManager sets the transaction manager for the executor.
+//
+// When set, side-effect tools are wrapped in a transaction that is
+// automatically committed on success or rolled back on error.
+func WithTransactionManager(tm *transaction.Manager) ExecutorOption {
+	return func(e *Executor) {
+		e.transactionManager = tm
+	}
+}
+
+// WithSessionID sets the session ID for trace correlation.
+func WithSessionID(sessionID string) ExecutorOption {
+	return func(e *Executor) {
+		e.sessionID = sessionID
+	}
 }
 
 // NewExecutor creates a new tool executor.
@@ -84,6 +112,36 @@ func NewExecutor(registry *Registry, opts *ExecutorOptions) *Executor {
 	}
 
 	return e
+}
+
+// NewExecutorWithOptions creates an executor with functional options.
+//
+// # Inputs
+//
+//   - registry: The tool registry.
+//   - execOpts: Executor configuration options (uses defaults if nil).
+//   - opts: Functional options for additional configuration.
+//
+// # Outputs
+//
+//   - *Executor: The configured executor.
+func NewExecutorWithOptions(registry *Registry, execOpts *ExecutorOptions, opts ...ExecutorOption) *Executor {
+	e := NewExecutor(registry, execOpts)
+
+	for _, opt := range opts {
+		opt(e)
+	}
+
+	return e
+}
+
+// SetSessionID sets the session ID for trace correlation.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (e *Executor) SetSessionID(sessionID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sessionID = sessionID
 }
 
 // Execute runs a tool with the given invocation.
@@ -169,12 +227,69 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Check if this tool has side effects and we have a transaction manager
+	hasSideEffects := tool.Definition().SideEffects
+	var txActive bool
+
+	if hasSideEffects && e.transactionManager != nil {
+		// Get session ID for trace correlation
+		e.mu.RLock()
+		sessionID := e.sessionID
+		e.mu.RUnlock()
+
+		// Check if a transaction is already active
+		if e.transactionManager.Active() == nil {
+			// Start transaction for side-effect tools
+			_, txErr := e.transactionManager.Begin(ctx, sessionID)
+			if txErr != nil {
+				logger.Error("Failed to start transaction", "error", txErr)
+				return nil, fmt.Errorf("starting transaction: %w", txErr)
+			}
+			txActive = true
+			logger.Debug("Transaction started for side-effect tool")
+		}
+	}
+
 	// Execute the tool
 	invocation.StartedAt = time.Now()
 	logger.Debug("Executing tool")
 
 	result, err := tool.Execute(ctx, invocation.Parameters)
 	invocation.CompletedAt = time.Now()
+
+	// Handle transaction commit/rollback
+	if txActive && e.transactionManager != nil {
+		if err != nil || ctx.Err() != nil {
+			// Rollback on error or context cancellation
+			reason := "tool execution failed"
+			if ctx.Err() != nil {
+				reason = "context cancelled"
+			}
+			_, rollbackErr := e.transactionManager.Rollback(ctx, reason)
+			if rollbackErr != nil {
+				logger.Error("Transaction rollback failed", "error", rollbackErr)
+			} else {
+				logger.Debug("Transaction rolled back", "reason", reason)
+			}
+		} else {
+			// Record modified files if available
+			if result != nil && result.Metadata != nil {
+				if files, ok := result.Metadata["modified_files"].([]string); ok {
+					for _, file := range files {
+						e.transactionManager.RecordModification(file)
+					}
+				}
+			}
+
+			// Commit on success
+			_, commitErr := e.transactionManager.Commit(ctx, "agent tool execution")
+			if commitErr != nil {
+				logger.Error("Transaction commit failed", "error", commitErr)
+				return nil, fmt.Errorf("committing transaction: %w", commitErr)
+			}
+			logger.Debug("Transaction committed")
+		}
+	}
 
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {

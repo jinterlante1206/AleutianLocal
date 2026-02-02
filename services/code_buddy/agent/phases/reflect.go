@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
@@ -469,6 +470,9 @@ func (p *ReflectPhase) emitStateTransition(deps *Dependencies, from, to agent.Ag
 //	but the agent hasn't produced a final text response yet, this method
 //	asks the LLM to synthesize a summary of what was learned.
 //
+//	If synthesis fails due to context overflow or LLM errors, this method
+//	generates a fallback response summarizing the tools used and findings.
+//
 // Inputs:
 //
 //	ctx - Context for cancellation.
@@ -493,11 +497,12 @@ func (p *ReflectPhase) synthesizeResponse(ctx context.Context, deps *Dependencie
 		}
 	}
 
-	// No LLM client available, skip synthesis
+	// No LLM client available, use fallback
 	if deps.LLMClient == nil {
-		slog.Warn("Cannot synthesize response - no LLM client",
+		slog.Warn("Cannot synthesize response - no LLM client, using fallback",
 			slog.String("session_id", deps.Session.ID),
 		)
+		p.storeFallbackResponse(deps)
 		return
 	}
 
@@ -506,31 +511,44 @@ func (p *ReflectPhase) synthesizeResponse(ctx context.Context, deps *Dependencie
 		slog.String("reason", reason),
 	)
 
+	// Estimate context size and truncate if needed to prevent overflow
+	synthesisCtx := p.prepareSynthesisContext(deps)
+
 	// Build synthesis prompt
 	synthesisPrompt := "Based on the tools you used and information you gathered, please provide a concise summary answering the user's original question. Focus on the key findings and insights."
 
-	// Add synthesis prompt to context
-	if deps.Context != nil {
-		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
-			Role:    "user",
-			Content: synthesisPrompt,
-		})
-	}
+	// Add synthesis prompt to the prepared context
+	synthesisCtx.ConversationHistory = append(synthesisCtx.ConversationHistory, agent.Message{
+		Role:    "user",
+		Content: synthesisPrompt,
+	})
 
 	// Build and send LLM request (no tools - just get a text response)
-	request := llm.BuildRequest(deps.Context, nil, 4096)
+	request := llm.BuildRequest(synthesisCtx, nil, 4096)
 
 	response, err := deps.LLMClient.Complete(ctx, request)
 	if err != nil {
-		slog.Error("Failed to synthesize response",
+		slog.Error("Failed to synthesize response, using fallback",
 			slog.String("session_id", deps.Session.ID),
 			slog.String("error", err.Error()),
 		)
+		p.storeFallbackResponse(deps)
+		return
+	}
+
+	// Check for empty response (context overflow or model issue)
+	if response.Content == "" {
+		slog.Warn("Synthesis returned empty content, using fallback",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("output_tokens", response.OutputTokens),
+			slog.String("stop_reason", response.StopReason),
+		)
+		p.storeFallbackResponse(deps)
 		return
 	}
 
 	// Store the synthesized response
-	if response.Content != "" && deps.Context != nil {
+	if deps.Context != nil {
 		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
 			Role:    "assistant",
 			Content: response.Content,
@@ -549,4 +567,174 @@ func (p *ReflectPhase) synthesizeResponse(ctx context.Context, deps *Dependencie
 			slog.Int("tokens", response.OutputTokens),
 		)
 	}
+}
+
+// prepareSynthesisContext creates a reduced context for synthesis.
+//
+// Description:
+//
+//	Creates a copy of the context with truncated tool results to prevent
+//	context overflow during synthesis. Keeps the most recent and relevant
+//	information while staying within reasonable token limits.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//
+// Outputs:
+//
+//	*agent.AssembledContext - A reduced context suitable for synthesis.
+func (p *ReflectPhase) prepareSynthesisContext(deps *Dependencies) *agent.AssembledContext {
+	if deps.Context == nil {
+		return &agent.AssembledContext{}
+	}
+
+	// Estimate current context size (rough: 4 chars per token)
+	totalSize := len(deps.Context.SystemPrompt)
+	for _, msg := range deps.Context.ConversationHistory {
+		totalSize += len(msg.Content)
+	}
+	for _, result := range deps.Context.ToolResults {
+		totalSize += len(result.Output)
+	}
+
+	slog.Debug("Synthesis context size estimation",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("total_chars", totalSize),
+		slog.Int("estimated_tokens", totalSize/4),
+		slog.Int("tool_results", len(deps.Context.ToolResults)),
+	)
+
+	// If context is small enough (under ~20K tokens), use as-is
+	maxContextChars := 80000 // ~20K tokens at 4 chars/token
+	if totalSize <= maxContextChars {
+		return deps.Context
+	}
+
+	slog.Info("Truncating context for synthesis",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("original_chars", totalSize),
+		slog.Int("max_chars", maxContextChars),
+	)
+
+	// Create a reduced context
+	reduced := &agent.AssembledContext{
+		SystemPrompt: deps.Context.SystemPrompt,
+		TotalTokens:  deps.Context.TotalTokens,
+	}
+
+	// Keep the user's original query (first user message) and last few messages
+	if len(deps.Context.ConversationHistory) > 0 {
+		reduced.ConversationHistory = append(reduced.ConversationHistory, deps.Context.ConversationHistory[0])
+
+		// Add a summary message if we're truncating
+		if len(deps.Context.ConversationHistory) > 5 {
+			reduced.ConversationHistory = append(reduced.ConversationHistory, agent.Message{
+				Role:    "assistant",
+				Content: fmt.Sprintf("[%d intermediate messages and tool calls truncated for synthesis]", len(deps.Context.ConversationHistory)-5),
+			})
+		}
+
+		// Keep the last 4 messages
+		start := len(deps.Context.ConversationHistory) - 4
+		if start < 1 {
+			start = 1
+		}
+		for i := start; i < len(deps.Context.ConversationHistory); i++ {
+			reduced.ConversationHistory = append(reduced.ConversationHistory, deps.Context.ConversationHistory[i])
+		}
+	}
+
+	// Keep only the most recent tool results with truncated output
+	maxResultLen := 2000
+	maxResults := 5
+	start := len(deps.Context.ToolResults) - maxResults
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(deps.Context.ToolResults); i++ {
+		result := deps.Context.ToolResults[i]
+		truncatedOutput := result.Output
+		if len(truncatedOutput) > maxResultLen {
+			truncatedOutput = truncatedOutput[:maxResultLen] + "\n... [output truncated]"
+		}
+		reduced.ToolResults = append(reduced.ToolResults, agent.ToolResult{
+			InvocationID: result.InvocationID,
+			Output:       truncatedOutput,
+			Success:      result.Success,
+		})
+	}
+
+	return reduced
+}
+
+// storeFallbackResponse generates and stores a fallback response.
+//
+// Description:
+//
+//	When LLM synthesis fails, this method creates a fallback response
+//	summarizing the tool results and discoveries.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+func (p *ReflectPhase) storeFallbackResponse(deps *Dependencies) {
+	if deps.Context == nil {
+		return
+	}
+
+	// Build a fallback response from tool results
+	var sb strings.Builder
+	sb.WriteString("Based on my exploration of the codebase, here's what I found:\n\n")
+
+	// Count tool results and extract findings
+	successfulResults := 0
+	var findings []string
+	for _, result := range deps.Context.ToolResults {
+		// Extract key findings from successful tool results
+		if result.Success && result.Output != "" {
+			successfulResults++
+			// Take first 300 chars of each result as a finding preview
+			preview := result.Output
+			if len(preview) > 300 {
+				preview = preview[:300] + "..."
+			}
+			// Clean up the preview (remove excessive newlines)
+			preview = strings.ReplaceAll(preview, "\n\n", "\n")
+			findings = append(findings, preview)
+		}
+	}
+
+	// Report exploration summary
+	sb.WriteString(fmt.Sprintf("**Exploration summary:** %d tool calls, %d successful results\n\n",
+		len(deps.Context.ToolResults), successfulResults))
+
+	// Report key findings (up to 5)
+	if len(findings) > 0 {
+		sb.WriteString("**Key discoveries:**\n")
+		maxFindings := 5
+		if len(findings) < maxFindings {
+			maxFindings = len(findings)
+		}
+		for i := 0; i < maxFindings; i++ {
+			sb.WriteString(fmt.Sprintf("\n%d. %s\n", i+1, findings[i]))
+		}
+	}
+
+	sb.WriteString("\n---\n*Note: Full synthesis was not available due to context size. This is a summary of the exploration results.*")
+
+	fallbackContent := sb.String()
+
+	deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+		Role:    "assistant",
+		Content: fallbackContent,
+	})
+	deps.Session.SetCurrentContext(deps.Context)
+
+	slog.Info("Stored fallback response",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("response_len", len(fallbackContent)),
+		slog.Int("total_results", len(deps.Context.ToolResults)),
+		slog.Int("findings_count", len(findings)),
+	)
 }

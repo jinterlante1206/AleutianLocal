@@ -27,6 +27,9 @@ const (
 	// SeverityWarning is for warnings that should be reviewed.
 	SeverityWarning Severity = "warning"
 
+	// SeverityHigh is for high-severity issues requiring attention.
+	SeverityHigh Severity = "high"
+
 	// SeverityCritical is for critical issues that indicate hallucination.
 	SeverityCritical Severity = "critical"
 )
@@ -58,6 +61,50 @@ const (
 
 	// ViolationEvidenceMismatch indicates quoted evidence doesn't match file.
 	ViolationEvidenceMismatch ViolationType = "evidence_mismatch"
+
+	// ViolationPhantomFile indicates reference to a file that doesn't exist.
+	// This is the highest priority violation as it invalidates other claims.
+	ViolationPhantomFile ViolationType = "phantom_file"
+
+	// ViolationStructuralClaim indicates fabricated directory/file structure.
+	// Structural claims about project layout without supporting evidence.
+	ViolationStructuralClaim ViolationType = "structural_claim"
+
+	// ViolationLanguageConfusion indicates wrong-language patterns in response.
+	// E.g., describing Flask patterns in a Go codebase.
+	ViolationLanguageConfusion ViolationType = "language_confusion"
+
+	// ViolationGenericPattern indicates generic descriptions without grounding.
+	// Response describes common patterns instead of project-specific findings.
+	ViolationGenericPattern ViolationType = "generic_pattern"
+)
+
+// ViolationPriority defines processing order for violation types.
+// Lower values = higher priority (processed first).
+// This is used to sort violations and deduplicate cascade violations.
+type ViolationPriority int
+
+const (
+	// PriorityPhantomFile is highest priority - file doesn't exist at all.
+	// Always process first because it invalidates any other claims about that file.
+	PriorityPhantomFile ViolationPriority = 1
+
+	// PriorityStructuralClaim is high priority - fabricated directory structure.
+	// Process after phantom because a phantom file in a structure claim should
+	// be reported as PhantomFile, not StructuralClaim.
+	PriorityStructuralClaim ViolationPriority = 2
+
+	// PriorityLanguageConfusion is medium priority - wrong language patterns.
+	// Lower priority because language confusion is often a symptom of phantom
+	// file references (referencing imaginary Python files in a Go project).
+	PriorityLanguageConfusion ViolationPriority = 3
+
+	// PriorityGenericPattern is low priority - generic descriptions.
+	// Lowest priority as it's the least severe form of hallucination.
+	PriorityGenericPattern ViolationPriority = 4
+
+	// PriorityOther is for existing violation types not in the hierarchy.
+	PriorityOther ViolationPriority = 5
 )
 
 // Violation represents a single grounding failure.
@@ -82,6 +129,18 @@ type Violation struct {
 
 	// Location is where in the response this occurred.
 	Location string `json:"location,omitempty"`
+
+	// Suggestion provides guidance on how to fix the violation.
+	Suggestion string `json:"suggestion,omitempty"`
+
+	// Phase indicates when this violation was detected ("pre_synthesis" or "post_synthesis").
+	Phase string `json:"phase,omitempty"`
+
+	// RetryCount indicates which retry attempt detected this violation.
+	RetryCount int `json:"retry_count,omitempty"`
+
+	// LocationOffset is the character position in the response (for sorting).
+	LocationOffset int `json:"location_offset,omitempty"`
 }
 
 // Result contains the outcome of grounding validation.
@@ -131,6 +190,9 @@ func (r *Result) AddViolation(v Violation) {
 	case SeverityCritical:
 		r.CriticalCount++
 		r.Confidence -= 0.3
+	case SeverityHigh:
+		r.CriticalCount++ // High severity counts as critical for rejection purposes
+		r.Confidence -= 0.25
 	case SeverityWarning:
 		r.WarningCount++
 		r.Confidence -= 0.1

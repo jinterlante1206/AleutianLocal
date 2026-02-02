@@ -13,6 +13,7 @@ package llm
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
@@ -293,6 +294,12 @@ func (a *OllamaAdapter) Model() string {
 
 // convertMessages converts agent messages to Ollama format.
 //
+// Description:
+//
+//	Converts llm.Message to datatypes.Message for Ollama API.
+//	IMPORTANT: For "tool" role messages, the content is stored in ToolResults,
+//	not in the Content field. This method extracts the actual content.
+//
 // Inputs:
 //
 //	request - The agent request containing messages.
@@ -313,9 +320,26 @@ func (a *OllamaAdapter) convertMessages(request *Request) []datatypes.Message {
 
 	// Convert each message
 	for _, msg := range request.Messages {
+		content := msg.Content
+
+		// BUG FIX: For tool messages, content is in ToolResults, not Content field.
+		// The client.go BuildRequest function stores tool results in ToolResults[].Content,
+		// but the conversion was previously ignoring this and reading empty msg.Content.
+		if msg.Role == "tool" && len(msg.ToolResults) > 0 {
+			var parts []string
+			for _, tr := range msg.ToolResults {
+				if tr.Content != "" {
+					parts = append(parts, tr.Content)
+				}
+			}
+			if len(parts) > 0 {
+				content = strings.Join(parts, "\n")
+			}
+		}
+
 		messages = append(messages, datatypes.Message{
 			Role:    msg.Role,
-			Content: msg.Content,
+			Content: content,
 		})
 	}
 

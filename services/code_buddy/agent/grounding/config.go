@@ -61,6 +61,12 @@ type Config struct {
 
 	// MultiSampleConfig configures the multi-sample consistency verifier.
 	MultiSampleConfig *MultiSampleConfig
+
+	// StructuralClaimCheckerConfig configures the structural claim checker.
+	StructuralClaimCheckerConfig *StructuralClaimCheckerConfig
+
+	// PhantomCheckerConfig configures the phantom file checker.
+	PhantomCheckerConfig *PhantomCheckerConfig
 }
 
 // DefaultConfig returns sensible defaults for grounding configuration.
@@ -70,22 +76,24 @@ type Config struct {
 //	Config - The default configuration.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:                   true,
-		RejectOnCritical:          true,
-		AddFootnoteOnWarning:      true,
-		MaxViolationsBeforeReject: 3,
-		MinConfidence:             0.5,
-		MaxResponseScanLength:     10000,
-		Timeout:                   5 * time.Second,
-		ShortCircuitOnCritical:    false,
-		MaxHallucinationRetries:   3,
-		LanguageCheckerConfig:     DefaultLanguageCheckerConfig(),
-		CitationCheckerConfig:     DefaultCitationCheckerConfig(),
-		GroundingCheckerConfig:    DefaultGroundingCheckerConfig(),
-		TMSVerifierConfig:         DefaultTMSVerifierConfig(),
-		StructuredOutputConfig:    DefaultStructuredOutputConfig(),
-		ChainOfVerificationConfig: DefaultChainOfVerificationConfig(),
-		MultiSampleConfig:         DefaultMultiSampleConfig(),
+		Enabled:                      true,
+		RejectOnCritical:             true,
+		AddFootnoteOnWarning:         true,
+		MaxViolationsBeforeReject:    3,
+		MinConfidence:                0.5,
+		MaxResponseScanLength:        10000,
+		Timeout:                      5 * time.Second,
+		ShortCircuitOnCritical:       false,
+		MaxHallucinationRetries:      3,
+		LanguageCheckerConfig:        DefaultLanguageCheckerConfig(),
+		CitationCheckerConfig:        DefaultCitationCheckerConfig(),
+		GroundingCheckerConfig:       DefaultGroundingCheckerConfig(),
+		TMSVerifierConfig:            DefaultTMSVerifierConfig(),
+		StructuredOutputConfig:       DefaultStructuredOutputConfig(),
+		ChainOfVerificationConfig:    DefaultChainOfVerificationConfig(),
+		MultiSampleConfig:            DefaultMultiSampleConfig(),
+		StructuralClaimCheckerConfig: DefaultStructuralClaimCheckerConfig(),
+		PhantomCheckerConfig:         DefaultPhantomCheckerConfig(),
 	}
 }
 
@@ -136,5 +144,49 @@ func DefaultCitationCheckerConfig() *CitationCheckerConfig {
 		ValidateFileExists: true,
 		ValidateInContext:  true,
 		ValidateLineRange:  true,
+	}
+}
+
+// StructuralClaimCheckerConfig configures the structural claim checker.
+type StructuralClaimCheckerConfig struct {
+	// Enabled determines if structural claim checking is active.
+	Enabled bool
+
+	// RequireToolEvidence requires tool output (ls/find/tree) for structural claims.
+	RequireToolEvidence bool
+
+	// MaxPathsToExtract limits the number of paths extracted from tree structures.
+	MaxPathsToExtract int
+}
+
+// DefaultStructuralClaimCheckerConfig returns default structural claim checker config.
+func DefaultStructuralClaimCheckerConfig() *StructuralClaimCheckerConfig {
+	return &StructuralClaimCheckerConfig{
+		Enabled:             true,
+		RequireToolEvidence: true,
+		MaxPathsToExtract:   100,
+	}
+}
+
+// PhantomCheckerConfig configures the phantom file checker.
+type PhantomCheckerConfig struct {
+	// Enabled determines if phantom file checking is active.
+	Enabled bool
+
+	// Extensions are the file extensions to check (e.g., ".go", ".py").
+	// Empty means check all common code extensions.
+	Extensions []string
+
+	// MaxRefsToCheck limits how many file references to check per response.
+	// Prevents excessive checking on large responses.
+	MaxRefsToCheck int
+}
+
+// DefaultPhantomCheckerConfig returns default phantom checker config.
+func DefaultPhantomCheckerConfig() *PhantomCheckerConfig {
+	return &PhantomCheckerConfig{
+		Enabled:        true,
+		Extensions:     nil, // nil means all common code extensions
+		MaxRefsToCheck: 100,
 	}
 }

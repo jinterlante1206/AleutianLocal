@@ -85,6 +85,10 @@ func (c *LanguageChecker) Name() string {
 //	Scans the response for language-specific patterns and flags
 //	any patterns that don't match the project's language.
 //
+//	IMPORTANT: If a language is present in the EvidenceIndex (meaning files of that
+//	language were actually shown to the LLM), we don't flag that language as a
+//	violation. This supports hybrid repos (e.g., Go backend with Python scripts).
+//
 // Thread Safety: Safe for concurrent use.
 func (c *LanguageChecker) Check(ctx context.Context, input *CheckInput) []Violation {
 	var violations []Violation
@@ -99,6 +103,13 @@ func (c *LanguageChecker) Check(ctx context.Context, input *CheckInput) []Violat
 	for lang, markers := range c.patterns {
 		// Skip markers for the correct language
 		if lang == projectLang {
+			continue
+		}
+
+		// HYBRID REPO SUPPORT: Skip if this language is in the EvidenceIndex.
+		// This means files of this language were actually shown in context,
+		// so discussing them is legitimate, not hallucination.
+		if input.EvidenceIndex != nil && input.EvidenceIndex.Languages[lang] {
 			continue
 		}
 

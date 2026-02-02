@@ -286,3 +286,138 @@ def hello():
 		t.Error("expected to detect Python patterns in non-Python project")
 	}
 }
+
+// TestLanguageChecker_Check_HybridRepo verifies that Python patterns are NOT flagged
+// when Python files are actually in the EvidenceIndex (hybrid repo scenario).
+//
+// This is critical for repos like "Go backend + Python scripts" where discussing
+// the Python scripts should not be flagged as hallucination.
+func TestLanguageChecker_Check_HybridRepo(t *testing.T) {
+	t.Run("python_in_evidence_not_flagged", func(t *testing.T) {
+		checker := NewLanguageChecker(nil)
+		ctx := context.Background()
+
+		// Simulate a Go project with a Python script in context
+		evidence := NewEvidenceIndex()
+		evidence.Languages["python"] = true // Python file was shown
+		evidence.Files["scripts/setup.py"] = true
+
+		input := &CheckInput{
+			Response: `The project includes a Python setup script.
+The scripts/setup.py file uses:
+from setuptools import setup
+def main():
+    setup(name="myproject")
+
+This handles package installation.`,
+			ProjectLang:   "go", // Main project is Go
+			EvidenceIndex: evidence,
+		}
+
+		violations := checker.Check(ctx, input)
+
+		// Should NOT flag Python patterns since Python is in EvidenceIndex
+		for _, v := range violations {
+			if v.Code == "WRONG_LANGUAGE_PYTHON" {
+				t.Errorf("should not flag Python when Python files are in evidence: %s", v.Message)
+			}
+		}
+	})
+
+	t.Run("python_not_in_evidence_is_flagged", func(t *testing.T) {
+		checker := NewLanguageChecker(nil)
+		ctx := context.Background()
+
+		// Go project with NO Python in evidence
+		evidence := NewEvidenceIndex()
+		evidence.Languages["go"] = true
+		evidence.Files["main.go"] = true
+
+		input := &CheckInput{
+			Response: `The project is built with Flask.
+from flask import Flask
+def create_app():
+    app = Flask(__name__)
+    return app
+
+This handles HTTP requests.`,
+			ProjectLang:   "go",
+			EvidenceIndex: evidence,
+		}
+
+		violations := checker.Check(ctx, input)
+
+		// SHOULD flag Python patterns - no Python files in evidence
+		found := false
+		for _, v := range violations {
+			if v.Code == "WRONG_LANGUAGE_PYTHON" {
+				found = true
+			}
+		}
+
+		if !found {
+			t.Error("expected to detect Python hallucination when no Python files in evidence")
+		}
+	})
+
+	t.Run("javascript_in_evidence_not_flagged", func(t *testing.T) {
+		checker := NewLanguageChecker(nil)
+		ctx := context.Background()
+
+		// Go project with a JavaScript frontend in context
+		evidence := NewEvidenceIndex()
+		evidence.Languages["javascript"] = true
+		evidence.Languages["go"] = true
+		evidence.Files["frontend/index.js"] = true
+		evidence.Files["main.go"] = true
+
+		input := &CheckInput{
+			Response: `The Go backend serves a JavaScript frontend.
+The frontend/index.js file:
+import React from 'react';
+export default function App() {
+    return <div>Hello</div>;
+}
+
+The Go backend is in main.go.`,
+			ProjectLang:   "go",
+			EvidenceIndex: evidence,
+		}
+
+		violations := checker.Check(ctx, input)
+
+		// Should NOT flag JavaScript patterns
+		for _, v := range violations {
+			if v.Code == "WRONG_LANGUAGE_JAVASCRIPT" {
+				t.Errorf("should not flag JavaScript when JS files are in evidence: %s", v.Message)
+			}
+		}
+	})
+
+	t.Run("nil_evidence_falls_back_to_project_lang", func(t *testing.T) {
+		checker := NewLanguageChecker(nil)
+		ctx := context.Background()
+
+		input := &CheckInput{
+			Response: `from flask import Flask
+def hello():
+    pass`,
+			ProjectLang:   "go",
+			EvidenceIndex: nil, // No evidence index
+		}
+
+		violations := checker.Check(ctx, input)
+
+		// Should still flag Python when no EvidenceIndex is available
+		found := false
+		for _, v := range violations {
+			if v.Code == "WRONG_LANGUAGE_PYTHON" {
+				found = true
+			}
+		}
+
+		if !found {
+			t.Error("expected to flag Python when EvidenceIndex is nil")
+		}
+	})
+}

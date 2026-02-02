@@ -319,3 +319,126 @@ func TestChatWithToolsResult(t *testing.T) {
 		t.Errorf("len(result.ToolCalls) = %d, want 1", len(result.ToolCalls))
 	}
 }
+
+func TestOllamaAdapter_convertMessages_ToolResults(t *testing.T) {
+	// BUG FIX TEST: Verify that tool messages with content in ToolResults
+	// are correctly converted (not sent as empty messages).
+	adapter := &OllamaAdapter{model: "test-model"}
+
+	t.Run("tool message content extracted from ToolResults", func(t *testing.T) {
+		request := &Request{
+			SystemPrompt: "You are a helpful assistant.",
+			Messages: []Message{
+				{Role: "user", Content: "Read the main.go file"},
+				{Role: "assistant", Content: "I'll read that file for you."},
+				{
+					Role: "tool",
+					// Content is intentionally empty - this is how BuildRequest creates tool messages
+					Content: "",
+					ToolResults: []ToolCallResult{
+						{
+							ToolCallID: "call_123",
+							Content:    "package main\n\nfunc main() {\n\tfmt.Println(\"Hello\")\n}",
+							IsError:    false,
+						},
+					},
+				},
+			},
+		}
+
+		messages := adapter.convertMessages(request)
+
+		// Should have: system + user + assistant + tool = 4 messages
+		if len(messages) != 4 {
+			t.Fatalf("expected 4 messages, got %d", len(messages))
+		}
+
+		// Check tool message has actual content (not empty!)
+		toolMsg := messages[3]
+		if toolMsg.Role != "tool" {
+			t.Errorf("expected tool message at index 3, got role=%q", toolMsg.Role)
+		}
+		if toolMsg.Content == "" {
+			t.Fatal("CRITICAL: tool message content is empty - bug not fixed!")
+		}
+		if toolMsg.Content != "package main\n\nfunc main() {\n\tfmt.Println(\"Hello\")\n}" {
+			t.Errorf("tool message content = %q, want file content", toolMsg.Content)
+		}
+	})
+
+	t.Run("multiple tool results joined", func(t *testing.T) {
+		request := &Request{
+			Messages: []Message{
+				{
+					Role:    "tool",
+					Content: "",
+					ToolResults: []ToolCallResult{
+						{ToolCallID: "call_1", Content: "Result 1"},
+						{ToolCallID: "call_2", Content: "Result 2"},
+						{ToolCallID: "call_3", Content: "Result 3"},
+					},
+				},
+			},
+		}
+
+		messages := adapter.convertMessages(request)
+
+		if len(messages) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(messages))
+		}
+
+		expected := "Result 1\nResult 2\nResult 3"
+		if messages[0].Content != expected {
+			t.Errorf("content = %q, want %q", messages[0].Content, expected)
+		}
+	})
+
+	t.Run("empty tool results still works", func(t *testing.T) {
+		request := &Request{
+			Messages: []Message{
+				{
+					Role:        "tool",
+					Content:     "",
+					ToolResults: []ToolCallResult{},
+				},
+			},
+		}
+
+		messages := adapter.convertMessages(request)
+
+		if len(messages) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(messages))
+		}
+		// Empty tool results means empty content - this is expected
+		if messages[0].Content != "" {
+			t.Errorf("content = %q, want empty", messages[0].Content)
+		}
+	})
+
+	t.Run("regular messages unchanged", func(t *testing.T) {
+		request := &Request{
+			SystemPrompt: "System prompt",
+			Messages: []Message{
+				{Role: "user", Content: "User message"},
+				{Role: "assistant", Content: "Assistant message"},
+			},
+		}
+
+		messages := adapter.convertMessages(request)
+
+		// system + user + assistant = 3
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d", len(messages))
+		}
+
+		if messages[0].Role != "system" || messages[0].Content != "System prompt" {
+			t.Errorf("system message wrong: %+v", messages[0])
+		}
+		if messages[1].Role != "user" || messages[1].Content != "User message" {
+			t.Errorf("user message wrong: %+v", messages[1])
+		}
+		if messages[2].Role != "assistant" || messages[2].Content != "Assistant message" {
+			t.Errorf("assistant message wrong: %+v", messages[2])
+		}
+	})
+}

@@ -22,6 +22,7 @@ package context
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -225,6 +226,12 @@ func (m *Manager) Assemble(ctx context.Context, query string, budget int) (*agen
 		m.addedAt[entry.ID] = m.currentStep
 	}
 
+	// Detect and inject explicit project language into system prompt
+	// This helps prevent hallucination by making the language constraint explicit upfront
+	if lang := m.detectProjectLanguage(assembled.CodeContext); lang != "" {
+		assembled.SystemPrompt = m.injectProjectLanguage(assembled.SystemPrompt, lang)
+	}
+
 	// Add initial user message
 	assembled.ConversationHistory = append(assembled.ConversationHistory, agent.Message{
 		Role:    "user",
@@ -281,6 +288,94 @@ func (m *Manager) parseContextEntries(contextStr string, symbolIDs []string) []a
 	}
 
 	return entries
+}
+
+// detectProjectLanguage determines the dominant programming language from code entries.
+//
+// Description:
+//
+//	Analyzes file extensions in the code context to identify the primary
+//	programming language. This is used to inject explicit language constraints
+//	into the system prompt to prevent hallucination.
+//
+// Inputs:
+//
+//	entries - Code entries from the assembled context.
+//
+// Outputs:
+//
+//	string - The dominant language (e.g., "Go", "Python"), or empty if unknown.
+func (m *Manager) detectProjectLanguage(entries []agent.CodeEntry) string {
+	langCounts := make(map[string]int)
+
+	for _, entry := range entries {
+		ext := strings.ToLower(filepath.Ext(entry.FilePath))
+		var lang string
+		switch ext {
+		case ".go":
+			lang = "Go"
+		case ".py":
+			lang = "Python"
+		case ".js":
+			lang = "JavaScript"
+		case ".ts":
+			lang = "TypeScript"
+		case ".jsx":
+			lang = "JavaScript"
+		case ".tsx":
+			lang = "TypeScript"
+		case ".java":
+			lang = "Java"
+		case ".rs":
+			lang = "Rust"
+		case ".c", ".h":
+			lang = "C"
+		case ".cpp", ".hpp", ".cc":
+			lang = "C++"
+		}
+		if lang != "" {
+			langCounts[lang]++
+		}
+	}
+
+	// Find dominant language
+	maxCount := 0
+	dominantLang := ""
+	for lang, count := range langCounts {
+		if count > maxCount {
+			maxCount = count
+			dominantLang = lang
+		}
+	}
+
+	return dominantLang
+}
+
+// injectProjectLanguage adds explicit language context to the system prompt.
+//
+// Description:
+//
+//	Inserts a clear statement about the project's primary programming language
+//	at the start of the system prompt. This helps prevent the LLM from
+//	hallucinating code in the wrong language (e.g., describing Python/Flask
+//	patterns when analyzing a Go project).
+//
+// Inputs:
+//
+//	systemPrompt - The base system prompt.
+//	lang - The detected project language (e.g., "Go").
+//
+// Outputs:
+//
+//	string - The system prompt with language context injected.
+func (m *Manager) injectProjectLanguage(systemPrompt, lang string) string {
+	langNotice := fmt.Sprintf(`IMPORTANT: You are analyzing a **%s** project.
+Do NOT reference or describe code patterns from other languages (Python, JavaScript, Java, etc.)
+unless those files are explicitly shown in your context.
+
+`, lang)
+
+	return langNotice + systemPrompt
 }
 
 // Update modifies context based on a tool result.
