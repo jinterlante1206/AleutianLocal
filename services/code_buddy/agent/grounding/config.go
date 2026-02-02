@@ -58,6 +58,9 @@ type Config struct {
 
 	// ChainOfVerificationConfig configures the chain-of-verification verifier.
 	ChainOfVerificationConfig *ChainOfVerificationConfig
+
+	// MultiSampleConfig configures the multi-sample consistency verifier.
+	MultiSampleConfig *MultiSampleConfig
 }
 
 // DefaultConfig returns sensible defaults for grounding configuration.
@@ -82,6 +85,7 @@ func DefaultConfig() Config {
 		TMSVerifierConfig:         DefaultTMSVerifierConfig(),
 		StructuredOutputConfig:    DefaultStructuredOutputConfig(),
 		ChainOfVerificationConfig: DefaultChainOfVerificationConfig(),
+		MultiSampleConfig:         DefaultMultiSampleConfig(),
 	}
 }
 

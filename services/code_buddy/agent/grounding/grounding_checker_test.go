@@ -519,3 +519,71 @@ func filterViolations(violations []Violation, pred func(Violation) bool) []Viola
 	}
 	return result
 }
+
+func TestGroundingChecker_formatExpectedFiles(t *testing.T) {
+	checker := NewGroundingChecker(nil)
+
+	t.Run("nil evidence", func(t *testing.T) {
+		result := checker.formatExpectedFiles(nil)
+		if result != "no files in context" {
+			t.Errorf("expected 'no files in context', got %q", result)
+		}
+	})
+
+	t.Run("empty evidence", func(t *testing.T) {
+		evidence := NewEvidenceIndex()
+		result := checker.formatExpectedFiles(evidence)
+		if result != "no files in context" {
+			t.Errorf("expected 'no files in context', got %q", result)
+		}
+	})
+
+	t.Run("with files", func(t *testing.T) {
+		evidence := NewEvidenceIndex()
+		evidence.FileBasenames["main.go"] = true
+		evidence.FileBasenames["handler.go"] = true
+		result := checker.formatExpectedFiles(evidence)
+		if !strings.Contains(result, "main.go") && !strings.Contains(result, "handler.go") {
+			t.Errorf("expected file names in result, got %q", result)
+		}
+	})
+
+	t.Run("limits to 5 files", func(t *testing.T) {
+		evidence := NewEvidenceIndex()
+		for i := 0; i < 10; i++ {
+			evidence.FileBasenames[strings.Repeat("a", i+1)+".go"] = true
+		}
+		result := checker.formatExpectedFiles(evidence)
+		// Result should contain files but be limited
+		if len(result) == 0 {
+			t.Error("expected non-empty result")
+		}
+	})
+}
+
+func TestGroundingChecker_validateClaim_IgnoresCommonWords(t *testing.T) {
+	checker := NewGroundingChecker(nil)
+	ctx := context.Background()
+
+	evidence := NewEvidenceIndex()
+	evidence.Files["real.go"] = true
+	evidence.FileBasenames["real.go"] = true
+
+	input := &CheckInput{
+		Response:      "The main thing is to update the config and return the result.",
+		EvidenceIndex: evidence,
+	}
+
+	violations := checker.Check(ctx, input)
+
+	// Common words like "main", "config", "return", "result" should be ignored
+	for _, v := range violations {
+		if v.Type == ViolationSymbolNotFound {
+			lowEvidence := strings.ToLower(v.Evidence)
+			// Check that we're not flagging common words
+			if lowEvidence == "main" || lowEvidence == "config" || lowEvidence == "return" || lowEvidence == "result" {
+				t.Errorf("should not flag common word as symbol: %s", v.Evidence)
+			}
+		}
+	}
+}

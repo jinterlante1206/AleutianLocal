@@ -548,3 +548,194 @@ func TestCitationChecker_Check_ZeroLine(t *testing.T) {
 		t.Error("expected violation for line 0 (lines start at 1)")
 	}
 }
+
+func TestCitationChecker_fileInContext(t *testing.T) {
+	checker := NewCitationChecker(nil)
+
+	t.Run("file in evidence index", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: &EvidenceIndex{
+				Files:         map[string]bool{"main.go": true},
+				FileBasenames: map[string]bool{"main.go": true},
+			},
+		}
+
+		if !checker.fileInContext("main.go", input) {
+			t.Error("expected main.go to be in context via EvidenceIndex")
+		}
+	})
+
+	t.Run("file in code context", func(t *testing.T) {
+		input := &CheckInput{
+			CodeContext: []agent.CodeEntry{
+				{FilePath: "src/main.go", Content: "package main"},
+			},
+		}
+
+		// Should match via basename
+		if !checker.fileInContext("main.go", input) {
+			t.Error("expected main.go to be in context via basename match")
+		}
+	})
+
+	t.Run("file in tool results", func(t *testing.T) {
+		input := &CheckInput{
+			ToolResults: []ToolResult{
+				{InvocationID: "read_1", Output: "Content of utils/helper.go:\npackage utils"},
+			},
+		}
+
+		if !checker.fileInContext("helper.go", input) {
+			t.Error("expected helper.go to be in context via tool result")
+		}
+	})
+
+	t.Run("file not in context", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: &EvidenceIndex{
+				Files:         map[string]bool{"main.go": true},
+				FileBasenames: map[string]bool{"main.go": true},
+			},
+		}
+
+		if checker.fileInContext("other.go", input) {
+			t.Error("expected other.go to NOT be in context")
+		}
+	})
+
+	t.Run("nil evidence index", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: nil,
+			CodeContext: []agent.CodeEntry{
+				{FilePath: "main.go", Content: "package main"},
+			},
+		}
+
+		if !checker.fileInContext("main.go", input) {
+			t.Error("expected main.go to be in context via CodeContext")
+		}
+	})
+}
+
+func TestCitationChecker_getFileContent(t *testing.T) {
+	checker := NewCitationChecker(nil)
+
+	t.Run("content from evidence index with normalized path", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: &EvidenceIndex{
+				FileContents: map[string]string{
+					"main.go": "package main\nfunc main() {}",
+				},
+			},
+		}
+
+		content := checker.getFileContent("main.go", input)
+		if content != "package main\nfunc main() {}" {
+			t.Errorf("expected content from evidence index, got %q", content)
+		}
+	})
+
+	t.Run("content from evidence index with original path", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: &EvidenceIndex{
+				FileContents: map[string]string{
+					"./src/main.go": "package main",
+				},
+			},
+		}
+
+		content := checker.getFileContent("./src/main.go", input)
+		if content != "package main" {
+			t.Errorf("expected content from evidence index, got %q", content)
+		}
+	})
+
+	t.Run("content from code context", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: &EvidenceIndex{
+				FileContents: map[string]string{}, // Empty
+			},
+			CodeContext: []agent.CodeEntry{
+				{FilePath: "utils/helper.go", Content: "package utils"},
+			},
+		}
+
+		content := checker.getFileContent("helper.go", input)
+		if content != "package utils" {
+			t.Errorf("expected content from code context, got %q", content)
+		}
+	})
+
+	t.Run("content not found", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: &EvidenceIndex{
+				FileContents: map[string]string{"main.go": "package main"},
+			},
+		}
+
+		content := checker.getFileContent("other.go", input)
+		if content != "" {
+			t.Errorf("expected empty content, got %q", content)
+		}
+	})
+
+	t.Run("nil evidence index falls back to code context", func(t *testing.T) {
+		input := &CheckInput{
+			EvidenceIndex: nil,
+			CodeContext: []agent.CodeEntry{
+				{FilePath: "main.go", Content: "package main"},
+			},
+		}
+
+		content := checker.getFileContent("main.go", input)
+		if content != "package main" {
+			t.Errorf("expected content from code context, got %q", content)
+		}
+	})
+}
+
+func TestCitationChecker_containsCodeClaims(t *testing.T) {
+	checker := NewCitationChecker(nil)
+
+	t.Run("response with function claim - the X function", func(t *testing.T) {
+		response := "The main function initializes the server."
+		if !checker.containsCodeClaims(response) {
+			t.Error("expected to detect code claim")
+		}
+	})
+
+	t.Run("response with function X pattern", func(t *testing.T) {
+		response := "function handleRequest processes incoming data."
+		if !checker.containsCodeClaims(response) {
+			t.Error("expected to detect code claim")
+		}
+	})
+
+	t.Run("response with file reference", func(t *testing.T) {
+		response := "The implementation in main.go handles this."
+		if !checker.containsCodeClaims(response) {
+			t.Error("expected to detect code claim")
+		}
+	})
+
+	t.Run("response with this code pattern", func(t *testing.T) {
+		response := "This code initializes the server."
+		if !checker.containsCodeClaims(response) {
+			t.Error("expected to detect code claim")
+		}
+	})
+
+	t.Run("response without code claims", func(t *testing.T) {
+		response := "Sure, I can help you with that question."
+		if checker.containsCodeClaims(response) {
+			t.Error("expected no code claims")
+		}
+	})
+
+	t.Run("response with the file X pattern", func(t *testing.T) {
+		response := "The file config.yaml contains settings."
+		if !checker.containsCodeClaims(response) {
+			t.Error("expected to detect code claim")
+		}
+	})
+}

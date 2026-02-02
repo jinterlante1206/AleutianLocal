@@ -55,6 +55,13 @@ func NewGrounder(config *Config) Grounder {
 		checkers = append(checkers, NewTMSVerifier(config.TMSVerifierConfig))
 	}
 
+	// Layer 7: Multi-Sample Verifier (consistency across multiple samples)
+	// Note: This is opt-in due to cost (N LLM calls). The actual multi-sample
+	// generation is done by the consumer; this checker provides analysis tools.
+	if config.MultiSampleConfig != nil && config.MultiSampleConfig.Enabled {
+		checkers = append(checkers, NewMultiSampleVerifier(config.MultiSampleConfig))
+	}
+
 	// Layer 8: Chain-of-Verification (self-verification step)
 	// Note: This checker is opt-in and requires external LLM client integration.
 	// The actual verification prompt/response handling is done by the consumer.

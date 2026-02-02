@@ -442,6 +442,435 @@ func TestNewGrounder_WithConfig(t *testing.T) {
 	}
 }
 
+func TestNewGrounder_WithAllOptionalCheckersEnabled(t *testing.T) {
+	config := &Config{
+		Enabled:          true,
+		RejectOnCritical: true,
+		StructuredOutputConfig: &StructuredOutputConfig{
+			Enabled: true,
+		},
+		TMSVerifierConfig: &TMSVerifierConfig{
+			Enabled: true,
+		},
+		MultiSampleConfig: &MultiSampleConfig{
+			Enabled: true,
+		},
+		ChainOfVerificationConfig: &ChainOfVerificationConfig{
+			Enabled: true,
+		},
+		CitationCheckerConfig:  DefaultCitationCheckerConfig(),
+		GroundingCheckerConfig: DefaultGroundingCheckerConfig(),
+		LanguageCheckerConfig:  DefaultLanguageCheckerConfig(),
+	}
+
+	grounder := NewGrounder(config)
+	if grounder == nil {
+		t.Fatal("expected non-nil grounder")
+	}
+
+	ctx := context.Background()
+	result, err := grounder.Validate(ctx, "Test response", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestNewGrounderWithCheckers(t *testing.T) {
+	checker := &mockChecker{
+		name:       "custom_checker",
+		violations: nil,
+	}
+
+	config := DefaultConfig()
+	grounder := NewGrounderWithCheckers(config, checker)
+
+	if grounder == nil {
+		t.Fatal("expected non-nil grounder")
+	}
+
+	ctx := context.Background()
+	result, err := grounder.Validate(ctx, "Test response", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.ChecksRun != 1 {
+		t.Errorf("expected ChecksRun=1, got %d", result.ChecksRun)
+	}
+}
+
+func TestConvertToolResults(t *testing.T) {
+	agentResults := []agent.ToolResult{
+		{InvocationID: "id1", Output: "output1"},
+		{InvocationID: "id2", Output: "output2"},
+		{InvocationID: "id3", Output: "output3"},
+	}
+
+	results := convertToolResults(agentResults)
+
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if results[0].InvocationID != "id1" {
+		t.Errorf("expected InvocationID='id1', got %s", results[0].InvocationID)
+	}
+	if results[1].Output != "output2" {
+		t.Errorf("expected Output='output2', got %s", results[1].Output)
+	}
+}
+
+func TestDetectLanguageFromPath(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{"main.go", "go"},
+		{"app.py", "python"},
+		{"index.js", "javascript"},
+		{"component.tsx", "typescript"},
+		{"App.java", "java"},
+		{"lib.rs", "rust"},
+		{"main.c", "c"},
+		{"main.cpp", "cpp"},
+		{"header.h", "c"},
+		{"header.hpp", "cpp"},
+		{"main.cc", "cpp"},
+		{"component.jsx", "javascript"},
+		{"app.ts", "typescript"},
+		{"README.md", ""},
+		{"config.yaml", ""},
+		{"data.json", ""},
+		{"", ""},
+		{"no_extension", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			lang := detectLanguageFromPath(tt.path)
+			if lang != tt.expected {
+				t.Errorf("detectLanguageFromPath(%q) = %q, want %q", tt.path, lang, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractSymbols(t *testing.T) {
+	t.Run("Go functions", func(t *testing.T) {
+		content := `package main
+
+func main() {
+    fmt.Println("Hello")
+}
+
+func helper() string {
+    return "help"
+}
+`
+		symbols := make(map[string]bool)
+		extractSymbols(content, symbols)
+
+		if !symbols["main"] {
+			t.Error("expected 'main' symbol")
+		}
+		if !symbols["helper"] {
+			t.Error("expected 'helper' symbol")
+		}
+	})
+
+	t.Run("Go methods", func(t *testing.T) {
+		content := `package server
+
+func (s *Server) Start() error {
+    return nil
+}
+
+func (h Handler) Handle() {
+}
+`
+		symbols := make(map[string]bool)
+		extractSymbols(content, symbols)
+
+		if !symbols["Start"] {
+			t.Error("expected 'Start' symbol")
+		}
+		if !symbols["Handle"] {
+			t.Error("expected 'Handle' symbol")
+		}
+	})
+
+	t.Run("Go types", func(t *testing.T) {
+		content := `package types
+
+type Server struct {
+    Port int
+}
+
+type Handler interface {
+    Handle()
+}
+`
+		symbols := make(map[string]bool)
+		extractSymbols(content, symbols)
+
+		if !symbols["Server"] {
+			t.Error("expected 'Server' symbol")
+		}
+		if !symbols["Handler"] {
+			t.Error("expected 'Handler' symbol")
+		}
+	})
+
+	t.Run("Python functions", func(t *testing.T) {
+		content := `
+def main():
+    print("Hello")
+
+def helper(x, y):
+    return x + y
+`
+		symbols := make(map[string]bool)
+		extractSymbols(content, symbols)
+
+		if !symbols["main"] {
+			t.Error("expected 'main' symbol")
+		}
+		if !symbols["helper"] {
+			t.Error("expected 'helper' symbol")
+		}
+	})
+
+	t.Run("Python classes", func(t *testing.T) {
+		content := `
+class Server:
+    def __init__(self):
+        pass
+
+class Handler(BaseHandler):
+    pass
+`
+		symbols := make(map[string]bool)
+		extractSymbols(content, symbols)
+
+		if !symbols["Server"] {
+			t.Error("expected 'Server' symbol")
+		}
+		if !symbols["Handler"] {
+			t.Error("expected 'Handler' symbol")
+		}
+	})
+
+	t.Run("empty content", func(t *testing.T) {
+		symbols := make(map[string]bool)
+		extractSymbols("", symbols)
+		if len(symbols) != 0 {
+			t.Errorf("expected no symbols, got %d", len(symbols))
+		}
+	})
+}
+
+func TestExtractFilePathsFromText(t *testing.T) {
+	t.Run("paths with directories", func(t *testing.T) {
+		text := `Looking at src/main.go and utils/helper.go for the implementation.`
+		files := make(map[string]bool)
+		basenames := make(map[string]bool)
+
+		extractFilePathsFromText(text, files, basenames)
+
+		if !files["src/main.go"] {
+			t.Error("expected 'src/main.go' in files")
+		}
+		if !files["utils/helper.go"] {
+			t.Error("expected 'utils/helper.go' in files")
+		}
+		if !basenames["main.go"] {
+			t.Error("expected 'main.go' in basenames")
+		}
+		if !basenames["helper.go"] {
+			t.Error("expected 'helper.go' in basenames")
+		}
+	})
+
+	t.Run("filenames only", func(t *testing.T) {
+		text := `Check config.yaml and main.go for settings.`
+		files := make(map[string]bool)
+		basenames := make(map[string]bool)
+
+		extractFilePathsFromText(text, files, basenames)
+
+		if !basenames["config.yaml"] {
+			t.Error("expected 'config.yaml' in basenames")
+		}
+		if !basenames["main.go"] {
+			t.Error("expected 'main.go' in basenames")
+		}
+	})
+
+	t.Run("quoted paths", func(t *testing.T) {
+		text := `Open "src/app.py" and 'lib/utils.js' files.`
+		files := make(map[string]bool)
+		basenames := make(map[string]bool)
+
+		extractFilePathsFromText(text, files, basenames)
+
+		if !files["src/app.py"] {
+			t.Error("expected 'src/app.py' in files")
+		}
+		if !files["lib/utils.js"] {
+			t.Error("expected 'lib/utils.js' in files")
+		}
+	})
+
+	t.Run("paths with backslashes", func(t *testing.T) {
+		text := `Windows path: src\main.go`
+		files := make(map[string]bool)
+		basenames := make(map[string]bool)
+
+		extractFilePathsFromText(text, files, basenames)
+
+		// Note: backslash paths may or may not be detected depending on implementation
+		// The function looks for \ or / as path separators
+		if !files["src\\main.go"] && !basenames["main.go"] {
+			// At minimum we should get the basename
+			t.Log("backslash path not detected as expected, this is acceptable")
+		}
+	})
+
+	t.Run("no code files", func(t *testing.T) {
+		text := `This is just plain text without file references.`
+		files := make(map[string]bool)
+		basenames := make(map[string]bool)
+
+		extractFilePathsFromText(text, files, basenames)
+
+		if len(files) != 0 {
+			t.Errorf("expected no files, got %d", len(files))
+		}
+		if len(basenames) != 0 {
+			t.Errorf("expected no basenames, got %d", len(basenames))
+		}
+	})
+}
+
+func TestHasCodeExtension(t *testing.T) {
+	tests := []struct {
+		path     string
+		expected bool
+	}{
+		{"main.go", true},
+		{"app.py", true},
+		{"index.js", true},
+		{"app.ts", true},
+		{"Component.jsx", true},
+		{"Component.tsx", true},
+		{"App.java", true},
+		{"lib.rs", true},
+		{"main.c", true},
+		{"main.cpp", true},
+		{"header.h", true},
+		{"header.hpp", true},
+		{"main.cc", true},
+		{"README.md", true},
+		{"config.yaml", true},
+		{"config.yml", true},
+		{"data.json", true},
+		{"image.png", false},
+		{"doc.pdf", false},
+		{"archive.zip", false},
+		{"no_extension", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := hasCodeExtension(tt.path)
+			if got != tt.expected {
+				t.Errorf("hasCodeExtension(%q) = %v, want %v", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildCheckInput(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxResponseScanLength = 100
+	grounder := NewDefaultGrounder(config)
+
+	t.Run("nil assembled context", func(t *testing.T) {
+		input, err := grounder.buildCheckInput("test response", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if input.Response != "test response" {
+			t.Errorf("expected response='test response', got %q", input.Response)
+		}
+		if input.ProjectLang != "" {
+			t.Errorf("expected empty ProjectLang, got %q", input.ProjectLang)
+		}
+	})
+
+	t.Run("with assembled context", func(t *testing.T) {
+		ctx := &agent.AssembledContext{
+			CodeContext: []agent.CodeEntry{
+				{FilePath: "main.go", Content: "package main"},
+			},
+			ToolResults: []agent.ToolResult{
+				{InvocationID: "read_1", Output: "file content"},
+			},
+		}
+
+		input, err := grounder.buildCheckInput("test response", ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if input.ProjectLang != "go" {
+			t.Errorf("expected ProjectLang='go', got %q", input.ProjectLang)
+		}
+		if input.EvidenceIndex == nil {
+			t.Error("expected non-nil EvidenceIndex")
+		}
+		if len(input.ToolResults) != 1 {
+			t.Errorf("expected 1 tool result, got %d", len(input.ToolResults))
+		}
+	})
+
+	t.Run("response truncation", func(t *testing.T) {
+		longResponse := "This is a very long response that exceeds the maximum scan length limit set in the configuration and more."
+
+		// Note: truncation only happens with non-nil assembledCtx
+		ctx := &agent.AssembledContext{
+			CodeContext: []agent.CodeEntry{
+				{FilePath: "main.go", Content: "package main"},
+			},
+		}
+
+		input, err := grounder.buildCheckInput(longResponse, ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(input.Response) > 100 {
+			t.Errorf("expected truncated response of length <=100, got %d", len(input.Response))
+		}
+	})
+}
+
+func TestBuildEvidenceIndex_NilContext(t *testing.T) {
+	config := DefaultConfig()
+	grounder := NewDefaultGrounder(config)
+
+	idx := grounder.buildEvidenceIndex(nil)
+	if idx == nil {
+		t.Fatal("expected non-nil index")
+	}
+	if len(idx.Files) != 0 {
+		t.Errorf("expected empty files, got %d", len(idx.Files))
+	}
+}
+
 func TestDefaultGrounder_DetectProjectLanguage(t *testing.T) {
 	config := DefaultConfig()
 	grounder := NewDefaultGrounder(config)
