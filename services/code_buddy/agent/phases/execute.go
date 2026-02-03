@@ -23,7 +23,6 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
@@ -669,21 +668,38 @@ func truncateQuery(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// emitToolRouting emits a routing event when the ToolRouter is used.
+// emitToolRouting emits a routing event and records a trace step.
 func (p *ExecutePhase) emitToolRouting(deps *Dependencies, selection *agent.ToolRouterSelection) {
-	if deps.EventEmitter == nil || selection == nil {
+	if selection == nil {
 		return
 	}
 
-	// Emit as a tool forcing event with routing-specific data
-	deps.EventEmitter.Emit(events.TypeToolForcing, &events.ToolForcingData{
-		Query:         deps.Query,
-		SuggestedTool: selection.Tool,
-		RetryCount:    0,
-		MaxRetries:    0,
-		StepNumber:    0,
-		Reason:        fmt.Sprintf("router_selection (confidence: %.2f, reasoning: %s)", selection.Confidence, selection.Reasoning),
-	})
+	// Emit event if emitter is available
+	if deps.EventEmitter != nil {
+		deps.EventEmitter.Emit(events.TypeToolForcing, &events.ToolForcingData{
+			Query:         deps.Query,
+			SuggestedTool: selection.Tool,
+			RetryCount:    0,
+			MaxRetries:    0,
+			StepNumber:    0,
+			Reason:        fmt.Sprintf("router_selection (confidence: %.2f, reasoning: %s)", selection.Confidence, selection.Reasoning),
+		})
+	}
+
+	// Record trace step for routing decision
+	if deps.Session != nil {
+		traceStep := crs.TraceStep{
+			Action:   "tool_routing",
+			Target:   selection.Tool,
+			Duration: selection.Duration,
+			Metadata: map[string]string{
+				"confidence": fmt.Sprintf("%.2f", selection.Confidence),
+				"reasoning":  selection.Reasoning,
+				"query":      truncateQuery(deps.Query, 200),
+			},
+		}
+		deps.Session.RecordTraceStep(traceStep)
+	}
 }
 
 // callLLM sends a request to the LLM and emits events.

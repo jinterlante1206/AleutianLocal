@@ -11,12 +11,16 @@
 package code_buddy
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/routing"
+	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,8 +28,9 @@ import (
 //
 // Thread Safety: AgentHandlers is safe for concurrent use.
 type AgentHandlers struct {
-	loop agent.AgentLoop
-	svc  *Service
+	loop         agent.AgentLoop
+	svc          *Service
+	modelManager *llm.MultiModelManager
 }
 
 // NewAgentHandlers creates handlers for the Code Buddy agent.
@@ -35,6 +40,7 @@ type AgentHandlers struct {
 //	Creates HTTP handlers that wrap the AgentLoop interface.
 //	The handlers provide REST endpoints for starting, continuing,
 //	and aborting agent sessions.
+//	Also initializes a shared MultiModelManager for tool routing.
 //
 // Inputs:
 //
@@ -51,9 +57,16 @@ type AgentHandlers struct {
 //	svc := code_buddy.NewService(config)
 //	handlers := code_buddy.NewAgentHandlers(loop, svc)
 func NewAgentHandlers(loop agent.AgentLoop, svc *Service) *AgentHandlers {
+	// Get Ollama endpoint from environment or use default
+	ollamaURL := os.Getenv("OLLAMA_URL")
+	if ollamaURL == "" {
+		ollamaURL = "http://localhost:11434"
+	}
+
 	return &AgentHandlers{
-		loop: loop,
-		svc:  svc,
+		loop:         loop,
+		svc:          svc,
+		modelManager: llm.NewMultiModelManager(ollamaURL),
 	}
 }
 
@@ -118,6 +131,16 @@ func (h *AgentHandlers) HandleAgentRun(c *gin.Context) {
 			Code:  "INVALID_CONFIG",
 		})
 		return
+	}
+
+	// Initialize tool router if enabled
+	if session.Config.ToolRouterEnabled {
+		if err := h.initializeToolRouter(c.Request.Context(), session, logger); err != nil {
+			// Log warning but don't fail - tool routing is optional
+			logger.Warn("Failed to initialize tool router, continuing without it",
+				"error", err,
+				"model", session.Config.ToolRouterModel)
+		}
 	}
 
 	// Run the agent loop
@@ -531,6 +554,78 @@ func (h *AgentHandlers) HandleGetCRSExport(c *gin.Context) {
 		"generation", response.Generation)
 
 	c.JSON(http.StatusOK, response)
+}
+
+// initializeToolRouter sets up the micro-LLM tool router for a session.
+//
+// Description:
+//
+//	Creates a Granite4Router with the session's configuration and wraps it
+//	with a RouterAdapter to implement the agent.ToolRouter interface.
+//	Also warms the router model to minimize first-request latency.
+//
+// Inputs:
+//
+//	ctx - Context for warming the model.
+//	session - The session to configure.
+//	logger - Logger for diagnostics.
+//
+// Outputs:
+//
+//	error - Non-nil if router creation or warmup fails.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent.Session, logger *slog.Logger) error {
+	// Build router config from session config
+	routerConfig := routing.RouterConfig{
+		Model:               session.Config.ToolRouterModel,
+		OllamaEndpoint:      h.getOllamaEndpoint(),
+		Timeout:             session.Config.ToolRouterTimeout,
+		ConfidenceThreshold: session.Config.ToolRouterConfidence,
+		Temperature:         0.1, // Low temperature for consistent routing
+		MaxTokens:           256,
+		KeepAlive:           "-1", // Keep model loaded indefinitely
+	}
+
+	// Create the Granite4 router
+	router, err := routing.NewGranite4Router(h.modelManager, routerConfig)
+	if err != nil {
+		return err
+	}
+
+	// Wrap with adapter to implement agent.ToolRouter interface
+	adapter := routing.NewRouterAdapter(router)
+
+	// Set router on session
+	session.SetToolRouter(adapter)
+
+	logger.Info("Tool router initialized",
+		"model", routerConfig.Model,
+		"timeout", routerConfig.Timeout,
+		"confidence_threshold", routerConfig.ConfidenceThreshold)
+
+	// Warm the router model in background (non-blocking)
+	go func() {
+		if warmErr := router.WarmRouter(ctx); warmErr != nil {
+			logger.Warn("Failed to warm router model",
+				"error", warmErr,
+				"model", routerConfig.Model)
+		} else {
+			logger.Info("Router model warmed successfully",
+				"model", routerConfig.Model)
+		}
+	}()
+
+	return nil
+}
+
+// getOllamaEndpoint returns the Ollama endpoint from environment or default.
+func (h *AgentHandlers) getOllamaEndpoint() string {
+	endpoint := os.Getenv("OLLAMA_URL")
+	if endpoint == "" {
+		endpoint = "http://localhost:11434"
+	}
+	return endpoint
 }
 
 // agentErrorToString converts an AgentError to a string, returning empty string for nil.
