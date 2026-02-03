@@ -672,7 +672,8 @@ func TestCLIUnit_Policy_TestSSN(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run failed: %v", err)
 			}
-			if err := result.AssertSuccess(); err != nil {
+			// Exit code 1 = findings found (CLI-01f: proper exit codes)
+			if err := result.AssertExitCode(1); err != nil {
 				t.Error(err)
 			}
 			for _, want := range tt.wantContains {
@@ -701,7 +702,8 @@ func TestCLIUnit_Policy_TestAWSKeys(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run failed: %v", err)
 			}
-			if err := result.AssertSuccess(); err != nil {
+			// Exit code 1 = findings found (CLI-01f: proper exit codes)
+			if err := result.AssertExitCode(1); err != nil {
 				t.Error(err)
 			}
 			for _, want := range tt.wantContains {
@@ -763,7 +765,8 @@ func TestCLIUnit_Policy_TestMultiplePatterns(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run failed: %v", err)
 			}
-			if err := result.AssertSuccess(); err != nil {
+			// Exit code 1 = findings found (CLI-01f: proper exit codes)
+			if err := result.AssertExitCode(1); err != nil {
 				t.Error(err)
 			}
 			for _, want := range tt.wantContains {

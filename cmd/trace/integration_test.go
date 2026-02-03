@@ -28,7 +28,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy"
+	"github.com/AleutianAI/AleutianFOSS/services/trace"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/gin-gonic/gin"
 )
 
@@ -1573,4 +1574,443 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 	}
 
 	t.Log("Full workflow test completed successfully!")
+}
+
+// ============================================================================
+// AGENT ENDPOINT TESTS (CB-28: Agent Loop)
+// ============================================================================
+
+// newAgentTestServer creates a test server with agent routes registered.
+func newAgentTestServer(t *testing.T) *testServer {
+	t.Helper()
+
+	// Skip if project doesn't exist
+	if _, err := os.Stat(testProjectRoot); os.IsNotExist(err) {
+		t.Skipf("Test project not found at %s", testProjectRoot)
+	}
+
+	gin.SetMode(gin.TestMode)
+
+	cfg := code_buddy.DefaultServiceConfig()
+	svc := code_buddy.NewService(cfg)
+	handlers := code_buddy.NewHandlers(svc)
+
+	// Create agent loop (will be mock mode without Ollama)
+	agentLoop := agent.NewDefaultAgentLoop()
+	agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+
+	router := gin.New()
+	router.Use(gin.Recovery())
+
+	v1 := router.Group("/v1")
+	code_buddy.RegisterRoutes(v1, handlers)
+	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+
+	ts := &testServer{
+		router: router,
+		t:      t,
+	}
+
+	// Initialize the graph
+	ts.initGraph()
+
+	return ts
+}
+
+func TestIntegration_Agent_Run(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	body := map[string]interface{}{
+		"project_root": testProjectRoot,
+		"query":        "What are the main entry points in this codebase?",
+	}
+	resp := ts.post("/v1/codebuddy/agent/run", body)
+
+	// Without Ollama, the agent runs in mock mode
+	// It should still return a valid response structure
+	if resp.Code != http.StatusOK && resp.Code != http.StatusInternalServerError {
+		t.Errorf("Expected 200 or 500 (mock mode), got %d: %s", resp.Code, resp.Body.String())
+		return
+	}
+
+	if resp.Code == http.StatusOK {
+		var result struct {
+			SessionID string `json:"session_id"`
+			State     string `json:"state"`
+			Response  string `json:"response"`
+		}
+		json.Unmarshal(resp.Body.Bytes(), &result)
+
+		if result.SessionID == "" {
+			t.Error("Expected session_id in response")
+		}
+		t.Logf("Agent run completed: session=%s, state=%s", result.SessionID, result.State)
+	} else {
+		t.Log("Agent run failed (expected in mock mode without LLM)")
+	}
+}
+
+func TestIntegration_Agent_Run_EmptyQuery(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	body := map[string]interface{}{
+		"project_root": testProjectRoot,
+		"query":        "",
+	}
+	resp := ts.post("/v1/codebuddy/agent/run", body)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 for empty query, got %d", resp.Code)
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(resp.Body.Bytes(), &result)
+
+	// Empty query is caught by JSON validation (required tag), returning INVALID_REQUEST
+	if result.Code != "INVALID_REQUEST" {
+		t.Errorf("Expected INVALID_REQUEST error code, got %s", result.Code)
+	}
+}
+
+func TestIntegration_Agent_State_NotFound(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	resp := ts.get("/v1/codebuddy/agent/nonexistent-session-id")
+
+	if resp.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(resp.Body.Bytes(), &result)
+
+	if result.Code != "SESSION_NOT_FOUND" {
+		t.Errorf("Expected SESSION_NOT_FOUND error code, got %s", result.Code)
+	}
+}
+
+func TestIntegration_Agent_Abort_NotFound(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	body := map[string]interface{}{
+		"session_id": "nonexistent-session-id",
+	}
+	resp := ts.post("/v1/codebuddy/agent/abort", body)
+
+	if resp.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
+	}
+}
+
+func TestIntegration_Agent_Continue_MissingSessionID(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	body := map[string]interface{}{
+		"input": "some clarification",
+	}
+	resp := ts.post("/v1/codebuddy/agent/continue", body)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 for missing session_id, got %d", resp.Code)
+	}
+}
+
+// ============================================================================
+// CRS EXPORT ENDPOINT TESTS (CB-29-2: CRS Export API)
+// ============================================================================
+
+func TestIntegration_Agent_ReasoningTrace_NotFound(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	resp := ts.get("/v1/codebuddy/agent/nonexistent-session-id/reasoning")
+
+	if resp.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(resp.Body.Bytes(), &result)
+
+	if result.Code != "SESSION_NOT_FOUND" {
+		t.Errorf("Expected SESSION_NOT_FOUND error code, got %s", result.Code)
+	}
+}
+
+func TestIntegration_Agent_CRSExport_NotFound(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	resp := ts.get("/v1/codebuddy/agent/nonexistent-session-id/crs")
+
+	if resp.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
+	}
+
+	var result struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(resp.Body.Bytes(), &result)
+
+	if result.Code != "SESSION_NOT_FOUND" {
+		t.Errorf("Expected SESSION_NOT_FOUND error code, got %s", result.Code)
+	}
+}
+
+func TestIntegration_Agent_FullSessionLifecycle(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	// Step 1: Start an agent session
+	t.Log("Step 1: Starting agent session...")
+	runBody := map[string]interface{}{
+		"project_root": testProjectRoot,
+		"query":        "List all exported functions",
+	}
+	runResp := ts.post("/v1/codebuddy/agent/run", runBody)
+
+	// Mock mode may fail, but we should at least get a valid response
+	if runResp.Code == http.StatusOK {
+		var runResult struct {
+			SessionID string `json:"session_id"`
+			State     string `json:"state"`
+		}
+		json.Unmarshal(runResp.Body.Bytes(), &runResult)
+
+		if runResult.SessionID == "" {
+			t.Fatal("Expected session_id in response")
+		}
+
+		sessionID := runResult.SessionID
+		t.Logf("  Session started: %s (state: %s)", sessionID, runResult.State)
+
+		// Step 2: Get session state
+		t.Log("Step 2: Getting session state...")
+		stateResp := ts.get("/v1/codebuddy/agent/" + sessionID)
+		if stateResp.Code == http.StatusOK {
+			var stateResult struct {
+				SessionID   string `json:"session_id"`
+				State       string `json:"state"`
+				StepCount   int    `json:"step_count"`
+				TokensUsed  int    `json:"tokens_used"`
+				ProjectRoot string `json:"project_root"`
+			}
+			json.Unmarshal(stateResp.Body.Bytes(), &stateResult)
+			t.Logf("  State: %s, Steps: %d, Tokens: %d",
+				stateResult.State, stateResult.StepCount, stateResult.TokensUsed)
+		}
+
+		// Step 3: Get reasoning trace (may return 204 if not enabled)
+		t.Log("Step 3: Getting reasoning trace...")
+		traceResp := ts.get("/v1/codebuddy/agent/" + sessionID + "/reasoning")
+		if traceResp.Code == http.StatusOK {
+			var traceResult struct {
+				TotalSteps int `json:"total_steps"`
+				Trace      []struct {
+					Step   int    `json:"step"`
+					Action string `json:"action"`
+				} `json:"trace"`
+			}
+			json.Unmarshal(traceResp.Body.Bytes(), &traceResult)
+			t.Logf("  Trace: %d steps", traceResult.TotalSteps)
+		} else if traceResp.Code == http.StatusNoContent {
+			t.Log("  Trace recording not enabled for this session")
+		}
+
+		// Step 4: Get CRS export (may return 204 if not enabled)
+		t.Log("Step 4: Getting CRS export...")
+		crsResp := ts.get("/v1/codebuddy/agent/" + sessionID + "/crs")
+		if crsResp.Code == http.StatusOK {
+			var crsResult struct {
+				SessionID  string `json:"session_id"`
+				Generation int64  `json:"generation"`
+				Summary    struct {
+					NodesExplored int `json:"nodes_explored"`
+					NodesProven   int `json:"nodes_proven"`
+				} `json:"summary"`
+			}
+			json.Unmarshal(crsResp.Body.Bytes(), &crsResult)
+			t.Logf("  CRS: generation=%d, explored=%d, proven=%d",
+				crsResult.Generation, crsResult.Summary.NodesExplored, crsResult.Summary.NodesProven)
+		} else if crsResp.Code == http.StatusNoContent {
+			t.Log("  CRS not enabled for this session")
+		}
+
+		// Step 5: Abort the session
+		t.Log("Step 5: Aborting session...")
+		abortBody := map[string]interface{}{
+			"session_id": sessionID,
+		}
+		abortResp := ts.post("/v1/codebuddy/agent/abort", abortBody)
+		if abortResp.Code == http.StatusOK {
+			t.Log("  Session aborted successfully")
+		}
+	} else {
+		t.Logf("Agent run returned %d (expected in mock mode)", runResp.Code)
+	}
+
+	t.Log("Full agent session lifecycle test completed!")
+}
+
+// ============================================================================
+// ROUTE REGISTRATION TESTS
+// ============================================================================
+
+func TestIntegration_RouteRegistration_CoreEndpoints(t *testing.T) {
+	ts := newTestServer(t)
+
+	// Test all core routes exist by making requests (even if they fail, route should exist)
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/v1/codebuddy/health"},
+		{"GET", "/v1/codebuddy/ready"},
+		{"GET", "/v1/codebuddy/tools"},
+		{"GET", "/v1/codebuddy/callers?graph_id=test&function=test"},
+		{"GET", "/v1/codebuddy/implementations?graph_id=test&interface=test"},
+	}
+
+	for _, route := range routes {
+		req, _ := http.NewRequest(route.method, route.path, nil)
+		resp := httptest.NewRecorder()
+		ts.router.ServeHTTP(resp, req)
+
+		// Route exists if we don't get 404
+		if resp.Code == http.StatusNotFound {
+			t.Errorf("Route %s %s not registered", route.method, route.path)
+		}
+	}
+}
+
+func TestIntegration_RouteRegistration_AgentEndpoints(t *testing.T) {
+	ts := newAgentTestServer(t)
+
+	// Verify agent routes are registered
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/v1/codebuddy/agent/test-id"},
+		{"GET", "/v1/codebuddy/agent/test-id/reasoning"},
+		{"GET", "/v1/codebuddy/agent/test-id/crs"},
+	}
+
+	for _, route := range routes {
+		req, _ := http.NewRequest(route.method, route.path, nil)
+		resp := httptest.NewRecorder()
+		ts.router.ServeHTTP(resp, req)
+
+		// Route exists if we get 404 (session not found) rather than 404 (route not found)
+		// The difference is in the response body
+		var result struct {
+			Code string `json:"code"`
+		}
+		json.Unmarshal(resp.Body.Bytes(), &result)
+
+		if resp.Code == http.StatusNotFound && result.Code == "" {
+			t.Errorf("Route %s %s not registered", route.method, route.path)
+		}
+	}
+}
+
+func TestIntegration_RouteRegistration_ExploreEndpoints(t *testing.T) {
+	ts := newTestServer(t)
+
+	exploreRoutes := []string{
+		"/v1/codebuddy/explore/entry_points",
+		"/v1/codebuddy/explore/data_flow",
+		"/v1/codebuddy/explore/error_flow",
+		"/v1/codebuddy/explore/config_usage",
+		"/v1/codebuddy/explore/similar_code",
+		"/v1/codebuddy/explore/minimal_context",
+		"/v1/codebuddy/explore/summarize_file",
+		"/v1/codebuddy/explore/summarize_package",
+		"/v1/codebuddy/explore/change_impact",
+	}
+
+	for _, path := range exploreRoutes {
+		req, _ := http.NewRequest("POST", path, bytes.NewBuffer([]byte("{}")))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		ts.router.ServeHTTP(resp, req)
+
+		// 400 (bad request) means route exists but input is invalid
+		// 404 (not found) means route doesn't exist
+		if resp.Code == http.StatusNotFound {
+			t.Errorf("Route POST %s not registered", path)
+		}
+	}
+}
+
+func TestIntegration_RouteRegistration_ReasonEndpoints(t *testing.T) {
+	ts := newTestServer(t)
+
+	reasonRoutes := []string{
+		"/v1/codebuddy/reason/breaking_changes",
+		"/v1/codebuddy/reason/simulate_change",
+		"/v1/codebuddy/reason/validate_change",
+		"/v1/codebuddy/reason/test_coverage",
+		"/v1/codebuddy/reason/side_effects",
+		"/v1/codebuddy/reason/suggest_refactor",
+	}
+
+	for _, path := range reasonRoutes {
+		req, _ := http.NewRequest("POST", path, bytes.NewBuffer([]byte("{}")))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		ts.router.ServeHTTP(resp, req)
+
+		if resp.Code == http.StatusNotFound {
+			t.Errorf("Route POST %s not registered", path)
+		}
+	}
+}
+
+func TestIntegration_RouteRegistration_CoordinateEndpoints(t *testing.T) {
+	ts := newTestServer(t)
+
+	coordinateRoutes := []string{
+		"/v1/codebuddy/coordinate/plan_changes",
+		"/v1/codebuddy/coordinate/validate_plan",
+		"/v1/codebuddy/coordinate/preview_changes",
+	}
+
+	for _, path := range coordinateRoutes {
+		req, _ := http.NewRequest("POST", path, bytes.NewBuffer([]byte("{}")))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		ts.router.ServeHTTP(resp, req)
+
+		if resp.Code == http.StatusNotFound {
+			t.Errorf("Route POST %s not registered", path)
+		}
+	}
+}
+
+func TestIntegration_RouteRegistration_PatternEndpoints(t *testing.T) {
+	ts := newTestServer(t)
+
+	patternRoutes := []string{
+		"/v1/codebuddy/patterns/detect",
+		"/v1/codebuddy/patterns/code_smells",
+		"/v1/codebuddy/patterns/duplication",
+		"/v1/codebuddy/patterns/circular_deps",
+		"/v1/codebuddy/patterns/conventions",
+		"/v1/codebuddy/patterns/dead_code",
+	}
+
+	for _, path := range patternRoutes {
+		req, _ := http.NewRequest("POST", path, bytes.NewBuffer([]byte("{}")))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		ts.router.ServeHTTP(resp, req)
+
+		if resp.Code == http.StatusNotFound {
+			t.Errorf("Route POST %s not registered", path)
+		}
+	}
 }

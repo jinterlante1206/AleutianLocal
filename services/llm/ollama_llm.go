@@ -43,10 +43,11 @@ type OllamaClient struct {
 
 // Ollama API request structure
 type ollamaGenerateRequest struct {
-	Model   string                 `json:"model"`
-	Prompt  string                 `json:"prompt"`
-	Stream  bool                   `json:"stream"`
-	Options map[string]interface{} `json:"options,omitempty"`
+	Model     string                 `json:"model"`
+	Prompt    string                 `json:"prompt"`
+	Stream    bool                   `json:"stream"`
+	Options   map[string]interface{} `json:"options,omitempty"`
+	KeepAlive string                 `json:"keep_alive,omitempty"` // "-1" = infinite, "5m" = 5 minutes, "0" = unload immediately
 }
 
 type ollamaGenerateResponse struct {
@@ -57,11 +58,12 @@ type ollamaGenerateResponse struct {
 }
 
 type ollamaChatRequest struct {
-	Model    string                 `json:"model"`
-	Messages []datatypes.Message    `json:"messages"`
-	Stream   bool                   `json:"stream"`
-	Options  map[string]interface{} `json:"options,omitempty"`
-	Tools    []OllamaTool           `json:"tools,omitempty"`
+	Model     string                 `json:"model"`
+	Messages  []datatypes.Message    `json:"messages"`
+	Stream    bool                   `json:"stream"`
+	Options   map[string]interface{} `json:"options,omitempty"`
+	Tools     []OllamaTool           `json:"tools,omitempty"`
+	KeepAlive string                 `json:"keep_alive,omitempty"` // "-1" = infinite, "5m" = 5 minutes, "0" = unload immediately
 }
 
 // =============================================================================
@@ -464,11 +466,19 @@ func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
 	if len(params.Stop) > 0 {
 		options["stop"] = params.Stop
 	}
+
+	// Use ModelOverride if provided, otherwise use client's default model
+	model := o.model
+	if params.ModelOverride != "" {
+		model = params.ModelOverride
+	}
+
 	payload := ollamaChatRequest{
-		Model:    o.model,
-		Messages: messages,
-		Stream:   false,
-		Options:  options,
+		Model:     model,
+		Messages:  messages,
+		Stream:    false,
+		Options:   options,
+		KeepAlive: params.KeepAlive, // Pass through keep_alive for multi-model support
 	}
 	reqBody, err := json.Marshal(payload)
 	if err != nil {
@@ -597,12 +607,19 @@ func (o *OllamaClient) ChatWithTools(ctx context.Context, messages []datatypes.M
 		options["stop"] = params.Stop
 	}
 
+	// Use ModelOverride if provided, otherwise use client's default model
+	model := o.model
+	if params.ModelOverride != "" {
+		model = params.ModelOverride
+	}
+
 	payload := ollamaChatRequest{
-		Model:    o.model,
-		Messages: messages,
-		Stream:   false,
-		Options:  options,
-		Tools:    tools,
+		Model:     model,
+		Messages:  messages,
+		Stream:    false,
+		Options:   options,
+		Tools:     tools,
+		KeepAlive: params.KeepAlive, // Pass through keep_alive for multi-model support
 	}
 	reqBody, err := json.Marshal(payload)
 	if err != nil {
@@ -1342,11 +1359,18 @@ func (o *OllamaClient) executeStreamRequest(ctx context.Context, messages []data
 	chatURL := o.baseURL + "/api/chat"
 	options := o.buildStreamOptions(params)
 
+	// Use ModelOverride if provided, otherwise use client's default model
+	model := o.model
+	if params.ModelOverride != "" {
+		model = params.ModelOverride
+	}
+
 	payload := ollamaChatRequest{
-		Model:    o.model,
-		Messages: messages,
-		Stream:   true,
-		Options:  options,
+		Model:     model,
+		Messages:  messages,
+		Stream:    true,
+		Options:   options,
+		KeepAlive: params.KeepAlive, // Pass through keep_alive for multi-model support
 	}
 
 	reqBody, err := json.Marshal(payload)

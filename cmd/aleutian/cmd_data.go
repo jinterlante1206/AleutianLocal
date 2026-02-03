@@ -34,6 +34,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// =============================================================================
+// COMMAND FLAGS (CLI-01f JSON Output Support)
+// =============================================================================
+
+var (
+	sessionListJSON     bool
+	weaviateSummaryJSON bool
+)
+
 // SessionInfo represents metadata about a chat session.
 //
 // # Description
@@ -1538,6 +1547,10 @@ func runListSessions(_ *cobra.Command, _ []string) {
 
 	resp, err := http.Get(orchestratorURL)
 	if err != nil {
+		if sessionListJSON {
+			OutputError(true, "Failed to connect to orchestrator", err)
+			os.Exit(CLIExitError)
+		}
 		log.Fatalf("Failed to connect to orchestrator: %v", err)
 	}
 	defer func() {
@@ -1547,15 +1560,44 @@ func runListSessions(_ *cobra.Command, _ []string) {
 	}()
 
 	if resp.StatusCode != http.StatusOK {
+		if sessionListJSON {
+			OutputError(true, "Orchestrator error", fmt.Errorf("%s", resp.Status))
+			os.Exit(CLIExitError)
+		}
 		log.Fatalf("Orchestrator returned an error: %s", resp.Status)
 	}
 
 	var result map[string]map[string][]SessionInfo
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if sessionListJSON {
+			OutputError(true, "Failed to parse response", err)
+			os.Exit(CLIExitError)
+		}
 		log.Fatalf("Failed to parse response from orchestrator: %v", err)
 	}
 
 	sessions := result["Get"]["Session"]
+
+	if sessionListJSON {
+		summaries := make([]SessionSummary, 0, len(sessions))
+		for _, s := range sessions {
+			summaries = append(summaries, SessionSummary{
+				ID:        s.SessionId,
+				Summary:   s.Summary,
+				CreatedAt: time.Unix(s.Timestamp, 0).Format(time.RFC3339),
+			})
+		}
+		jsonResult := SessionListResult{
+			Sessions: summaries,
+			Count:    len(summaries),
+		}
+		if err := OutputJSON(jsonResult, false); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to encode JSON: %v\n", err)
+			os.Exit(CLIExitError)
+		}
+		os.Exit(CLIExitSuccess)
+	}
+
 	if len(sessions) == 0 {
 		fmt.Println("No active sessions found.")
 		return
@@ -1697,10 +1739,16 @@ func runWeaviateRestore(_ *cobra.Command, args []string) {
 //   - Requires orchestrator to be running
 func runWeaviateSummary(_ *cobra.Command, _ []string) {
 	baseURL := getOrchestratorBaseURL()
-	fmt.Println("Fetching Weaviate summary...")
+	if !weaviateSummaryJSON {
+		fmt.Println("Fetching Weaviate summary...")
+	}
 	orchestratorURL := fmt.Sprintf("%s/v1/weaviate/summary", baseURL)
 	resp, err := http.Get(orchestratorURL)
 	if err != nil {
+		if weaviateSummaryJSON {
+			OutputError(true, "Failed to send summary request", err)
+			os.Exit(CLIExitError)
+		}
 		log.Fatalf("Failed to send summary request: %v", err)
 	}
 	defer func() {
@@ -1708,11 +1756,36 @@ func runWeaviateSummary(_ *cobra.Command, _ []string) {
 			slog.Debug("response body close error", "error", closeErr)
 		}
 	}()
+
+	if resp.StatusCode != http.StatusOK {
+		if weaviateSummaryJSON {
+			OutputError(true, "Weaviate error", fmt.Errorf("%s", resp.Status))
+			os.Exit(CLIExitError)
+		}
+		log.Fatalf("Weaviate returned an error: %s", resp.Status)
+	}
+
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if weaviateSummaryJSON {
+			OutputError(true, "Failed to read summary response", err)
+			os.Exit(CLIExitError)
+		}
 		log.Fatalf("Failed to read summary response: %v", err)
 	}
 
+	if weaviateSummaryJSON {
+		// Output the raw JSON from Weaviate (already properly formatted)
+		var prettyJSON bytes.Buffer
+		if err := json.Indent(&prettyJSON, bodyBytes, "", "  "); err != nil {
+			OutputError(true, "Failed to format JSON", err)
+			os.Exit(CLIExitError)
+		}
+		fmt.Println(prettyJSON.String())
+		os.Exit(CLIExitSuccess)
+	}
+
+	// Human-readable output
 	var prettyJSON bytes.Buffer
 	if err := json.Indent(&prettyJSON, bodyBytes, "", "  "); err != nil {
 		log.Fatalf("Failed to format JSON: %v", err)

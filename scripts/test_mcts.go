@@ -10,10 +10,10 @@ import (
 	"log"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/activities"
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/algorithms/search"
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/integration"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/activities"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/algorithms/search"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
 )
 
 func main() {
