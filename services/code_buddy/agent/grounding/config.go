@@ -330,20 +330,35 @@ type SemanticDriftCheckerConfig struct {
 	// MinResponseLength is the minimum response length to check.
 	// Very short responses are skipped (can't meaningfully assess).
 	MinResponseLength int
+
+	// ListTypeMismatchPenalty is the penalty for non-list response to LIST question.
+	// Default 0.7 - significant mismatch as list questions expect enumeration.
+	ListTypeMismatchPenalty float64
+
+	// WhereTypeMismatchPenalty is the penalty for non-location response to WHERE question.
+	// Default 0.5 - moderate mismatch as WHERE questions expect file/path references.
+	WhereTypeMismatchPenalty float64
+
+	// HowTypeMismatchPenalty is the penalty for non-process response to HOW question.
+	// Default 0.3 - slight mismatch as HOW questions expect process descriptions.
+	HowTypeMismatchPenalty float64
 }
 
 // DefaultSemanticDriftCheckerConfig returns default semantic drift checker config.
 func DefaultSemanticDriftCheckerConfig() *SemanticDriftCheckerConfig {
 	return &SemanticDriftCheckerConfig{
-		Enabled:           true,
-		CriticalThreshold: 0.7,
-		HighThreshold:     0.5,
-		WarningThreshold:  0.3,
-		KeywordWeight:     0.4,
-		TopicWeight:       0.4,
-		TypeWeight:        0.2,
-		MinKeywords:       2,
-		MinResponseLength: 20,
+		Enabled:                  true,
+		CriticalThreshold:        0.7,
+		HighThreshold:            0.5,
+		WarningThreshold:         0.3,
+		KeywordWeight:            0.4,
+		TopicWeight:              0.4,
+		TypeWeight:               0.2,
+		MinKeywords:              2,
+		MinResponseLength:        20,
+		ListTypeMismatchPenalty:  0.7, // Significant: LIST questions expect enumeration
+		WhereTypeMismatchPenalty: 0.5, // Moderate: WHERE questions expect locations
+		HowTypeMismatchPenalty:   0.3, // Slight: HOW questions expect process description
 	}
 }
 

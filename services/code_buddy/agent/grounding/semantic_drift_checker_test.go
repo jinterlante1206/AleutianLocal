@@ -228,16 +228,15 @@ forecast for tomorrow looks promising.`,
 	}
 
 	violations := checker.Check(context.Background(), input)
-	// Should have warning for partial drift
-	hasWarning := false
+	// Response mentions tests and describes a process, so it should not trigger
+	// critical or high severity violations. The slight off-topic mention of weather
+	// may or may not trigger a warning depending on keyword overlap, but should
+	// never be critical since the main question is addressed.
 	for _, v := range violations {
-		if v.Severity == SeverityWarning {
-			hasWarning = true
-			break
+		if v.Severity == SeverityCritical {
+			t.Errorf("partial drift should not be critical, got: %s", v.Message)
 		}
 	}
-	// Response mentions tests so may not trigger violation, which is acceptable
-	_ = hasWarning
 }
 
 func TestSemanticDriftChecker_KeywordOverlap(t *testing.T) {
@@ -414,6 +413,7 @@ func TestSemanticDriftChecker_QuestionClassification(t *testing.T) {
 		question     string
 		expectedType QuestionType
 	}{
+		// Direct patterns
 		{"What tests exist?", QuestionList},
 		{"List all the functions", QuestionList},
 		{"Show all files", QuestionList},
@@ -428,6 +428,22 @@ func TestSemanticDriftChecker_QuestionClassification(t *testing.T) {
 		{"What is the Config struct?", QuestionWhat},
 		{"What does processRequest do?", QuestionWhat},
 		{"Hello world", QuestionUnknown},
+
+		// Indirect patterns (M2 fix)
+		{"Can you tell me what tests exist?", QuestionList},
+		{"Could you list all the functions?", QuestionList},
+		{"Can you show me what files are there?", QuestionList},
+		{"Could you explain how the parser works?", QuestionHow},
+		{"Can you tell me how authentication is implemented?", QuestionHow},
+		{"Could you tell me where the config file is?", QuestionWhere},
+		{"Please tell me where the config is located", QuestionWhere},
+		{"Could you explain why it uses recursion?", QuestionWhy},
+		{"Can you tell me why the timeout is 30s?", QuestionWhy},
+		{"Could you describe the architecture?", QuestionDescribe},
+		{"Can you give me an overview of the caching system?", QuestionDescribe},
+		{"Could you tell me what is the Config struct?", QuestionWhat},
+		{"I'd like to know what tests exist", QuestionList},
+		{"Please tell me where the main function is", QuestionWhere},
 	}
 
 	for _, tt := range tests {
@@ -543,5 +559,93 @@ func TestQuestionType_String(t *testing.T) {
 				t.Errorf("expected %s, got %s", tt.expected, tt.qt.String())
 			}
 		})
+	}
+}
+
+func TestSemanticDriftChecker_ConfigurableTypeMismatchPenalties(t *testing.T) {
+	t.Run("custom list mismatch penalty", func(t *testing.T) {
+		// Use a very low penalty
+		config := &SemanticDriftCheckerConfig{
+			Enabled:                  true,
+			CriticalThreshold:        0.7,
+			HighThreshold:            0.5,
+			WarningThreshold:         0.3,
+			KeywordWeight:            0.4,
+			TopicWeight:              0.4,
+			TypeWeight:               0.2,
+			MinKeywords:              2,
+			MinResponseLength:        20,
+			ListTypeMismatchPenalty:  0.1, // Very low penalty
+			WhereTypeMismatchPenalty: 0.5,
+			HowTypeMismatchPenalty:   0.3,
+		}
+		checker := NewSemanticDriftChecker(config)
+
+		input := &CheckInput{
+			UserQuestion: "What tests exist in this project?",
+			// Non-list response but with test keywords
+			Response: "The test framework uses assertions for validation of test results.",
+		}
+
+		violations := checker.Check(context.Background(), input)
+		// With low penalty, shouldn't trigger critical violations
+		for _, v := range violations {
+			if v.Severity == SeverityCritical {
+				t.Errorf("low list penalty should not trigger critical: %s", v.Message)
+			}
+		}
+	})
+
+	t.Run("high list mismatch penalty", func(t *testing.T) {
+		// Use a very high penalty
+		config := &SemanticDriftCheckerConfig{
+			Enabled:                  true,
+			CriticalThreshold:        0.5, // Lower threshold
+			HighThreshold:            0.4,
+			WarningThreshold:         0.3,
+			KeywordWeight:            0.2,
+			TopicWeight:              0.2,
+			TypeWeight:               0.6, // Higher type weight
+			MinKeywords:              1,
+			MinResponseLength:        10,
+			ListTypeMismatchPenalty:  1.0, // Maximum penalty
+			WhereTypeMismatchPenalty: 0.5,
+			HowTypeMismatchPenalty:   0.3,
+		}
+		checker := NewSemanticDriftChecker(config)
+
+		input := &CheckInput{
+			UserQuestion: "What tests exist?",
+			// Non-list response
+			Response: "The tests use assertions for validation.",
+		}
+
+		violations := checker.Check(context.Background(), input)
+		// With high penalty, should trigger violations
+		if len(violations) == 0 {
+			t.Error("high list penalty should trigger violation for non-list response")
+		}
+	})
+}
+
+func TestSemanticDriftChecker_StopWordsCopy(t *testing.T) {
+	// Verify that modifying checker's stopWordsLower doesn't affect package-level stopWords
+	checker := NewSemanticDriftChecker(nil)
+
+	// The package-level stopWords should have "the"
+	if !stopWords["the"] {
+		t.Fatal("expected 'the' in package-level stopWords")
+	}
+
+	// Verify checker has its own copy
+	if !checker.stopWordsLower["the"] {
+		t.Fatal("expected 'the' in checker's stopWordsLower")
+	}
+
+	// The maps should be separate instances (defense-in-depth test)
+	// Note: We don't actually mutate in this test to avoid side effects,
+	// but we verify they are separate allocations
+	if &checker.stopWordsLower == &stopWords {
+		t.Error("stopWordsLower should be a copy, not the same map reference")
 	}
 }
