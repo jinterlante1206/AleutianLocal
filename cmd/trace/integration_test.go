@@ -28,8 +28,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy"
-	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/gin-gonic/gin"
 )
 
