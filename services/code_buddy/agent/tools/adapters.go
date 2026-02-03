@@ -650,3 +650,197 @@ func (t *MockTool) WithDefinition(d ToolDefinition) *MockTool {
 func (t *MockTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
 	return t.ExecuteFunc(ctx, params)
 }
+
+// ============================================================================
+// Static Tool Definitions for Classification
+// ============================================================================
+
+// StaticToolDefinitions returns tool definitions without needing a graph.
+//
+// Description:
+//
+//	Returns the definitions for all exploration tools. These can be used
+//	for query classification without initializing the full tool system.
+//	The definitions include tool names, descriptions, and parameter schemas.
+//
+// Outputs:
+//
+//	[]ToolDefinition - The static tool definitions.
+//
+// Example:
+//
+//	defs := tools.StaticToolDefinitions()
+//	classifier, _ := classifier.NewLLMClassifier(client, defs, config)
+//
+// Thread Safety: This function is safe for concurrent use.
+func StaticToolDefinitions() []ToolDefinition {
+	return []ToolDefinition{
+		{
+			Name:        "find_entry_points",
+			Description: "Discovers entry points in the codebase (main functions, HTTP handlers, CLI commands, tests, etc.)",
+			Parameters: map[string]ParamDef{
+				"type": {
+					Type:        ParamTypeString,
+					Description: "Type of entry point to find: 'main', 'handler', 'command', 'test', 'lambda', 'grpc', or 'all'",
+					Required:    false,
+					Default:     "all",
+					Enum:        []any{"main", "handler", "command", "test", "lambda", "grpc", "all"},
+				},
+				"package": {
+					Type:        ParamTypeString,
+					Description: "Filter results to a specific package path",
+					Required:    false,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of results to return",
+					Required:    false,
+					Default:     100,
+				},
+				"include_tests": {
+					Type:        ParamTypeBool,
+					Description: "Include test entry points in results",
+					Required:    false,
+					Default:     false,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    90,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+		},
+		{
+			Name:        "trace_data_flow",
+			Description: "Traces data flow through function calls, identifying sources, transforms, and sinks",
+			Parameters: map[string]ParamDef{
+				"symbol_id": {
+					Type:        ParamTypeString,
+					Description: "The symbol ID to start tracing from",
+					Required:    true,
+				},
+				"max_hops": {
+					Type:        ParamTypeInt,
+					Description: "Maximum depth to trace",
+					Required:    false,
+					Default:     5,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    85,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     15 * time.Second,
+		},
+		{
+			Name:        "trace_error_flow",
+			Description: "Traces error propagation paths to understand how errors are handled and escalated",
+			Parameters: map[string]ParamDef{
+				"symbol_id": {
+					Type:        ParamTypeString,
+					Description: "The symbol ID to start tracing from",
+					Required:    true,
+				},
+				"max_depth": {
+					Type:        ParamTypeInt,
+					Description: "Maximum depth to trace",
+					Required:    false,
+					Default:     5,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    80,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     15 * time.Second,
+		},
+		{
+			Name:        "build_minimal_context",
+			Description: "Builds minimal context required to understand a symbol, filtering by relevance",
+			Parameters: map[string]ParamDef{
+				"symbol_id": {
+					Type:        ParamTypeString,
+					Description: "The symbol ID to build context for",
+					Required:    true,
+				},
+				"max_tokens": {
+					Type:        ParamTypeInt,
+					Description: "Maximum tokens for context",
+					Required:    false,
+					Default:     4000,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    75,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+		},
+		{
+			Name:        "find_similar_code",
+			Description: "Finds code similar to a given symbol or pattern",
+			Parameters: map[string]ParamDef{
+				"symbol_id": {
+					Type:        ParamTypeString,
+					Description: "The symbol ID to find similar code for",
+					Required:    true,
+				},
+				"threshold": {
+					Type:        ParamTypeFloat,
+					Description: "Similarity threshold (0.0-1.0)",
+					Required:    false,
+					Default:     0.7,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of results",
+					Required:    false,
+					Default:     20,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    70,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+		},
+		{
+			Name:        "summarize_file",
+			Description: "Generates a summary of a file's contents and structure",
+			Parameters: map[string]ParamDef{
+				"path": {
+					Type:        ParamTypeString,
+					Description: "The file path to summarize",
+					Required:    true,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    65,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+		},
+		{
+			Name:        "find_config_usage",
+			Description: "Finds where configuration values are defined and used",
+			Parameters: map[string]ParamDef{
+				"pattern": {
+					Type:        ParamTypeString,
+					Description: "Pattern to search for in config names",
+					Required:    false,
+				},
+				"include_env": {
+					Type:        ParamTypeBool,
+					Description: "Include environment variable references",
+					Required:    false,
+					Default:     true,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    60,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+		},
+	}
+}

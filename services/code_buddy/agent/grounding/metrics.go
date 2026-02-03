@@ -96,6 +96,9 @@ var (
 	// Confidence fabrication metrics (CB-28d-5r)
 	confidenceFabricationsTotal metric.Int64Counter
 
+	// Phantom package metrics (CB-28d-8)
+	phantomPackagesTotal metric.Int64Counter
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -380,6 +383,16 @@ func initMetrics() error {
 		confidenceFabricationsTotal, err = meter.Int64Counter(
 			"grounding_confidence_fabrications_total",
 			metric.WithDescription("Confidence fabrication violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Phantom package metrics (CB-28d-8)
+		phantomPackagesTotal, err = meter.Int64Counter(
+			"grounding_phantom_packages_total",
+			metric.WithDescription("Phantom package path references detected"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -1062,4 +1075,23 @@ func RecordConfidenceFabrication(ctx context.Context, claimType string, evidence
 	)
 
 	confidenceFabricationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordPhantomPackage records a phantom package path detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - packagePath: The phantom package path that was detected.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordPhantomPackage(ctx context.Context, packagePath string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("package_path", packagePath),
+	)
+
+	phantomPackagesTotal.Add(ctx, 1, attrs)
 }

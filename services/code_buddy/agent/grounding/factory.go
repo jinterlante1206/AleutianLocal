@@ -69,6 +69,12 @@ func NewGrounder(config *Config) Grounder {
 		checkers = append(checkers, NewChainOfVerification(config.ChainOfVerificationConfig))
 	}
 
+	// Layer 9: Phantom Package Checker (validates package path references)
+	// Detects conformity hallucination where model assumes standard packages exist.
+	if config.PhantomPackageCheckerConfig != nil && config.PhantomPackageCheckerConfig.Enabled {
+		checkers = append(checkers, NewPhantomPackageChecker(config.PhantomPackageCheckerConfig))
+	}
+
 	return NewDefaultGrounder(*config, checkers...)
 }
 

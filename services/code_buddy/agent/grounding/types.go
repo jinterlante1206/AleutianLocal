@@ -142,6 +142,12 @@ const (
 	// or absent. E.g., "all inputs are validated" when only one validation was seen,
 	// or "there is no error logging" after searching only 3 files.
 	ViolationConfidenceFabrication ViolationType = "confidence_fabrication"
+
+	// ViolationPhantomPackage indicates reference to a package path that doesn't exist.
+	// The model mentions pkg/config, cmd/database, etc. that are not in the codebase.
+	// This is conformity hallucination - assuming standard patterns exist.
+	// E.g., claiming "pkg/config" handles configuration when no such package exists.
+	ViolationPhantomPackage ViolationType = "phantom_package"
 )
 
 // ViolationPriority defines processing order for violation types.
@@ -224,6 +230,11 @@ const (
 	// Same level as line number fabrication (P3) - epistemically problematic but
 	// not necessarily factually wrong. The claim might be true, just not supported.
 	PriorityConfidenceFabrication ViolationPriority = 3
+
+	// PriorityPhantomPackage is high priority - package path doesn't exist.
+	// Same level as structural claim (P2) - factual error about project structure.
+	// Model claims pkg/config exists when it doesn't - this is conformity hallucination.
+	PriorityPhantomPackage ViolationPriority = 2
 )
 
 // Violation represents a single grounding failure.
@@ -400,6 +411,11 @@ type CheckInput struct {
 
 	// KnownSymbols maps symbol names that exist in the graph to true.
 	KnownSymbols map[string]bool
+
+	// KnownPackages maps package paths that exist in the project to true.
+	// Derived from graph file paths (e.g., "pkg/calcs", "cmd/orchestrator").
+	// Used by PhantomPackageChecker to validate package path references.
+	KnownPackages map[string]bool
 
 	// CodeContext is the code that was shown to the LLM.
 	CodeContext []agent.CodeEntry

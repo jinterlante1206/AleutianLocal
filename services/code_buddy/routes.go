@@ -189,6 +189,8 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 //	POST /v1/codebuddy/agent/continue - Continue from CLARIFY state
 //	POST /v1/codebuddy/agent/abort - Abort an active session
 //	GET  /v1/codebuddy/agent/:id - Get session state
+//	GET  /v1/codebuddy/agent/:id/reasoning - Get reasoning trace
+//	GET  /v1/codebuddy/agent/:id/crs - Get CRS state export
 //
 // Example:
 //
@@ -208,5 +210,9 @@ func RegisterAgentRoutes(rg *gin.RouterGroup, handlers *AgentHandlers) {
 
 		// Session state
 		agent.GET("/:id", handlers.HandleAgentState)
+
+		// CRS Export API (CB-29-2)
+		agent.GET("/:id/reasoning", handlers.HandleGetReasoningTrace)
+		agent.GET("/:id/crs", handlers.HandleGetCRSExport)
 	}
 }

@@ -87,6 +87,23 @@ type AgentLoop interface {
 	//
 	// Thread Safety: This method is safe for concurrent use.
 	GetState(sessionID string) (*SessionState, error)
+
+	// GetSession returns the full session object.
+	//
+	// Description:
+	//   Returns the complete Session for operations that need access
+	//   to CRS, trace recorder, or other internal state not exposed
+	//   through SessionState.
+	//
+	// Inputs:
+	//   sessionID - The session ID to retrieve.
+	//
+	// Outputs:
+	//   *Session - The full session object.
+	//   error - Non-nil if session not found.
+	//
+	// Thread Safety: This method is safe for concurrent use.
+	GetSession(sessionID string) (*Session, error)
 }
 
 // LoopDependencies contains dependencies for the agent loop.
@@ -524,6 +541,32 @@ func (l *DefaultAgentLoop) GetState(sessionID string) (*SessionState, error) {
 	}
 
 	return session.ToSessionState(), nil
+}
+
+// GetSession implements AgentLoop.
+//
+// Description:
+//
+//	Returns the full session object for operations that need access
+//	to CRS, trace recorder, or other internal state.
+//
+// Inputs:
+//
+//	sessionID - The session ID to retrieve.
+//
+// Outputs:
+//
+//	*Session - The full session object.
+//	error - Non-nil if session not found.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (l *DefaultAgentLoop) GetSession(sessionID string) (*Session, error) {
+	session, ok := l.sessions.Get(sessionID)
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+
+	return session, nil
 }
 
 // validateRunInput validates inputs for Run.

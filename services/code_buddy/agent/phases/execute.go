@@ -14,14 +14,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/classifier"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
 )
 
 // ExecutePhase handles the main tool execution loop.
@@ -31,6 +34,7 @@ import (
 //   - Parsing and executing tool calls from LLM responses
 //   - Running safety checks on proposed changes
 //   - Updating context with tool results
+//   - Forcing tool usage for analytical queries
 //   - Determining when to reflect or complete
 //
 // Thread Safety: ExecutePhase is safe for concurrent use.
@@ -46,6 +50,27 @@ type ExecutePhase struct {
 
 	// maxGroundingRetries is the max retries on grounding failures (circuit breaker).
 	maxGroundingRetries int
+
+	// forcingPolicy determines when to force tool usage.
+	forcingPolicy ToolForcingPolicy
+
+	// maxToolForcingRetries limits tool forcing attempts (circuit breaker).
+	maxToolForcingRetries int
+
+	// maxStepForForcing is the maximum step number where tool forcing applies.
+	maxStepForForcing int
+
+	// toolChoiceSelector selects tool_choice based on query classification.
+	// This enables API-level tool forcing rather than prompt-only.
+	toolChoiceSelector *classifier.ToolChoiceSelector
+
+	// responseValidator validates LLM responses for quality.
+	// Checks for prohibited patterns and tool call requirements.
+	responseValidator *classifier.RetryableValidator
+
+	// qualityValidator validates response quality (hedging, citations).
+	// Checks for evidence-based claims in analytical responses.
+	qualityValidator *classifier.QualityValidator
 }
 
 // ExecutePhaseOption configures an ExecutePhase.
@@ -111,6 +136,89 @@ func WithMaxGroundingRetries(retries int) ExecutePhaseOption {
 	}
 }
 
+// WithToolForcingPolicy sets the policy for forcing tool usage.
+//
+// Inputs:
+//
+//	policy - The tool forcing policy. If nil, forcing is disabled.
+//
+// Outputs:
+//
+//	ExecutePhaseOption - The configuration function.
+func WithToolForcingPolicy(policy ToolForcingPolicy) ExecutePhaseOption {
+	return func(p *ExecutePhase) {
+		p.forcingPolicy = policy
+	}
+}
+
+// WithMaxToolForcingRetries sets the maximum tool forcing retries.
+//
+// Inputs:
+//
+//	retries - Maximum retry count (circuit breaker threshold).
+//
+// Outputs:
+//
+//	ExecutePhaseOption - The configuration function.
+func WithMaxToolForcingRetries(retries int) ExecutePhaseOption {
+	return func(p *ExecutePhase) {
+		p.maxToolForcingRetries = retries
+	}
+}
+
+// WithMaxStepForForcing sets the maximum step for tool forcing.
+//
+// Inputs:
+//
+//	step - Maximum step number where forcing applies.
+//
+// Outputs:
+//
+//	ExecutePhaseOption - The configuration function.
+func WithMaxStepForForcing(step int) ExecutePhaseOption {
+	return func(p *ExecutePhase) {
+		p.maxStepForForcing = step
+	}
+}
+
+// WithQueryClassifier sets the query classifier for both tool forcing and
+// tool choice selection.
+//
+// Description:
+//
+//	Sets a custom QueryClassifier that will be used by both the forcing
+//	policy (to determine when to force tool usage) and the tool choice
+//	selector (to select API-level tool_choice parameter).
+//
+//	This enables using the LLMClassifier instead of the default RegexClassifier
+//	for more accurate query classification.
+//
+// Inputs:
+//
+//	c - The query classifier to use. If nil, defaults to RegexClassifier.
+//
+// Outputs:
+//
+//	ExecutePhaseOption - The configuration function.
+//
+// Example:
+//
+//	// Use LLM-based classifier
+//	llmClassifier, _ := classifier.NewLLMClassifier(client, toolDefs, config)
+//	phase := NewExecutePhase(WithQueryClassifier(llmClassifier))
+//
+// Thread Safety: The option is safe for concurrent use if the classifier is.
+func WithQueryClassifier(c classifier.QueryClassifier) ExecutePhaseOption {
+	return func(p *ExecutePhase) {
+		if c == nil {
+			c = classifier.NewRegexClassifier()
+		}
+		// Update both components to use the same classifier
+		p.forcingPolicy = NewDefaultForcingPolicyWithClassifier(c)
+		p.toolChoiceSelector = classifier.NewToolChoiceSelector(c, nil)
+	}
+}
+
 // NewExecutePhase creates a new execution phase.
 //
 // Inputs:
@@ -121,11 +229,21 @@ func WithMaxGroundingRetries(retries int) ExecutePhaseOption {
 //
 //	*ExecutePhase - The configured phase.
 func NewExecutePhase(opts ...ExecutePhaseOption) *ExecutePhase {
+	// Create classifier for hybrid stack
+	queryClassifier := classifier.NewRegexClassifier()
+
 	p := &ExecutePhase{
-		maxTokens:           4096,
-		reflectionThreshold: 10,
-		requireSafetyCheck:  true,
-		maxGroundingRetries: 3, // Circuit breaker for hallucination retries
+		maxTokens:             4096,
+		reflectionThreshold:   10,
+		requireSafetyCheck:    true,
+		maxGroundingRetries:   3, // Circuit breaker for hallucination retries
+		forcingPolicy:         NewDefaultForcingPolicy(),
+		maxToolForcingRetries: 2, // Circuit breaker for tool forcing
+		maxStepForForcing:     2, // Only force on early steps
+		// Hybrid stack components
+		toolChoiceSelector: classifier.NewToolChoiceSelector(queryClassifier, nil),
+		responseValidator:  classifier.NewRetryableValidator(2), // Max 2 retries
+		qualityValidator:   classifier.NewQualityValidator(nil), // Default config
 	}
 
 	for _, opt := range opts {
@@ -287,11 +405,38 @@ func (p *ExecutePhase) validateDependencies(deps *Dependencies) error {
 func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) *llm.Request {
 	// Get available tools
 	var toolDefs []tools.ToolDefinition
+	var toolNames []string
 	if deps.ToolRegistry != nil {
 		toolDefs = deps.ToolRegistry.GetDefinitions()
+		toolNames = make([]string, len(toolDefs))
+		for i, def := range toolDefs {
+			toolNames[i] = def.Name
+		}
 	}
 
-	return llm.BuildRequest(deps.Context, toolDefs, p.maxTokens)
+	request := llm.BuildRequest(deps.Context, toolDefs, p.maxTokens)
+
+	// Apply tool_choice from hybrid stack classifier.
+	// Note: We use a fresh context here since buildLLMRequest doesn't receive ctx.
+	// The selector's tracing will create a new root span for classification.
+	if p.toolChoiceSelector != nil && deps.Query != "" && len(toolDefs) > 0 {
+		selection := p.toolChoiceSelector.SelectToolChoice(context.Background(), deps.Query, toolNames)
+
+		// Only set tool_choice for analytical queries
+		if selection.IsAnalytical {
+			request.ToolChoice = selection.ToolChoice
+
+			slog.Debug("tool_choice selected",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("tool_choice_type", selection.ToolChoice.Type),
+				slog.String("suggested_tool", selection.SuggestedTool),
+				slog.Float64("confidence", selection.Confidence),
+				slog.String("reason", selection.Reason),
+			)
+		}
+	}
+
+	return request
 }
 
 // callLLM sends a request to the LLM and emits events.
@@ -371,6 +516,71 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		deps.Session.IncrementMetric(agent.MetricTokens, response.OutputTokens)
 	}
 	deps.Session.IncrementMetric(agent.MetricLLMCalls, 1)
+
+	// Validate response for prohibited patterns (hybrid stack layer 4)
+	if p.responseValidator != nil {
+		// Get the tool_choice that was used for this request
+		var toolChoice *llm.ToolChoice
+		if p.toolChoiceSelector != nil && deps.Query != "" {
+			toolNames := p.getToolNames(deps)
+			selection := p.toolChoiceSelector.SelectToolChoice(ctx, deps.Query, toolNames)
+			if selection.IsAnalytical {
+				toolChoice = selection.ToolChoice
+			}
+		}
+
+		validation := p.responseValidator.Validate(response, toolChoice)
+		if !validation.Valid {
+			forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+
+			slog.Warn("Response validation failed",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("reason", validation.Reason),
+				slog.String("pattern", validation.MatchedPattern),
+				slog.Bool("retryable", validation.Retryable),
+				slog.Int("retry_count", forcingRetries),
+			)
+
+			// Check if we should retry with stronger tool_choice
+			if validation.Retryable && p.responseValidator.ShouldRetry(validation, forcingRetries) {
+				return p.retryWithStrongerToolChoice(ctx, deps, response, validation, stepNumber)
+			}
+		}
+	}
+
+	// Validate response quality (hedging language, citations) for analytical queries
+	if p.qualityValidator != nil && response.Content != "" {
+		// Determine if this is an analytical query
+		isAnalytical := false
+		if p.toolChoiceSelector != nil && deps.Query != "" {
+			toolNames := p.getToolNames(deps)
+			selection := p.toolChoiceSelector.SelectToolChoice(ctx, deps.Query, toolNames)
+			isAnalytical = selection.IsAnalytical
+		}
+
+		qualityResult := p.qualityValidator.ValidateQuality(response.Content, isAnalytical)
+		if !qualityResult.Valid {
+			forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+
+			slog.Warn("Response quality validation failed",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("reason", qualityResult.Reason),
+				slog.String("pattern", qualityResult.MatchedPattern),
+				slog.Bool("retryable", qualityResult.Retryable),
+				slog.Int("retry_count", forcingRetries),
+			)
+
+			// Retry with quality correction if retryable and under limit
+			if qualityResult.Retryable && forcingRetries < p.maxToolForcingRetries {
+				return p.retryWithQualityCorrection(ctx, deps, response, qualityResult, stepNumber)
+			}
+		}
+	}
+
+	// Check if tool forcing should be applied (before grounding validation)
+	if p.shouldForceToolUsage(ctx, deps, stepNumber) {
+		return p.forceToolUsage(ctx, deps, response, stepNumber)
+	}
 
 	// Validate response against grounding (anti-hallucination)
 	responseContent := response.Content
@@ -504,6 +714,328 @@ func (p *ExecutePhase) buildCorrectionPrompt(result *grounding.Result) string {
 	return prompt
 }
 
+// shouldForceToolUsage determines if tool usage should be forced.
+//
+// Description:
+//
+//	Checks the tool forcing policy to determine if the LLM should be
+//	prompted to use tools instead of returning a text-only response.
+//
+// Inputs:
+//
+//	ctx - Context for tracing.
+//	deps - Phase dependencies.
+//	stepNumber - Current step number.
+//
+// Outputs:
+//
+//	bool - True if tool usage should be forced.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *ExecutePhase) shouldForceToolUsage(ctx context.Context, deps *Dependencies, stepNumber int) bool {
+	// Skip if no forcing policy configured
+	if p.forcingPolicy == nil {
+		return false
+	}
+
+	// Skip if deps is nil (shouldn't happen after validation)
+	if deps == nil || deps.Session == nil {
+		return false
+	}
+
+	// Get current retry count
+	forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+
+	// Build available tools list
+	var availableTools []string
+	if deps.ToolRegistry != nil {
+		defs := deps.ToolRegistry.GetDefinitions()
+		availableTools = make([]string, len(defs))
+		for i, def := range defs {
+			availableTools[i] = def.Name
+		}
+	}
+
+	// Build forcing request
+	req := &ForcingRequest{
+		Query:             deps.Query,
+		StepNumber:        stepNumber,
+		ForcingRetries:    forcingRetries,
+		MaxRetries:        p.maxToolForcingRetries,
+		MaxStepForForcing: p.maxStepForForcing,
+		AvailableTools:    availableTools,
+	}
+
+	return p.forcingPolicy.ShouldForce(ctx, req)
+}
+
+// forceToolUsage injects a hint and returns to EXECUTE state for retry.
+//
+// Description:
+//
+//	When tool forcing is triggered, this method:
+//	1. Builds a forcing hint with tool suggestion
+//	2. Emits a tool forcing event
+//	3. Adds the hint to conversation history
+//	4. Increments the forcing retry metric
+//	5. Returns StateExecute to retry
+//
+// Inputs:
+//
+//	ctx - Context for tracing.
+//	deps - Phase dependencies.
+//	response - The LLM response that triggered forcing.
+//	stepNumber - Current step number.
+//
+// Outputs:
+//
+//	agent.AgentState - StateExecute to retry.
+//	error - Non-nil only for unrecoverable errors.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *ExecutePhase) forceToolUsage(ctx context.Context, deps *Dependencies, response *llm.Response, stepNumber int) (agent.AgentState, error) {
+	forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+
+	slog.Info("Forcing tool usage",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("query", deps.Query),
+		slog.Int("step", stepNumber),
+		slog.Int("retry", forcingRetries+1),
+	)
+
+	// Build available tools list
+	var availableTools []string
+	if deps.ToolRegistry != nil {
+		defs := deps.ToolRegistry.GetDefinitions()
+		availableTools = make([]string, len(defs))
+		for i, def := range defs {
+			availableTools[i] = def.Name
+		}
+	}
+
+	// Build forcing request and hint
+	req := &ForcingRequest{
+		Query:             deps.Query,
+		StepNumber:        stepNumber,
+		ForcingRetries:    forcingRetries,
+		MaxRetries:        p.maxToolForcingRetries,
+		MaxStepForForcing: p.maxStepForForcing,
+		AvailableTools:    availableTools,
+	}
+
+	hint := p.forcingPolicy.BuildHint(ctx, req)
+
+	// Emit tool forcing event
+	p.emitToolForcing(deps, req, hint, stepNumber)
+
+	// Add hint to conversation via ContextManager (thread-safe)
+	if deps.ContextManager != nil {
+		deps.ContextManager.AddMessage(deps.Context, "user", hint)
+	} else if deps.Context != nil {
+		// Fallback: direct append (less safe but functional)
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "user",
+			Content: hint,
+		})
+	}
+
+	// Increment forcing retry metric
+	deps.Session.IncrementMetric(agent.MetricToolForcingRetries, 1)
+
+	// Return to EXECUTE to retry with the hint
+	return agent.StateExecute, nil
+}
+
+// retryWithStrongerToolChoice retries with escalated tool_choice after validation failure.
+//
+// Description:
+//
+//	When response validation fails (e.g., prohibited patterns detected),
+//	this method escalates the tool_choice and retries. The escalation order is:
+//	  auto → any → tool (specific)
+//
+// Inputs:
+//
+//	ctx - Context for tracing.
+//	deps - Phase dependencies.
+//	response - The failed LLM response.
+//	validation - The validation result.
+//	stepNumber - Current step number.
+//
+// Outputs:
+//
+//	agent.AgentState - StateExecute to retry.
+//	error - Non-nil only for unrecoverable errors.
+func (p *ExecutePhase) retryWithStrongerToolChoice(
+	ctx context.Context,
+	deps *Dependencies,
+	response *llm.Response,
+	validation classifier.ValidationResult,
+	stepNumber int,
+) (agent.AgentState, error) {
+	forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+
+	slog.Info("Retrying with stronger tool_choice",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("validation_reason", validation.Reason),
+		slog.Int("retry", forcingRetries+1),
+	)
+
+	// Get suggested tool for retry
+	var suggestedTool string
+	if p.toolChoiceSelector != nil && deps.Query != "" {
+		toolNames := p.getToolNames(deps)
+		selection := p.toolChoiceSelector.SelectToolChoice(ctx, deps.Query, toolNames)
+		suggestedTool = selection.SuggestedTool
+	}
+
+	// Get stronger tool_choice for retry
+	retryToolChoice := p.responseValidator.GetRetryToolChoice(forcingRetries+1, nil, suggestedTool)
+
+	slog.Info("Escalating tool_choice for retry",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("new_tool_choice_type", retryToolChoice.Type),
+		slog.String("new_tool_choice_name", retryToolChoice.Name),
+		slog.String("suggested_tool", suggestedTool),
+	)
+
+	// Build correction message for retry
+	correctionMsg := fmt.Sprintf(`Your response didn't use tools as required. Please use tools to explore the codebase before answering.
+
+Issue: %s
+
+Call a tool now (suggestion: %s if available), then provide your answer based on what you find.`,
+		validation.Reason, suggestedTool)
+
+	// Add correction to conversation
+	if deps.ContextManager != nil {
+		deps.ContextManager.AddMessage(deps.Context, "user", correctionMsg)
+	} else if deps.Context != nil {
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "user",
+			Content: correctionMsg,
+		})
+	}
+
+	// Increment forcing retry metric
+	deps.Session.IncrementMetric(agent.MetricToolForcingRetries, 1)
+
+	// Emit tool forcing event
+	p.emitToolForcing(deps, &ForcingRequest{
+		Query:             deps.Query,
+		StepNumber:        stepNumber,
+		ForcingRetries:    forcingRetries,
+		MaxRetries:        p.maxToolForcingRetries,
+		MaxStepForForcing: p.maxStepForForcing,
+	}, correctionMsg, stepNumber)
+
+	// Return to EXECUTE to retry
+	return agent.StateExecute, nil
+}
+
+// retryWithQualityCorrection retries after quality validation failure.
+//
+// Description:
+//
+//	When response quality validation fails (e.g., hedging language detected,
+//	missing citations), this method adds a correction message and retries.
+//
+// Inputs:
+//
+//	ctx - Context for tracing.
+//	deps - Phase dependencies.
+//	response - The failed LLM response.
+//	validation - The quality validation result.
+//	stepNumber - Current step number.
+//
+// Outputs:
+//
+//	agent.AgentState - StateExecute to retry.
+//	error - Non-nil only for unrecoverable errors.
+func (p *ExecutePhase) retryWithQualityCorrection(
+	ctx context.Context,
+	deps *Dependencies,
+	response *llm.Response,
+	validation classifier.ValidationResult,
+	stepNumber int,
+) (agent.AgentState, error) {
+	forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+
+	slog.Info("Retrying with quality correction",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("validation_reason", validation.Reason),
+		slog.Int("retry", forcingRetries+1),
+	)
+
+	// Build correction message based on the quality issue
+	var correctionMsg string
+	if strings.Contains(validation.Reason, "hedging") {
+		correctionMsg = `Your response used hedging language ("likely", "probably", "appears to") for code facts. Please:
+
+1. Replace hedging with specific [file.go:line] citations
+2. If you're uncertain, call a tool to verify
+3. If something isn't found, say "I don't see X in the context"
+
+BAD: "The system likely uses flags for configuration"
+GOOD: "Flags defined in [cmd/main.go:23-38]: -project, -api-key, -verbose"
+
+Please revise your response with specific citations.`
+	} else if strings.Contains(validation.Reason, "citation") {
+		correctionMsg = `Your response lacked [file:line] citations. For analytical responses, every factual claim about code needs a citation.
+
+Format: [file.go:42] or [file.go:42-50] for ranges
+
+Please revise your response to include specific file and line citations for your claims.`
+	} else {
+		correctionMsg = fmt.Sprintf(`Your response had a quality issue: %s
+
+Please revise with specific evidence and [file:line] citations.`, validation.Reason)
+	}
+
+	// Add correction to conversation
+	if deps.ContextManager != nil {
+		deps.ContextManager.AddMessage(deps.Context, "user", correctionMsg)
+	} else if deps.Context != nil {
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "user",
+			Content: correctionMsg,
+		})
+	}
+
+	// Increment forcing retry metric
+	deps.Session.IncrementMetric(agent.MetricToolForcingRetries, 1)
+
+	// Return to EXECUTE to retry
+	return agent.StateExecute, nil
+}
+
+// emitToolForcing emits a tool forcing event.
+func (p *ExecutePhase) emitToolForcing(deps *Dependencies, req *ForcingRequest, hint string, stepNumber int) {
+	if deps.EventEmitter == nil {
+		return
+	}
+
+	// Extract suggested tool from hint (best effort)
+	suggestedTool := ""
+	if req != nil && len(req.AvailableTools) > 0 {
+		// Get suggestion from classifier
+		if p.forcingPolicy != nil {
+			if dfp, ok := p.forcingPolicy.(*DefaultForcingPolicy); ok {
+				suggestedTool, _ = dfp.classifier.SuggestTool(context.Background(), req.Query, req.AvailableTools)
+			}
+		}
+	}
+
+	deps.EventEmitter.Emit(events.TypeToolForcing, &events.ToolForcingData{
+		Query:         req.Query,
+		SuggestedTool: suggestedTool,
+		RetryCount:    req.ForcingRetries + 1,
+		MaxRetries:    req.MaxRetries,
+		StepNumber:    stepNumber,
+		Reason:        "analytical_query_without_tools",
+	})
+}
+
 // executeToolCalls executes tool invocations with safety checks.
 //
 // Inputs:
@@ -521,6 +1053,9 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 	blocked := false
 
 	for _, inv := range invocations {
+		// Refresh graph if dirty files exist (before tool queries stale data)
+		p.maybeRefreshGraph(ctx, deps)
+
 		// Emit tool invocation event
 		p.emitToolInvocation(deps, &inv)
 
@@ -539,6 +1074,9 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		// Execute the tool
 		result := p.executeSingleTool(ctx, deps, &inv)
 		results = append(results, result)
+
+		// Track file modifications for graph refresh
+		p.trackModifiedFiles(deps, result)
 
 		// Emit tool result event
 		p.emitToolResult(deps, &inv, result)
@@ -876,4 +1414,135 @@ func toolParamsToMap(params *agent.ToolParameters) map[string]any {
 	}
 
 	return result
+}
+
+// maybeRefreshGraph refreshes the graph if dirty files exist.
+//
+// Description:
+//
+//	Checks if any files have been marked dirty by previous tool executions.
+//	If so, triggers an incremental refresh to update the graph with fresh
+//	parse results. This ensures subsequent tool queries return up-to-date data.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies.
+//
+// Thread Safety:
+//
+//	Safe for concurrent use. Refresh is atomic (copy-on-write).
+func (p *ExecutePhase) maybeRefreshGraph(ctx context.Context, deps *Dependencies) {
+	// Skip if no tracker or refresher
+	if deps.DirtyTracker == nil || deps.GraphRefresher == nil {
+		return
+	}
+
+	// Skip if no dirty files
+	if !deps.DirtyTracker.HasDirty() {
+		return
+	}
+
+	// Get dirty files (does not clear - we clear after successful refresh)
+	dirtyFiles := deps.DirtyTracker.GetDirtyFiles()
+	if len(dirtyFiles) == 0 {
+		return
+	}
+
+	slog.Info("refreshing graph for modified files",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("file_count", len(dirtyFiles)),
+	)
+
+	// Perform refresh
+	result, err := deps.GraphRefresher.RefreshFiles(ctx, dirtyFiles)
+	if err != nil {
+		slog.Warn("incremental graph refresh failed, continuing with stale graph",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+		// Non-fatal: continue with stale data rather than failing
+		return
+	}
+
+	// Clear the successfully refreshed files
+	deps.DirtyTracker.Clear(dirtyFiles)
+
+	slog.Info("graph refreshed",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("nodes_removed", result.NodesRemoved),
+		slog.Int("nodes_added", result.NodesAdded),
+		slog.Duration("duration", result.Duration),
+	)
+
+	// Emit graph refresh event
+	p.emitGraphRefresh(deps, result, len(dirtyFiles))
+}
+
+// trackModifiedFiles marks files modified by a tool result as dirty.
+//
+// Description:
+//
+//	After a tool executes, checks if it modified any files and marks
+//	them in the DirtyTracker for later refresh.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//	result - The tool execution result.
+func (p *ExecutePhase) trackModifiedFiles(deps *Dependencies, result *tools.Result) {
+	// Skip if no tracker or result
+	if deps.DirtyTracker == nil || result == nil {
+		return
+	}
+
+	// Skip if no modified files
+	if len(result.ModifiedFiles) == 0 {
+		return
+	}
+
+	// Mark each modified file as dirty
+	for _, path := range result.ModifiedFiles {
+		deps.DirtyTracker.MarkDirty(path)
+	}
+
+	slog.Debug("tracked modified files",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("count", len(result.ModifiedFiles)),
+	)
+}
+
+// getToolNames extracts tool names from the registry.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//
+// Outputs:
+//
+//	[]string - List of available tool names.
+func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
+	if deps.ToolRegistry == nil {
+		return nil
+	}
+	defs := deps.ToolRegistry.GetDefinitions()
+	names := make([]string, len(defs))
+	for i, def := range defs {
+		names[i] = def.Name
+	}
+	return names
+}
+
+// emitGraphRefresh emits a graph refresh event.
+func (p *ExecutePhase) emitGraphRefresh(deps *Dependencies, result *graph.RefreshResult, fileCount int) {
+	if deps.EventEmitter == nil || result == nil {
+		return
+	}
+
+	deps.EventEmitter.Emit(events.TypeContextUpdate, &events.ContextUpdateData{
+		Action:          "graph_refresh",
+		EntriesAffected: fileCount,
+		TokensBefore:    result.NodesRemoved,
+		TokensAfter:     result.NodesAdded,
+	})
 }

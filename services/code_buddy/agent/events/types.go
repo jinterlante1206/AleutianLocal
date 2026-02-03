@@ -63,6 +63,9 @@ const (
 
 	// TypeStepComplete is emitted when a step is completed.
 	TypeStepComplete Type = "step_complete"
+
+	// TypeToolForcing is emitted when tool usage is being forced for an analytical query.
+	TypeToolForcing Type = "tool_forcing"
 )
 
 // Event represents an agent event.
@@ -335,4 +338,25 @@ type StepCompleteData struct {
 
 	// TokensUsed is the tokens used in this step.
 	TokensUsed int `json:"tokens_used"`
+}
+
+// ToolForcingData is the data for tool forcing events.
+type ToolForcingData struct {
+	// Query is the user's analytical query.
+	Query string `json:"query"`
+
+	// SuggestedTool is the tool being suggested in the forcing hint.
+	SuggestedTool string `json:"suggested_tool,omitempty"`
+
+	// RetryCount is the current tool forcing retry attempt.
+	RetryCount int `json:"retry_count"`
+
+	// MaxRetries is the maximum number of retries allowed.
+	MaxRetries int `json:"max_retries"`
+
+	// StepNumber is the step where forcing occurred.
+	StepNumber int `json:"step_number"`
+
+	// Reason explains why tool forcing was triggered.
+	Reason string `json:"reason,omitempty"`
 }

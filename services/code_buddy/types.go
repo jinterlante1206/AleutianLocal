@@ -362,6 +362,192 @@ type AgentStateResponse struct {
 }
 
 // =============================================================================
+// CRS Export API Types (CB-29-2)
+// =============================================================================
+
+// ReasoningTraceResponse is the response for GET /v1/codebuddy/agent/:id/reasoning.
+type ReasoningTraceResponse struct {
+	// SessionID is the unique session identifier.
+	SessionID string `json:"session_id"`
+
+	// TotalSteps is the number of reasoning steps recorded.
+	TotalSteps int `json:"total_steps"`
+
+	// Duration is the total time from first to last step.
+	Duration string `json:"total_duration"`
+
+	// StartTime is when the first step occurred (RFC3339).
+	StartTime string `json:"start_time,omitempty"`
+
+	// EndTime is when the last step occurred (RFC3339).
+	EndTime string `json:"end_time,omitempty"`
+
+	// Trace contains all recorded reasoning steps.
+	Trace []ReasoningStep `json:"trace"`
+
+	// Summary provides high-level reasoning metrics.
+	Summary *ReasoningSummaryResponse `json:"summary,omitempty"`
+}
+
+// ReasoningStep represents one step in the reasoning process.
+type ReasoningStep struct {
+	// Step is the 1-indexed step number.
+	Step int `json:"step"`
+
+	// Timestamp is when this step occurred (RFC3339).
+	Timestamp string `json:"timestamp"`
+
+	// Action describes what was done (e.g., "explore", "analyze", "trace_flow").
+	Action string `json:"action"`
+
+	// Target is the file or symbol being operated on.
+	Target string `json:"target"`
+
+	// Tool is the tool that triggered this action (optional).
+	Tool string `json:"tool,omitempty"`
+
+	// DurationMs is how long this step took in milliseconds.
+	DurationMs int64 `json:"duration_ms"`
+
+	// SymbolsFound lists symbols discovered in this step.
+	SymbolsFound []string `json:"symbols_found,omitempty"`
+
+	// ProofUpdates lists proof status changes.
+	ProofUpdates []ProofUpdateResponse `json:"proof_updates,omitempty"`
+
+	// Error contains any error that occurred.
+	Error string `json:"error,omitempty"`
+
+	// Metadata contains additional step context.
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// ProofUpdateResponse represents a proof status change in API responses.
+type ProofUpdateResponse struct {
+	// NodeID is the node whose proof status changed.
+	NodeID string `json:"node_id"`
+
+	// Status is the new status: "proven", "disproven", "expanded", "unknown".
+	Status string `json:"status"`
+
+	// Reason explains why the status changed.
+	Reason string `json:"reason,omitempty"`
+
+	// Source indicates signal source: "hard", "soft".
+	Source string `json:"source,omitempty"`
+}
+
+// ReasoningSummaryResponse provides high-level reasoning metrics.
+type ReasoningSummaryResponse struct {
+	// NodesExplored is the total code nodes examined.
+	NodesExplored int `json:"nodes_explored"`
+
+	// NodesProven is nodes with verified behavior (tests pass, types check).
+	NodesProven int `json:"nodes_proven"`
+
+	// NodesDisproven is nodes with verified issues (tests fail, type errors).
+	NodesDisproven int `json:"nodes_disproven"`
+
+	// NodesUnknown is nodes without conclusive evidence.
+	NodesUnknown int `json:"nodes_unknown"`
+
+	// ConstraintsApplied is the number of constraints used in reasoning.
+	ConstraintsApplied int `json:"constraints_applied"`
+
+	// ExplorationDepth is the maximum depth reached in call graph traversal.
+	ExplorationDepth int `json:"exploration_depth"`
+
+	// ConfidenceScore is overall confidence in the reasoning (0.0-1.0).
+	ConfidenceScore float64 `json:"confidence_score"`
+}
+
+// CRSExportResponse is the response for GET /v1/codebuddy/agent/:id/crs.
+type CRSExportResponse struct {
+	// SessionID is the unique session identifier.
+	SessionID string `json:"session_id"`
+
+	// Generation is the CRS snapshot generation number.
+	Generation int64 `json:"generation"`
+
+	// Timestamp is when this snapshot was taken (RFC3339).
+	Timestamp string `json:"timestamp"`
+
+	// Indexes contains exports of all six CRS indexes.
+	Indexes CRSIndexesResponse `json:"indexes"`
+
+	// Summary provides high-level reasoning metrics.
+	Summary ReasoningSummaryResponse `json:"summary"`
+}
+
+// CRSIndexesResponse contains exports of all six CRS indexes.
+//
+// Note: Some indexes only provide aggregate counts for performance reasons.
+// Full data export for similarity and dependency indexes is deferred.
+type CRSIndexesResponse struct {
+	// Proof contains proof status entries.
+	Proof []ProofEntryResponse `json:"proof"`
+
+	// Constraints contains constraint entries.
+	Constraints []ConstraintEntryResponse `json:"constraints"`
+
+	// SimilarityCount is the number of similarity pairs stored.
+	// Full similarity matrix export is deferred for performance.
+	SimilarityCount int `json:"similarity_count"`
+
+	// DependencyCount is the number of dependency edges.
+	// Full dependency graph export is deferred for performance.
+	DependencyCount int `json:"dependency_count"`
+
+	// History contains recent exploration history entries.
+	History []HistoryEntryResponse `json:"history"`
+
+	// StreamingCardinality is the estimated unique item count in streaming index.
+	StreamingCardinality uint64 `json:"streaming_cardinality"`
+
+	// StreamingBytes is the approximate memory usage of streaming index.
+	StreamingBytes int `json:"streaming_bytes"`
+}
+
+// ProofEntryResponse represents a proof entry in API responses.
+type ProofEntryResponse struct {
+	// NodeID is the node identifier.
+	NodeID string `json:"node_id"`
+
+	// Status is the proof status: "unknown", "proven", "disproven", "expanded".
+	Status string `json:"status"`
+
+	// Evidence lists reasons for this status.
+	Evidence []string `json:"evidence,omitempty"`
+}
+
+// ConstraintEntryResponse represents a constraint in API responses.
+type ConstraintEntryResponse struct {
+	// ID is the constraint identifier.
+	ID string `json:"id"`
+
+	// Type is the constraint type.
+	Type string `json:"type"`
+
+	// Nodes are the affected nodes.
+	Nodes []string `json:"nodes"`
+
+	// Strength is the constraint weight (0.0-1.0).
+	Strength float64 `json:"strength"`
+}
+
+// HistoryEntryResponse represents an exploration history entry.
+type HistoryEntryResponse struct {
+	// NodeID is the explored node.
+	NodeID string `json:"node_id"`
+
+	// VisitCount is how many times this node was visited.
+	VisitCount int `json:"visit_count"`
+
+	// LastVisitedAt is when it was last visited (RFC3339).
+	LastVisitedAt string `json:"last_visited_at,omitempty"`
+}
+
+// =============================================================================
 // AGENTIC TOOL TYPES (CB-20/21/22/23 Tool Endpoints)
 // =============================================================================
 // Request and response types for the agentic reasoning layer tools.

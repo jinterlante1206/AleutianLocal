@@ -74,13 +74,15 @@ func (e *BridgeError) Unwrap() error {
 //	- Applies deltas from activity results
 //	- Handles conflicts and rollbacks
 //	- Tracks metrics and traces
+//	- Optionally records trace steps for audit/debugging
 //
 // Thread Safety: Safe for concurrent use.
 type Bridge struct {
-	mu     sync.RWMutex
-	crs    crs.CRS
-	config *BridgeConfig
-	logger *slog.Logger
+	mu            sync.RWMutex
+	crs           crs.CRS
+	traceRecorder *crs.TraceRecorder
+	config        *BridgeConfig
+	logger        *slog.Logger
 
 	// State
 	closed bool
@@ -104,36 +106,96 @@ type BridgeConfig struct {
 
 	// EnableTracing enables OpenTelemetry tracing.
 	EnableTracing bool
+
+	// EnableTraceRecording enables automatic trace step recording.
+	// When true and a TraceRecorder is provided, the Bridge records
+	// a TraceStep after each activity execution.
+	// Default: true
+	EnableTraceRecording bool
 }
 
 // DefaultBridgeConfig returns the default bridge configuration.
 func DefaultBridgeConfig() *BridgeConfig {
 	return &BridgeConfig{
-		MaxRetries:    3,
-		RetryDelay:    100 * time.Millisecond,
-		EnableMetrics: true,
-		EnableTracing: true,
+		MaxRetries:           3,
+		RetryDelay:           100 * time.Millisecond,
+		EnableMetrics:        true,
+		EnableTracing:        true,
+		EnableTraceRecording: true,
+	}
+}
+
+// BridgeOption configures optional Bridge parameters.
+type BridgeOption func(*Bridge)
+
+// WithTraceRecorder sets the trace recorder for automatic step recording.
+//
+// Description:
+//
+//	When provided, the Bridge will automatically record a TraceStep
+//	after each successful activity execution. Recording failures
+//	are logged but do not block activity execution.
+//
+// Inputs:
+//
+//	recorder - The trace recorder. May be nil (disables recording).
+//
+// Example:
+//
+//	recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+//	bridge := integration.NewBridge(crsInstance, config,
+//	    integration.WithTraceRecorder(recorder),
+//	)
+func WithTraceRecorder(recorder *crs.TraceRecorder) BridgeOption {
+	return func(b *Bridge) {
+		b.traceRecorder = recorder
 	}
 }
 
 // NewBridge creates a new bridge.
 //
+// Description:
+//
+//	Creates a Bridge that coordinates activity execution and CRS state
+//	management. Optionally accepts a TraceRecorder for automatic
+//	reasoning trace recording.
+//
 // Inputs:
-//   - crsInstance: The CRS state machine.
-//   - config: Bridge configuration. Uses defaults if nil.
+//
+//	crsInstance - The CRS state machine. Must not be nil.
+//	config - Bridge configuration. Uses defaults if nil.
+//	opts - Optional configuration functions.
 //
 // Outputs:
-//   - *Bridge: The new bridge.
-func NewBridge(crsInstance crs.CRS, config *BridgeConfig) *Bridge {
+//
+//	*Bridge - The new bridge.
+//
+// Example:
+//
+//	// Basic usage
+//	bridge := integration.NewBridge(crsInstance, nil)
+//
+//	// With trace recorder
+//	recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+//	bridge := integration.NewBridge(crsInstance, config,
+//	    integration.WithTraceRecorder(recorder),
+//	)
+func NewBridge(crsInstance crs.CRS, config *BridgeConfig, opts ...BridgeOption) *Bridge {
 	if config == nil {
 		config = DefaultBridgeConfig()
 	}
 
-	return &Bridge{
+	b := &Bridge{
 		crs:    crsInstance,
 		config: config,
 		logger: slog.Default().With(slog.String("component", "bridge")),
 	}
+
+	for _, opt := range opts {
+		opt(b)
+	}
+
+	return b
 }
 
 // -----------------------------------------------------------------------------
@@ -217,6 +279,11 @@ func (b *Bridge) RunActivity(
 		b.conflictsFound++
 		b.mu.Unlock()
 
+		// Emit conflict metric for Prometheus
+		if b.config.EnableMetrics {
+			RecordConflict()
+		}
+
 		// Conflicts and retries are expected behavior, log at Debug level
 		b.logger.Debug("activity apply conflict, retrying",
 			slog.String("activity", activity.Name()),
@@ -235,34 +302,179 @@ func (b *Bridge) runActivityOnce(
 	input activities.ActivityInput,
 	attempt int,
 ) (activities.ActivityResult, error) {
+	startTime := time.Now() // Capture start time for metrics
+
 	// Get fresh snapshot
 	snapshot := b.crs.Snapshot()
 
 	// Run activity
-	result, delta, err := activity.Execute(ctx, snapshot, input)
-	if err != nil {
-		return result, err
-	}
+	result, delta, executeErr := activity.Execute(ctx, snapshot, input)
 
-	// Apply delta if present
-	if delta != nil {
+	// Apply delta if present and execution succeeded
+	var applyErr error
+	if executeErr == nil && delta != nil {
 		metrics, err := b.crs.Apply(ctx, delta)
 		if err != nil {
-			return result, &BridgeError{Operation: "Apply", Err: err}
+			applyErr = &BridgeError{Operation: "Apply", Err: err}
+		} else {
+			b.mu.Lock()
+			b.deltasApplied++
+			b.mu.Unlock()
+
+			b.logger.Debug("delta applied",
+				slog.String("activity", activity.Name()),
+				slog.Int64("generation", metrics.NewGeneration),
+				slog.Int("entries_modified", metrics.EntriesModified),
+			)
 		}
+	}
 
-		b.mu.Lock()
-		b.deltasApplied++
-		b.mu.Unlock()
+	// Record trace step with full observability (DR-6/DR-15: record ALL activities)
+	// Record even when activity fails - this provides complete audit trail
+	b.recordTraceStep(ctx, result, delta, input, startTime)
 
-		b.logger.Debug("delta applied",
-			slog.String("activity", activity.Name()),
-			slog.Int64("generation", metrics.NewGeneration),
-			slog.Int("entries_modified", metrics.EntriesModified),
-		)
+	// Return the first error encountered
+	if executeErr != nil {
+		return result, executeErr
+	}
+	if applyErr != nil {
+		return result, applyErr
 	}
 
 	return result, nil
+}
+
+// recordTraceStep records a trace step with full observability integration.
+//
+// Description:
+//
+//	Records the activity execution as a TraceStep and emits:
+//	1. OTel span event with CRS context
+//	2. Prometheus metrics for reasoning progress
+//	3. Structured log with trace correlation
+//	4. TraceStep to TraceRecorder with trace_id link
+//
+//	Recording failures are logged but never block activity execution.
+//	Each subsystem operates independently - a failure in one does not
+//	prevent the others from recording.
+//
+// Inputs:
+//
+//	ctx - Context containing the active span for trace correlation.
+//	result - The activity execution result.
+//	delta - The delta produced by the activity. May be nil.
+//	input - The activity input. May be nil.
+//	startTime - When the activity started.
+//
+// Outputs:
+//
+//	None.
+//
+// Thread Safety: Safe for concurrent use.
+func (b *Bridge) recordTraceStep(
+	ctx context.Context,
+	result activities.ActivityResult,
+	delta crs.Delta,
+	input activities.ActivityInput,
+	startTime time.Time,
+) {
+	recordingStart := time.Now()
+
+	// Fast path: check if any recording is enabled
+	b.mu.RLock()
+	recorder := b.traceRecorder
+	recordingEnabled := b.config.EnableTraceRecording
+	metricsEnabled := b.config.EnableMetrics
+	tracingEnabled := b.config.EnableTracing
+	b.mu.RUnlock()
+
+	// Nothing to do if everything is disabled
+	if recorder == nil && !metricsEnabled && !tracingEnabled {
+		return
+	}
+
+	// Panic recovery - recording must never crash the activity
+	defer func() {
+		if r := recover(); r != nil {
+			b.logger.Warn("trace recording panicked",
+				slog.Any("panic", r),
+				slog.String("activity", result.ActivityName),
+			)
+			RecordRecordingError("panic")
+		}
+	}()
+
+	// Extract trace step
+	step := ExtractTraceStep(&result, delta, input, startTime)
+
+	// --- 1. OTel Span Event ---
+	if tracingEnabled {
+		span := trace.SpanFromContext(ctx)
+		if span.IsRecording() {
+			span.AddEvent("crs.activity_completed", trace.WithAttributes(
+				attribute.String("activity", result.ActivityName),
+				attribute.Bool("success", result.Success),
+				attribute.Bool("partial_success", result.PartialSuccess),
+				attribute.Int("proof_updates", len(step.ProofUpdates)),
+				attribute.Int("constraints_added", len(step.ConstraintsAdded)),
+				attribute.Int("dependencies_found", len(step.DependenciesFound)),
+				attribute.Int("symbols_found", len(step.SymbolsFound)),
+				attribute.Int64("duration_ms", step.Duration.Milliseconds()),
+			))
+
+			// Add trace_id to step metadata for correlation (DR-10: pre-allocate)
+			spanCtx := span.SpanContext()
+			if spanCtx.IsValid() {
+				if step.Metadata == nil {
+					step.Metadata = make(map[string]string, 2)
+				}
+				step.Metadata["trace_id"] = spanCtx.TraceID().String()
+				step.Metadata["span_id"] = spanCtx.SpanID().String()
+			}
+		}
+	}
+
+	// --- 2. Prometheus Metrics ---
+	if metricsEnabled {
+		RecordActivityMetrics(
+			result.ActivityName,
+			result.Success,
+			result.PartialSuccess,
+			step.Duration.Seconds(),
+		)
+		RecordStepMetrics(result.ActivityName, &step)
+		UpdateGenerationGauge(b.crs.Generation())
+	}
+
+	// --- 3. Structured Log with Trace Context ---
+	logger := b.logger
+	if tracingEnabled {
+		spanCtx := trace.SpanContextFromContext(ctx)
+		if spanCtx.IsValid() {
+			logger = logger.With(
+				slog.String("trace_id", spanCtx.TraceID().String()),
+				slog.String("span_id", spanCtx.SpanID().String()),
+			)
+		}
+	}
+	logger.Info("crs activity completed",
+		slog.String("activity", result.ActivityName),
+		slog.Bool("success", result.Success),
+		slog.Int("proof_updates", len(step.ProofUpdates)),
+		slog.Int("constraints_added", len(step.ConstraintsAdded)),
+		slog.Int("dependencies_found", len(step.DependenciesFound)),
+		slog.Duration("duration", step.Duration),
+	)
+
+	// --- 4. TraceRecorder ---
+	if recorder != nil && recordingEnabled {
+		recorder.RecordStep(step)
+	}
+
+	// Record recording overhead
+	if metricsEnabled {
+		RecordRecordingDuration(recordingStart)
+	}
 }
 
 // Snapshot returns the current CRS snapshot.
@@ -323,6 +535,33 @@ func (b *Bridge) Close() error {
 
 	b.closed = true
 	return nil
+}
+
+// SetTraceRecorder sets or replaces the trace recorder.
+//
+// Description:
+//
+//	Allows setting the trace recorder after construction.
+//	Useful when the recorder is created after the Bridge.
+//
+// Inputs:
+//
+//	recorder - The trace recorder. May be nil (disables recording).
+//
+// Thread Safety: Safe for concurrent use.
+func (b *Bridge) SetTraceRecorder(recorder *crs.TraceRecorder) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.traceRecorder = recorder
+}
+
+// TraceRecorder returns the current trace recorder, or nil if not set.
+//
+// Thread Safety: Safe for concurrent use.
+func (b *Bridge) TraceRecorder() *crs.TraceRecorder {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.traceRecorder
 }
 
 // Stats returns bridge statistics.

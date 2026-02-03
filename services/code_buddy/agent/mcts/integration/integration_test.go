@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/activities"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/algorithms"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/eval"
 )
@@ -141,6 +142,114 @@ func TestBridge_Evaluable(t *testing.T) {
 			t.Error("expected metrics")
 		}
 	})
+}
+
+// -----------------------------------------------------------------------------
+// Bridge TraceRecorder Tests (CB-29-2a)
+// -----------------------------------------------------------------------------
+
+func TestNewBridge_WithTraceRecorder(t *testing.T) {
+	crsInstance := crs.New(nil)
+	recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+
+	bridge := NewBridge(crsInstance, nil, WithTraceRecorder(recorder))
+
+	if bridge.TraceRecorder() == nil {
+		t.Fatal("expected non-nil trace recorder")
+	}
+	if bridge.TraceRecorder() != recorder {
+		t.Error("expected same recorder instance")
+	}
+}
+
+func TestNewBridge_WithoutTraceRecorder(t *testing.T) {
+	crsInstance := crs.New(nil)
+
+	bridge := NewBridge(crsInstance, nil)
+
+	if bridge.TraceRecorder() != nil {
+		t.Error("expected nil trace recorder")
+	}
+}
+
+func TestNewBridge_WithNilTraceRecorder(t *testing.T) {
+	crsInstance := crs.New(nil)
+
+	bridge := NewBridge(crsInstance, nil, WithTraceRecorder(nil))
+
+	if bridge.TraceRecorder() != nil {
+		t.Error("expected nil trace recorder")
+	}
+}
+
+func TestBridge_SetTraceRecorder(t *testing.T) {
+	crsInstance := crs.New(nil)
+	bridge := NewBridge(crsInstance, nil)
+	recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+
+	// Initially nil
+	if bridge.TraceRecorder() != nil {
+		t.Error("expected nil trace recorder initially")
+	}
+
+	// Set recorder
+	bridge.SetTraceRecorder(recorder)
+
+	if bridge.TraceRecorder() == nil {
+		t.Fatal("expected non-nil trace recorder after set")
+	}
+	if bridge.TraceRecorder() != recorder {
+		t.Error("expected same recorder instance")
+	}
+
+	// Clear recorder
+	bridge.SetTraceRecorder(nil)
+
+	if bridge.TraceRecorder() != nil {
+		t.Error("expected nil trace recorder after clear")
+	}
+}
+
+func TestBridge_SetTraceRecorder_Concurrent(t *testing.T) {
+	crsInstance := crs.New(nil)
+	bridge := NewBridge(crsInstance, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+			bridge.SetTraceRecorder(recorder)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = bridge.TraceRecorder()
+		}()
+	}
+	wg.Wait()
+
+	// Test passes if no race condition detected
+}
+
+func TestBridgeConfig_EnableTraceRecording_Default(t *testing.T) {
+	config := DefaultBridgeConfig()
+
+	if !config.EnableTraceRecording {
+		t.Error("expected EnableTraceRecording to default to true")
+	}
+}
+
+func TestBridgeConfig_EnableTraceRecording_Custom(t *testing.T) {
+	config := &BridgeConfig{
+		EnableTraceRecording: false,
+	}
+	crsInstance := crs.New(nil)
+	bridge := NewBridge(crsInstance, config)
+
+	if bridge.config.EnableTraceRecording {
+		t.Error("expected EnableTraceRecording to be false")
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -543,4 +652,318 @@ func TestActivity_HandlesNilEvaluableReturns(t *testing.T) {
 			_ = metrics
 		}
 	})
+}
+
+// -----------------------------------------------------------------------------
+// Observability Integration Tests (CB-29-2c)
+// -----------------------------------------------------------------------------
+
+func TestBridge_RecordTraceStep_Integration(t *testing.T) {
+	t.Run("records trace step after activity execution", func(t *testing.T) {
+		crsInstance := crs.New(nil)
+		recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+		config := &BridgeConfig{
+			EnableTraceRecording: true,
+			EnableMetrics:        true,
+			EnableTracing:        false, // Disable OTel for this test
+			MaxRetries:           0,
+		}
+		bridge := NewBridge(crsInstance, config, WithTraceRecorder(recorder))
+
+		// Create a mock activity that succeeds
+		activity := &mockActivity{
+			name: "test_activity",
+			result: activities.ActivityResult{
+				ActivityName: "test_activity",
+				Success:      true,
+				Duration:     100 * time.Millisecond,
+			},
+		}
+
+		// Register activity name for metrics
+		RegisterActivityName("test_activity")
+
+		// Run activity
+		_, err := bridge.RunActivity(context.Background(), activity, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify trace step was recorded
+		steps := recorder.GetSteps()
+		if len(steps) != 1 {
+			t.Fatalf("expected 1 step, got %d", len(steps))
+		}
+
+		step := steps[0]
+		if step.Action != "test_activity" {
+			t.Errorf("expected action 'test_activity', got %q", step.Action)
+		}
+	})
+
+	t.Run("records trace step for failed activities", func(t *testing.T) {
+		crsInstance := crs.New(nil)
+		recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+		config := &BridgeConfig{
+			EnableTraceRecording: true,
+			EnableMetrics:        true,
+			EnableTracing:        false,
+			MaxRetries:           0,
+		}
+		bridge := NewBridge(crsInstance, config, WithTraceRecorder(recorder))
+
+		// Create a mock activity that fails but returns a result
+		activity := &mockActivity{
+			name: "failing_activity",
+			result: activities.ActivityResult{
+				ActivityName: "failing_activity",
+				Success:      false,
+				Duration:     50 * time.Millisecond,
+			},
+		}
+
+		RegisterActivityName("failing_activity")
+
+		// Run activity - it should complete without error (activity failure != execution error)
+		_, err := bridge.RunActivity(context.Background(), activity, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify trace step was recorded even for failed activity (DR-6/DR-15)
+		steps := recorder.GetSteps()
+		if len(steps) != 1 {
+			t.Fatalf("expected 1 step for failed activity, got %d", len(steps))
+		}
+	})
+
+	t.Run("no recording when recorder is nil", func(t *testing.T) {
+		crsInstance := crs.New(nil)
+		config := &BridgeConfig{
+			EnableTraceRecording: true,
+			EnableMetrics:        false,
+			EnableTracing:        false,
+			MaxRetries:           0,
+		}
+		// No recorder provided
+		bridge := NewBridge(crsInstance, config)
+
+		activity := &mockActivity{
+			name: "test_activity",
+			result: activities.ActivityResult{
+				ActivityName: "test_activity",
+				Success:      true,
+			},
+		}
+
+		// Should not panic
+		_, err := bridge.RunActivity(context.Background(), activity, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("no recording when EnableTraceRecording is false", func(t *testing.T) {
+		crsInstance := crs.New(nil)
+		recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+		config := &BridgeConfig{
+			EnableTraceRecording: false, // Disabled
+			EnableMetrics:        true,
+			EnableTracing:        false,
+			MaxRetries:           0,
+		}
+		bridge := NewBridge(crsInstance, config, WithTraceRecorder(recorder))
+
+		activity := &mockActivity{
+			name: "test_activity",
+			result: activities.ActivityResult{
+				ActivityName: "test_activity",
+				Success:      true,
+			},
+		}
+
+		_, err := bridge.RunActivity(context.Background(), activity, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify no step was recorded
+		steps := recorder.GetSteps()
+		if len(steps) != 0 {
+			t.Errorf("expected 0 steps when recording disabled, got %d", len(steps))
+		}
+	})
+}
+
+func TestBridge_RecordTraceStep_WithDelta(t *testing.T) {
+	t.Run("records step with delta information", func(t *testing.T) {
+		crsInstance := crs.New(nil)
+		recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+		config := &BridgeConfig{
+			EnableTraceRecording: true,
+			EnableMetrics:        true,
+			EnableTracing:        false,
+			MaxRetries:           0,
+		}
+		bridge := NewBridge(crsInstance, config, WithTraceRecorder(recorder))
+
+		// Create activity with a delta
+		delta := crs.NewProofDelta(crs.SignalSourceHard, map[string]crs.ProofNumber{
+			"node1": {
+				Status: crs.ProofStatusProven,
+				Source: crs.SignalSourceHard,
+			},
+		})
+
+		activity := &mockActivityWithDelta{
+			name: "delta_activity",
+			result: activities.ActivityResult{
+				ActivityName: "delta_activity",
+				Success:      true,
+				Duration:     100 * time.Millisecond,
+			},
+			delta: delta,
+		}
+
+		RegisterActivityName("delta_activity")
+
+		_, err := bridge.RunActivity(context.Background(), activity, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify trace step includes delta information
+		steps := recorder.GetSteps()
+		if len(steps) != 1 {
+			t.Fatalf("expected 1 step, got %d", len(steps))
+		}
+
+		step := steps[0]
+		if len(step.ProofUpdates) != 1 {
+			t.Errorf("expected 1 proof update, got %d", len(step.ProofUpdates))
+		}
+	})
+}
+
+func TestBridge_RecordTraceStep_ConcurrentSafety(t *testing.T) {
+	t.Run("concurrent activity executions are thread-safe", func(t *testing.T) {
+		crsInstance := crs.New(nil)
+		recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+		config := &BridgeConfig{
+			EnableTraceRecording: true,
+			EnableMetrics:        true,
+			EnableTracing:        false,
+			MaxRetries:           0,
+		}
+		bridge := NewBridge(crsInstance, config, WithTraceRecorder(recorder))
+
+		const numGoroutines = 50
+		var wg sync.WaitGroup
+
+		for i := 0; i < numGoroutines; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				activity := &mockActivity{
+					name: "search",
+					result: activities.ActivityResult{
+						ActivityName: "search",
+						Success:      true,
+						Duration:     time.Duration(i) * time.Millisecond,
+					},
+				}
+				_, err := bridge.RunActivity(context.Background(), activity, nil)
+				if err != nil {
+					t.Errorf("unexpected error in goroutine %d: %v", i, err)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+
+		// Verify all steps were recorded
+		steps := recorder.GetSteps()
+		if len(steps) != numGoroutines {
+			t.Errorf("expected %d steps, got %d", numGoroutines, len(steps))
+		}
+	})
+}
+
+// -----------------------------------------------------------------------------
+// Mock Activity for Tests
+// -----------------------------------------------------------------------------
+
+type mockActivity struct {
+	name   string
+	result activities.ActivityResult
+}
+
+func (m *mockActivity) Name() string {
+	return m.name
+}
+
+func (m *mockActivity) Execute(ctx context.Context, snapshot crs.Snapshot, input activities.ActivityInput) (activities.ActivityResult, crs.Delta, error) {
+	return m.result, nil, nil
+}
+
+func (m *mockActivity) ShouldRun(snapshot crs.Snapshot) (bool, activities.Priority) {
+	return true, activities.PriorityNormal
+}
+
+func (m *mockActivity) Algorithms() []algorithms.Algorithm {
+	return nil
+}
+
+func (m *mockActivity) Timeout() time.Duration {
+	return 10 * time.Second
+}
+
+func (m *mockActivity) Properties() []eval.Property {
+	return nil
+}
+
+func (m *mockActivity) Metrics() []eval.MetricDefinition {
+	return nil
+}
+
+func (m *mockActivity) HealthCheck(ctx context.Context) error {
+	return nil
+}
+
+type mockActivityWithDelta struct {
+	name   string
+	result activities.ActivityResult
+	delta  crs.Delta
+}
+
+func (m *mockActivityWithDelta) Name() string {
+	return m.name
+}
+
+func (m *mockActivityWithDelta) Execute(ctx context.Context, snapshot crs.Snapshot, input activities.ActivityInput) (activities.ActivityResult, crs.Delta, error) {
+	return m.result, m.delta, nil
+}
+
+func (m *mockActivityWithDelta) ShouldRun(snapshot crs.Snapshot) (bool, activities.Priority) {
+	return true, activities.PriorityNormal
+}
+
+func (m *mockActivityWithDelta) Algorithms() []algorithms.Algorithm {
+	return nil
+}
+
+func (m *mockActivityWithDelta) Timeout() time.Duration {
+	return 10 * time.Second
+}
+
+func (m *mockActivityWithDelta) Properties() []eval.Property {
+	return nil
+}
+
+func (m *mockActivityWithDelta) Metrics() []eval.MetricDefinition {
+	return nil
+}
+
+func (m *mockActivityWithDelta) HealthCheck(ctx context.Context) error {
+	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
 	"github.com/google/uuid"
 )
 
@@ -42,6 +43,9 @@ const (
 
 	// MetricGroundingRetries is the grounding validation retry count.
 	MetricGroundingRetries MetricField = "grounding_retries"
+
+	// MetricToolForcingRetries is the tool forcing retry count.
+	MetricToolForcingRetries MetricField = "tool_forcing_retries"
 )
 
 // ValidContextEvictionPolicies contains valid eviction policy values.
@@ -272,6 +276,22 @@ type Session struct {
 
 	// inProgress indicates if an operation is currently running.
 	inProgress bool
+
+	// CRS is the Code Reasoning State for MCTS-based reasoning.
+	// Optional - nil when MCTS is not enabled.
+	CRS crs.CRS `json:"-"`
+
+	// traceRecorder captures reasoning steps for audit and debugging.
+	// Optional - nil when trace recording is not enabled.
+	traceRecorder *crs.TraceRecorder
+
+	// crsSerializer converts CRS snapshots to exportable formats.
+	// Lazily initialized when needed.
+	crsSerializer *crs.Serializer
+
+	// cachedSummary holds the cached reasoning summary.
+	// Invalidated when CRS changes.
+	cachedSummary *crs.ReasoningSummary
 }
 
 // AssembledContext represents the current context window for the LLM.
@@ -552,6 +572,8 @@ func (s *Session) IncrementMetric(field MetricField, value int) {
 		s.Metrics.CacheHits += value
 	case MetricGroundingRetries:
 		s.Metrics.GroundingRetries += value
+	case MetricToolForcingRetries:
+		s.Metrics.ToolForcingRetries += value
 	}
 	s.LastActiveAt = time.Now()
 }
@@ -689,6 +711,8 @@ func (s *Session) GetMetric(field MetricField) int {
 		return s.Metrics.CacheHits
 	case MetricGroundingRetries:
 		return s.Metrics.GroundingRetries
+	case MetricToolForcingRetries:
+		return s.Metrics.ToolForcingRetries
 	default:
 		return 0
 	}
@@ -701,4 +725,194 @@ func (s *Session) GetProjectRoot() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.ProjectRoot
+}
+
+// -----------------------------------------------------------------------------
+// CRS Methods
+// -----------------------------------------------------------------------------
+
+// SetCRS sets the Code Reasoning State for this session.
+//
+// Description:
+//
+//	Associates a CRS instance with this session for MCTS-based reasoning.
+//	Also initializes the CRS serializer for later export operations.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetCRS(crsInstance crs.CRS) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CRS = crsInstance
+	s.cachedSummary = nil
+	if s.crsSerializer == nil {
+		s.crsSerializer = crs.NewSerializer(nil)
+	}
+}
+
+// GetCRS returns the CRS instance for this session.
+//
+// Outputs:
+//
+//	crs.CRS - The CRS instance, or nil if not set.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetCRS() crs.CRS {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.CRS
+}
+
+// HasCRS returns true if CRS is enabled for this session.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) HasCRS() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.CRS != nil
+}
+
+// SetTraceRecorder sets the trace recorder for this session.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetTraceRecorder(recorder *crs.TraceRecorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.traceRecorder = recorder
+}
+
+// GetTraceRecorder returns the trace recorder for this session.
+//
+// Outputs:
+//
+//	*crs.TraceRecorder - The trace recorder, or nil if not set.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetTraceRecorder() *crs.TraceRecorder {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.traceRecorder
+}
+
+// GetReasoningSummary returns the reasoning summary for this session.
+//
+// Description:
+//
+//	Computes high-level metrics about the reasoning process from CRS state.
+//	Returns nil if CRS is not enabled. Summary is cached until CRS changes.
+//
+// Outputs:
+//
+//	*ReasoningSummary - Summary metrics, or nil if CRS not enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetReasoningSummary() *ReasoningSummary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.CRS == nil {
+		return nil
+	}
+
+	// Return cached summary if available
+	if s.cachedSummary != nil {
+		return convertCRSSummary(s.cachedSummary)
+	}
+
+	// Initialize serializer if needed
+	if s.crsSerializer == nil {
+		s.crsSerializer = crs.NewSerializer(nil)
+	}
+
+	// Compute summary from current snapshot
+	snapshot := s.CRS.Snapshot()
+	summary := s.crsSerializer.ComputeSummary(snapshot)
+	s.cachedSummary = &summary
+
+	return convertCRSSummary(&summary)
+}
+
+// InvalidateSummaryCache clears the cached reasoning summary.
+//
+// Description:
+//
+//	Call this after applying deltas to CRS to ensure fresh summary
+//	is computed on next GetReasoningSummary call.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) InvalidateSummaryCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cachedSummary = nil
+}
+
+// GetReasoningTrace returns the reasoning trace for this session.
+//
+// Description:
+//
+//	Returns the step-by-step reasoning trace if a trace recorder is set.
+//	Returns nil if trace recording is not enabled.
+//
+// Outputs:
+//
+//	*crs.ReasoningTrace - The reasoning trace, or nil if not enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetReasoningTrace() *crs.ReasoningTrace {
+	s.mu.RLock()
+	recorder := s.traceRecorder
+	sessionID := s.ID
+	s.mu.RUnlock()
+
+	if recorder == nil {
+		return nil
+	}
+
+	trace := recorder.Export(sessionID)
+	return &trace
+}
+
+// GetCRSExport returns the full CRS state export.
+//
+// Description:
+//
+//	Exports all six CRS indexes and summary metrics in JSON-serializable format.
+//	Returns nil if CRS is not enabled.
+//
+// Outputs:
+//
+//	*crs.CRSExport - Full CRS export, or nil if CRS not enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetCRSExport() *crs.CRSExport {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.CRS == nil {
+		return nil
+	}
+
+	// Initialize serializer if needed
+	if s.crsSerializer == nil {
+		s.crsSerializer = crs.NewSerializer(nil)
+	}
+
+	snapshot := s.CRS.Snapshot()
+	export := s.crsSerializer.Export(snapshot, s.ID)
+	return export
+}
+
+// convertCRSSummary converts crs.ReasoningSummary to agent.ReasoningSummary.
+func convertCRSSummary(src *crs.ReasoningSummary) *ReasoningSummary {
+	if src == nil {
+		return nil
+	}
+	return &ReasoningSummary{
+		NodesExplored:      src.NodesExplored,
+		NodesProven:        src.NodesProven,
+		NodesDisproven:     src.NodesDisproven,
+		NodesUnknown:       src.NodesUnknown,
+		ConstraintsApplied: src.ConstraintsApplied,
+		ExplorationDepth:   src.ExplorationDepth,
+		ConfidenceScore:    src.ConfidenceScore,
+	}
 }

@@ -29,10 +29,11 @@ func init() {
 
 // MockAgentLoop implements agent.AgentLoop for testing.
 type MockAgentLoop struct {
-	runFunc      func(ctx context.Context, session *agent.Session, query string) (*agent.RunResult, error)
-	continueFunc func(ctx context.Context, sessionID string, clarification string) (*agent.RunResult, error)
-	abortFunc    func(ctx context.Context, sessionID string) error
-	getStateFunc func(sessionID string) (*agent.SessionState, error)
+	runFunc        func(ctx context.Context, session *agent.Session, query string) (*agent.RunResult, error)
+	continueFunc   func(ctx context.Context, sessionID string, clarification string) (*agent.RunResult, error)
+	abortFunc      func(ctx context.Context, sessionID string) error
+	getStateFunc   func(sessionID string) (*agent.SessionState, error)
+	getSessionFunc func(sessionID string) (*agent.Session, error)
 }
 
 func (m *MockAgentLoop) Run(ctx context.Context, session *agent.Session, query string) (*agent.RunResult, error) {
@@ -74,6 +75,14 @@ func (m *MockAgentLoop) GetState(sessionID string) (*agent.SessionState, error) 
 		CreatedAt:    time.Now(),
 		LastActiveAt: time.Now(),
 	}, nil
+}
+
+func (m *MockAgentLoop) GetSession(sessionID string) (*agent.Session, error) {
+	if m.getSessionFunc != nil {
+		return m.getSessionFunc(sessionID)
+	}
+	session, _ := agent.NewSession("/test/project", nil)
+	return session, nil
 }
 
 func setupAgentTestRouter(handlers *AgentHandlers) *gin.Engine {
@@ -457,5 +466,129 @@ func TestAgentErrorToString(t *testing.T) {
 				t.Errorf("agentErrorToString() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// CRS Export Endpoint Tests (CB-29-2)
+// =============================================================================
+
+func TestAgentHandlers_HandleGetReasoningTrace_NotFound(t *testing.T) {
+	mockLoop := &MockAgentLoop{
+		getSessionFunc: func(sessionID string) (*agent.Session, error) {
+			return nil, agent.ErrSessionNotFound
+		},
+	}
+
+	handlers := NewAgentHandlers(mockLoop, nil)
+	r := setupAgentTestRouter(handlers)
+
+	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/nonexistent-id/reasoning", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestAgentHandlers_HandleGetReasoningTrace_NoTraceRecorder(t *testing.T) {
+	mockLoop := &MockAgentLoop{
+		getSessionFunc: func(sessionID string) (*agent.Session, error) {
+			// Return session without trace recorder
+			session, _ := agent.NewSession("/test/project", nil)
+			return session, nil
+		},
+	}
+
+	handlers := NewAgentHandlers(mockLoop, nil)
+	r := setupAgentTestRouter(handlers)
+
+	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/test-session/reasoning", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	// Should return 204 No Content when trace recorder not enabled
+	if w.Code != http.StatusNoContent {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+func TestAgentHandlers_HandleGetCRSExport_NotFound(t *testing.T) {
+	mockLoop := &MockAgentLoop{
+		getSessionFunc: func(sessionID string) (*agent.Session, error) {
+			return nil, agent.ErrSessionNotFound
+		},
+	}
+
+	handlers := NewAgentHandlers(mockLoop, nil)
+	r := setupAgentTestRouter(handlers)
+
+	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/nonexistent-id/crs", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestAgentHandlers_HandleGetCRSExport_NoCRS(t *testing.T) {
+	mockLoop := &MockAgentLoop{
+		getSessionFunc: func(sessionID string) (*agent.Session, error) {
+			// Return session without CRS
+			session, _ := agent.NewSession("/test/project", nil)
+			return session, nil
+		},
+	}
+
+	handlers := NewAgentHandlers(mockLoop, nil)
+	r := setupAgentTestRouter(handlers)
+
+	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/test-session/crs", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	// Should return 204 No Content when CRS not enabled
+	if w.Code != http.StatusNoContent {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+func TestAgentHandlers_HandleGetReasoningTrace_MissingSessionID(t *testing.T) {
+	mockLoop := &MockAgentLoop{}
+	handlers := NewAgentHandlers(mockLoop, nil)
+	r := setupAgentTestRouter(handlers)
+
+	// Test with empty session ID - Gin routes to handler with empty :id param
+	req := httptest.NewRequest("GET", "/v1/codebuddy/agent//reasoning", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	// Empty session ID gets caught by handler validation, returns 400
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestAgentHandlers_HandleGetCRSExport_MissingSessionID(t *testing.T) {
+	mockLoop := &MockAgentLoop{}
+	handlers := NewAgentHandlers(mockLoop, nil)
+	r := setupAgentTestRouter(handlers)
+
+	// Test with empty session ID - Gin routes to handler with empty :id param
+	req := httptest.NewRequest("GET", "/v1/codebuddy/agent//crs", nil)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	// Empty session ID gets caught by handler validation, returns 400
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }

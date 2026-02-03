@@ -212,6 +212,11 @@ type Result struct {
 	// Truncated indicates if output was truncated.
 	Truncated bool `json:"truncated"`
 
+	// ModifiedFiles lists files written or modified by this tool.
+	// Used by DirtyTracker to trigger incremental graph refresh.
+	// Tools that write to the file system should populate this.
+	ModifiedFiles []string `json:"modified_files,omitempty"`
+
 	// Metadata contains additional result metadata.
 	Metadata map[string]any `json:"metadata,omitempty"`
 }

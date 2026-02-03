@@ -32,6 +32,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
 )
 
 // Phase defines the interface for agent phases.
@@ -135,6 +136,14 @@ type Dependencies struct {
 	// AnchoredSynthesisBuilder builds tool-anchored synthesis prompts.
 	// Optional - if nil, basic synthesis prompt is used.
 	AnchoredSynthesisBuilder grounding.AnchoredSynthesisBuilder
+
+	// DirtyTracker tracks files modified by tools for graph refresh.
+	// Optional - if nil, graph freshness tracking is disabled.
+	DirtyTracker *graph.DirtyTracker
+
+	// GraphRefresher handles incremental graph updates.
+	// Optional - if nil, graph refresh is disabled.
+	GraphRefresher *graph.Refresher
 }
 
 // GraphProvider initializes and provides access to the code graph.

@@ -16,6 +16,7 @@ import (
 	"net/http"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
 	"github.com/gin-gonic/gin"
 )
 
@@ -392,6 +393,146 @@ func (h *AgentHandlers) HandleAgentState(c *gin.Context) {
 	})
 }
 
+// HandleGetReasoningTrace handles GET /v1/codebuddy/agent/:id/reasoning.
+//
+// Description:
+//
+//	Retrieves the step-by-step reasoning trace for a session.
+//	The trace shows what actions were taken, what was found,
+//	and how the CRS was updated during reasoning.
+//
+// Path Parameters:
+//
+//	id: Session ID (required)
+//
+// Response:
+//
+//	200 OK: ReasoningTraceResponse
+//	404 Not Found: Session not found
+//	204 No Content: Session exists but trace recording not enabled
+//
+// Thread Safety: This method is safe for concurrent use.
+func (h *AgentHandlers) HandleGetReasoningTrace(c *gin.Context) {
+	requestID := getOrCreateRequestID(c)
+	logger := slog.With("request_id", requestID, "handler", "HandleGetReasoningTrace")
+
+	sessionID := c.Param("id")
+	if sessionID == "" {
+		logger.Warn("Missing session id")
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "session id is required",
+			Code:  "MISSING_PARAMETER",
+		})
+		return
+	}
+
+	logger.Info("Getting reasoning trace", "session_id", sessionID)
+
+	session, err := h.loop.GetSession(sessionID)
+	if err != nil {
+		if errors.Is(err, agent.ErrSessionNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error: err.Error(),
+				Code:  "SESSION_NOT_FOUND",
+			})
+			return
+		}
+
+		logger.Error("Get session failed", "error", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: err.Error(),
+			Code:  "GET_SESSION_FAILED",
+		})
+		return
+	}
+
+	trace := session.GetReasoningTrace()
+	if trace == nil {
+		// Trace recording not enabled for this session
+		c.Status(http.StatusNoContent)
+		return
+	}
+
+	// Convert to API response
+	response := convertReasoningTrace(trace, session.GetReasoningSummary())
+
+	logger.Info("Got reasoning trace",
+		"session_id", sessionID,
+		"total_steps", response.TotalSteps)
+
+	c.JSON(http.StatusOK, response)
+}
+
+// HandleGetCRSExport handles GET /v1/codebuddy/agent/:id/crs.
+//
+// Description:
+//
+//	Retrieves the full CRS (Code Reasoning State) export for a session.
+//	This includes all six indexes and summary metrics for debugging
+//	and analysis of the reasoning process.
+//
+// Path Parameters:
+//
+//	id: Session ID (required)
+//
+// Response:
+//
+//	200 OK: CRSExportResponse
+//	404 Not Found: Session not found
+//	204 No Content: Session exists but CRS not enabled
+//
+// Thread Safety: This method is safe for concurrent use.
+func (h *AgentHandlers) HandleGetCRSExport(c *gin.Context) {
+	requestID := getOrCreateRequestID(c)
+	logger := slog.With("request_id", requestID, "handler", "HandleGetCRSExport")
+
+	sessionID := c.Param("id")
+	if sessionID == "" {
+		logger.Warn("Missing session id")
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error: "session id is required",
+			Code:  "MISSING_PARAMETER",
+		})
+		return
+	}
+
+	logger.Info("Getting CRS export", "session_id", sessionID)
+
+	session, err := h.loop.GetSession(sessionID)
+	if err != nil {
+		if errors.Is(err, agent.ErrSessionNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error: err.Error(),
+				Code:  "SESSION_NOT_FOUND",
+			})
+			return
+		}
+
+		logger.Error("Get session failed", "error", err)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Error: err.Error(),
+			Code:  "GET_SESSION_FAILED",
+		})
+		return
+	}
+
+	export := session.GetCRSExport()
+	if export == nil {
+		// CRS not enabled for this session
+		c.Status(http.StatusNoContent)
+		return
+	}
+
+	// Convert to API response
+	response := convertCRSExport(export)
+
+	logger.Info("Got CRS export",
+		"session_id", sessionID,
+		"generation", response.Generation)
+
+	c.JSON(http.StatusOK, response)
+}
+
 // agentErrorToString converts an AgentError to a string, returning empty string for nil.
 //
 // Inputs:
@@ -406,4 +547,150 @@ func agentErrorToString(err *agent.AgentError) string {
 		return ""
 	}
 	return err.Message
+}
+
+// convertReasoningTrace converts crs.ReasoningTrace to ReasoningTraceResponse.
+//
+// Inputs:
+//
+//	trace - The CRS reasoning trace.
+//	summary - The reasoning summary (optional).
+//
+// Outputs:
+//
+//	*ReasoningTraceResponse - The API response.
+func convertReasoningTrace(trace *crs.ReasoningTrace, summary *agent.ReasoningSummary) *ReasoningTraceResponse {
+	if trace == nil {
+		return nil
+	}
+
+	response := &ReasoningTraceResponse{
+		SessionID:  trace.SessionID,
+		TotalSteps: trace.TotalSteps,
+		Duration:   trace.Duration,
+		Trace:      make([]ReasoningStep, 0, len(trace.Trace)),
+	}
+
+	if !trace.StartTime.IsZero() {
+		response.StartTime = trace.StartTime.Format("2006-01-02T15:04:05Z07:00")
+	}
+	if !trace.EndTime.IsZero() {
+		response.EndTime = trace.EndTime.Format("2006-01-02T15:04:05Z07:00")
+	}
+
+	for _, step := range trace.Trace {
+		respStep := ReasoningStep{
+			Step:         step.Step,
+			Action:       step.Action,
+			Target:       step.Target,
+			Tool:         step.Tool,
+			DurationMs:   step.Duration.Milliseconds(),
+			SymbolsFound: step.SymbolsFound,
+			Error:        step.Error,
+			Metadata:     step.Metadata,
+		}
+
+		if !step.Timestamp.IsZero() {
+			respStep.Timestamp = step.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+		}
+
+		for _, update := range step.ProofUpdates {
+			respStep.ProofUpdates = append(respStep.ProofUpdates, ProofUpdateResponse{
+				NodeID: update.NodeID,
+				Status: update.Status,
+				Reason: update.Reason,
+				Source: update.Source,
+			})
+		}
+
+		response.Trace = append(response.Trace, respStep)
+	}
+
+	if summary != nil {
+		response.Summary = &ReasoningSummaryResponse{
+			NodesExplored:      summary.NodesExplored,
+			NodesProven:        summary.NodesProven,
+			NodesDisproven:     summary.NodesDisproven,
+			NodesUnknown:       summary.NodesUnknown,
+			ConstraintsApplied: summary.ConstraintsApplied,
+			ExplorationDepth:   summary.ExplorationDepth,
+			ConfidenceScore:    summary.ConfidenceScore,
+		}
+	}
+
+	return response
+}
+
+// convertCRSExport converts crs.CRSExport to CRSExportResponse.
+//
+// Inputs:
+//
+//	export - The CRS export.
+//
+// Outputs:
+//
+//	*CRSExportResponse - The API response.
+func convertCRSExport(export *crs.CRSExport) *CRSExportResponse {
+	if export == nil {
+		return nil
+	}
+
+	response := &CRSExportResponse{
+		SessionID:  export.SessionID,
+		Generation: export.Generation,
+		Indexes:    CRSIndexesResponse{},
+		Summary: ReasoningSummaryResponse{
+			NodesExplored:      export.Summary.NodesExplored,
+			NodesProven:        export.Summary.NodesProven,
+			NodesDisproven:     export.Summary.NodesDisproven,
+			NodesUnknown:       export.Summary.NodesUnknown,
+			ConstraintsApplied: export.Summary.ConstraintsApplied,
+			ExplorationDepth:   export.Summary.ExplorationDepth,
+			ConfidenceScore:    export.Summary.ConfidenceScore,
+		},
+	}
+
+	if !export.Timestamp.IsZero() {
+		response.Timestamp = export.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+	}
+
+	// Convert proof index entries
+	for _, entry := range export.Indexes.Proof.Entries {
+		response.Indexes.Proof = append(response.Indexes.Proof, ProofEntryResponse{
+			NodeID: entry.NodeID,
+			Status: entry.Status,
+			// Evidence is derived from proof/disproof numbers
+			Evidence: nil,
+		})
+	}
+
+	// Convert constraint index entries
+	for _, entry := range export.Indexes.Constraint.Constraints {
+		response.Indexes.Constraints = append(response.Indexes.Constraints, ConstraintEntryResponse{
+			ID:       entry.ID,
+			Type:     entry.Type,
+			Nodes:    entry.Nodes,
+			Strength: 1.0, // Not stored in source, default to 1.0
+		})
+	}
+
+	// Set aggregate counts for performance-deferred indexes
+	response.Indexes.SimilarityCount = export.Indexes.Similarity.PairCount
+	response.Indexes.DependencyCount = export.Indexes.Dependency.EdgeCount
+	response.Indexes.StreamingCardinality = export.Indexes.Streaming.Cardinality
+	response.Indexes.StreamingBytes = export.Indexes.Streaming.ApproximateBytes
+
+	// Convert history index recent entries
+	for _, entry := range export.Indexes.History.RecentEntries {
+		histEntry := HistoryEntryResponse{
+			NodeID:     entry.NodeID,
+			VisitCount: 1, // Each entry represents one visit
+		}
+		if !entry.Timestamp.IsZero() {
+			histEntry.LastVisitedAt = entry.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+		}
+		response.Indexes.History = append(response.Indexes.History, histEntry)
+	}
+
+	return response
 }

@@ -229,6 +229,9 @@ type SessionMetrics struct {
 	// GroundingRetries is the number of grounding validation retries.
 	GroundingRetries int `json:"grounding_retries"`
 
+	// ToolForcingRetries is the number of tool forcing retries.
+	ToolForcingRetries int `json:"tool_forcing_retries"`
+
 	// GraphStats contains Code Buddy graph statistics.
 	GraphStats *GraphStats `json:"graph_stats,omitempty"`
 }
@@ -273,6 +276,42 @@ type RunResult struct {
 
 	// Error contains error details (for ERROR state).
 	Error *AgentError `json:"error,omitempty"`
+
+	// ReasoningSummary provides high-level metrics about the reasoning process.
+	// Populated when CRS is enabled for the session.
+	ReasoningSummary *ReasoningSummary `json:"reasoning_summary,omitempty"`
+}
+
+// ReasoningSummary provides high-level metrics about reasoning progress.
+//
+// Description:
+//
+//	Computed from CRS state to give a quick overview of reasoning
+//	progress without requiring full index inspection. Included in
+//	RunResult when CRS is enabled for the session.
+type ReasoningSummary struct {
+	// NodesExplored is the total number of nodes in the proof index.
+	NodesExplored int `json:"nodes_explored"`
+
+	// NodesProven is the count of nodes with PROVEN status.
+	NodesProven int `json:"nodes_proven"`
+
+	// NodesDisproven is the count of nodes with DISPROVEN status.
+	NodesDisproven int `json:"nodes_disproven"`
+
+	// NodesUnknown is the count of nodes with UNKNOWN or EXPANDED status.
+	NodesUnknown int `json:"nodes_unknown"`
+
+	// ConstraintsApplied is the number of active constraints.
+	ConstraintsApplied int `json:"constraints_applied"`
+
+	// ExplorationDepth is the number of history entries (proxy for depth).
+	ExplorationDepth int `json:"exploration_depth"`
+
+	// ConfidenceScore is the ratio of proven nodes to explored nodes.
+	// Value is between 0.0 and 1.0. Use with caution - this is a coverage
+	// metric, not a statistical confidence interval.
+	ConfidenceScore float64 `json:"confidence_score"`
 }
 
 // ClarifyRequest contains details when agent needs clarification.

@@ -157,11 +157,28 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 	// Create LLM adapter
 	llmClient := agentllm.NewOllamaAdapter(ollamaClient, model)
 
+	// Create LLM classifier for better query classification
+	llmClassifier, classifierErr := createLLMClassifier(llmClient)
+	if classifierErr != nil {
+		slog.Warn("Failed to create LLM classifier, using regex fallback",
+			slog.String("error", classifierErr.Error()))
+	}
+
 	// Create phase registry with actual phase implementations
 	registry := agent.NewPhaseRegistry()
 	registry.Register(agent.StateInit, code_buddy.NewPhaseAdapter(phases.NewInitPhase()))
 	registry.Register(agent.StatePlan, code_buddy.NewPhaseAdapter(phases.NewPlanPhase()))
-	registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
+
+	// Use LLM classifier if available
+	if llmClassifier != nil {
+		slog.Info("Using LLM-based query classifier")
+		registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(
+			phases.NewExecutePhase(phases.WithQueryClassifier(llmClassifier)),
+		))
+	} else {
+		registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
+	}
+
 	registry.Register(agent.StateReflect, code_buddy.NewPhaseAdapter(phases.NewReflectPhase()))
 	registry.Register(agent.StateClarify, code_buddy.NewPhaseAdapter(phases.NewClarifyPhase()))
 	slog.Info("Registered phases", slog.Int("count", registry.Count()))
@@ -249,4 +266,30 @@ func printBanner(port int, agentEnabled bool) {
 ╚═══════════════════════════════════════════════════════════════════╝
 `
 	fmt.Printf(banner, agentStatus, port, port, port, port)
+}
+
+// createLLMClassifier creates an LLM-based query classifier.
+//
+// Description:
+//
+//	Creates an LLMClassifier using the provided LLM client and static
+//	tool definitions. This enables better query classification than
+//	regex patterns alone.
+//
+// Inputs:
+//
+//	client - The LLM client for classification calls.
+//
+// Outputs:
+//
+//	classifier.QueryClassifier - The LLM classifier, or nil on error.
+//	error - Non-nil if classifier creation fails.
+func createLLMClassifier(client agentllm.Client) (classifier.QueryClassifier, error) {
+	toolDefs := tools.StaticToolDefinitions()
+	if len(toolDefs) == 0 {
+		return nil, fmt.Errorf("no static tool definitions available")
+	}
+
+	config := classifier.DefaultClassifierConfig()
+	return classifier.NewLLMClassifier(client, toolDefs, config)
 }

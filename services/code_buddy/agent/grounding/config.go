@@ -109,6 +109,9 @@ type Config struct {
 
 	// ConfidenceCheckerConfig configures the confidence fabrication checker.
 	ConfidenceCheckerConfig *ConfidenceCheckerConfig
+
+	// PhantomPackageCheckerConfig configures the phantom package checker.
+	PhantomPackageCheckerConfig *PhantomPackageCheckerConfig
 }
 
 // DefaultConfig returns sensible defaults for grounding configuration.
@@ -150,6 +153,7 @@ func DefaultConfig() Config {
 		TemporalCheckerConfig:        DefaultTemporalCheckerConfig(),
 		CrossContextCheckerConfig:    DefaultCrossContextCheckerConfig(),
 		ConfidenceCheckerConfig:      DefaultConfidenceCheckerConfig(),
+		PhantomPackageCheckerConfig:  DefaultPhantomPackageCheckerConfig(),
 	}
 }
 
@@ -795,5 +799,36 @@ func DefaultConfidenceCheckerConfig() *ConfidenceCheckerConfig {
 		SkipTautologies:         true,
 		SkipCodeBlocks:          true,
 		MaxClaimsToCheck:        20,
+	}
+}
+
+// PhantomPackageCheckerConfig configures the phantom package checker.
+type PhantomPackageCheckerConfig struct {
+	// Enabled determines if phantom package checking is active.
+	Enabled bool
+
+	// MaxPackagesToCheck limits how many package references to check.
+	// Prevents excessive checking on large responses.
+	MaxPackagesToCheck int
+
+	// MinPackageLength filters out short paths (e.g., "pkg" alone).
+	// Package paths shorter than this are ignored.
+	MinPackageLength int
+
+	// CheckGoPackages enables checking Go-style pkg/cmd/internal paths.
+	CheckGoPackages bool
+
+	// CheckPythonPackages enables checking Python-style dot.paths.
+	CheckPythonPackages bool
+}
+
+// DefaultPhantomPackageCheckerConfig returns default phantom package checker config.
+func DefaultPhantomPackageCheckerConfig() *PhantomPackageCheckerConfig {
+	return &PhantomPackageCheckerConfig{
+		Enabled:             true,
+		MaxPackagesToCheck:  50,
+		MinPackageLength:    4, // Skip bare "pkg", "cmd"
+		CheckGoPackages:     true,
+		CheckPythonPackages: true,
 	}
 }

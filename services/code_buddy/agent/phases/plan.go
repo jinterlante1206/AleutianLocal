@@ -286,6 +286,13 @@ func (p *PlanPhase) assembleContext(ctx context.Context, deps *Dependencies) (*a
 		return nil, fmt.Errorf("assemble context: %w", err)
 	}
 
+	// Inject available tools into the system prompt
+	// This ensures the LLM knows what tools are available
+	if deps.ToolRegistry != nil {
+		toolDefs := deps.ToolRegistry.GetDefinitions()
+		deps.ContextManager.InjectToolsIntoPrompt(assembled, toolDefs)
+	}
+
 	return assembled, nil
 }
 

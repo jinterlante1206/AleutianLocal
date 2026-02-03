@@ -76,27 +76,95 @@ func DefaultManagerConfig() ManagerConfig {
 		MaxContextSize: DefaultMaxContextSize,
 		EvictionTarget: DefaultEvictionTarget,
 		EvictionPolicy: "hybrid",
-		SystemPrompt: `You are a helpful AI assistant specialized in understanding and analyzing code.
-You have access to the complete codebase and tools to explore it thoroughly.
+		SystemPrompt: `## MANDATORY: TOOL-FIRST RESPONSE
 
-IMPORTANT GUIDELINES:
-1. Be proactive - for broad questions like "what are the security concerns?" or "trace the data flow",
-   start by finding entry points (main functions, HTTP handlers, CLI commands) and explore outward.
-2. Use your tools to gather information before answering. Don't guess - explore the code.
-3. For analytical questions, examine relevant code paths and provide specific findings with file:line references.
-4. Only request clarification when there are genuinely ambiguous or contradictory requirements.
-   Do NOT ask "which file?" or "which function?" - explore the codebase and provide a comprehensive answer.
-5. When making code changes, ensure safety by checking for potential issues.
+**Your response to any analytical question MUST start with a tool call.**
 
-GROUNDING RULES (Critical - prevents hallucination):
-1. ONLY discuss code that appears in your context. If you haven't seen a file, don't describe it.
-2. Use [file.go:42] or [file.go:42-50] citation format when referencing specific code.
-3. If asked about something not in your context, say "I don't see X in the provided context" - don't invent it.
-4. Match the project's programming language. If the context shows Go code, discuss Go patterns (not Python/Flask/etc).
-5. Quote actual code snippets when explaining behavior - this proves you're looking at real code.
-6. If uncertain whether something exists, use tools to verify before claiming it exists.
+DO NOT:
+- Say "I'm ready to help you analyze..." - USE TOOLS INSTEAD
+- Say "What would you like me to investigate?" - DECIDE AND ACT
+- Say "I'll analyze this codebase..." without immediately calling a tool
+- Say "Hello! I'm here to help..." - JUST CALL THE TOOL
+- Offer a menu of options - PICK THE RIGHT TOOL AND CALL IT
+- Ask clarifying questions before trying tools first
+- Describe what you could do - DO IT
 
-Always explain your reasoning and cite specific code locations in your answers.`,
+The user asked a question. ANSWER IT by calling tools, not by offering to help.
+
+## QUESTION → TOOL MAPPING
+
+When you see these questions, call these tools FIRST:
+
+| Question Pattern | Tool to Call |
+|------------------|--------------|
+| "What tests exist?" | find_entry_points(type="test") |
+| "Entry points?" / "main functions?" | find_entry_points(type="main") |
+| "How does X work?" / "Trace the flow" | trace_data_flow |
+| "Project structure?" / "What packages?" | find_entry_points(type="main") |
+| "Configuration?" / "How is X configured?" | find_config_usage |
+| "Error handling?" | trace_error_flow |
+| "Similar code?" / "Duplicates?" | find_similar_code |
+| "Summarize file X" / "What's in X?" | summarize_file |
+| "Security concerns?" | find_entry_points → trace_data_flow |
+| "Logging patterns?" | find_config_usage(config_key="log") |
+
+## GROUNDING RULES (Prevents Hallucination)
+
+### Evidence Requirements
+
+1. **NEVER use hedging language for code facts:**
+   - BANNED: "likely", "probably", "might", "may", "could", "appears to", "seems to"
+   - If uncertain → call a tool to verify
+   - If not found → say "I don't see X in the context"
+
+2. **Every factual claim MUST have a [file.go:line] citation:**
+   - BAD:  "The system uses flags for configuration"
+   - GOOD: "Flags defined in [cmd/main.go:23-38]: -project, -api-key, -verbose"
+
+3. **Quote actual code when explaining behavior:**
+   - BAD:  "The function calculates complexity"
+   - GOOD: "CalculateChangeComplexity [complexity.go:45] uses: score = lines * weight"
+
+### Response Format by Question Type
+
+| Question Type | Format | Required Elements |
+|---------------|--------|-------------------|
+| "What exists?" / "What packages?" | TABLE | Name, Path, File count, Responsibility |
+| "Configuration?" / "Options?" | TABLE + CODE | Flag/env name, type, default, code snippet |
+| "How does X work?" | FLOW + CITATIONS | Step-by-step with [file:line] at each step |
+| "Where is X?" | LIST | File paths with line numbers |
+
+### Prohibited Patterns
+
+- "The system likely..." → FIND THE CODE
+- "It appears to..." → CITE THE EVIDENCE
+- "Based on the function names..." → READ THE ACTUAL IMPLEMENTATION
+- Describing flow without any [file:line] citations
+
+### Examples
+
+**BAD Response (hedging, no citations):**
+> The system likely uses flags for configuration. It appears to load settings from environment variables. Based on the function names, main probably calls init first.
+
+**GOOD Response (evidence-based, cited):**
+> ## Configuration
+>
+> ### CLI Flags [cmd/main.go:23-38]
+> | Flag | Type | Default |
+> |------|------|---------|
+> | -project | string | "." |
+> | -verbose | bool | false |
+>
+> ### Loading: flag.Parse() called at [main.go:45]
+
+## RESPONSE PATTERN
+
+1. CALL a tool first (your response starts with a tool call, not text)
+2. Report findings with specific [file:line] citations
+3. Explain based on actual code from tool results
+4. Use tables for enumeration questions (packages, config, files)
+
+Do NOT write explanatory text before calling tools. Call the tool FIRST.`,
 	}
 }
 
@@ -369,13 +437,110 @@ func (m *Manager) detectProjectLanguage(entries []agent.CodeEntry) string {
 //
 //	string - The system prompt with language context injected.
 func (m *Manager) injectProjectLanguage(systemPrompt, lang string) string {
-	langNotice := fmt.Sprintf(`IMPORTANT: You are analyzing a **%s** project.
-Do NOT reference or describe code patterns from other languages (Python, JavaScript, Java, etc.)
+	langNotice := fmt.Sprintf(`## PROJECT LANGUAGE
+
+You are analyzing a **%s** project. Do NOT reference code patterns from other languages
 unless those files are explicitly shown in your context.
 
 `, lang)
 
-	return langNotice + systemPrompt
+	// Insert AFTER MANDATORY section, BEFORE QUESTION → TOOL MAPPING (or AVAILABLE TOOLS if present)
+	// This keeps the critical instruction first
+	insertMarker := "## QUESTION → TOOL MAPPING"
+
+	// Check if AVAILABLE TOOLS section exists (it would be inserted before QUESTION)
+	if strings.Contains(systemPrompt, "## AVAILABLE TOOLS") {
+		insertMarker = "## AVAILABLE TOOLS"
+	}
+
+	idx := strings.Index(systemPrompt, insertMarker)
+	if idx > 0 {
+		return systemPrompt[:idx] + langNotice + systemPrompt[idx:]
+	}
+
+	// Fallback: insert after first section (after the DO NOT list ends)
+	doNotEnd := strings.Index(systemPrompt, "The user asked a question")
+	if doNotEnd > 0 {
+		// Find end of that line
+		lineEnd := strings.Index(systemPrompt[doNotEnd:], "\n")
+		if lineEnd > 0 {
+			insertPos := doNotEnd + lineEnd + 1
+			return systemPrompt[:insertPos] + "\n" + langNotice + systemPrompt[insertPos:]
+		}
+	}
+
+	return systemPrompt + langNotice
+}
+
+// injectToolList adds available tools to the system prompt.
+//
+// Description:
+//
+//	Inserts a dynamically generated list of available tools into the
+//	system prompt. The list is formatted as a markdown table showing
+//	tool names and descriptions.
+//
+// Inputs:
+//
+//	systemPrompt - The base system prompt.
+//	toolDefs - Available tool definitions.
+//
+// Outputs:
+//
+//	string - The system prompt with tool list injected.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (m *Manager) injectToolList(systemPrompt string, toolDefs []tools.ToolDefinition) string {
+	if len(toolDefs) == 0 {
+		return systemPrompt
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## AVAILABLE TOOLS\n\n")
+	sb.WriteString("| Tool | Purpose |\n")
+	sb.WriteString("|------|--------|\n")
+
+	for _, tool := range toolDefs {
+		// Truncate description to keep prompt concise
+		desc := tool.Description
+		if len(desc) > 80 {
+			desc = desc[:77] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("| %s | %s |\n", tool.Name, desc))
+	}
+	sb.WriteString("\n")
+
+	// Insert AFTER MANDATORY section, BEFORE QUESTION → TOOL MAPPING
+	// This ensures the critical instruction comes first, then tools, then how to use them
+	insertMarker := "## QUESTION → TOOL MAPPING"
+	idx := strings.Index(systemPrompt, insertMarker)
+	if idx > 0 {
+		return systemPrompt[:idx] + sb.String() + systemPrompt[idx:]
+	}
+
+	// Fallback: append to end if marker not found
+	return systemPrompt + sb.String()
+}
+
+// InjectToolsIntoPrompt adds available tools to an assembled context's system prompt.
+//
+// Description:
+//
+//	Public method to inject tool definitions into an existing assembled
+//	context. This is called by the execute phase when it has access to
+//	the tool registry.
+//
+// Inputs:
+//
+//	ctx - The assembled context to modify.
+//	toolDefs - Available tool definitions from ToolRegistry.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (m *Manager) InjectToolsIntoPrompt(ctx *agent.AssembledContext, toolDefs []tools.ToolDefinition) {
+	if ctx == nil || len(toolDefs) == 0 {
+		return
+	}
+	ctx.SystemPrompt = m.injectToolList(ctx.SystemPrompt, toolDefs)
 }
 
 // Update modifies context based on a tool result.

@@ -49,6 +49,42 @@ type Client interface {
 	Model() string
 }
 
+// ToolChoice specifies how the model should select tools.
+//
+// The tool_choice parameter controls whether and which tools the model calls.
+// This enables forcing tool usage at the API level rather than relying on prompts.
+type ToolChoice struct {
+	// Type controls tool selection behavior:
+	// - "auto": Model decides whether to call tools (default)
+	// - "any": Model MUST call at least one tool
+	// - "tool": Model MUST call the specific named tool
+	// - "none": Model cannot call tools (text response only)
+	Type string `json:"type"`
+
+	// Name is required when Type is "tool". Specifies which tool to force.
+	Name string `json:"name,omitempty"`
+}
+
+// ToolChoiceAuto allows the model to decide whether to call tools.
+func ToolChoiceAuto() *ToolChoice {
+	return &ToolChoice{Type: "auto"}
+}
+
+// ToolChoiceAny forces the model to call at least one tool.
+func ToolChoiceAny() *ToolChoice {
+	return &ToolChoice{Type: "any"}
+}
+
+// ToolChoiceRequired forces the model to call a specific tool by name.
+func ToolChoiceRequired(toolName string) *ToolChoice {
+	return &ToolChoice{Type: "tool", Name: toolName}
+}
+
+// ToolChoiceNone prevents the model from calling any tools.
+func ToolChoiceNone() *ToolChoice {
+	return &ToolChoice{Type: "none"}
+}
+
 // Request represents a completion request to the LLM.
 type Request struct {
 	// SystemPrompt is the system message.
@@ -59,6 +95,10 @@ type Request struct {
 
 	// Tools defines available tools for the LLM.
 	Tools []tools.ToolDefinition `json:"tools,omitempty"`
+
+	// ToolChoice controls tool selection behavior.
+	// If nil, defaults to "auto" (model decides).
+	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
 
 	// MaxTokens limits the response length.
 	MaxTokens int `json:"max_tokens,omitempty"`
@@ -234,6 +274,12 @@ func formatCodeContext(entries []agent.CodeEntry) string {
 
 // ParseToolCalls extracts tool invocations from an LLM response.
 //
+// Description:
+//
+//	Parses native tool_calls from the LLM response structure.
+//	For models that don't support native function calling, use
+//	ParseToolCallsWithReAct instead.
+//
 // Inputs:
 //
 //	response - The LLM response
@@ -241,6 +287,8 @@ func formatCodeContext(entries []agent.CodeEntry) string {
 // Outputs:
 //
 //	[]agent.ToolInvocation - Parsed tool invocations
+//
+// Thread Safety: This function is safe for concurrent use.
 func ParseToolCalls(response *Response) []agent.ToolInvocation {
 	if response == nil || len(response.ToolCalls) == 0 {
 		return nil
@@ -259,6 +307,70 @@ func ParseToolCalls(response *Response) []agent.ToolInvocation {
 	}
 
 	return invocations
+}
+
+// ParseToolCallsWithReAct extracts tool invocations with ReAct fallback.
+//
+// Description:
+//
+//	First attempts to parse native tool_calls from the response.
+//	If no native tool calls are found, falls back to parsing
+//	ReAct-style text format (Thought/Action/Action Input).
+//
+//	This enables tool usage with models that don't support native
+//	function calling.
+//
+// Inputs:
+//
+//	response - The LLM response
+//
+// Outputs:
+//
+//	[]agent.ToolInvocation - Parsed tool invocations (from either source)
+//	bool - True if invocations came from ReAct parsing (not native)
+//
+// Example:
+//
+//	invocations, usedReAct := ParseToolCallsWithReAct(response)
+//	if usedReAct {
+//	    // Format next tool result as Observation
+//	}
+//
+// Thread Safety: This function is safe for concurrent use.
+func ParseToolCallsWithReAct(response *Response) ([]agent.ToolInvocation, bool) {
+	if response == nil {
+		return nil, false
+	}
+
+	// First try native tool calls
+	if len(response.ToolCalls) > 0 {
+		return ParseToolCalls(response), false
+	}
+
+	// Fall back to ReAct parsing
+	if response.Content == "" {
+		return nil, false
+	}
+
+	reactResult := ParseReAct(response.Content)
+	if !reactResult.HasAction() {
+		return nil, false
+	}
+
+	toolCall := reactResult.ToToolCall()
+	if toolCall == nil {
+		return nil, false
+	}
+
+	// Convert to ToolInvocation
+	params := parseArguments(toolCall.Arguments)
+	invocation := agent.ToolInvocation{
+		ID:         toolCall.ID,
+		Tool:       toolCall.Name,
+		Parameters: params,
+	}
+
+	return []agent.ToolInvocation{invocation}, true
 }
 
 // parseArguments parses JSON arguments string into ToolParameters.
