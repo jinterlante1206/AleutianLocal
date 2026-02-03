@@ -65,7 +65,7 @@ func (qt QuestionType) String() string {
 
 // Package-level compiled regexes for question type detection (compiled once).
 var (
-	// listQuestionPattern detects list-type questions.
+	// listQuestionPattern detects list-type questions (direct form).
 	listQuestionPattern = regexp.MustCompile(
 		`(?i)^(?:what\s+(?:\w+\s+)*(?:exist|are there|do we have)|` +
 			`list\s+(?:all\s+)?|` +
@@ -75,29 +75,62 @@ var (
 			`what\s+(?:\w+\s+)*files?)`,
 	)
 
-	// howQuestionPattern detects how-type questions.
+	// listQuestionPatternIndirect detects indirect list-type questions.
+	// E.g., "Can you tell me what tests exist?" or "I'd like to know what files are there"
+	listQuestionPatternIndirect = regexp.MustCompile(
+		`(?i)(?:can\s+you|could\s+you|please|i(?:'d| would)\s+like\s+to\s+know)\s+` +
+			`(?:tell\s+me\s+)?(?:what\s+(?:\w+\s+)*(?:exist|are there|do we have)|` +
+			`(?:list|show|find)\s+(?:all\s+)?)`,
+	)
+
+	// howQuestionPattern detects how-type questions (direct form).
 	howQuestionPattern = regexp.MustCompile(
 		`(?i)^how\s+(?:does|is|do|are|can|to|should)`,
 	)
 
-	// whereQuestionPattern detects where-type questions.
+	// howQuestionPatternIndirect detects indirect how-type questions.
+	howQuestionPatternIndirect = regexp.MustCompile(
+		`(?i)(?:can\s+you|could\s+you|please)\s+(?:explain|tell\s+me|describe)\s+how`,
+	)
+
+	// whereQuestionPattern detects where-type questions (direct form).
 	whereQuestionPattern = regexp.MustCompile(
 		`(?i)^where\s+(?:is|are|do|does|can)`,
 	)
 
-	// whyQuestionPattern detects why-type questions.
+	// whereQuestionPatternIndirect detects indirect where-type questions.
+	whereQuestionPatternIndirect = regexp.MustCompile(
+		`(?i)(?:can\s+you|could\s+you|please)\s+(?:tell\s+me|show\s+me|find)\s+where`,
+	)
+
+	// whyQuestionPattern detects why-type questions (direct form).
 	whyQuestionPattern = regexp.MustCompile(
 		`(?i)^why\s+(?:does|is|do|are|did|was|were)`,
 	)
 
-	// whatQuestionPattern detects definitional what questions.
+	// whyQuestionPatternIndirect detects indirect why-type questions.
+	whyQuestionPatternIndirect = regexp.MustCompile(
+		`(?i)(?:can\s+you|could\s+you|please)\s+(?:explain|tell\s+me)\s+why`,
+	)
+
+	// whatQuestionPattern detects definitional what questions (direct form).
 	whatQuestionPattern = regexp.MustCompile(
 		`(?i)^what\s+(?:is|does|are)\s+(?:the\s+)?[a-z]`,
 	)
 
-	// describeQuestionPattern detects describe/explain questions.
+	// whatQuestionPatternIndirect detects indirect what questions.
+	whatQuestionPatternIndirect = regexp.MustCompile(
+		`(?i)(?:can\s+you|could\s+you|please)\s+(?:tell\s+me|explain)\s+what\s+(?:is|does|are)`,
+	)
+
+	// describeQuestionPattern detects describe/explain questions (direct form).
 	describeQuestionPattern = regexp.MustCompile(
 		`(?i)^(?:describe|explain|tell\s+me\s+about)`,
+	)
+
+	// describeQuestionPatternIndirect detects indirect describe/explain questions.
+	describeQuestionPatternIndirect = regexp.MustCompile(
+		`(?i)(?:can\s+you|could\s+you|please)\s+(?:describe|explain|give\s+(?:me\s+)?(?:an?\s+)?(?:overview|summary))`,
 	)
 
 	// wordPattern extracts words from text.
@@ -191,10 +224,16 @@ func NewSemanticDriftChecker(config *SemanticDriftCheckerConfig) *SemanticDriftC
 		}
 	}
 
+	// Copy stopWords for defense-in-depth (prevents accidental mutation of package-level map)
+	stopWordsCopy := make(map[string]bool, len(stopWords))
+	for word, val := range stopWords {
+		stopWordsCopy[word] = val
+	}
+
 	return &SemanticDriftChecker{
 		config:         config,
 		synonymLookup:  synonymLookup,
-		stopWordsLower: stopWords,
+		stopWordsLower: stopWordsCopy,
 	}
 }
 
@@ -305,10 +344,22 @@ func (c *SemanticDriftChecker) Check(ctx context.Context, input *CheckInput) []V
 }
 
 // classifyQuestion determines the type of question being asked.
+//
+// Description:
+//
+//	Classifies questions by checking both direct patterns (e.g., "What tests exist?")
+//	and indirect patterns (e.g., "Can you tell me what tests exist?").
+//	Direct patterns are checked first, then indirect patterns as fallback.
+//
+// Inputs:
+//   - question: The question to classify.
+//
+// Outputs:
+//   - QuestionType: The classified type.
 func (c *SemanticDriftChecker) classifyQuestion(question string) QuestionType {
 	q := strings.TrimSpace(question)
 
-	// Check patterns in order of specificity
+	// Check direct patterns first (in order of specificity)
 	if listQuestionPattern.MatchString(q) {
 		return QuestionList
 	}
@@ -325,6 +376,27 @@ func (c *SemanticDriftChecker) classifyQuestion(question string) QuestionType {
 		return QuestionDescribe
 	}
 	if whatQuestionPattern.MatchString(q) {
+		return QuestionWhat
+	}
+
+	// Check indirect patterns as fallback for questions like
+	// "Can you tell me what tests exist?" or "Could you explain how this works?"
+	if listQuestionPatternIndirect.MatchString(q) {
+		return QuestionList
+	}
+	if howQuestionPatternIndirect.MatchString(q) {
+		return QuestionHow
+	}
+	if whereQuestionPatternIndirect.MatchString(q) {
+		return QuestionWhere
+	}
+	if whyQuestionPatternIndirect.MatchString(q) {
+		return QuestionWhy
+	}
+	if describeQuestionPatternIndirect.MatchString(q) {
+		return QuestionDescribe
+	}
+	if whatQuestionPatternIndirect.MatchString(q) {
 		return QuestionWhat
 	}
 
@@ -448,6 +520,7 @@ func (c *SemanticDriftChecker) calculateTopicMismatch(questionKeywords, response
 //	LIST questions should have list-like responses.
 //	HOW questions should describe processes.
 //	WHERE questions should reference locations.
+//	Penalties are configurable via SemanticDriftCheckerConfig.
 //
 // Inputs:
 //   - questionType: The classified question type.
@@ -462,21 +535,21 @@ func (c *SemanticDriftChecker) calculateTypeMismatch(questionType QuestionType, 
 		if c.hasListIndicators(response) {
 			return 0.0
 		}
-		return 0.7 // Significant mismatch
+		return c.config.ListTypeMismatchPenalty
 
 	case QuestionWhere:
 		// WHERE questions should mention locations/files
 		if c.hasLocationIndicators(response) {
 			return 0.0
 		}
-		return 0.5 // Moderate mismatch
+		return c.config.WhereTypeMismatchPenalty
 
 	case QuestionHow:
 		// HOW questions should describe processes
 		if c.hasProcessIndicators(response) {
 			return 0.0
 		}
-		return 0.3 // Slight mismatch
+		return c.config.HowTypeMismatchPenalty
 
 	case QuestionUnknown:
 		// Can't assess type match for unknown questions

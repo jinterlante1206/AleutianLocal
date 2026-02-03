@@ -412,7 +412,8 @@ services:
     networks:
       - aleutian-network
     depends_on:
-      - aleutian-jaeger
+      aleutian-jaeger:
+        condition: service_healthy
 
   aleutian-jaeger:
     image: jaegertracing/all-in-one:latest
@@ -437,7 +438,8 @@ services:
     networks:
       - aleutian-network
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
       interval: 10s
@@ -454,8 +456,10 @@ services:
     networks:
       - aleutian-network
     depends_on:
-      - prometheus
-      - aleutian-jaeger
+      prometheus:
+        condition: service_healthy
+      aleutian-jaeger:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
       interval: 10s
