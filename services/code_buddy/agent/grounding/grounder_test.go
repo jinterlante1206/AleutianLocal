@@ -551,9 +551,9 @@ func TestDetectLanguageFromPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			lang := detectLanguageFromPath(tt.path)
+			lang := DetectLanguageFromPath(tt.path)
 			if lang != tt.expected {
-				t.Errorf("detectLanguageFromPath(%q) = %q, want %q", tt.path, lang, tt.expected)
+				t.Errorf("DetectLanguageFromPath(%q) = %q, want %q", tt.path, lang, tt.expected)
 			}
 		})
 	}

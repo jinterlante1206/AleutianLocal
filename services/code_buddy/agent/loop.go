@@ -841,7 +841,21 @@ func (l *DefaultAgentLoop) collectToolInvocations(session *Session) []ToolInvoca
 	return invocations
 }
 
-// getLastAssistantMessage returns the last assistant response.
+// getLastAssistantMessage returns the last non-empty assistant response.
+//
+// Description:
+//
+//	Walks backward through conversation history to find the most recent
+//	assistant message with actual content. Empty assistant messages (which
+//	can occur from context overflow during LLM calls) are skipped.
+//
+// Inputs:
+//
+//	session - The session to search.
+//
+// Outputs:
+//
+//	string - The last non-empty assistant response, or empty string if none.
 func (l *DefaultAgentLoop) getLastAssistantMessage(session *Session) string {
 	ctx := session.GetCurrentContext()
 	if ctx == nil {
@@ -849,8 +863,10 @@ func (l *DefaultAgentLoop) getLastAssistantMessage(session *Session) string {
 	}
 
 	for i := len(ctx.ConversationHistory) - 1; i >= 0; i-- {
-		if ctx.ConversationHistory[i].Role == "assistant" {
-			return ctx.ConversationHistory[i].Content
+		msg := ctx.ConversationHistory[i]
+		// Skip empty assistant messages (can occur from context overflow)
+		if msg.Role == "assistant" && msg.Content != "" {
+			return msg.Content
 		}
 	}
 

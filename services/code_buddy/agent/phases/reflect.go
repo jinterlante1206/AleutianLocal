@@ -18,6 +18,7 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 )
 
@@ -473,6 +474,10 @@ func (p *ReflectPhase) emitStateTransition(deps *Dependencies, from, to agent.Ag
 //	If synthesis fails due to context overflow or LLM errors, this method
 //	generates a fallback response summarizing the tools used and findings.
 //
+//	Post-synthesis verification runs after each synthesis attempt to catch
+//	hallucinations. If verification fails, synthesis is retried with stricter
+//	prompts up to MaxRetries times.
+//
 // Inputs:
 //
 //	ctx - Context for cancellation.
@@ -514,59 +519,280 @@ func (p *ReflectPhase) synthesizeResponse(ctx context.Context, deps *Dependencie
 	// Estimate context size and truncate if needed to prevent overflow
 	synthesisCtx := p.prepareSynthesisContext(deps)
 
-	// Build synthesis prompt
-	synthesisPrompt := "Based on the tools you used and information you gathered, please provide a concise summary answering the user's original question. Focus on the key findings and insights."
+	// Build anchored synthesis prompt if builder available
+	anchoredBuilder := p.getAnchoredSynthesisBuilder(deps)
+	userQuestion := grounding.ExtractUserQuestion(synthesisCtx)
+	projectLang := p.detectProjectLanguage(synthesisCtx)
 
-	// Add synthesis prompt to the prepared context
-	synthesisCtx.ConversationHistory = append(synthesisCtx.ConversationHistory, agent.Message{
-		Role:    "user",
-		Content: synthesisPrompt,
-	})
-
-	// Build and send LLM request (no tools - just get a text response)
-	request := llm.BuildRequest(synthesisCtx, nil, 4096)
-
-	response, err := deps.LLMClient.Complete(ctx, request)
-	if err != nil {
-		slog.Error("Failed to synthesize response, using fallback",
-			slog.String("session_id", deps.Session.ID),
-			slog.String("error", err.Error()),
-		)
-		p.storeFallbackResponse(deps)
-		return
+	var baseSynthesisPrompt string
+	if anchoredBuilder != nil {
+		baseSynthesisPrompt = anchoredBuilder.BuildAnchoredSynthesisPrompt(ctx, synthesisCtx, userQuestion, projectLang)
+	} else {
+		// Fallback to basic prompt
+		baseSynthesisPrompt = "Based on the tools you used and information you gathered, please provide a concise summary answering the user's original question. Focus on the key findings and insights."
 	}
 
-	// Check for empty response (context overflow or model issue)
-	if response.Content == "" {
-		slog.Warn("Synthesis returned empty content, using fallback",
-			slog.String("session_id", deps.Session.ID),
-			slog.Int("output_tokens", response.OutputTokens),
-			slog.String("stop_reason", response.StopReason),
-		)
-		p.storeFallbackResponse(deps)
-		return
+	// Get post-synthesis verifier if available
+	postSynthesisVerifier := p.getPostSynthesisVerifier(deps)
+	maxRetries := 3
+	if postSynthesisVerifier == nil {
+		maxRetries = 1 // Single attempt without verification
+	}
+
+	var lastResponse string
+	var lastViolations []grounding.Violation
+
+	for retryCount := 0; retryCount < maxRetries; retryCount++ {
+		// Generate prompt (with increasing strictness on retries)
+		synthesisPrompt := baseSynthesisPrompt
+		if postSynthesisVerifier != nil && retryCount > 0 && len(lastViolations) > 0 {
+			synthesisPrompt = postSynthesisVerifier.GenerateStricterPrompt(baseSynthesisPrompt, lastViolations, grounding.StrictnessLevel(retryCount))
+		}
+
+		// Create fresh context copy for this attempt
+		attemptCtx := p.copySynthesisContext(synthesisCtx)
+		attemptCtx.ConversationHistory = append(attemptCtx.ConversationHistory, agent.Message{
+			Role:    "user",
+			Content: synthesisPrompt,
+		})
+
+		// Build and send LLM request (no tools - just get a text response)
+		request := llm.BuildRequest(attemptCtx, nil, 4096)
+
+		response, err := deps.LLMClient.Complete(ctx, request)
+		if err != nil {
+			slog.Error("Failed to synthesize response",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("error", err.Error()),
+				slog.Int("retry_count", retryCount),
+			)
+			if retryCount == maxRetries-1 {
+				p.storeFallbackResponse(deps)
+				return
+			}
+			continue
+		}
+
+		// Check for empty response (context overflow or model issue)
+		if response.Content == "" {
+			slog.Warn("Synthesis returned empty content",
+				slog.String("session_id", deps.Session.ID),
+				slog.Int("output_tokens", response.OutputTokens),
+				slog.String("stop_reason", response.StopReason),
+				slog.Int("retry_count", retryCount),
+			)
+			if retryCount == maxRetries-1 {
+				p.storeFallbackResponse(deps)
+				return
+			}
+			continue
+		}
+
+		lastResponse = response.Content
+
+		// Post-synthesis verification
+		if postSynthesisVerifier != nil {
+			verifyResult, verifyErr := postSynthesisVerifier.VerifyPostSynthesis(ctx, response.Content, deps.Context, retryCount)
+			if verifyErr != nil {
+				slog.Warn("Post-synthesis verification error",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("error", verifyErr.Error()),
+				)
+				// Treat verification errors as pass (non-fatal)
+			} else if !verifyResult.Passed {
+				slog.Warn("Post-synthesis verification failed",
+					slog.String("session_id", deps.Session.ID),
+					slog.Int("violations", len(verifyResult.Violations)),
+					slog.Int("retry_count", retryCount),
+					slog.String("strictness", verifyResult.StrictnessLevel.String()),
+				)
+				lastViolations = verifyResult.Violations
+
+				// Check if we've exhausted retries
+				if verifyResult.NeedsFeedbackLoop {
+					slog.Info("Post-synthesis feedback loop triggered",
+						slog.String("session_id", deps.Session.ID),
+						slog.Int("questions", len(verifyResult.FeedbackQuestions)),
+					)
+					// For now, store the best response we have with a warning
+					// Future: trigger re-exploration
+					lastResponse = p.appendVerificationWarning(lastResponse, verifyResult)
+					break
+				}
+
+				// Retry with stricter prompt
+				continue
+			} else {
+				slog.Debug("Post-synthesis verification passed",
+					slog.String("session_id", deps.Session.ID),
+					slog.Int("retry_count", retryCount),
+				)
+			}
+		}
+
+		// Verification passed or not available - use this response
+		break
 	}
 
 	// Store the synthesized response
-	if deps.Context != nil {
+	if lastResponse != "" && deps.Context != nil {
 		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
 			Role:    "assistant",
-			Content: response.Content,
+			Content: lastResponse,
 		})
 		// Persist to session
 		deps.Session.SetCurrentContext(deps.Context)
 
-		// Update token metrics
-		if response.OutputTokens > 0 {
-			deps.Session.IncrementMetric(agent.MetricTokens, response.OutputTokens)
-		}
-
 		slog.Info("Synthesized response stored",
 			slog.String("session_id", deps.Session.ID),
-			slog.Int("response_len", len(response.Content)),
-			slog.Int("tokens", response.OutputTokens),
+			slog.Int("response_len", len(lastResponse)),
 		)
+	} else if lastResponse == "" {
+		p.storeFallbackResponse(deps)
 	}
+}
+
+// getPostSynthesisVerifier extracts the post-synthesis verifier from deps if available.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//
+// Outputs:
+//
+//	grounding.PostSynthesisVerifier - The verifier, or nil if not available.
+func (p *ReflectPhase) getPostSynthesisVerifier(deps *Dependencies) grounding.PostSynthesisVerifier {
+	if deps.ResponseGrounder == nil {
+		return nil
+	}
+
+	// Type assert to get the PostSynthesisVerifier interface
+	if verifier, ok := deps.ResponseGrounder.(grounding.PostSynthesisVerifier); ok {
+		return verifier
+	}
+
+	return nil
+}
+
+// copySynthesisContext creates a shallow copy of the context for retry attempts.
+//
+// Inputs:
+//
+//	ctx - The context to copy.
+//
+// Outputs:
+//
+//	*agent.AssembledContext - A copy that can be modified independently.
+func (p *ReflectPhase) copySynthesisContext(ctx *agent.AssembledContext) *agent.AssembledContext {
+	if ctx == nil {
+		return &agent.AssembledContext{}
+	}
+
+	// Create a copy with copied slices
+	copy := &agent.AssembledContext{
+		SystemPrompt: ctx.SystemPrompt,
+		TotalTokens:  ctx.TotalTokens,
+	}
+
+	// Copy conversation history
+	if len(ctx.ConversationHistory) > 0 {
+		copy.ConversationHistory = make([]agent.Message, len(ctx.ConversationHistory))
+		for i, msg := range ctx.ConversationHistory {
+			copy.ConversationHistory[i] = msg
+		}
+	}
+
+	// Copy tool results
+	if len(ctx.ToolResults) > 0 {
+		copy.ToolResults = make([]agent.ToolResult, len(ctx.ToolResults))
+		for i, result := range ctx.ToolResults {
+			copy.ToolResults[i] = result
+		}
+	}
+
+	// Copy code context
+	if len(ctx.CodeContext) > 0 {
+		copy.CodeContext = make([]agent.CodeEntry, len(ctx.CodeContext))
+		for i, entry := range ctx.CodeContext {
+			copy.CodeContext[i] = entry
+		}
+	}
+
+	return copy
+}
+
+// appendVerificationWarning appends a warning to the response about verification issues.
+//
+// Inputs:
+//
+//	response - The original response.
+//	result - The verification result with violations.
+//
+// Outputs:
+//
+//	string - The response with appended warning.
+func (p *ReflectPhase) appendVerificationWarning(response string, result *grounding.PostSynthesisResult) string {
+	if result == nil || len(result.Violations) == 0 {
+		return response
+	}
+
+	warning := "\n\n---\n⚠️ **Note**: This response may contain some unverified claims. "
+	warning += "Consider using exploration tools to verify specific details."
+
+	return response + warning
+}
+
+// getAnchoredSynthesisBuilder extracts the anchored synthesis builder from deps if available.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//
+// Outputs:
+//
+//	grounding.AnchoredSynthesisBuilder - The builder, or nil if not available.
+func (p *ReflectPhase) getAnchoredSynthesisBuilder(deps *Dependencies) grounding.AnchoredSynthesisBuilder {
+	if deps.AnchoredSynthesisBuilder != nil {
+		return deps.AnchoredSynthesisBuilder
+	}
+	return nil
+}
+
+// detectProjectLanguage detects the primary language from context.
+//
+// Inputs:
+//
+//	ctx - The assembled context with code entries.
+//
+// Outputs:
+//
+//	string - The detected language (e.g., "go", "python"), or empty if unknown.
+func (p *ReflectPhase) detectProjectLanguage(ctx *agent.AssembledContext) string {
+	if ctx == nil {
+		return ""
+	}
+
+	// Count file extensions
+	langCounts := make(map[string]int)
+
+	for _, entry := range ctx.CodeContext {
+		lang := grounding.DetectLanguageFromPath(entry.FilePath)
+		if lang != "" {
+			langCounts[lang]++
+		}
+	}
+
+	// Find the most common language
+	maxCount := 0
+	primaryLang := ""
+	for lang, count := range langCounts {
+		if count > maxCount {
+			maxCount = count
+			primaryLang = lang
+		}
+	}
+
+	return primaryLang
 }
 
 // prepareSynthesisContext creates a reduced context for synthesis.

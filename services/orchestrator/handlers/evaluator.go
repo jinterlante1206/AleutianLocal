@@ -55,11 +55,20 @@ type dataFetchRequest struct {
 	Interval  string   `json:"interval"`
 }
 
+// metricsRequest is the request payload for the metrics service.
+type metricsRequest struct {
+	Returns        []float64 `json:"returns"`
+	Metric         string    `json:"metric"`
+	RiskFreeRate   float64   `json:"risk_free_rate"`
+	PeriodsPerYear int       `json:"periods_per_year"`
+}
+
 // Evaluator handles the logic of running forecasts and checking trading signals
 type Evaluator struct {
 	httpClient        *http.Client
 	orchestratorURL   string
 	tradingServiceURL string
+	metricsServiceURL string
 	storage           *InfluxDBStorage
 }
 
@@ -77,6 +86,12 @@ func NewEvaluator() (*Evaluator, error) {
 		tradingURL = "http://localhost:12132"
 	}
 
+	metricsURL := os.Getenv("SAPHENEIA_METRICS_SERVICE_URL")
+	if metricsURL == "" {
+		// Default to the external port mapped in podman-compose (12702->8000)
+		metricsURL = "http://localhost:12702"
+	}
+
 	storage, err := NewInfluxDBStorage()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
@@ -86,6 +101,7 @@ func NewEvaluator() (*Evaluator, error) {
 		httpClient:        &http.Client{Timeout: 5 * time.Minute},
 		orchestratorURL:   orchestratorURL,
 		tradingServiceURL: tradingURL,
+		metricsServiceURL: metricsURL,
 		storage:           storage,
 	}, nil
 }
@@ -258,15 +274,16 @@ func buildInferenceRequestFromJob(
 	}
 }
 
-// RunScenario executes a backtest based on the YAML scenario file
-func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.BacktestScenario, runID string) error {
+// RunScenario executes a backtest based on the YAML scenario file.
+// Returns computed metrics on success, or nil metrics with error on failure.
+func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.BacktestScenario, runID string) (*datatypes.MetricsResponse, error) {
 	ticker := scenario.Evaluation.Ticker
 	slog.Info("Starting backtest loop", "run_id", runID, "ticker", ticker)
 
 	// Precheck and autofill data
 	adjustedFetchStart, err := e.EnsureDataAvailability(ctx, scenario)
 	if err != nil {
-		return fmt.Errorf("data availability check failed: %w", err)
+		return nil, fmt.Errorf("data availability check failed: %w", err)
 	}
 	fetchStartDate := adjustedFetchStart
 
@@ -282,7 +299,7 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 		}
 		fetchEndDate, err = time.Parse(endLayout, endDateStr)
 		if err != nil {
-			return fmt.Errorf("invalid end_date format: %w", err)
+			return nil, fmt.Errorf("invalid end_date format: %w", err)
 		}
 	}
 
@@ -291,10 +308,10 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 	// Fetch OHLC data using absolute date range
 	fullHistory, _, err := fetchOHLCFromInfluxByDateRange(ctx, ticker, fetchStartDate, fetchEndDate)
 	if err != nil {
-		return fmt.Errorf("failed to fetch history: %w", err)
+		return nil, fmt.Errorf("failed to fetch history: %w", err)
 	}
 	if len(fullHistory.Close) == 0 {
-		return fmt.Errorf("no historical data found for %s", ticker)
+		return nil, fmt.Errorf("no historical data found for %s", ticker)
 	}
 
 	slog.Info("Data fetch complete",
@@ -309,7 +326,7 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 	}
 	evalStart, err := time.Parse(evalStartLayout, scenario.Evaluation.StartDate)
 	if err != nil {
-		return fmt.Errorf("invalid start date format: %w", err)
+		return nil, fmt.Errorf("invalid start date format: %w", err)
 	}
 
 	startIndex := -1
@@ -322,13 +339,13 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 	}
 
 	if startIndex == -1 {
-		return fmt.Errorf("start date %s not found in loaded history (oldest data: %s, latest data: %s)",
+		return nil, fmt.Errorf("start date %s not found in loaded history (oldest data: %s, latest data: %s)",
 			scenario.Evaluation.StartDate, fullHistory.Time[0].Format("2006-01-02"), fullHistory.Time[len(fullHistory.Time)-1].Format("2006-01-02"))
 	}
 
 	// Ensure we have enough context *before* the start index
 	if startIndex < scenario.Forecast.ContextSize {
-		return fmt.Errorf("insufficient history before start date. Need %d days context, but only have %d days available (start_date=%s is at index %d, oldest_data=%s)",
+		return nil, fmt.Errorf("insufficient history before start date. Need %d days context, but only have %d days available (start_date=%s is at index %d, oldest_data=%s)",
 			scenario.Forecast.ContextSize, startIndex, scenario.Evaluation.StartDate, startIndex, fullHistory.Time[0].Format("2006-01-02"))
 	}
 
@@ -493,6 +510,14 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 	currentPosition := scenario.Trading.InitialPosition
 	currentCash := scenario.Trading.InitialCash
 
+	// Track portfolio values for metrics calculation
+	// Pre-allocate slice with capacity for all iterations + initial value
+	portfolioValues := make([]float64, 0, endIndex-startIndex+2)
+
+	// Record initial portfolio value BEFORE trading begins
+	initialValue := currentCash + currentPosition*fullHistory.Close[startIndex]
+	portfolioValues = append(portfolioValues, initialValue)
+
 	// 5. Sequential trading loop using pre-fetched forecasts
 	for i := startIndex; i <= endIndex; i++ {
 		fr, ok := forecasts[i]
@@ -540,6 +565,10 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 		currentPosition = signal.PositionAfter
 		currentCash = signal.AvailableCash
 
+		// Track portfolio value AFTER trade execution
+		portfolioValue := currentCash + currentPosition*currentSimulatedPrice
+		portfolioValues = append(portfolioValues, portfolioValue)
+
 		// Store Result with metadata (populated only in unified mode)
 		result := datatypes.EvaluationResult{
 			Ticker:          ticker,
@@ -577,7 +606,27 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 			slog.Info("Progress", "date", currentDate.Format("20060102"), "cash", currentCash)
 		}
 	}
-	return nil
+
+	// --- Compute and Store Performance Metrics ---
+	slog.Info("Computing performance metrics", "portfolio_values", len(portfolioValues))
+
+	returns := portfolioValuesToReturns(portfolioValues)
+
+	metrics, err := e.CallMetricsService(ctx, returns, runID)
+	if err != nil {
+		// Non-blocking: log warning but don't fail the backtest
+		slog.Warn("Metrics calculation failed", "error", err)
+		// Return zero metrics instead of nil
+		metrics = &datatypes.MetricsResponse{}
+	} else {
+		// Store metrics to InfluxDB
+		if err := e.storage.StoreMetrics(ctx, runID, ticker, scenario.Forecast.Model, metrics); err != nil {
+			slog.Error("Failed to store metrics to InfluxDB", "error", err)
+			// Continue - metrics are still returned to caller
+		}
+	}
+
+	return metrics, nil
 }
 
 func (e *Evaluator) EvaluateTickerModel(
@@ -708,6 +757,104 @@ func retryWithBackoff(ctx context.Context, operation string, fn func() error) er
 		}
 	}
 	return fmt.Errorf("operation %s failed after %d attempts: %w", operation, maxRetries, lastErr)
+}
+
+// portfolioValuesToReturns converts a series of portfolio values to period returns.
+// Returns are capped to [-1.0, 10.0] to handle extreme values.
+func portfolioValuesToReturns(values []float64) []float64 {
+	if len(values) < 2 {
+		return []float64{}
+	}
+
+	returns := make([]float64, 0, len(values)-1)
+	for i := 1; i < len(values); i++ {
+		if values[i-1] <= 0 {
+			returns = append(returns, 0.0)
+			continue
+		}
+		ret := (values[i] - values[i-1]) / values[i-1]
+		// Cap extreme returns (same bounds as Python MetricsClient)
+		if ret < -1.0 {
+			ret = -1.0
+		} else if ret > 10.0 {
+			ret = 10.0
+		}
+		returns = append(returns, ret)
+	}
+	return returns
+}
+
+// CallMetricsService sends portfolio returns to the metrics service and returns computed metrics.
+// Uses the existing retryWithBackoff helper for consistency.
+// This is a non-blocking operation - errors are logged but don't fail the backtest.
+func (e *Evaluator) CallMetricsService(ctx context.Context, returns []float64, runID string) (*datatypes.MetricsResponse, error) {
+	if len(returns) < 2 {
+		slog.Warn("Insufficient returns data for metrics", "count", len(returns))
+		return &datatypes.MetricsResponse{}, nil
+	}
+
+	url := fmt.Sprintf("%s/metrics/v1/compute/", e.metricsServiceURL)
+
+	reqBody := metricsRequest{
+		Returns:        returns,
+		Metric:         "all",
+		RiskFreeRate:   0.0,
+		PeriodsPerYear: 252,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal metrics request: %w", err)
+	}
+
+	var result datatypes.MetricsResponse
+
+	err = retryWithBackoff(ctx, "metrics_service", func() error {
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+		if err != nil {
+			return fmt.Errorf("failed to create metrics request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("X-Run-ID", runID)
+
+		resp, err := e.httpClient.Do(httpReq)
+		if err != nil {
+			return err
+		}
+
+		// Read and close body immediately to avoid leaks on retry
+		respBody, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if closeErr != nil {
+			slog.Debug("Failed to close response body", "error", closeErr)
+		}
+
+		if readErr != nil {
+			return fmt.Errorf("failed to read response: %w", readErr)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("metrics service returned %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return fmt.Errorf("failed to decode metrics response: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	slog.Info("Metrics computed successfully",
+		"sharpe_ratio", fmt.Sprintf("%.3f", result.SharpeRatio),
+		"max_drawdown", fmt.Sprintf("%.2f%%", result.MaxDrawdown*100),
+		"cagr", fmt.Sprintf("%.2f%%", result.CAGR*100),
+		"win_rate", fmt.Sprintf("%.1f%%", result.WinRate*100))
+
+	return &result, nil
 }
 
 func (e *Evaluator) CallForecastService(ctx context.Context, ticker, model string, contextSize, horizonSize int) (*datatypes.ForecastResult, error) {
@@ -1428,6 +1575,34 @@ func (s *InfluxDBStorage) StoreResult(ctx context.Context, result *datatypes.Eva
 		SetTime(result.Timestamp)
 
 	return s.writeAPI.WritePoint(ctx, p)
+}
+
+// StoreMetrics writes backtest performance metrics to InfluxDB.
+func (s *InfluxDBStorage) StoreMetrics(ctx context.Context, runID, ticker, model string, metrics *datatypes.MetricsResponse) error {
+	if metrics == nil {
+		return nil
+	}
+
+	p := influxdb2.NewPointWithMeasurement("backtest_metrics").
+		AddTag("run_id", runID).
+		AddTag("ticker", ticker).
+		AddTag("model", model).
+		AddField("sharpe_ratio", metrics.SharpeRatio).
+		AddField("max_drawdown", metrics.MaxDrawdown).
+		AddField("cagr", metrics.CAGR).
+		AddField("calmar_ratio", metrics.CalmarRatio).
+		AddField("win_rate", metrics.WinRate).
+		SetTime(time.Now())
+
+	if err := s.writeAPI.WritePoint(ctx, p); err != nil {
+		return fmt.Errorf("failed to write metrics to InfluxDB: %w", err)
+	}
+
+	slog.Info("Metrics stored to InfluxDB",
+		"run_id", runID,
+		"measurement", "backtest_metrics")
+
+	return nil
 }
 
 func (s *InfluxDBStorage) Close() {

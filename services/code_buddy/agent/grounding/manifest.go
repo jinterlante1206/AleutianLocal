@@ -54,12 +54,13 @@ var DefaultCodeExtensions = map[string]bool{
 //
 // Thread Safety: Safe for concurrent use.
 type FileManifest struct {
-	mu         sync.RWMutex
-	files      map[string]bool // relative paths normalized with forward slashes
-	basenames  map[string]bool // just the filename portion
-	root       string
-	loadedAt   time.Time
-	extensions map[string]bool
+	mu              sync.RWMutex
+	files           map[string]bool // relative paths normalized with forward slashes
+	basenames       map[string]bool // just the filename portion
+	extensionCounts map[string]int  // count of files per extension
+	root            string
+	loadedAt        time.Time
+	extensions      map[string]bool
 }
 
 // NewFileManifest creates a new empty file manifest.
@@ -90,9 +91,10 @@ func NewFileManifest(extensions []string) *FileManifest {
 	}
 
 	return &FileManifest{
-		files:      make(map[string]bool),
-		basenames:  make(map[string]bool),
-		extensions: extMap,
+		files:           make(map[string]bool),
+		basenames:       make(map[string]bool),
+		extensionCounts: make(map[string]int),
+		extensions:      extMap,
 	}
 }
 
@@ -120,6 +122,7 @@ func (m *FileManifest) ScanDir(ctx context.Context, root string) error {
 	// Clear existing data
 	m.files = make(map[string]bool)
 	m.basenames = make(map[string]bool)
+	m.extensionCounts = make(map[string]int)
 	m.root = root
 	m.loadedAt = time.Now()
 
@@ -168,6 +171,7 @@ func (m *FileManifest) ScanDir(ctx context.Context, root string) error {
 
 		m.files[relPath] = true
 		m.basenames[name] = true
+		m.extensionCounts[ext]++
 
 		return nil
 	})
@@ -278,6 +282,29 @@ func (m *FileManifest) ToKnownFiles() map[string]bool {
 
 	result := make(map[string]bool, len(m.files))
 	for k, v := range m.files {
+		result[k] = v
+	}
+	return result
+}
+
+// ExtensionCounts returns a copy of the extension count map.
+//
+// Description:
+//
+//	Returns a map of file extensions to their count in the manifest.
+//	This is useful for detecting the primary language of a project.
+//	Extensions include the leading dot (e.g., ".go", ".py").
+//
+// Outputs:
+//   - map[string]int: Copy of the extension counts map.
+//
+// Thread Safety: Safe for concurrent use (acquires read lock).
+func (m *FileManifest) ExtensionCounts() map[string]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string]int, len(m.extensionCounts))
+	for k, v := range m.extensionCounts {
 		result[k] = v
 	}
 	return result

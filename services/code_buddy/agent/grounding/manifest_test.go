@@ -337,3 +337,79 @@ func TestFileManifest_ToKnownFiles(t *testing.T) {
 		t.Error("ToKnownFiles should return a copy, not the original map")
 	}
 }
+
+func TestFileManifest_ExtensionCounts(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create test files with various extensions
+	files := map[string]string{
+		"main.go":     "package main",
+		"server.go":   "package server",
+		"handler.go":  "package handler",
+		"utils.py":    "# Python",
+		"script.py":   "# Python",
+		"config.json": "{}",
+		"README.md":   "# Readme",
+	}
+	for path, content := range files {
+		if err := os.WriteFile(filepath.Join(tmpDir, path), []byte(content), 0644); err != nil {
+			t.Fatalf("creating file %s: %v", path, err)
+		}
+	}
+
+	m := NewFileManifest(nil)
+	if err := m.ScanDir(context.Background(), tmpDir); err != nil {
+		t.Fatalf("ScanDir failed: %v", err)
+	}
+
+	counts := m.ExtensionCounts()
+
+	t.Run("counts go files correctly", func(t *testing.T) {
+		if counts[".go"] != 3 {
+			t.Errorf("expected 3 .go files, got %d", counts[".go"])
+		}
+	})
+
+	t.Run("counts python files correctly", func(t *testing.T) {
+		if counts[".py"] != 2 {
+			t.Errorf("expected 2 .py files, got %d", counts[".py"])
+		}
+	})
+
+	t.Run("counts other files", func(t *testing.T) {
+		if counts[".json"] != 1 {
+			t.Errorf("expected 1 .json file, got %d", counts[".json"])
+		}
+		if counts[".md"] != 1 {
+			t.Errorf("expected 1 .md file, got %d", counts[".md"])
+		}
+	})
+
+	t.Run("returns copy not original", func(t *testing.T) {
+		counts[".go"] = 999
+		freshCounts := m.ExtensionCounts()
+		if freshCounts[".go"] == 999 {
+			t.Error("ExtensionCounts should return a copy, not the original map")
+		}
+	})
+
+	t.Run("re-scan clears counts", func(t *testing.T) {
+		// Create new dir with only Python files
+		tmpDir2 := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir2, "app.py"), []byte("# Python"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := m.ScanDir(context.Background(), tmpDir2); err != nil {
+			t.Fatalf("second ScanDir failed: %v", err)
+		}
+
+		counts2 := m.ExtensionCounts()
+		if counts2[".go"] != 0 {
+			t.Errorf("expected 0 .go files after re-scan, got %d", counts2[".go"])
+		}
+		if counts2[".py"] != 1 {
+			t.Errorf("expected 1 .py file after re-scan, got %d", counts2[".py"])
+		}
+	})
+}

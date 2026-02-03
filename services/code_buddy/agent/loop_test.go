@@ -470,3 +470,67 @@ func TestAgentLoopInterface(t *testing.T) {
 	// Verify DefaultAgentLoop implements AgentLoop interface
 	var _ AgentLoop = (*DefaultAgentLoop)(nil)
 }
+
+func TestDefaultAgentLoop_GetLastAssistantMessage_SkipsEmptyMessages(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+	session, _ := NewSession("/test/project", nil)
+
+	// Create a context with an empty assistant message followed by a non-empty one
+	ctx := &AssembledContext{
+		ConversationHistory: []Message{
+			{Role: "user", Content: "What does this do?"},
+			{Role: "assistant", Content: ""},           // Empty message (e.g., from context overflow)
+			{Role: "tool", Content: "tool result"},     // Tool result
+			{Role: "assistant", Content: "The answer"}, // Actual response
+		},
+	}
+	session.SetCurrentContext(ctx)
+
+	result := loop.getLastAssistantMessage(session)
+	if result != "The answer" {
+		t.Errorf("getLastAssistantMessage = %q, want %q", result, "The answer")
+	}
+}
+
+func TestDefaultAgentLoop_GetLastAssistantMessage_ReturnsEmptyWhenAllEmpty(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+	session, _ := NewSession("/test/project", nil)
+
+	// Create a context with only empty assistant messages
+	ctx := &AssembledContext{
+		ConversationHistory: []Message{
+			{Role: "user", Content: "What does this do?"},
+			{Role: "assistant", Content: ""},       // Empty message
+			{Role: "assistant", Content: ""},       // Another empty message
+			{Role: "tool", Content: "tool result"}, // Tool result
+		},
+	}
+	session.SetCurrentContext(ctx)
+
+	result := loop.getLastAssistantMessage(session)
+	if result != "" {
+		t.Errorf("getLastAssistantMessage = %q, want empty string", result)
+	}
+}
+
+func TestDefaultAgentLoop_GetLastAssistantMessage_FindsLastNonEmpty(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+	session, _ := NewSession("/test/project", nil)
+
+	// Empty messages should be skipped, finding the last non-empty one
+	ctx := &AssembledContext{
+		ConversationHistory: []Message{
+			{Role: "user", Content: "Question 1"},
+			{Role: "assistant", Content: "First answer"},
+			{Role: "user", Content: "Question 2"},
+			{Role: "assistant", Content: ""}, // Empty - context overflow
+			{Role: "assistant", Content: ""}, // Another empty
+		},
+	}
+	session.SetCurrentContext(ctx)
+
+	result := loop.getLastAssistantMessage(session)
+	if result != "First answer" {
+		t.Errorf("getLastAssistantMessage = %q, want %q", result, "First answer")
+	}
+}

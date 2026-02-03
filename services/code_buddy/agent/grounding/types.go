@@ -77,6 +77,71 @@ const (
 	// ViolationGenericPattern indicates generic descriptions without grounding.
 	// Response describes common patterns instead of project-specific findings.
 	ViolationGenericPattern ViolationType = "generic_pattern"
+
+	// ViolationPhantomSymbol indicates reference to a symbol that doesn't exist.
+	// The file exists but the referenced function/type/variable does not.
+	// This is distinct from ViolationSymbolNotFound which is for cited symbols
+	// that should exist based on citation format but don't.
+	ViolationPhantomSymbol ViolationType = "phantom_symbol"
+
+	// ViolationSemanticDrift indicates response doesn't address the original question.
+	// The response may be internally consistent but completely irrelevant to what was asked.
+	// This is the highest priority violation as the entire response is invalid.
+	ViolationSemanticDrift ViolationType = "semantic_drift"
+
+	// ViolationAttributeHallucination indicates wrong attributes about real code elements.
+	// The referenced element exists but the properties described are fabricated
+	// (wrong return types, wrong parameter counts, wrong field names).
+	ViolationAttributeHallucination ViolationType = "attribute_hallucination"
+
+	// ViolationLineNumberFabrication indicates fabricated or incorrect line numbers.
+	// The file exists and may be in context, but the cited line number is wrong.
+	// This includes lines beyond file length and symbol location mismatches.
+	ViolationLineNumberFabrication ViolationType = "line_number_fabrication"
+
+	// ViolationRelationshipHallucination indicates fabricated relationships between code elements.
+	// Claims about function calls, imports, or interface implementations that don't exist.
+	// E.g., "A calls B" when A doesn't call B, or "X imports Y" when X doesn't import Y.
+	ViolationRelationshipHallucination ViolationType = "relationship_hallucination"
+
+	// ViolationBehavioralHallucination indicates fabricated claims about code behavior.
+	// Claims about what code does (validates, logs, encrypts) that are contradicted by the code.
+	// E.g., "validates input" when there's no validation, "logs errors" when they're swallowed.
+	ViolationBehavioralHallucination ViolationType = "behavioral_hallucination"
+
+	// ViolationQuantitativeHallucination indicates incorrect numeric claims.
+	// Wrong file counts, line counts, function counts, etc.
+	// E.g., "15 test files" when there are 3, "200 lines" when file has 52.
+	ViolationQuantitativeHallucination ViolationType = "quantitative_hallucination"
+
+	// ViolationFabricatedCode indicates code snippet not found in evidence.
+	// Model shows code blocks that don't exist in the codebase,
+	// inventing implementations or showing "improved" code as original.
+	// This is a critical violation - actively misleading users.
+	ViolationFabricatedCode ViolationType = "fabricated_code"
+
+	// ViolationAPIHallucination indicates claims about libraries/APIs not in evidence.
+	// Model claims usage of libraries not imported, or confuses similar libraries
+	// (e.g., claims "uses gorm" when project actually uses sqlx).
+	ViolationAPIHallucination ViolationType = "api_hallucination"
+
+	// ViolationTemporalHallucination indicates unverifiable claims about code history.
+	// Model makes claims about when code was added, changed, refactored, or versioned
+	// without access to git history. Examples: "recently refactored", "added in v2.0",
+	// "originally implemented for X", "was changed because Y".
+	ViolationTemporalHallucination ViolationType = "temporal_hallucination"
+
+	// ViolationCrossContextConfusion indicates mixing information from different code locations.
+	// Model conflates attributes, fields, or behaviors from different instances of
+	// similarly-named symbols. E.g., describing Config in pkg/server with fields
+	// that actually belong to Config in pkg/client.
+	ViolationCrossContextConfusion ViolationType = "cross_context_confusion"
+
+	// ViolationConfidenceFabrication indicates overconfident claims without supporting evidence.
+	// Model asserts certainty ("always", "never", "all", "none") when evidence is weak
+	// or absent. E.g., "all inputs are validated" when only one validation was seen,
+	// or "there is no error logging" after searching only 3 files.
+	ViolationConfidenceFabrication ViolationType = "confidence_fabrication"
 )
 
 // ViolationPriority defines processing order for violation types.
@@ -85,8 +150,12 @@ const (
 type ViolationPriority int
 
 const (
-	// PriorityPhantomFile is highest priority - file doesn't exist at all.
-	// Always process first because it invalidates any other claims about that file.
+	// PrioritySemanticDrift is highest priority - response doesn't address the question.
+	// Process first because if the entire response is off-topic, other violations are moot.
+	PrioritySemanticDrift ViolationPriority = 0
+
+	// PriorityPhantomFile is high priority - file doesn't exist at all.
+	// Always process early because it invalidates any other claims about that file.
 	PriorityPhantomFile ViolationPriority = 1
 
 	// PriorityStructuralClaim is high priority - fabricated directory structure.
@@ -105,6 +174,56 @@ const (
 
 	// PriorityOther is for existing violation types not in the hierarchy.
 	PriorityOther ViolationPriority = 5
+
+	// PriorityPhantomSymbol is high priority - symbol doesn't exist in file.
+	// Process after phantom file (P1) but at same level as structural claim (P2).
+	PriorityPhantomSymbol ViolationPriority = 2
+
+	// PriorityAttributeHallucination is high priority - wrong attributes on real symbols.
+	// Same level as phantom symbol (P2) as it's a factual error about existing code.
+	PriorityAttributeHallucination ViolationPriority = 2
+
+	// PriorityLineNumberFabrication is medium priority - incorrect line citations.
+	// Less severe than phantom symbol since the file/symbol may exist, just wrong location.
+	PriorityLineNumberFabrication ViolationPriority = 3
+
+	// PriorityRelationshipHallucination is high priority - fabricated code relationships.
+	// Wrong understanding of system architecture (calls, imports, dependencies).
+	PriorityRelationshipHallucination ViolationPriority = 2
+
+	// PriorityBehavioralHallucination is high priority - fabricated behavior claims.
+	// Wrong claims about what code does (validation, logging, security).
+	// Same level as relationship hallucination (P2) due to security implications.
+	PriorityBehavioralHallucination ViolationPriority = 2
+
+	// PriorityQuantitativeHallucination is medium priority - incorrect numeric claims.
+	// Wrong counts are factual errors but less severe than structural hallucinations.
+	// Same level as language confusion (P3).
+	PriorityQuantitativeHallucination ViolationPriority = 3
+
+	// PriorityFabricatedCode is critical priority - invented code shown as real.
+	// Same level as PhantomFile (P1) - both are actively misleading.
+	// Fabricated code is as dangerous as claiming a file exists when it doesn't.
+	PriorityFabricatedCode ViolationPriority = 1
+
+	// PriorityAPIHallucination is high priority - incorrect library/API claims.
+	// Same level as structural claim (P2) - factual error about project dependencies.
+	PriorityAPIHallucination ViolationPriority = 2
+
+	// PriorityTemporalHallucination is low priority - unverifiable history claims.
+	// Same level as generic pattern (P4) - often harmless filler.
+	// Temporal claims are unverifiable without git access, not provably wrong.
+	PriorityTemporalHallucination ViolationPriority = 4
+
+	// PriorityCrossContextConfusion is high priority - mixing up different code locations.
+	// Same level as structural claim (P2) - factual error about code structure.
+	// Conflating information from different symbols is a serious hallucination.
+	PriorityCrossContextConfusion ViolationPriority = 2
+
+	// PriorityConfidenceFabrication is medium priority - overconfident claims.
+	// Same level as line number fabrication (P3) - epistemically problematic but
+	// not necessarily factually wrong. The claim might be true, just not supported.
+	PriorityConfidenceFabrication ViolationPriority = 3
 )
 
 // Violation represents a single grounding failure.
@@ -266,6 +385,10 @@ type CheckInput struct {
 	// Response is the LLM response text.
 	Response string
 
+	// UserQuestion is the original user question being answered.
+	// Used by SemanticDriftChecker to verify response addresses the question.
+	UserQuestion string
+
 	// ProjectRoot is the absolute path to the project root.
 	ProjectRoot string
 
@@ -311,6 +434,11 @@ type EvidenceIndex struct {
 	// Symbols (function/type names) that appeared in context.
 	Symbols map[string]bool
 
+	// SymbolDetails maps symbol names to detailed information.
+	// Key: symbol name, Value: list of SymbolInfo for all locations.
+	// This provides richer information than Symbols map for validation.
+	SymbolDetails map[string][]SymbolInfo
+
 	// Frameworks/libraries mentioned in shown code.
 	Frameworks map[string]bool
 
@@ -320,8 +448,35 @@ type EvidenceIndex struct {
 	// FileContents maps file paths to their content.
 	FileContents map[string]string
 
+	// FileLines maps file paths to their total line count.
+	// Populated during evidence building by counting newlines in content.
+	// Used by LineNumberChecker to validate cited line numbers.
+	FileLines map[string]int
+
+	// Imports maps file paths to their imported package paths.
+	// Key: normalized file path, Value: list of import paths.
+	// Used by RelationshipChecker to validate import claims.
+	Imports map[string][]ImportInfo
+
+	// CallsWithin tracks function calls within shown code.
+	// Key: "FunctionName" or "pkg.FunctionName", Value: list of called functions.
+	// Only populated for functions defined in evidence.
+	// Used by RelationshipChecker to validate call relationship claims.
+	CallsWithin map[string][]string
+
 	// RawContent is concatenated content for substring matching.
 	RawContent string
+}
+
+// ImportInfo tracks an import statement with optional alias.
+type ImportInfo struct {
+	// Path is the import path (e.g., "github.com/pkg/errors").
+	Path string
+
+	// Alias is the local name if aliased, or the package name from path.
+	// For `import foo "pkg/bar"`, Alias is "foo".
+	// For `import "pkg/bar"`, Alias is "bar".
+	Alias string
 }
 
 // NewEvidenceIndex creates a new empty evidence index.
@@ -330,9 +485,13 @@ func NewEvidenceIndex() *EvidenceIndex {
 		Files:         make(map[string]bool),
 		FileBasenames: make(map[string]bool),
 		Symbols:       make(map[string]bool),
+		SymbolDetails: make(map[string][]SymbolInfo),
 		Frameworks:    make(map[string]bool),
 		Languages:     make(map[string]bool),
 		FileContents:  make(map[string]string),
+		FileLines:     make(map[string]int),
+		Imports:       make(map[string][]ImportInfo),
+		CallsWithin:   make(map[string][]string),
 	}
 }
 
@@ -367,6 +526,48 @@ type Claim struct {
 
 	// Position is where in the response this claim was found.
 	Position int
+}
+
+// SymbolInfo contains detailed information about a symbol.
+//
+// This tracks where symbols are defined in the codebase, enabling
+// validation that referenced symbols actually exist and have correct attributes.
+type SymbolInfo struct {
+	// Name is the symbol name (function, type, variable, constant name).
+	Name string
+
+	// Kind is the symbol kind: "function", "type", "variable", "constant", "method".
+	Kind string
+
+	// File is the file path where the symbol is defined.
+	File string
+
+	// Line is the line number where the symbol is defined.
+	Line int
+
+	// ReturnTypes lists the return types for functions/methods (in order).
+	// For "func Parse() (*Result, error)", this is ["*Result", "error"].
+	// Empty for non-functions.
+	ReturnTypes []string
+
+	// Parameters lists the parameter types for functions/methods (in order).
+	// For "func Parse(ctx context.Context, data []byte)", this is ["context.Context", "[]byte"].
+	// Empty for non-functions.
+	Parameters []string
+
+	// Fields lists the field names for structs.
+	// For "type Config struct { Name string; Value int }", this is ["Name", "Value"].
+	// Empty for non-structs.
+	Fields []string
+
+	// Methods lists the method names for interfaces.
+	// For "type Reader interface { Read() }", this is ["Read"].
+	// Empty for non-interfaces.
+	Methods []string
+
+	// Receiver is the receiver type for methods (e.g., "*Config" for pointer receiver).
+	// Empty for functions and non-method types.
+	Receiver string
 }
 
 // ClaimType categorizes claims.

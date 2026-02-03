@@ -165,6 +165,9 @@ func (c *StructuralClaimChecker) Check(ctx context.Context, input *CheckInput) [
 			"Cite the tool output that shows the actual directory layout.",
 	})
 
+	// Record metric for structural claim without citation
+	RecordStructuralClaimNoCitation(ctx, "directory_tree")
+
 	return violations
 }
 

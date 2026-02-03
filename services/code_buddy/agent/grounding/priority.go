@@ -29,14 +29,38 @@ import "sort"
 // Thread Safety: Safe for concurrent use (pure function).
 func ViolationTypeToPriority(vt ViolationType) ViolationPriority {
 	switch vt {
+	case ViolationSemanticDrift:
+		return PrioritySemanticDrift
 	case ViolationPhantomFile:
 		return PriorityPhantomFile
+	case ViolationPhantomSymbol:
+		return PriorityPhantomSymbol
 	case ViolationStructuralClaim:
 		return PriorityStructuralClaim
+	case ViolationAttributeHallucination:
+		return PriorityAttributeHallucination
+	case ViolationLineNumberFabrication:
+		return PriorityLineNumberFabrication
+	case ViolationRelationshipHallucination:
+		return PriorityRelationshipHallucination
+	case ViolationBehavioralHallucination:
+		return PriorityBehavioralHallucination
+	case ViolationQuantitativeHallucination:
+		return PriorityQuantitativeHallucination
 	case ViolationLanguageConfusion:
 		return PriorityLanguageConfusion
 	case ViolationGenericPattern:
 		return PriorityGenericPattern
+	case ViolationFabricatedCode:
+		return PriorityFabricatedCode
+	case ViolationAPIHallucination:
+		return PriorityAPIHallucination
+	case ViolationTemporalHallucination:
+		return PriorityTemporalHallucination
+	case ViolationCrossContextConfusion:
+		return PriorityCrossContextConfusion
+	case ViolationConfidenceFabrication:
+		return PriorityConfidenceFabrication
 	default:
 		return PriorityOther
 	}
@@ -220,7 +244,7 @@ func CountViolationsByPriority(violations []Violation) map[ViolationPriority]int
 	return counts
 }
 
-// HasHighPriorityViolations returns true if any violations are P1 or P2.
+// HasHighPriorityViolations returns true if any violations are P0, P1, or P2.
 //
 // Description:
 //
@@ -231,13 +255,14 @@ func CountViolationsByPriority(violations []Violation) map[ViolationPriority]int
 //   - violations: Slice of violations to check.
 //
 // Outputs:
-//   - bool: True if any PhantomFile or StructuralClaim violations exist.
+//   - bool: True if any high-priority violations exist (P0-P2).
 //
 // Thread Safety: Safe for concurrent use.
 func HasHighPriorityViolations(violations []Violation) bool {
 	for _, v := range violations {
 		p := v.Priority()
-		if p == PriorityPhantomFile || p == PriorityStructuralClaim {
+		// P0 = SemanticDrift, P1 = PhantomFile, P2 = StructuralClaim/PhantomSymbol/Attribute/Relationship/Behavioral
+		if p <= PriorityStructuralClaim {
 			return true
 		}
 	}

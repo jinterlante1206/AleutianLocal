@@ -131,6 +131,10 @@ type Dependencies struct {
 	// ResponseGrounder validates LLM responses against project reality.
 	// Optional - if nil, grounding validation is skipped.
 	ResponseGrounder ResponseGrounder
+
+	// AnchoredSynthesisBuilder builds tool-anchored synthesis prompts.
+	// Optional - if nil, basic synthesis prompt is used.
+	AnchoredSynthesisBuilder grounding.AnchoredSynthesisBuilder
 }
 
 // GraphProvider initializes and provides access to the code graph.

@@ -48,6 +48,54 @@ var (
 	// Confidence metrics
 	confidenceHistogram metric.Float64Histogram
 
+	// Anchored synthesis metrics
+	synthesisPromptsWithEvidence metric.Int64Counter
+	evidenceRelevanceHistogram   metric.Float64Histogram
+
+	// Structural claim metrics (CB-28d-5b)
+	structuralClaimsNoCitation metric.Int64Counter
+
+	// Post-synthesis metrics (CB-28d-5e)
+	postSynthesisViolations metric.Int64Counter
+	feedbackLoopsTriggered  metric.Int64Counter
+
+	// Phantom symbol metrics (CB-28d-5g)
+	phantomSymbolsTotal metric.Int64Counter
+
+	// Semantic drift metrics (CB-28d-5h)
+	semanticDriftTotal          metric.Int64Counter
+	semanticDriftScoreHistogram metric.Float64Histogram
+
+	// Attribute hallucination metrics (CB-28d-5i)
+	attributeHallucinationsTotal metric.Int64Counter
+
+	// Line number fabrication metrics (CB-28d-5j)
+	lineFabricationsTotal metric.Int64Counter
+
+	// Relationship hallucination metrics (CB-28d-5k)
+	relationshipHallucinationsTotal metric.Int64Counter
+
+	// Behavioral hallucination metrics (CB-28d-5l)
+	behavioralHallucinationsTotal metric.Int64Counter
+
+	// Quantitative hallucination metrics (CB-28d-5m)
+	quantitativeHallucinationsTotal metric.Int64Counter
+
+	// Fabricated code snippet metrics (CB-28d-5n)
+	fabricatedCodeTotal metric.Int64Counter
+
+	// API/library hallucination metrics (CB-28d-5o)
+	apiHallucinationsTotal metric.Int64Counter
+
+	// Temporal hallucination metrics (CB-28d-5p)
+	temporalHallucinationsTotal metric.Int64Counter
+
+	// Cross-context confusion metrics (CB-28d-5q)
+	crossContextConfusionsTotal metric.Int64Counter
+
+	// Confidence fabrication metrics (CB-28d-5r)
+	confidenceFabricationsTotal metric.Int64Counter
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -155,6 +203,183 @@ func initMetrics() error {
 		confidenceHistogram, err = meter.Float64Histogram(
 			"grounding_confidence",
 			metric.WithDescription("Response confidence score distribution"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Anchored synthesis metrics
+		synthesisPromptsWithEvidence, err = meter.Int64Counter(
+			"grounding_synthesis_prompts_with_evidence_total",
+			metric.WithDescription("Total synthesis prompts built with tool evidence"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		evidenceRelevanceHistogram, err = meter.Float64Histogram(
+			"grounding_synthesis_evidence_relevance_score",
+			metric.WithDescription("Distribution of evidence relevance scores"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Structural claim metrics (CB-28d-5b)
+		structuralClaimsNoCitation, err = meter.Int64Counter(
+			"grounding_structural_claims_no_citation_total",
+			metric.WithDescription("Structural claims detected without tool evidence"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Post-synthesis metrics (CB-28d-5e)
+		postSynthesisViolations, err = meter.Int64Counter(
+			"grounding_post_synthesis_violations_total",
+			metric.WithDescription("Violations detected during post-synthesis verification"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		feedbackLoopsTriggered, err = meter.Int64Counter(
+			"grounding_feedback_loops_triggered_total",
+			metric.WithDescription("Feedback loops triggered after retry exhaustion"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Phantom symbol metrics (CB-28d-5g)
+		phantomSymbolsTotal, err = meter.Int64Counter(
+			"grounding_phantom_symbols_total",
+			metric.WithDescription("Phantom symbol references detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Semantic drift metrics (CB-28d-5h)
+		semanticDriftTotal, err = meter.Int64Counter(
+			"grounding_semantic_drift_total",
+			metric.WithDescription("Semantic drift violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		semanticDriftScoreHistogram, err = meter.Float64Histogram(
+			"grounding_semantic_drift_score",
+			metric.WithDescription("Distribution of semantic drift scores"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Attribute hallucination metrics (CB-28d-5i)
+		attributeHallucinationsTotal, err = meter.Int64Counter(
+			"grounding_attribute_hallucinations_total",
+			metric.WithDescription("Attribute hallucination violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Line number fabrication metrics (CB-28d-5j)
+		lineFabricationsTotal, err = meter.Int64Counter(
+			"grounding_line_fabrications_total",
+			metric.WithDescription("Line number fabrication violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Relationship hallucination metrics (CB-28d-5k)
+		relationshipHallucinationsTotal, err = meter.Int64Counter(
+			"grounding_relationship_hallucinations_total",
+			metric.WithDescription("Relationship hallucination violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Behavioral hallucination metrics (CB-28d-5l)
+		behavioralHallucinationsTotal, err = meter.Int64Counter(
+			"grounding_behavioral_hallucinations_total",
+			metric.WithDescription("Behavioral hallucination violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Quantitative hallucination metrics (CB-28d-5m)
+		quantitativeHallucinationsTotal, err = meter.Int64Counter(
+			"grounding_quantitative_hallucinations_total",
+			metric.WithDescription("Quantitative hallucination violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Fabricated code snippet metrics (CB-28d-5n)
+		fabricatedCodeTotal, err = meter.Int64Counter(
+			"grounding_fabricated_code_total",
+			metric.WithDescription("Fabricated code snippet violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// API/library hallucination metrics (CB-28d-5o)
+		apiHallucinationsTotal, err = meter.Int64Counter(
+			"grounding_api_hallucinations_total",
+			metric.WithDescription("API/library hallucination violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Temporal hallucination metrics (CB-28d-5p)
+		temporalHallucinationsTotal, err = meter.Int64Counter(
+			"grounding_temporal_hallucinations_total",
+			metric.WithDescription("Temporal hallucination violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Cross-context confusion metrics (CB-28d-5q)
+		crossContextConfusionsTotal, err = meter.Int64Counter(
+			"grounding_cross_context_confusions_total",
+			metric.WithDescription("Cross-context confusion violations detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Confidence fabrication metrics (CB-28d-5r)
+		confidenceFabricationsTotal, err = meter.Int64Counter(
+			"grounding_confidence_fabrications_total",
+			metric.WithDescription("Confidence fabrication violations detected"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -471,4 +696,370 @@ func truncateForAttribute(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// RecordSynthesisPromptWithEvidence records that a synthesis prompt was built with evidence.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - evidenceCount: Number of evidence items included.
+//   - projectLang: The detected project language.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordSynthesisPromptWithEvidence(ctx context.Context, evidenceCount int, projectLang string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.Int("evidence_count", evidenceCount),
+		attribute.String("project_language", projectLang),
+	)
+
+	synthesisPromptsWithEvidence.Add(ctx, 1, attrs)
+}
+
+// RecordEvidenceRelevanceScore records a single evidence relevance score.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - score: The relevance score (0.0-1.0).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordEvidenceRelevanceScore(ctx context.Context, score float64) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+	evidenceRelevanceHistogram.Record(ctx, score)
+}
+
+// RecordStructuralClaimNoCitation records a structural claim without tool evidence.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - claimType: Type of structural claim (e.g., "directory", "file_tree").
+//
+// Thread Safety: Safe for concurrent use.
+func RecordStructuralClaimNoCitation(ctx context.Context, claimType string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("claim_type", claimType),
+	)
+
+	structuralClaimsNoCitation.Add(ctx, 1, attrs)
+}
+
+// RecordPostSynthesisViolation records a violation found during post-synthesis verification.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - violationType: Type of violation.
+//   - severity: Violation severity.
+//   - retryCount: Current retry attempt.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordPostSynthesisViolation(ctx context.Context, violationType ViolationType, severity Severity, retryCount int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("violation_type", string(violationType)),
+		attribute.String("severity", string(severity)),
+		attribute.Int("retry_count", retryCount),
+	)
+
+	postSynthesisViolations.Add(ctx, 1, attrs)
+}
+
+// RecordFeedbackLoopTriggered records when a feedback loop is triggered after retry exhaustion.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - questionCount: Number of feedback questions generated.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordFeedbackLoopTriggered(ctx context.Context, questionCount int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.Int("question_count", questionCount),
+	)
+
+	feedbackLoopsTriggered.Add(ctx, 1, attrs)
+}
+
+// RecordPhantomSymbol records a phantom symbol reference detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - symbolKind: Kind of symbol (function, type, etc.).
+//   - hasFileContext: Whether the symbol had file association.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordPhantomSymbol(ctx context.Context, symbolKind string, hasFileContext bool) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("symbol_kind", symbolKind),
+		attribute.Bool("has_file_context", hasFileContext),
+	)
+
+	phantomSymbolsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordSemanticDrift records a semantic drift detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - driftScore: The calculated drift score (0.0-1.0).
+//   - questionType: The detected question type (list, how, where, etc.).
+//   - severity: The violation severity.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordSemanticDrift(ctx context.Context, driftScore float64, questionType string, severity Severity) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("question_type", questionType),
+		attribute.String("severity", string(severity)),
+	)
+
+	semanticDriftTotal.Add(ctx, 1, attrs)
+	semanticDriftScoreHistogram.Record(ctx, driftScore)
+}
+
+// RecordAttributeHallucination records an attribute hallucination detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - claimType: Type of attribute claim (return_type, parameter_count, field_count, etc.).
+//   - symbolKind: Kind of symbol (function, struct, interface).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordAttributeHallucination(ctx context.Context, claimType string, symbolKind string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("claim_type", claimType),
+		attribute.String("symbol_kind", symbolKind),
+	)
+
+	attributeHallucinationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordLineFabrication records a line number fabrication detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - fabricationType: Type of fabrication (beyond_file_length, symbol_mismatch, invalid_range).
+//   - filePath: The file path involved in the fabrication.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordLineFabrication(ctx context.Context, fabricationType string, filePath string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("fabrication_type", fabricationType),
+		attribute.String("file_path", filePath),
+	)
+
+	lineFabricationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordRelationshipHallucination records a relationship hallucination detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - relationshipKind: Kind of relationship (import, call, implements).
+//   - subject: The subject of the relationship claim.
+//   - object: The object of the relationship claim.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordRelationshipHallucination(ctx context.Context, relationshipKind string, subject string, object string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("relationship_kind", relationshipKind),
+		attribute.String("subject", subject),
+		attribute.String("object", object),
+	)
+
+	relationshipHallucinationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordBehavioralHallucination records a behavioral hallucination detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - category: Category of behavioral claim (error_handling, validation, security).
+//   - subject: The function/component the claim is about.
+//   - claimedBehavior: The behavior that was claimed.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordBehavioralHallucination(ctx context.Context, category string, subject string, claimedBehavior string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("category", category),
+		attribute.String("subject", subject),
+		attribute.String("claimed_behavior", claimedBehavior),
+	)
+
+	behavioralHallucinationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordQuantitativeHallucination records a quantitative hallucination detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - claimType: Type of quantitative claim (file_count, line_count, symbol_count).
+//   - claimed: The claimed number.
+//   - actual: The actual number from evidence.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordQuantitativeHallucination(ctx context.Context, claimType string, claimed int, actual int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("claim_type", claimType),
+		attribute.Int("claimed", claimed),
+		attribute.Int("actual", actual),
+	)
+
+	quantitativeHallucinationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordFabricatedCode records a fabricated code snippet detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - classification: Classification result (verbatim, modified, fabricated).
+//   - similarity: The similarity score (0.0-1.0).
+//   - snippetLen: Length of the code snippet in characters.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordFabricatedCode(ctx context.Context, classification string, similarity float64, snippetLen int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("classification", classification),
+		attribute.Float64("similarity", similarity),
+		attribute.Int("snippet_length", snippetLen),
+	)
+
+	fabricatedCodeTotal.Add(ctx, 1, attrs)
+}
+
+// RecordAPIHallucination records an API/library hallucination detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - claimType: Type of claim (library_missing, library_confusion, api_not_found).
+//   - claimedLibrary: The library that was claimed.
+//   - actualLibrary: The library actually found in evidence (if confusion detected).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordAPIHallucination(ctx context.Context, claimType string, claimedLibrary string, actualLibrary string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("claim_type", claimType),
+		attribute.String("claimed_library", claimedLibrary),
+		attribute.String("actual_library", actualLibrary),
+	)
+
+	apiHallucinationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordTemporalHallucination records a temporal hallucination detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - claimType: Type of temporal claim (recency, historical, version, reason).
+//   - hasGitEvidence: Whether git evidence was available.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordTemporalHallucination(ctx context.Context, claimType string, hasGitEvidence bool) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("claim_type", claimType),
+		attribute.Bool("has_git_evidence", hasGitEvidence),
+	)
+
+	temporalHallucinationsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordCrossContextConfusion records a cross-context confusion detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - confusionType: Type of confusion (attribute_confusion, location_mismatch, ambiguous_reference).
+//   - symbol: The symbol name that was confused.
+//   - claimedLocation: The location claimed in the response.
+//   - actualLocation: The actual location in evidence (if applicable).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordCrossContextConfusion(ctx context.Context, confusionType string, symbol string, claimedLocation string, actualLocation string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("confusion_type", confusionType),
+		attribute.String("symbol", symbol),
+		attribute.String("claimed_location", claimedLocation),
+		attribute.String("actual_location", actualLocation),
+	)
+
+	crossContextConfusionsTotal.Add(ctx, 1, attrs)
+}
+
+// RecordConfidenceFabrication records a confidence fabrication detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - claimType: Type of claim (absolute, negative_absolute, universal, exhaustive).
+//   - evidenceStrength: Strength of evidence (absent, partial, strong).
+//   - severity: The violation severity.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordConfidenceFabrication(ctx context.Context, claimType string, evidenceStrength string, severity Severity) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("claim_type", claimType),
+		attribute.String("evidence_strength", evidenceStrength),
+		attribute.String("severity", string(severity)),
+	)
+
+	confidenceFabricationsTotal.Add(ctx, 1, attrs)
 }

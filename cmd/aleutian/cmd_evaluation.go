@@ -99,6 +99,16 @@ func runEvaluation(cmd *cobra.Command, _ []string) {
 				_ = os.Setenv("SAPHENEIA_TRADING_URL", "http://sapheneia-trading:8000")
 			}
 		}
+
+		// Set metrics URL based on deployment mode if not already set
+		if os.Getenv("SAPHENEIA_METRICS_SERVICE_URL") == "" {
+			switch evalDeploymentMode {
+			case "standalone":
+				_ = os.Setenv("SAPHENEIA_METRICS_SERVICE_URL", "http://localhost:12702")
+			case "distributed":
+				_ = os.Setenv("SAPHENEIA_METRICS_SERVICE_URL", "http://sapheneia-metrics:8000")
+			}
+		}
 	}
 
 	// 3. Generate a Unique Run ID
@@ -150,13 +160,28 @@ func runEvaluation(cmd *cobra.Command, _ []string) {
 
 	// 6. Execute the Run using RunScenario
 	ctx := context.Background()
-	if err := evaluator.RunScenario(ctx, scenario, runID); err != nil {
+	metrics, err := evaluator.RunScenario(ctx, scenario, runID)
+	if err != nil {
 		slog.Error("Evaluation failed", "error", err)
 		return
 	}
 
 	fmt.Printf("\n✅ Evaluation completed successfully.\n")
 	fmt.Printf("   Run ID: %s\n", runID)
+
+	// Display performance metrics if available
+	if metrics != nil && (metrics.SharpeRatio != 0 || metrics.MaxDrawdown != 0 || metrics.WinRate != 0) {
+		fmt.Println()
+		fmt.Println("═══════════════════════════════════════════════════════════════")
+		fmt.Println("                     PERFORMANCE METRICS                        ")
+		fmt.Println("═══════════════════════════════════════════════════════════════")
+		fmt.Printf("  Sharpe Ratio:    %8.3f\n", metrics.SharpeRatio)
+		fmt.Printf("  Max Drawdown:    %8.2f%%\n", metrics.MaxDrawdown*100)
+		fmt.Printf("  CAGR:            %8.2f%%\n", metrics.CAGR*100)
+		fmt.Printf("  Calmar Ratio:    %8.3f\n", metrics.CalmarRatio)
+		fmt.Printf("  Win Rate:        %8.1f%%\n", metrics.WinRate*100)
+		fmt.Println("═══════════════════════════════════════════════════════════════")
+	}
 }
 
 func runExport(cmd *cobra.Command, args []string) {
