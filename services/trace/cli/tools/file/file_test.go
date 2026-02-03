@@ -12,6 +12,7 @@ package file
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -765,6 +766,210 @@ func TestGrepTool_Execute_RegexPattern(t *testing.T) {
 	}
 }
 
+func TestGrepTool_Execute_FuzzyMatch(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	// Create file with various function names (lowercase for simple matching)
+	content := `func parsefile() {}
+func parsejson() {}
+func readconfig() {}
+func processdata() {}
+`
+	createTestFile(t, dir, "code.go", content)
+
+	tool := NewGrepTool(config)
+	ctx := context.Background()
+
+	// "prsfil" should fuzzy match "parsefile" (p-a-r-s-e-f-i-l-e contains p-r-s-f-i-l in order)
+	result, err := tool.Execute(ctx, map[string]any{
+		"pattern": "prsfil",
+		"path":    dir,
+		"fuzzy":   true,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+
+	grepResult := result.Output.(*GrepResult)
+	if grepResult.Count != 1 {
+		t.Errorf("expected 1 fuzzy match, got %d", grepResult.Count)
+	}
+	if grepResult.Count > 0 && !strings.Contains(grepResult.Matches[0].Content, "parsefile") {
+		t.Errorf("expected match on parsefile line, got: %s", grepResult.Matches[0].Content)
+	}
+}
+
+func TestGrepTool_Execute_FuzzyMatch_CaseInsensitive(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	createTestFile(t, dir, "code.go", "func ParseFile() {}\nfunc ReadData() {}\n")
+
+	tool := NewGrepTool(config)
+	ctx := context.Background()
+
+	// Case insensitive fuzzy match
+	result, err := tool.Execute(ctx, map[string]any{
+		"pattern":          "prsfl",
+		"path":             dir,
+		"fuzzy":            true,
+		"case_insensitive": true,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	grepResult := result.Output.(*GrepResult)
+	if grepResult.Count != 1 {
+		t.Errorf("expected 1 case-insensitive fuzzy match, got %d", grepResult.Count)
+	}
+}
+
+func TestGrepTool_Execute_ApproximateMatch(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	// Create file with a typo
+	content := `func functon() {} // typo: functon instead of function
+func process() {}
+func validate() {}
+`
+	createTestFile(t, dir, "code.go", content)
+
+	tool := NewGrepTool(config)
+	ctx := context.Background()
+
+	// "function" should approximately match "functon" with 1 error (missing 'i')
+	result, err := tool.Execute(ctx, map[string]any{
+		"pattern":     "function",
+		"path":        dir,
+		"approximate": true,
+		"max_errors":  1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+
+	grepResult := result.Output.(*GrepResult)
+	if grepResult.Count != 1 {
+		t.Errorf("expected 1 approximate match, got %d", grepResult.Count)
+	}
+	if grepResult.Count > 0 && !strings.Contains(grepResult.Matches[0].Content, "functon") {
+		t.Errorf("expected match on functon line, got: %s", grepResult.Matches[0].Content)
+	}
+}
+
+func TestGrepTool_Execute_ApproximateMatch_MaxErrors(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	createTestFile(t, dir, "code.go", "func proces() {} // missing 's'\n")
+
+	tool := NewGrepTool(config)
+	ctx := context.Background()
+
+	// "process" vs "proces" - 1 edit distance
+	// With max_errors=0, should NOT match
+	result1, _ := tool.Execute(ctx, map[string]any{
+		"pattern":     "process",
+		"path":        dir,
+		"approximate": true,
+		"max_errors":  0,
+	})
+	if result1.Output.(*GrepResult).Count != 0 {
+		t.Error("max_errors=0 should not match 'proces' for 'process'")
+	}
+
+	// With max_errors=1, should match
+	result2, _ := tool.Execute(ctx, map[string]any{
+		"pattern":     "process",
+		"path":        dir,
+		"approximate": true,
+		"max_errors":  1,
+	})
+	if result2.Output.(*GrepResult).Count != 1 {
+		t.Error("max_errors=1 should match 'proces' for 'process'")
+	}
+}
+
+func TestGrepParams_Validate_FuzzyApproximate(t *testing.T) {
+	// Cannot use both fuzzy and approximate
+	params := GrepParams{
+		Pattern:     "test",
+		Fuzzy:       true,
+		Approximate: true,
+	}
+	err := params.Validate()
+	if err == nil {
+		t.Error("expected error when both fuzzy and approximate are true")
+	}
+	if !strings.Contains(err.Error(), "cannot use both") {
+		t.Errorf("expected 'cannot use both' error, got: %v", err)
+	}
+}
+
+func TestLevenshteinDistance(t *testing.T) {
+	tests := []struct {
+		s1, s2   string
+		expected int
+	}{
+		{"", "", 0},
+		{"a", "", 1},
+		{"", "a", 1},
+		{"abc", "abc", 0},
+		{"abc", "abd", 1},          // substitution
+		{"abc", "abcd", 1},         // insertion
+		{"abcd", "abc", 1},         // deletion
+		{"function", "functon", 1}, // missing 'i'
+		{"kitten", "sitting", 3},   // classic example
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.s1+"_"+tt.s2, func(t *testing.T) {
+			got := levenshteinDistance(tt.s1, tt.s2)
+			if got != tt.expected {
+				t.Errorf("levenshteinDistance(%q, %q) = %d, want %d", tt.s1, tt.s2, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFuzzyMatch(t *testing.T) {
+	tests := []struct {
+		pattern  string
+		text     string
+		expected bool
+	}{
+		{"abc", "abc", true},
+		{"abc", "aXbXc", true},
+		{"abc", "XXaXXbXXcXX", true},
+		{"prsfil", "parsefile", true}, // lowercase - case sensitive matching
+		{"prsFil", "parseFile", true}, // match case exactly
+		{"xyz", "abc", false},
+		{"abc", "ab", false}, // pattern longer than text match
+		{"", "abc", true},    // empty pattern always matches
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"_in_"+tt.text, func(t *testing.T) {
+			got := fuzzyMatch(tt.pattern, tt.text)
+			if got != tt.expected {
+				t.Errorf("fuzzyMatch(%q, %q) = %v, want %v", tt.pattern, tt.text, got, tt.expected)
+			}
+		})
+	}
+}
+
 // ============================================================================
 // Parameter Validation Tests
 // ============================================================================
@@ -948,6 +1153,373 @@ func TestExpandBraces(t *testing.T) {
 			got := expandBraces(tt.pattern)
 			if len(got) != len(tt.expected) {
 				t.Errorf("expandBraces(%s) = %v, want %v", tt.pattern, got, tt.expected)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Diff Tool Tests
+// ============================================================================
+
+func TestDiffTool_Execute_IdenticalFiles(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	content := "line1\nline2\nline3\n"
+	pathA := createTestFile(t, dir, "file_a.txt", content)
+	pathB := createTestFile(t, dir, "file_b.txt", content)
+
+	tool := NewDiffTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_a": pathA,
+		"file_b": pathB,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+
+	diffResult := result.Output.(*DiffResult)
+	if !diffResult.FilesIdentical {
+		t.Error("expected files to be identical")
+	}
+}
+
+func TestDiffTool_Execute_DifferentFiles(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	pathA := createTestFile(t, dir, "file_a.txt", "line1\nline2\nline3\n")
+	pathB := createTestFile(t, dir, "file_b.txt", "line1\nmodified\nline3\n")
+
+	tool := NewDiffTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_a": pathA,
+		"file_b": pathB,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+
+	diffResult := result.Output.(*DiffResult)
+	if diffResult.FilesIdentical {
+		t.Error("expected files to be different")
+	}
+	if diffResult.LinesAdded == 0 && diffResult.LinesRemoved == 0 {
+		t.Error("expected some additions or removals")
+	}
+	if !strings.Contains(diffResult.Diff, "modified") {
+		t.Error("diff should contain the modified content")
+	}
+}
+
+func TestDiffTool_Execute_AddedLines(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	pathA := createTestFile(t, dir, "file_a.txt", "line1\nline2\n")
+	pathB := createTestFile(t, dir, "file_b.txt", "line1\nline2\nline3\nline4\n")
+
+	tool := NewDiffTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_a": pathA,
+		"file_b": pathB,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	diffResult := result.Output.(*DiffResult)
+	if diffResult.LinesAdded < 2 {
+		t.Errorf("expected at least 2 lines added, got %d", diffResult.LinesAdded)
+	}
+}
+
+// ============================================================================
+// Tree Tool Tests
+// ============================================================================
+
+func TestTreeTool_Execute_SimpleDirectory(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	// Create some files and directories
+	createTestFile(t, dir, "file1.txt", "content")
+	createTestFile(t, dir, "file2.go", "content")
+	subDir := filepath.Join(dir, "subdir")
+	os.Mkdir(subDir, 0755)
+	createTestFile(t, subDir, "nested.txt", "content")
+
+	tool := NewTreeTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"path": dir,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+
+	treeResult := result.Output.(*TreeResult)
+	if treeResult.TotalDirs < 1 {
+		t.Error("expected at least 1 directory")
+	}
+	if treeResult.TotalFiles < 2 {
+		t.Error("expected at least 2 files")
+	}
+	if !strings.Contains(treeResult.Tree, "subdir") {
+		t.Error("tree should contain 'subdir'")
+	}
+}
+
+func TestTreeTool_Execute_DirsOnly(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	createTestFile(t, dir, "file.txt", "content")
+	subDir := filepath.Join(dir, "subdir")
+	os.Mkdir(subDir, 0755)
+
+	tool := NewTreeTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"path":      dir,
+		"dirs_only": true,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	treeResult := result.Output.(*TreeResult)
+	if treeResult.TotalFiles != 0 {
+		t.Errorf("dirs_only should not count files, got %d", treeResult.TotalFiles)
+	}
+	if treeResult.TotalDirs < 1 {
+		t.Error("expected at least 1 directory")
+	}
+}
+
+func TestTreeTool_Execute_DepthLimit(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	// Create nested directories
+	current := dir
+	for i := 0; i < 5; i++ {
+		current = filepath.Join(current, fmt.Sprintf("level%d", i))
+		os.Mkdir(current, 0755)
+		createTestFile(t, current, "file.txt", "content")
+	}
+
+	tool := NewTreeTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"path":  dir,
+		"depth": 2,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	treeResult := result.Output.(*TreeResult)
+	if !treeResult.Truncated {
+		t.Error("expected tree to be truncated at depth 2")
+	}
+}
+
+// ============================================================================
+// JSON Tool Tests
+// ============================================================================
+
+func TestJSONTool_Execute_ValidJSON(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	jsonContent := `{"name": "test", "value": 42}`
+	path := createTestFile(t, dir, "data.json", jsonContent)
+
+	tool := NewJSONTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_path": path,
+		"validate":  true,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+
+	jsonResult := result.Output.(*JSONResult)
+	if !jsonResult.Valid {
+		t.Error("expected JSON to be valid")
+	}
+}
+
+func TestJSONTool_Execute_InvalidJSON(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	invalidJSON := `{"name": "test", value: 42}` // Missing quotes around value
+	path := createTestFile(t, dir, "invalid.json", invalidJSON)
+
+	tool := NewJSONTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_path": path,
+		"validate":  true,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jsonResult := result.Output.(*JSONResult)
+	if jsonResult.Valid {
+		t.Error("expected JSON to be invalid")
+	}
+	if jsonResult.Error == "" {
+		t.Error("expected error message for invalid JSON")
+	}
+}
+
+func TestJSONTool_Execute_QuerySimple(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	jsonContent := `{"name": "test", "nested": {"value": 42}}`
+	path := createTestFile(t, dir, "data.json", jsonContent)
+
+	tool := NewJSONTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_path": path,
+		"query":     ".name",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+
+	jsonResult := result.Output.(*JSONResult)
+	if jsonResult.Value != "test" {
+		t.Errorf("expected 'test', got %v", jsonResult.Value)
+	}
+}
+
+func TestJSONTool_Execute_QueryNested(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	jsonContent := `{"config": {"database": {"host": "localhost", "port": 5432}}}`
+	path := createTestFile(t, dir, "config.json", jsonContent)
+
+	tool := NewJSONTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_path": path,
+		"query":     ".config.database.host",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jsonResult := result.Output.(*JSONResult)
+	if jsonResult.Value != "localhost" {
+		t.Errorf("expected 'localhost', got %v", jsonResult.Value)
+	}
+}
+
+func TestJSONTool_Execute_QueryArray(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	jsonContent := `{"users": [{"name": "Alice"}, {"name": "Bob"}]}`
+	path := createTestFile(t, dir, "users.json", jsonContent)
+
+	tool := NewJSONTool(config)
+	ctx := context.Background()
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"file_path": path,
+		"query":     ".users[0].name",
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jsonResult := result.Output.(*JSONResult)
+	if jsonResult.Value != "Alice" {
+		t.Errorf("expected 'Alice', got %v", jsonResult.Value)
+	}
+}
+
+func TestQueryJSON(t *testing.T) {
+	data := map[string]any{
+		"name": "test",
+		"nested": map[string]any{
+			"value": 42.0,
+		},
+		"array": []any{"a", "b", "c"},
+	}
+
+	tests := []struct {
+		query    string
+		expected any
+		wantErr  bool
+	}{
+		{".", data, false},
+		{".name", "test", false},
+		{".nested.value", 42.0, false},
+		{".array[0]", "a", false},
+		{".array[2]", "c", false},
+		{".missing", nil, true},
+		{".array[10]", nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			got, err := queryJSON(data, tt.query)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("queryJSON() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && fmt.Sprintf("%v", got) != fmt.Sprintf("%v", tt.expected) {
+				t.Errorf("queryJSON() = %v, want %v", got, tt.expected)
 			}
 		})
 	}

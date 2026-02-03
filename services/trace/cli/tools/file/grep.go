@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
@@ -50,11 +51,11 @@ func (t *GrepTool) Category() tools.ToolCategory {
 func (t *GrepTool) Definition() tools.ToolDefinition {
 	return tools.ToolDefinition{
 		Name:        "Grep",
-		Description: "Search file contents using regex patterns. Returns matching lines with optional context. Use glob parameter to filter file types.",
+		Description: "Search file contents using regex, fuzzy (fzf-style), or approximate (agrep-style) patterns. Returns matching lines with optional context.",
 		Parameters: map[string]tools.ParamDef{
 			"pattern": {
 				Type:        tools.ParamTypeString,
-				Description: "Regex pattern to search for",
+				Description: "Pattern to search for (regex by default, or literal when fuzzy/approximate enabled)",
 				Required:    true,
 			},
 			"path": {
@@ -85,6 +86,24 @@ func (t *GrepTool) Definition() tools.ToolDefinition {
 				Required:    false,
 				Default:     DefaultGrepLimit,
 			},
+			"fuzzy": {
+				Type:        tools.ParamTypeBool,
+				Description: "Enable fzf-style fuzzy matching (chars in order, not adjacent). Example: 'prsfil' matches 'parseFile'",
+				Required:    false,
+				Default:     false,
+			},
+			"approximate": {
+				Type:        tools.ParamTypeBool,
+				Description: "Enable agrep-style approximate matching using edit distance. Example: 'functon' matches 'function'",
+				Required:    false,
+				Default:     false,
+			},
+			"max_errors": {
+				Type:        tools.ParamTypeInt,
+				Description: fmt.Sprintf("Maximum edit distance for approximate matching (default 2, max %d)", MaxFuzzyErrors),
+				Required:    false,
+				Default:     2,
+			},
 		},
 		Category:    tools.CategoryFile,
 		Priority:    85,
@@ -92,17 +111,26 @@ func (t *GrepTool) Definition() tools.ToolDefinition {
 		Timeout:     60 * time.Second,
 		Examples: []tools.ToolExample{
 			{
-				Description: "Find function definitions",
+				Description: "Find function definitions (regex)",
 				Parameters: map[string]any{
 					"pattern": "func\\s+\\w+\\(",
 					"glob":    "*.go",
 				},
 			},
 			{
-				Description: "Find TODO comments with context",
+				Description: "Fuzzy search for parseFile",
 				Parameters: map[string]any{
-					"pattern":       "TODO:",
-					"context_lines": 2,
+					"pattern": "prsfil",
+					"fuzzy":   true,
+					"glob":    "*.go",
+				},
+			},
+			{
+				Description: "Approximate search allowing typos",
+				Parameters: map[string]any{
+					"pattern":     "function",
+					"approximate": true,
+					"max_errors":  1,
 				},
 			},
 		},
@@ -133,6 +161,18 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	if limit, ok := getIntParam(params, "limit"); ok {
 		p.Limit = limit
 	}
+	if fuzzy, ok := params["fuzzy"].(bool); ok {
+		p.Fuzzy = fuzzy
+	}
+	if approximate, ok := params["approximate"].(bool); ok {
+		p.Approximate = approximate
+	}
+	// Track if max_errors was explicitly provided
+	maxErrorsProvided := false
+	if maxErrors, ok := getIntParam(params, "max_errors"); ok {
+		p.MaxErrors = maxErrors
+		maxErrorsProvided = true
+	}
 
 	// Set defaults
 	if p.Limit == 0 {
@@ -140,6 +180,10 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	}
 	if p.Path == "" {
 		p.Path = t.config.WorkingDir
+	}
+	// Only set default max_errors if not explicitly provided
+	if p.Approximate && !maxErrorsProvided {
+		p.MaxErrors = 2 // Default max errors for approximate matching
 	}
 
 	// Validate
@@ -151,18 +195,34 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 		}, nil
 	}
 
-	// Compile regex
-	regexPattern := p.Pattern
-	if p.CaseInsensitive {
-		regexPattern = "(?i)" + regexPattern
-	}
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return &tools.Result{
-			Success:  false,
-			Error:    fmt.Sprintf("invalid regex pattern: %v", err),
-			Duration: time.Since(start),
-		}, nil
+	// Create matcher based on mode
+	var matcher lineMatcher
+	if p.Fuzzy {
+		matcher = &fuzzyMatcher{
+			pattern:         p.Pattern,
+			caseInsensitive: p.CaseInsensitive,
+		}
+	} else if p.Approximate {
+		matcher = &approximateMatcher{
+			pattern:         p.Pattern,
+			maxErrors:       p.MaxErrors,
+			caseInsensitive: p.CaseInsensitive,
+		}
+	} else {
+		// Standard regex mode
+		regexPattern := p.Pattern
+		if p.CaseInsensitive {
+			regexPattern = "(?i)" + regexPattern
+		}
+		re, err := regexp.Compile(regexPattern)
+		if err != nil {
+			return &tools.Result{
+				Success:  false,
+				Error:    fmt.Sprintf("invalid regex pattern: %v", err),
+				Duration: time.Since(start),
+			}, nil
+		}
+		matcher = &regexMatcher{re: re}
 	}
 
 	// Check if path is within allowed directories
@@ -175,7 +235,7 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	}
 
 	// Perform search
-	matches, filesSearched, totalCount, err := t.grepFiles(ctx, p.Path, re, p.Glob, p.ContextLines, p.Limit)
+	matches, filesSearched, totalCount, err := t.grepFiles(ctx, p.Path, matcher, p.Glob, p.ContextLines, p.Limit)
 	if err != nil {
 		return &tools.Result{
 			Success:  false,
@@ -221,7 +281,7 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 }
 
 // grepFiles searches for pattern in files.
-func (t *GrepTool) grepFiles(ctx context.Context, root string, re *regexp.Regexp, globPattern string, contextLines, limit int) ([]GrepMatch, int, int, error) {
+func (t *GrepTool) grepFiles(ctx context.Context, root string, matcher lineMatcher, globPattern string, contextLines, limit int) ([]GrepMatch, int, int, error) {
 	var matches []GrepMatch
 	filesSearched := 0
 	totalMatches := 0
@@ -246,7 +306,7 @@ func (t *GrepTool) grepFiles(ctx context.Context, root string, re *regexp.Regexp
 
 	if !info.IsDir() {
 		// Search single file
-		fileMatches, err := t.searchFile(ctx, root, re, contextLines)
+		fileMatches, err := t.searchFile(ctx, root, matcher, contextLines)
 		if err != nil {
 			return nil, 0, 0, err
 		}
@@ -298,7 +358,7 @@ func (t *GrepTool) grepFiles(ctx context.Context, root string, re *regexp.Regexp
 		filesSearched++
 
 		// Search file
-		fileMatches, err := t.searchFile(ctx, path, re, contextLines)
+		fileMatches, err := t.searchFile(ctx, path, matcher, contextLines)
 		if err != nil {
 			return nil // Skip file errors
 		}
@@ -324,7 +384,7 @@ func (t *GrepTool) grepFiles(ctx context.Context, root string, re *regexp.Regexp
 }
 
 // searchFile searches for pattern matches in a single file.
-func (t *GrepTool) searchFile(ctx context.Context, path string, re *regexp.Regexp, contextLines int) ([]GrepMatch, error) {
+func (t *GrepTool) searchFile(ctx context.Context, path string, matcher lineMatcher, contextLines int) ([]GrepMatch, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -382,7 +442,7 @@ func (t *GrepTool) searchFile(ctx context.Context, path string, re *regexp.Regex
 		pending = newPending
 
 		// Check for match
-		if re.MatchString(line) {
+		if matcher.MatchString(line) {
 			match := GrepMatch{
 				File:    path,
 				Line:    lineNum,
@@ -444,4 +504,185 @@ func isBinaryExtension(ext string) bool {
 		".db": true, ".sqlite": true, ".sqlite3": true,
 	}
 	return binaryExts[strings.ToLower(ext)]
+}
+
+// ============================================================================
+// Matcher Implementations
+// ============================================================================
+
+// lineMatcher is the interface for different matching strategies.
+type lineMatcher interface {
+	// MatchString returns true if the line contains a match.
+	MatchString(line string) bool
+}
+
+// regexMatcher implements lineMatcher using standard regex.
+type regexMatcher struct {
+	re *regexp.Regexp
+}
+
+// MatchString checks if line matches the regex.
+func (m *regexMatcher) MatchString(line string) bool {
+	return m.re.MatchString(line)
+}
+
+// fuzzyMatcher implements fzf-style fuzzy matching.
+// Characters must appear in order but not necessarily adjacent.
+// Example: "prsfil" matches "parseFile"
+type fuzzyMatcher struct {
+	pattern         string
+	caseInsensitive bool
+}
+
+// MatchString checks if line contains a fuzzy match.
+func (m *fuzzyMatcher) MatchString(line string) bool {
+	pattern := m.pattern
+	text := line
+
+	if m.caseInsensitive {
+		pattern = strings.ToLower(pattern)
+		text = strings.ToLower(text)
+	}
+
+	return fuzzyMatch(pattern, text)
+}
+
+// fuzzyMatch checks if pattern chars appear in text in order.
+// This is fzf-style matching where "abc" matches "aXbXc".
+func fuzzyMatch(pattern, text string) bool {
+	patternRunes := []rune(pattern)
+	textRunes := []rune(text)
+
+	patternIdx := 0
+	for _, r := range textRunes {
+		if patternIdx >= len(patternRunes) {
+			break
+		}
+		if r == patternRunes[patternIdx] {
+			patternIdx++
+		}
+	}
+
+	return patternIdx == len(patternRunes)
+}
+
+// approximateMatcher implements agrep-style approximate matching.
+// Uses Levenshtein distance to find matches within maxErrors edits.
+type approximateMatcher struct {
+	pattern         string
+	maxErrors       int
+	caseInsensitive bool
+}
+
+// MatchString checks if line contains an approximate match.
+func (m *approximateMatcher) MatchString(line string) bool {
+	pattern := m.pattern
+	text := line
+
+	if m.caseInsensitive {
+		pattern = strings.ToLower(pattern)
+		text = strings.ToLower(text)
+	}
+
+	return approximateMatch(pattern, text, m.maxErrors)
+}
+
+// approximateMatch checks if any substring of text matches pattern
+// within maxErrors edit distance. Text should already be lowercased
+// if case-insensitive matching is needed.
+func approximateMatch(pattern, text string, maxErrors int) bool {
+	patternLen := len([]rune(pattern))
+	textRunes := []rune(text)
+	textLen := len(textRunes)
+
+	// For short patterns, check each word boundary
+	words := splitIntoWords(text)
+	for _, word := range words {
+		if levenshteinDistance(pattern, word) <= maxErrors {
+			return true
+		}
+	}
+
+	// Also check sliding windows of pattern length +/- maxErrors
+	minWindow := max(1, patternLen-maxErrors)
+	maxWindow := min(textLen, patternLen+maxErrors)
+
+	for windowSize := minWindow; windowSize <= maxWindow; windowSize++ {
+		for i := 0; i <= textLen-windowSize; i++ {
+			substr := string(textRunes[i : i+windowSize])
+			if levenshteinDistance(pattern, substr) <= maxErrors {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// splitIntoWords splits text into words (sequences of letters/digits).
+func splitIntoWords(text string) []string {
+	var words []string
+	var current strings.Builder
+
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+			current.WriteRune(r)
+		} else {
+			if current.Len() > 0 {
+				words = append(words, current.String())
+				current.Reset()
+			}
+		}
+	}
+	if current.Len() > 0 {
+		words = append(words, current.String())
+	}
+
+	return words
+}
+
+// levenshteinDistance computes the edit distance between two strings.
+// Uses the Wagner-Fischer algorithm with O(min(m,n)) space.
+func levenshteinDistance(s1, s2 string) int {
+	r1 := []rune(s1)
+	r2 := []rune(s2)
+
+	// Ensure r1 is the shorter string for space efficiency
+	if len(r1) > len(r2) {
+		r1, r2 = r2, r1
+	}
+
+	m, n := len(r1), len(r2)
+
+	// Single row of the DP matrix
+	prev := make([]int, m+1)
+	curr := make([]int, m+1)
+
+	// Initialize first row
+	for i := 0; i <= m; i++ {
+		prev[i] = i
+	}
+
+	// Fill the matrix row by row
+	for j := 1; j <= n; j++ {
+		curr[0] = j
+
+		for i := 1; i <= m; i++ {
+			cost := 0
+			if r1[i-1] != r2[j-1] {
+				cost = 1
+			}
+
+			curr[i] = min(
+				prev[i]+1,      // deletion
+				curr[i-1]+1,    // insertion
+				prev[i-1]+cost, // substitution
+			)
+		}
+
+		// Swap rows
+		prev, curr = curr, prev
+	}
+
+	return prev[m]
 }

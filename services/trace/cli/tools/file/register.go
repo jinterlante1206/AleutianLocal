@@ -18,7 +18,7 @@ import (
 //
 // Description:
 //
-//	Registers the five core file tools (Read, Write, Edit, Glob, Grep)
+//	Registers all file tools (Read, Write, Edit, Glob, Grep, Diff, Tree, JSON)
 //	with the provided tool registry. These tools require a Config that
 //	specifies the working directory and allowed paths.
 //
@@ -35,11 +35,17 @@ import (
 //
 // Thread Safety: This function is safe to call once during initialization.
 func RegisterFileTools(registry *tools.Registry, config *Config) {
+	// Core file operations
 	registry.Register(NewReadTool(config))
 	registry.Register(NewWriteTool(config))
 	registry.Register(NewEditTool(config))
 	registry.Register(NewGlobTool(config))
 	registry.Register(NewGrepTool(config))
+
+	// Enhanced tools
+	registry.Register(NewDiffTool(config))
+	registry.Register(NewTreeTool(config))
+	registry.Register(NewJSONTool(config))
 }
 
 // StaticFileToolDefinitions returns tool definitions without requiring config.
@@ -65,10 +71,16 @@ func StaticFileToolDefinitions() []tools.ToolDefinition {
 	dummyConfig := NewConfig("/")
 
 	return []tools.ToolDefinition{
+		// Core file operations
 		NewReadTool(dummyConfig).Definition(),
 		NewWriteTool(dummyConfig).Definition(),
 		NewEditTool(dummyConfig).Definition(),
 		NewGlobTool(dummyConfig).Definition(),
 		NewGrepTool(dummyConfig).Definition(),
+
+		// Enhanced tools
+		NewDiffTool(dummyConfig).Definition(),
+		NewTreeTool(dummyConfig).Definition(),
+		NewJSONTool(dummyConfig).Definition(),
 	}
 }

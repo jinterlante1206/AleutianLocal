@@ -362,7 +362,22 @@ type GrepParams struct {
 
 	// Limit is the maximum number of matches. Defaults to DefaultGrepLimit.
 	Limit int `json:"limit,omitempty"`
+
+	// Fuzzy enables fzf-style fuzzy matching where characters must appear
+	// in order but not necessarily adjacent. Example: "prsfil" matches "parseFile".
+	Fuzzy bool `json:"fuzzy,omitempty"`
+
+	// Approximate enables agrep-style approximate matching using Levenshtein
+	// distance. Example: "functon" matches "function" with MaxErrors=1.
+	Approximate bool `json:"approximate,omitempty"`
+
+	// MaxErrors is the maximum edit distance for approximate matching.
+	// Only used when Approximate=true. Default: 2, Max: 5.
+	MaxErrors int `json:"max_errors,omitempty"`
 }
+
+// MaxFuzzyErrors is the maximum allowed edit distance for approximate matching.
+const MaxFuzzyErrors = 5
 
 // Validate checks that GrepParams are valid.
 func (p *GrepParams) Validate() error {
@@ -380,6 +395,12 @@ func (p *GrepParams) Validate() error {
 	}
 	if p.Path != "" && !filepath.IsAbs(p.Path) {
 		return errors.New("path must be absolute if provided")
+	}
+	if p.Fuzzy && p.Approximate {
+		return errors.New("cannot use both fuzzy and approximate matching")
+	}
+	if p.MaxErrors < 0 || p.MaxErrors > MaxFuzzyErrors {
+		return fmt.Errorf("max_errors must be between 0 and %d", MaxFuzzyErrors)
 	}
 	return nil
 }
@@ -577,4 +598,145 @@ func ResolveAndValidatePath(path string, config *Config) (string, error) {
 	}
 
 	return realPath, nil
+}
+
+// ============================================================================
+// Diff Types
+// ============================================================================
+
+// DiffParams defines parameters for the Diff tool.
+type DiffParams struct {
+	// FileA is the first file to compare.
+	FileA string `json:"file_a"`
+
+	// FileB is the second file to compare.
+	FileB string `json:"file_b"`
+
+	// ContextLines is the number of context lines around changes.
+	ContextLines int `json:"context_lines,omitempty"`
+}
+
+// Validate checks that DiffParams are valid.
+func (p *DiffParams) Validate() error {
+	if p.FileA == "" {
+		return errors.New("file_a is required")
+	}
+	if p.FileB == "" {
+		return errors.New("file_b is required")
+	}
+	if !filepath.IsAbs(p.FileA) {
+		return errors.New("file_a must be absolute")
+	}
+	if !filepath.IsAbs(p.FileB) {
+		return errors.New("file_b must be absolute")
+	}
+	if p.ContextLines < 0 || p.ContextLines > MaxContextLines {
+		return fmt.Errorf("context_lines must be between 0 and %d", MaxContextLines)
+	}
+	return nil
+}
+
+// DiffResult contains the outcome of a Diff operation.
+type DiffResult struct {
+	// Diff is the unified diff output.
+	Diff string `json:"diff"`
+
+	// LinesAdded is the number of lines added.
+	LinesAdded int `json:"lines_added"`
+
+	// LinesRemoved is the number of lines removed.
+	LinesRemoved int `json:"lines_removed"`
+
+	// FilesIdentical indicates if the files are the same.
+	FilesIdentical bool `json:"files_identical"`
+}
+
+// ============================================================================
+// Tree Types
+// ============================================================================
+
+// TreeParams defines parameters for the Tree tool.
+type TreeParams struct {
+	// Path is the directory to visualize.
+	Path string `json:"path,omitempty"`
+
+	// Depth is the maximum depth to traverse (default: 3, max: 10).
+	Depth int `json:"depth,omitempty"`
+
+	// ShowHidden includes dotfiles/dotdirs.
+	ShowHidden bool `json:"show_hidden,omitempty"`
+
+	// DirsOnly shows only directories, not files.
+	DirsOnly bool `json:"dirs_only,omitempty"`
+}
+
+// MaxTreeDepth is the maximum allowed tree depth.
+const MaxTreeDepth = 10
+
+// Validate checks that TreeParams are valid.
+func (p *TreeParams) Validate() error {
+	if p.Path != "" && !filepath.IsAbs(p.Path) {
+		return errors.New("path must be absolute if provided")
+	}
+	if p.Depth < 0 || p.Depth > MaxTreeDepth {
+		return fmt.Errorf("depth must be between 0 and %d", MaxTreeDepth)
+	}
+	return nil
+}
+
+// TreeResult contains the outcome of a Tree operation.
+type TreeResult struct {
+	// Tree is the ASCII tree output.
+	Tree string `json:"tree"`
+
+	// TotalDirs is the number of directories found.
+	TotalDirs int `json:"total_dirs"`
+
+	// TotalFiles is the number of files found.
+	TotalFiles int `json:"total_files"`
+
+	// Truncated indicates if depth limit was hit.
+	Truncated bool `json:"truncated"`
+}
+
+// ============================================================================
+// JSON Types
+// ============================================================================
+
+// JSONParams defines parameters for the JSON tool.
+type JSONParams struct {
+	// FilePath is the JSON file to query/validate.
+	FilePath string `json:"file_path"`
+
+	// Query is a jq-style path (e.g., ".users[0].name").
+	Query string `json:"query,omitempty"`
+
+	// Validate only validates JSON, doesn't query.
+	Validate bool `json:"validate,omitempty"`
+}
+
+// JSONParamsValidate checks that JSONParams are valid.
+func (p *JSONParams) ValidateParams() error {
+	if p.FilePath == "" {
+		return errors.New("file_path is required")
+	}
+	if !filepath.IsAbs(p.FilePath) {
+		return errors.New("file_path must be absolute")
+	}
+	return nil
+}
+
+// JSONResult contains the outcome of a JSON operation.
+type JSONResult struct {
+	// Value is the query result.
+	Value any `json:"value,omitempty"`
+
+	// Valid indicates if the JSON is valid.
+	Valid bool `json:"valid"`
+
+	// Error contains the parse error if invalid.
+	Error string `json:"error,omitempty"`
+
+	// Path is the file path.
+	Path string `json:"path"`
 }

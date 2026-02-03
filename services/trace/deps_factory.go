@@ -21,6 +21,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools/file"
 )
 
 // DefaultDependenciesFactory creates phase Dependencies for agent sessions.
@@ -217,7 +218,7 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 				if f.enableTools && cached.Graph != nil && cached.Index != nil {
 					registry := tools.NewRegistry()
 
-					// Register all CB-20 exploration tools
+					// Register all CB-20 exploration tools (graph-based)
 					registry.Register(tools.NewFindEntryPointsTool(cached.Graph, cached.Index))
 					registry.Register(tools.NewTraceDataFlowTool(cached.Graph, cached.Index))
 					registry.Register(tools.NewTraceErrorFlowTool(cached.Graph, cached.Index))
@@ -225,6 +226,17 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 					registry.Register(tools.NewFindSimilarCodeTool(cached.Graph, cached.Index))
 					registry.Register(tools.NewSummarizeFileTool(cached.Graph, cached.Index))
 					registry.Register(tools.NewFindConfigUsageTool(cached.Graph, cached.Index))
+
+					// Register CB-30 file operation tools (Read, Write, Edit, Glob, Grep, Diff, Tree, JSON)
+					projectRoot := session.GetProjectRoot()
+					if projectRoot != "" {
+						fileConfig := file.NewConfig(projectRoot)
+						file.RegisterFileTools(registry, fileConfig)
+						slog.Info("File tools registered",
+							slog.String("session_id", session.ID),
+							slog.String("project_root", projectRoot),
+						)
+					}
 
 					deps.ToolRegistry = registry
 					deps.ToolExecutor = tools.NewExecutor(registry, nil)
