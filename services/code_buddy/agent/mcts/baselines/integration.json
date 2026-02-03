@@ -1,0 +1,95 @@
+{
+  "component": "mcts/integration",
+  "version": "1.0.0",
+  "created_at": "2026-01-31T23:34:00Z",
+  "updated_at": "2026-01-31T23:34:00Z",
+  "latency": {
+    "p50": 56125,
+    "p95": 100000,
+    "p99": 150000,
+    "mean": 56125,
+    "std_dev": 10000
+  },
+  "throughput": {
+    "ops_per_second": 17808,
+    "bytes_per_second": 0
+  },
+  "memory": {
+    "alloc_bytes_per_op": 24603,
+    "allocs_per_op": 1126,
+    "heap_in_use": 0
+  },
+  "error": {
+    "rate": 0,
+    "count": 0
+  },
+  "sample_count": 21128,
+  "metadata": {
+    "platform": "darwin/arm64",
+    "cpu": "Apple M4 Max",
+    "go_version": "1.23",
+    "benchmark_date": "2026-01-31",
+    "notes": "Initial baseline for MCTS integration layer"
+  },
+  "benchmarks": {
+    "Bridge_RunActivity": {
+      "ns_per_op": 56125,
+      "bytes_per_op": 24603,
+      "allocs_per_op": 1126,
+      "iterations": 21128
+    },
+    "Bridge_Apply": {
+      "ns_per_op": 1102,
+      "bytes_per_op": 3720,
+      "allocs_per_op": 35,
+      "iterations": 1000000
+    },
+    "ABHarness_Process": {
+      "ns_per_op": 7.791,
+      "bytes_per_op": 0,
+      "allocs_per_op": 0,
+      "iterations": 153440421
+    },
+    "ABHarness_ProcessWithSampling": {
+      "ns_per_op": 761.3,
+      "bytes_per_op": 720,
+      "allocs_per_op": 11,
+      "iterations": 1552998
+    },
+    "Bridge_RunActivity_Parallel": {
+      "ns_per_op": 18439,
+      "bytes_per_op": 24787,
+      "allocs_per_op": 1127,
+      "iterations": 67405
+    },
+    "Bridge_Apply_Parallel": {
+      "ns_per_op": 1748,
+      "bytes_per_op": 3862,
+      "allocs_per_op": 36,
+      "iterations": 614437
+    }
+  },
+  "load_tests": {
+    "100_concurrent_activities": {
+      "total_operations": 1000,
+      "success_rate_min": 0.5,
+      "notes": "100 goroutines x 10 ops each"
+    },
+    "100_concurrent_applies": {
+      "total_operations": 5000,
+      "success_rate_min": 1.0,
+      "notes": "100 goroutines x 50 ops each, all should succeed"
+    },
+    "cancellation_under_load": {
+      "goroutines": 100,
+      "timeout_seconds": 5,
+      "notes": "Tests graceful cancellation"
+    },
+    "ab_harness_under_load": {
+      "total_requests": 2000,
+      "expected_sample_rate_min": 0.4,
+      "expected_sample_rate_max": 0.6,
+      "notes": "100 goroutines x 20 ops at 50% sample rate"
+    }
+  }
+}

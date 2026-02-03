@@ -18,6 +18,7 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
@@ -42,6 +43,9 @@ type ExecutePhase struct {
 
 	// requireSafetyCheck requires safety checks for modifications.
 	requireSafetyCheck bool
+
+	// maxGroundingRetries is the max retries on grounding failures (circuit breaker).
+	maxGroundingRetries int
 }
 
 // ExecutePhaseOption configures an ExecutePhase.
@@ -92,6 +96,21 @@ func WithSafetyCheck(required bool) ExecutePhaseOption {
 	}
 }
 
+// WithMaxGroundingRetries sets the maximum grounding validation retries.
+//
+// Inputs:
+//
+//	retries - Maximum retry count (circuit breaker threshold).
+//
+// Outputs:
+//
+//	ExecutePhaseOption - The configuration function.
+func WithMaxGroundingRetries(retries int) ExecutePhaseOption {
+	return func(p *ExecutePhase) {
+		p.maxGroundingRetries = retries
+	}
+}
+
 // NewExecutePhase creates a new execution phase.
 //
 // Inputs:
@@ -106,6 +125,7 @@ func NewExecutePhase(opts ...ExecutePhaseOption) *ExecutePhase {
 		maxTokens:           4096,
 		reflectionThreshold: 10,
 		requireSafetyCheck:  true,
+		maxGroundingRetries: 3, // Circuit breaker for hallucination retries
 	}
 
 	for _, opt := range opts {
@@ -200,7 +220,7 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		slog.Info("No tool calls, completing",
 			slog.String("session_id", deps.Session.ID),
 		)
-		return p.handleCompletion(deps, response, stepStart, stepNumber)
+		return p.handleCompletion(ctx, deps, response, stepStart, stepNumber)
 	}
 
 	// Parse and execute tool calls
@@ -320,8 +340,16 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 
 // handleCompletion handles LLM responses with no tool calls.
 //
+// Description:
+//
+//	Validates the response against grounding rules (anti-hallucination).
+//	If critical violations are detected and retries are available, builds
+//	a correction prompt and returns EXECUTE to retry. Implements circuit
+//	breaker pattern to prevent infinite retry loops.
+//
 // Inputs:
 //
+//	ctx - Context for cancellation.
 //	deps - Phase dependencies.
 //	response - The LLM response.
 //	stepStart - When the step started.
@@ -329,9 +357,9 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 //
 // Outputs:
 //
-//	agent.AgentState - COMPLETE.
-//	error - Always nil.
-func (p *ExecutePhase) handleCompletion(deps *Dependencies, response *llm.Response, stepStart time.Time, stepNumber int) (agent.AgentState, error) {
+//	agent.AgentState - COMPLETE if grounded, EXECUTE if retry needed.
+//	error - Non-nil only for unrecoverable errors.
+func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies, response *llm.Response, stepStart time.Time, stepNumber int) (agent.AgentState, error) {
 	slog.Info("Handling completion",
 		slog.String("session_id", deps.Session.ID),
 		slog.Int("output_tokens", response.OutputTokens),
@@ -341,33 +369,104 @@ func (p *ExecutePhase) handleCompletion(deps *Dependencies, response *llm.Respon
 	// Update session metrics with token usage
 	if response.OutputTokens > 0 {
 		deps.Session.IncrementMetric(agent.MetricTokens, response.OutputTokens)
-		slog.Info("Updated token metrics",
-			slog.String("session_id", deps.Session.ID),
-			slog.Int("tokens_added", response.OutputTokens),
-		)
 	}
 	deps.Session.IncrementMetric(agent.MetricLLMCalls, 1)
 
+	// Validate response against grounding (anti-hallucination)
+	responseContent := response.Content
+	var groundingResult *grounding.Result
+
+	if deps.ResponseGrounder != nil && deps.Context != nil {
+		var err error
+		groundingResult, err = deps.ResponseGrounder.Validate(ctx, response.Content, deps.Context)
+		if err != nil {
+			slog.Warn("Grounding validation error",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("error", err.Error()),
+			)
+			// Continue with unvalidated response on error
+		}
+	}
+
+	// Handle grounding result
+	if groundingResult != nil {
+		slog.Info("Grounding validation complete",
+			slog.String("session_id", deps.Session.ID),
+			slog.Bool("grounded", groundingResult.Grounded),
+			slog.Float64("confidence", groundingResult.Confidence),
+			slog.Int("critical_count", groundingResult.CriticalCount),
+			slog.Int("warning_count", groundingResult.WarningCount),
+		)
+
+		// Log violations
+		for _, v := range groundingResult.Violations {
+			slog.Warn("Grounding violation",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("type", string(v.Type)),
+				slog.String("severity", string(v.Severity)),
+				slog.String("code", v.Code),
+				slog.String("message", v.Message),
+			)
+		}
+
+		// Check if we should reject and retry
+		if deps.ResponseGrounder.ShouldReject(groundingResult) {
+			retryCount := deps.Session.GetMetric(agent.MetricGroundingRetries)
+
+			if retryCount < p.maxGroundingRetries {
+				// Build correction prompt and retry
+				correctionPrompt := p.buildCorrectionPrompt(groundingResult)
+
+				slog.Info("Grounding rejection - requesting retry",
+					slog.String("session_id", deps.Session.ID),
+					slog.Int("retry_count", retryCount+1),
+					slog.Int("max_retries", p.maxGroundingRetries),
+				)
+
+				// Add correction as user message to trigger re-generation
+				if deps.ContextManager != nil {
+					deps.ContextManager.AddMessage(deps.Context, "user", correctionPrompt)
+				} else if deps.Context != nil {
+					deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+						Role:    "user",
+						Content: correctionPrompt,
+					})
+				}
+
+				deps.Session.IncrementMetric(agent.MetricGroundingRetries, 1)
+
+				// Return to EXECUTE to get a new response
+				return agent.StateExecute, nil
+			}
+
+			// Circuit breaker triggered - log and continue with best effort
+			slog.Error("Grounding circuit breaker triggered - accepting ungrounded response",
+				slog.String("session_id", deps.Session.ID),
+				slog.Int("retry_count", retryCount),
+				slog.Int("critical_violations", groundingResult.CriticalCount),
+			)
+
+			// Add warning footnote about potential issues
+			responseContent = response.Content + "\n\n---\n⚠️ **Warning**: This response may contain inaccuracies. Please verify code references."
+		} else {
+			// Response is grounded or only has warnings - add footnote if needed
+			footnote := deps.ResponseGrounder.GenerateFootnote(groundingResult)
+			if footnote != "" {
+				responseContent = response.Content + footnote
+			}
+		}
+	}
+
 	// Add response to context conversation history
 	if deps.ContextManager != nil {
-		deps.ContextManager.AddMessage(deps.Context, "assistant", response.Content)
-		slog.Debug("Added response via ContextManager")
+		deps.ContextManager.AddMessage(deps.Context, "assistant", responseContent)
+		deps.Session.SetCurrentContext(deps.Context)
 	} else if deps.Context != nil {
-		// In degraded mode without ContextManager, add directly to conversation history
 		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
 			Role:    "assistant",
-			Content: response.Content,
+			Content: responseContent,
 		})
-		// Persist updated context to session
 		deps.Session.SetCurrentContext(deps.Context)
-		slog.Info("Stored response in session context (degraded mode)",
-			slog.String("session_id", deps.Session.ID),
-			slog.Int("history_len", len(deps.Context.ConversationHistory)),
-		)
-	} else {
-		slog.Warn("Cannot store response - no context available",
-			slog.String("session_id", deps.Session.ID),
-		)
 	}
 
 	// Emit step complete
@@ -381,6 +480,28 @@ func (p *ExecutePhase) handleCompletion(deps *Dependencies, response *llm.Respon
 	)
 
 	return agent.StateComplete, nil
+}
+
+// buildCorrectionPrompt creates a prompt to correct grounding violations.
+func (p *ExecutePhase) buildCorrectionPrompt(result *grounding.Result) string {
+	var issues []string
+	for _, v := range result.Violations {
+		if v.Severity == grounding.SeverityCritical {
+			issues = append(issues, v.Message)
+		}
+	}
+
+	prompt := "Your previous response had grounding issues that need correction:\n\n"
+	for i, issue := range issues {
+		prompt += fmt.Sprintf("%d. %s\n", i+1, issue)
+	}
+	prompt += "\nPlease provide a corrected response that:\n"
+	prompt += "- Only discusses code that appears in the provided context\n"
+	prompt += "- Uses [file:line] citations for specific code references\n"
+	prompt += "- Matches the project's programming language\n"
+	prompt += "- Says \"I don't see X in the context\" if something is not present\n"
+
+	return prompt
 }
 
 // executeToolCalls executes tool invocations with safety checks.
@@ -550,10 +671,15 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 			continue
 		}
 
-		_, err := deps.ContextManager.Update(ctx, deps.Context, result)
+		updated, err := deps.ContextManager.Update(ctx, deps.Context, result)
 		if err != nil {
 			p.emitError(deps, fmt.Errorf("context update failed: %w", err), true)
+			continue
 		}
+
+		// Update deps.Context with the new context and persist to session
+		deps.Context = updated
+		deps.Session.SetCurrentContext(updated)
 	}
 }
 

@@ -62,6 +62,16 @@ type TradingSignalResponse struct {
 	Ticker        string  `json:"ticker"`         // Ticker symbol
 }
 
+// MetricsResponse contains computed performance metrics from the metrics service.
+// These metrics are calculated from the portfolio's return series after a backtest.
+type MetricsResponse struct {
+	SharpeRatio float64 `json:"sharpe_ratio"` // Risk-adjusted return (annualized)
+	MaxDrawdown float64 `json:"max_drawdown"` // Maximum peak-to-trough decline (negative value)
+	CAGR        float64 `json:"cagr"`         // Compound Annual Growth Rate
+	CalmarRatio float64 `json:"calmar_ratio"` // CAGR / |MaxDrawdown|
+	WinRate     float64 `json:"win_rate"`     // Percentage of positive return periods (0-1)
+}
+
 // EvaluationResult is the final data point stored in InfluxDB.
 //
 // Description:

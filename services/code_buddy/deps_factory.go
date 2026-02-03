@@ -16,6 +16,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	agentcontext "github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/context"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
@@ -33,12 +34,13 @@ import (
 //
 // Thread Safety: DefaultDependenciesFactory is safe for concurrent use.
 type DefaultDependenciesFactory struct {
-	llmClient     llm.Client
-	graphProvider phases.GraphProvider
-	toolRegistry  *tools.Registry
-	toolExecutor  *tools.Executor
-	safetyGate    safety.Gate
-	eventEmitter  *events.Emitter
+	llmClient        llm.Client
+	graphProvider    phases.GraphProvider
+	toolRegistry     *tools.Registry
+	toolExecutor     *tools.Executor
+	safetyGate       safety.Gate
+	eventEmitter     *events.Emitter
+	responseGrounder grounding.Grounder
 
 	// service provides access to cached graphs for context/tools
 	service *Service
@@ -140,6 +142,13 @@ func WithToolsEnabled(enabled bool) DependenciesFactoryOption {
 	}
 }
 
+// WithResponseGrounder sets the response grounding validator.
+func WithResponseGrounder(grounder grounding.Grounder) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.responseGrounder = grounder
+	}
+}
+
 // Create implements agent.DependenciesFactory.
 //
 // Description:
@@ -163,14 +172,15 @@ func WithToolsEnabled(enabled bool) DependenciesFactoryOption {
 // Thread Safety: This method is safe for concurrent use.
 func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string) (any, error) {
 	deps := &phases.Dependencies{
-		Session:       session,
-		Query:         query,
-		LLMClient:     f.llmClient,
-		GraphProvider: f.graphProvider,
-		ToolRegistry:  f.toolRegistry,
-		ToolExecutor:  f.toolExecutor,
-		SafetyGate:    f.safetyGate,
-		EventEmitter:  f.eventEmitter,
+		Session:          session,
+		Query:            query,
+		LLMClient:        f.llmClient,
+		GraphProvider:    f.graphProvider,
+		ToolRegistry:     f.toolRegistry,
+		ToolExecutor:     f.toolExecutor,
+		SafetyGate:       f.safetyGate,
+		EventEmitter:     f.eventEmitter,
+		ResponseGrounder: f.responseGrounder,
 		// Retrieve existing context from session (persisted by PlanPhase)
 		Context: session.GetCurrentContext(),
 	}
@@ -218,6 +228,9 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 
 					deps.ToolRegistry = registry
 					deps.ToolExecutor = tools.NewExecutor(registry, nil)
+
+					// Mark graph_initialized requirement as satisfied since we have a valid graph
+					deps.ToolExecutor.SatisfyRequirement("graph_initialized")
 
 					slog.Info("ToolRegistry created",
 						slog.String("session_id", session.ID),

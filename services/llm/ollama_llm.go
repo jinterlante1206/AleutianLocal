@@ -61,12 +61,110 @@ type ollamaChatRequest struct {
 	Messages []datatypes.Message    `json:"messages"`
 	Stream   bool                   `json:"stream"`
 	Options  map[string]interface{} `json:"options,omitempty"`
+	Tools    []OllamaTool           `json:"tools,omitempty"`
+}
+
+// =============================================================================
+// Tool Calling Types (Ollama API compatible)
+// =============================================================================
+
+// OllamaTool represents a tool definition for Ollama's function calling API.
+//
+// Description:
+//
+//	Ollama uses an OpenAI-compatible format for tool definitions.
+//	This structure is serialized in the "tools" array of chat requests.
+//
+// Example:
+//
+//	{
+//	  "type": "function",
+//	  "function": {
+//	    "name": "read_file",
+//	    "description": "Read contents of a file",
+//	    "parameters": {...}
+//	  }
+//	}
+type OllamaTool struct {
+	Type     string             `json:"type"`
+	Function OllamaToolFunction `json:"function"`
+}
+
+// OllamaToolFunction contains the function definition within an OllamaTool.
+type OllamaToolFunction struct {
+	Name        string               `json:"name"`
+	Description string               `json:"description"`
+	Parameters  OllamaToolParameters `json:"parameters"`
+}
+
+// OllamaToolParameters defines the JSON Schema for tool parameters.
+type OllamaToolParameters struct {
+	Type       string                    `json:"type"`
+	Properties map[string]OllamaParamDef `json:"properties,omitempty"`
+	Required   []string                  `json:"required,omitempty"`
+}
+
+// OllamaParamDef defines a single parameter in JSON Schema format.
+type OllamaParamDef struct {
+	Type        string `json:"type"`
+	Description string `json:"description,omitempty"`
+	Enum        []any  `json:"enum,omitempty"`
+	Default     any    `json:"default,omitempty"`
+}
+
+// OllamaToolCall represents a tool call from Ollama's response.
+type OllamaToolCall struct {
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Function OllamaFunctionCall `json:"function"`
+}
+
+// OllamaFunctionCall contains the function name and arguments.
+//
+// Note: Arguments can be either a JSON string or a JSON object depending on the model.
+// Some models (like glm-4.7-flash) return arguments as an object, while others
+// (OpenAI-compatible) return it as a JSON-encoded string.
+type OllamaFunctionCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// ArgumentsString returns the arguments as a JSON string.
+// If arguments is already a string, it returns the unquoted string.
+// If arguments is an object, it returns the JSON-encoded string.
+func (f *OllamaFunctionCall) ArgumentsString() string {
+	if len(f.Arguments) == 0 {
+		return "{}"
+	}
+
+	// Check if it's a JSON string (starts with quote)
+	if f.Arguments[0] == '"' {
+		var s string
+		if err := json.Unmarshal(f.Arguments, &s); err == nil {
+			return s
+		}
+	}
+
+	// It's an object or other JSON value, return as-is
+	return string(f.Arguments)
 }
 
 type ollamaChatResponse struct {
-	Message   datatypes.Message `json:"message"`
+	Message   ollamaChatMessage `json:"message"`
 	CreatedAt string            `json:"created_at"`
 	Done      bool              `json:"done"`
+}
+
+// ollamaChatMessage extends datatypes.Message to include tool calls.
+//
+// Description:
+//
+//	Ollama returns tool calls in the message.tool_calls field when the
+//	model decides to call tools. This type captures that response.
+type ollamaChatMessage struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []OllamaToolCall `json:"tool_calls,omitempty"`
 }
 
 // =============================================================================
@@ -419,6 +517,161 @@ func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
 		slog.Warn("Ollama chat response message role was not 'assistant'", "role", ollamaResp.Message.Role)
 	}
 	return ollamaResp.Message.Content, nil
+}
+
+// ChatWithToolsResult contains the response from ChatWithTools.
+type ChatWithToolsResult struct {
+	// Content is the text response (may be empty if tool_use).
+	Content string
+
+	// ToolCalls contains tool calls from the model.
+	ToolCalls []OllamaToolCall
+
+	// StopReason indicates why generation stopped.
+	// Values: "end", "tool_use"
+	StopReason string
+}
+
+// ChatWithTools sends a chat request with tools and returns both content and tool calls.
+//
+// Description:
+//
+//	Extends Chat to support Ollama's function calling API. When tools are provided,
+//	the model may respond with tool_calls instead of (or in addition to) content.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout.
+//	messages - Conversation history.
+//	params - Generation parameters.
+//	tools - Tool definitions for function calling.
+//
+// Outputs:
+//
+//	*ChatWithToolsResult - Content and/or tool calls.
+//	error - Non-nil on failure.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (o *OllamaClient) ChatWithTools(ctx context.Context, messages []datatypes.Message,
+	params GenerationParams, tools []OllamaTool) (*ChatWithToolsResult, error) {
+
+	ctx, span := tracer.Start(ctx, "OllamaClient.ChatWithTools")
+	defer span.End()
+	span.SetAttributes(attribute.String("llm.model", o.model))
+	span.SetAttributes(attribute.Int("llm.num_messages", len(messages)))
+	span.SetAttributes(attribute.Int("llm.num_tools", len(tools)))
+
+	slog.Debug("Chat with tools via Ollama",
+		"model", o.model,
+		"num_messages", len(messages),
+		"num_tools", len(tools),
+	)
+
+	chatURL := o.baseURL + "/api/chat"
+	options := make(map[string]interface{})
+	if params.Temperature != nil {
+		options["temperature"] = *params.Temperature
+	} else {
+		defaultTemp := float32(0.2)
+		options["temperature"] = &defaultTemp
+	}
+	if params.TopK != nil {
+		options["top_k"] = *params.TopK
+	} else {
+		defaultTopK := 20
+		options["top_k"] = defaultTopK
+	}
+	if params.TopP != nil {
+		options["top_p"] = *params.TopP
+	} else {
+		defaultTopP := float32(0.9)
+		options["top_p"] = defaultTopP
+	}
+	if params.MaxTokens != nil {
+		options["num_predict"] = *params.MaxTokens
+	} else {
+		defaultMaxTokens := 8192
+		options["num_predict"] = defaultMaxTokens
+	}
+	if len(params.Stop) > 0 {
+		options["stop"] = params.Stop
+	}
+
+	payload := ollamaChatRequest{
+		Model:    o.model,
+		Messages: messages,
+		Stream:   false,
+		Options:  options,
+		Tools:    tools,
+	}
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("failed to marshal chat request to Ollama: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", chatURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("failed to create chat request to Ollama: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("failed to send request to %s: %v", chatURL, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		span.RecordError(readErr)
+		span.SetStatus(codes.Error, readErr.Error())
+		return nil, fmt.Errorf("failed to read response body: %v", readErr)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		httpErr := fmt.Errorf("ollama chat failed with status %d: %s", resp.StatusCode, string(respBody))
+		slog.Error("Ollama chat returned an error",
+			"status_code", resp.StatusCode,
+			"response", string(respBody),
+		)
+		span.RecordError(httpErr)
+		span.SetStatus(codes.Error, httpErr.Error())
+		return nil, httpErr
+	}
+
+	var ollamaResp ollamaChatResponse
+	if err = json.Unmarshal(respBody, &ollamaResp); err != nil {
+		slog.Error("Failed to parse JSON chat response from Ollama",
+			"error", err,
+			"response", string(respBody),
+		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, fmt.Errorf("failed to parse ollama chat response: %w", err)
+	}
+
+	result := &ChatWithToolsResult{
+		Content:   ollamaResp.Message.Content,
+		ToolCalls: ollamaResp.Message.ToolCalls,
+	}
+
+	// Determine stop reason
+	if len(result.ToolCalls) > 0 {
+		result.StopReason = "tool_use"
+		slog.Debug("Ollama returned tool calls",
+			"num_tool_calls", len(result.ToolCalls),
+		)
+	} else {
+		result.StopReason = "end"
+	}
+
+	return result, nil
 }
 
 // =============================================================================

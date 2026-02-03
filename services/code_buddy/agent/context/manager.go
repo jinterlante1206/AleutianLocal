@@ -22,6 +22,7 @@ package context
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -75,10 +76,27 @@ func DefaultManagerConfig() ManagerConfig {
 		MaxContextSize: DefaultMaxContextSize,
 		EvictionTarget: DefaultEvictionTarget,
 		EvictionPolicy: "hybrid",
-		SystemPrompt: `You are a helpful AI assistant specialized in understanding and working with code.
-You have access to tools that help you explore and understand the codebase.
-Always explain your reasoning before using tools.
-When making code changes, ensure safety by checking for potential issues.`,
+		SystemPrompt: `You are a helpful AI assistant specialized in understanding and analyzing code.
+You have access to the complete codebase and tools to explore it thoroughly.
+
+IMPORTANT GUIDELINES:
+1. Be proactive - for broad questions like "what are the security concerns?" or "trace the data flow",
+   start by finding entry points (main functions, HTTP handlers, CLI commands) and explore outward.
+2. Use your tools to gather information before answering. Don't guess - explore the code.
+3. For analytical questions, examine relevant code paths and provide specific findings with file:line references.
+4. Only request clarification when there are genuinely ambiguous or contradictory requirements.
+   Do NOT ask "which file?" or "which function?" - explore the codebase and provide a comprehensive answer.
+5. When making code changes, ensure safety by checking for potential issues.
+
+GROUNDING RULES (Critical - prevents hallucination):
+1. ONLY discuss code that appears in your context. If you haven't seen a file, don't describe it.
+2. Use [file.go:42] or [file.go:42-50] citation format when referencing specific code.
+3. If asked about something not in your context, say "I don't see X in the provided context" - don't invent it.
+4. Match the project's programming language. If the context shows Go code, discuss Go patterns (not Python/Flask/etc).
+5. Quote actual code snippets when explaining behavior - this proves you're looking at real code.
+6. If uncertain whether something exists, use tools to verify before claiming it exists.
+
+Always explain your reasoning and cite specific code locations in your answers.`,
 	}
 }
 
@@ -208,6 +226,12 @@ func (m *Manager) Assemble(ctx context.Context, query string, budget int) (*agen
 		m.addedAt[entry.ID] = m.currentStep
 	}
 
+	// Detect and inject explicit project language into system prompt
+	// This helps prevent hallucination by making the language constraint explicit upfront
+	if lang := m.detectProjectLanguage(assembled.CodeContext); lang != "" {
+		assembled.SystemPrompt = m.injectProjectLanguage(assembled.SystemPrompt, lang)
+	}
+
 	// Add initial user message
 	assembled.ConversationHistory = append(assembled.ConversationHistory, agent.Message{
 		Role:    "user",
@@ -255,14 +279,103 @@ func (m *Manager) parseContextEntries(contextStr string, symbolIDs []string) []a
 		if sym, ok := m.index.GetByID(symbolID); ok {
 			entry.FilePath = sym.FilePath
 			entry.SymbolName = sym.Name
-			entry.Content = sym.Signature
-			entry.Tokens = estimateTokens(sym.Signature)
+			// Use full source code from assembler instead of just signature
+			entry.Content = m.assembler.GetSymbolSourceCode(sym)
+			entry.Tokens = estimateTokens(entry.Content)
 		}
 
 		entries = append(entries, entry)
 	}
 
 	return entries
+}
+
+// detectProjectLanguage determines the dominant programming language from code entries.
+//
+// Description:
+//
+//	Analyzes file extensions in the code context to identify the primary
+//	programming language. This is used to inject explicit language constraints
+//	into the system prompt to prevent hallucination.
+//
+// Inputs:
+//
+//	entries - Code entries from the assembled context.
+//
+// Outputs:
+//
+//	string - The dominant language (e.g., "Go", "Python"), or empty if unknown.
+func (m *Manager) detectProjectLanguage(entries []agent.CodeEntry) string {
+	langCounts := make(map[string]int)
+
+	for _, entry := range entries {
+		ext := strings.ToLower(filepath.Ext(entry.FilePath))
+		var lang string
+		switch ext {
+		case ".go":
+			lang = "Go"
+		case ".py":
+			lang = "Python"
+		case ".js":
+			lang = "JavaScript"
+		case ".ts":
+			lang = "TypeScript"
+		case ".jsx":
+			lang = "JavaScript"
+		case ".tsx":
+			lang = "TypeScript"
+		case ".java":
+			lang = "Java"
+		case ".rs":
+			lang = "Rust"
+		case ".c", ".h":
+			lang = "C"
+		case ".cpp", ".hpp", ".cc":
+			lang = "C++"
+		}
+		if lang != "" {
+			langCounts[lang]++
+		}
+	}
+
+	// Find dominant language
+	maxCount := 0
+	dominantLang := ""
+	for lang, count := range langCounts {
+		if count > maxCount {
+			maxCount = count
+			dominantLang = lang
+		}
+	}
+
+	return dominantLang
+}
+
+// injectProjectLanguage adds explicit language context to the system prompt.
+//
+// Description:
+//
+//	Inserts a clear statement about the project's primary programming language
+//	at the start of the system prompt. This helps prevent the LLM from
+//	hallucinating code in the wrong language (e.g., describing Python/Flask
+//	patterns when analyzing a Go project).
+//
+// Inputs:
+//
+//	systemPrompt - The base system prompt.
+//	lang - The detected project language (e.g., "Go").
+//
+// Outputs:
+//
+//	string - The system prompt with language context injected.
+func (m *Manager) injectProjectLanguage(systemPrompt, lang string) string {
+	langNotice := fmt.Sprintf(`IMPORTANT: You are analyzing a **%s** project.
+Do NOT reference or describe code patterns from other languages (Python, JavaScript, Java, etc.)
+unless those files are explicitly shown in your context.
+
+`, lang)
+
+	return langNotice + systemPrompt
 }
 
 // Update modifies context based on a tool result.

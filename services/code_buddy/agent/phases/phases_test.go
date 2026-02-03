@@ -687,3 +687,125 @@ func TestPhasesRespectContextCancellation(t *testing.T) {
 		t.Errorf("Expected DEGRADED on context cancellation, got %s", state)
 	}
 }
+
+// Test fallback response generation when synthesis fails
+func TestReflectPhase_FallbackResponse(t *testing.T) {
+	phase := NewReflectPhase(
+		WithMaxSteps(1), // Low threshold to trigger completion immediately
+	)
+	deps := createTestDependencies()
+
+	// Set up context with tool results but no LLM client (triggers fallback)
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{
+			{Role: "user", Content: "What are the security concerns?"},
+		},
+		ToolResults: []agent.ToolResult{
+			{InvocationID: "call_1", Success: true, Output: "Found 3 files in /src/auth: login.go, token.go, session.go"},
+			{InvocationID: "call_2", Success: true, Output: "Function validateToken handles JWT verification"},
+			{InvocationID: "call_3", Success: false, Output: "", Error: "file not found"},
+		},
+	}
+	deps.LLMClient = nil // No LLM client - forces fallback
+
+	// Update session metrics to trigger completion
+	deps.Session.IncrementMetric(agent.MetricSteps, 10)
+
+	state, err := phase.Execute(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if state != agent.StateComplete {
+		t.Errorf("Expected COMPLETE, got %s", state)
+	}
+
+	// Check that a fallback response was generated
+	ctx := deps.Session.GetCurrentContext()
+	if ctx == nil {
+		t.Fatal("Expected context to be set")
+	}
+
+	// Find assistant response
+	var assistantMsg *agent.Message
+	for i := len(ctx.ConversationHistory) - 1; i >= 0; i-- {
+		if ctx.ConversationHistory[i].Role == "assistant" {
+			assistantMsg = &ctx.ConversationHistory[i]
+			break
+		}
+	}
+
+	if assistantMsg == nil {
+		t.Fatal("Expected assistant response in conversation history")
+	}
+
+	// Check fallback response contains expected elements
+	if !contains(assistantMsg.Content, "exploration") {
+		t.Errorf("Fallback response should mention exploration, got: %s", assistantMsg.Content)
+	}
+	if !contains(assistantMsg.Content, "3 tool calls") {
+		t.Errorf("Fallback response should mention tool calls count, got: %s", assistantMsg.Content)
+	}
+	if !contains(assistantMsg.Content, "2 successful results") {
+		t.Errorf("Fallback response should mention successful results, got: %s", assistantMsg.Content)
+	}
+}
+
+// Test context truncation for synthesis
+func TestReflectPhase_ContextTruncation(t *testing.T) {
+	phase := NewReflectPhase()
+
+	// Create a very large context
+	deps := createTestDependencies()
+	largeOutput := make([]byte, 50000)
+	for i := range largeOutput {
+		largeOutput[i] = 'x'
+	}
+
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{
+			{Role: "user", Content: "Original query"},
+		},
+		ToolResults: []agent.ToolResult{
+			{InvocationID: "call_1", Success: true, Output: string(largeOutput)},
+			{InvocationID: "call_2", Success: true, Output: string(largeOutput)},
+		},
+	}
+
+	// Test that prepareSynthesisContext truncates correctly
+	reduced := phase.prepareSynthesisContext(deps)
+
+	// Estimate reduced size
+	totalSize := 0
+	for _, msg := range reduced.ConversationHistory {
+		totalSize += len(msg.Content)
+	}
+	for _, result := range reduced.ToolResults {
+		totalSize += len(result.Output)
+	}
+
+	// Should be much smaller than original (2 x 50000 = 100000 bytes)
+	if totalSize >= 100000 {
+		t.Errorf("Context was not truncated: size = %d", totalSize)
+	}
+
+	// Each tool result should be truncated to ~2000 chars + truncation message
+	for _, result := range reduced.ToolResults {
+		if len(result.Output) > 2500 {
+			t.Errorf("Tool result not truncated: len = %d", len(result.Output))
+		}
+	}
+}
+
+// helper function
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

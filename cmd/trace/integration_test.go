@@ -8,15 +8,15 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package main provides integration tests for the Code Buddy HTTP API.
+// Package main provides integration tests for the Aleutian Trace HTTP API.
 //
 // These tests exercise all HTTP endpoints end-to-end using a real codebase
 // (AleutianOrchestrator) to validate the full request/response cycle.
 //
 // Usage:
 //
-//	go test -v ./cmd/codebuddy -run TestIntegration
-//	go test -v ./cmd/codebuddy -run TestIntegration -tags=integration
+//	go test -v ./cmd/trace -run TestIntegration
+//	go test -v ./cmd/trace -run TestIntegration -tags=integration
 package main
 
 import (

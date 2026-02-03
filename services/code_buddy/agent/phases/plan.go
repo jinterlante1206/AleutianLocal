@@ -155,7 +155,11 @@ func (p *PlanPhase) Execute(ctx context.Context, deps *Dependencies) (agent.Agen
 		assembledContext := &agent.AssembledContext{
 			SystemPrompt: "You are a helpful code assistant. Answer questions about the codebase.",
 			CodeContext:  []agent.CodeEntry{},
+			LibraryDocs:  []agent.DocEntry{},
+			ToolResults:  []agent.ToolResult{},
 			TotalTokens:  0,
+			// CT-001/PH-005: Initialize Relevance map to prevent nil map panic
+			Relevance: make(map[string]float64),
 			// Include the user's query in conversation history
 			ConversationHistory: []agent.Message{
 				{

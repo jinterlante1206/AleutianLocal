@@ -39,6 +39,9 @@ const (
 
 	// MetricCacheHits is the cache hits metric.
 	MetricCacheHits MetricField = "cache_hits"
+
+	// MetricGroundingRetries is the grounding validation retry count.
+	MetricGroundingRetries MetricField = "grounding_retries"
 )
 
 // ValidContextEvictionPolicies contains valid eviction policy values.
@@ -295,6 +298,50 @@ type AssembledContext struct {
 	Relevance map[string]float64 `json:"relevance"`
 }
 
+// GetRelevance returns the relevance score for an entry ID.
+// Returns 0.0 if the entry ID doesn't exist or if Relevance map is nil.
+//
+// Thread Safety: This method is NOT safe for concurrent use.
+func (c *AssembledContext) GetRelevance(entryID string) float64 {
+	if c.Relevance == nil {
+		return 0.0
+	}
+	return c.Relevance[entryID]
+}
+
+// SetRelevance sets the relevance score for an entry ID.
+// Initializes the Relevance map if nil (CT-001 fix).
+//
+// Thread Safety: This method is NOT safe for concurrent use.
+func (c *AssembledContext) SetRelevance(entryID string, score float64) {
+	if c.Relevance == nil {
+		c.Relevance = make(map[string]float64)
+	}
+	c.Relevance[entryID] = score
+}
+
+// EnsureInitialized ensures all slice/map fields are non-nil.
+// Call this after unmarshalling or constructing AssembledContext.
+//
+// Thread Safety: This method is NOT safe for concurrent use.
+func (c *AssembledContext) EnsureInitialized() {
+	if c.CodeContext == nil {
+		c.CodeContext = []CodeEntry{}
+	}
+	if c.LibraryDocs == nil {
+		c.LibraryDocs = []DocEntry{}
+	}
+	if c.ToolResults == nil {
+		c.ToolResults = []ToolResult{}
+	}
+	if c.ConversationHistory == nil {
+		c.ConversationHistory = []Message{}
+	}
+	if c.Relevance == nil {
+		c.Relevance = make(map[string]float64)
+	}
+}
+
 // CodeEntry represents a code snippet in context.
 type CodeEntry struct {
 	// ID is a unique identifier for this entry.
@@ -503,6 +550,8 @@ func (s *Session) IncrementMetric(field MetricField, value int) {
 		s.Metrics.LLMCalls += value
 	case MetricCacheHits:
 		s.Metrics.CacheHits += value
+	case MetricGroundingRetries:
+		s.Metrics.GroundingRetries += value
 	}
 	s.LastActiveAt = time.Now()
 }
@@ -614,6 +663,35 @@ func (s *Session) GetMetrics() SessionMetrics {
 		return SessionMetrics{}
 	}
 	return *s.Metrics
+}
+
+// GetMetric returns the value of a specific metric field.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetMetric(field MetricField) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Metrics == nil {
+		return 0
+	}
+	switch field {
+	case MetricSteps:
+		return s.Metrics.TotalSteps
+	case MetricTokens:
+		return s.Metrics.TotalTokens
+	case MetricToolCalls:
+		return s.Metrics.ToolCalls
+	case MetricToolErrors:
+		return s.Metrics.ToolErrors
+	case MetricLLMCalls:
+		return s.Metrics.LLMCalls
+	case MetricCacheHits:
+		return s.Metrics.CacheHits
+	case MetricGroundingRetries:
+		return s.Metrics.GroundingRetries
+	default:
+		return 0
+	}
 }
 
 // GetProjectRoot returns the project root path.

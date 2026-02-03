@@ -1394,3 +1394,235 @@ func TestStreamEvent_Creation(t *testing.T) {
 		t.Errorf("Error event error = %q, want %q", errorEvent.Error, "Connection failed")
 	}
 }
+
+// =============================================================================
+// ChatWithTools Tests
+// =============================================================================
+
+func TestOllamaClient_ChatWithTools_Success(t *testing.T) {
+	t.Parallel()
+
+	server := newMockOllamaServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Response with tool calls
+		response := `{
+			"message": {
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{
+						"id": "call_123",
+						"type": "function",
+						"function": {
+							"name": "read_file",
+							"arguments": "{\"path\": \"/test.go\"}"
+						}
+					}
+				]
+			},
+			"created_at": "2024-01-01T00:00:00Z",
+			"done": true
+		}`
+		_, _ = w.Write([]byte(response))
+	})
+	defer server.Close()
+
+	client := newTestOllamaClient(server.URL, "test-model")
+	messages := []datatypes.Message{
+		{Role: "user", Content: "Read the file /test.go"},
+	}
+	tools := []OllamaTool{
+		{
+			Type: "function",
+			Function: OllamaToolFunction{
+				Name:        "read_file",
+				Description: "Read a file",
+				Parameters: OllamaToolParameters{
+					Type: "object",
+					Properties: map[string]OllamaParamDef{
+						"path": {Type: "string", Description: "File path"},
+					},
+					Required: []string{"path"},
+				},
+			},
+		},
+	}
+
+	result, err := client.ChatWithTools(context.Background(), messages, GenerationParams{}, tools)
+
+	if err != nil {
+		t.Fatalf("ChatWithTools() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("ChatWithTools() returned nil result")
+	}
+	if result.StopReason != "tool_use" {
+		t.Errorf("StopReason = %q, want 'tool_use'", result.StopReason)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].Function.Name != "read_file" {
+		t.Errorf("ToolCalls[0].Function.Name = %q, want 'read_file'", result.ToolCalls[0].Function.Name)
+	}
+	if result.ToolCalls[0].ID != "call_123" {
+		t.Errorf("ToolCalls[0].ID = %q, want 'call_123'", result.ToolCalls[0].ID)
+	}
+}
+
+func TestOllamaClient_ChatWithTools_NoToolCalls(t *testing.T) {
+	t.Parallel()
+
+	server := newMockOllamaServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Response with content only, no tool calls
+		response := `{
+			"message": {
+				"role": "assistant",
+				"content": "I cannot read files directly. Please provide the content."
+			},
+			"created_at": "2024-01-01T00:00:00Z",
+			"done": true
+		}`
+		_, _ = w.Write([]byte(response))
+	})
+	defer server.Close()
+
+	client := newTestOllamaClient(server.URL, "test-model")
+	messages := []datatypes.Message{
+		{Role: "user", Content: "Hello"},
+	}
+
+	result, err := client.ChatWithTools(context.Background(), messages, GenerationParams{}, nil)
+
+	if err != nil {
+		t.Fatalf("ChatWithTools() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("ChatWithTools() returned nil result")
+	}
+	if result.StopReason != "end" {
+		t.Errorf("StopReason = %q, want 'end'", result.StopReason)
+	}
+	if len(result.ToolCalls) != 0 {
+		t.Errorf("len(ToolCalls) = %d, want 0", len(result.ToolCalls))
+	}
+	if result.Content == "" {
+		t.Error("Content should not be empty")
+	}
+}
+
+func TestOllamaClient_ChatWithTools_MultipleToolCalls(t *testing.T) {
+	t.Parallel()
+
+	server := newMockOllamaServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Response with multiple tool calls
+		response := `{
+			"message": {
+				"role": "assistant",
+				"content": "I'll read both files for you.",
+				"tool_calls": [
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {
+							"name": "read_file",
+							"arguments": "{\"path\": \"/main.go\"}"
+						}
+					},
+					{
+						"id": "call_2",
+						"type": "function",
+						"function": {
+							"name": "read_file",
+							"arguments": "{\"path\": \"/utils.go\"}"
+						}
+					}
+				]
+			},
+			"created_at": "2024-01-01T00:00:00Z",
+			"done": true
+		}`
+		_, _ = w.Write([]byte(response))
+	})
+	defer server.Close()
+
+	client := newTestOllamaClient(server.URL, "test-model")
+	messages := []datatypes.Message{
+		{Role: "user", Content: "Read main.go and utils.go"},
+	}
+
+	result, err := client.ChatWithTools(context.Background(), messages, GenerationParams{}, nil)
+
+	if err != nil {
+		t.Fatalf("ChatWithTools() error = %v", err)
+	}
+	if len(result.ToolCalls) != 2 {
+		t.Fatalf("len(ToolCalls) = %d, want 2", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].ID != "call_1" {
+		t.Errorf("ToolCalls[0].ID = %q, want 'call_1'", result.ToolCalls[0].ID)
+	}
+	if result.ToolCalls[1].ID != "call_2" {
+		t.Errorf("ToolCalls[1].ID = %q, want 'call_2'", result.ToolCalls[1].ID)
+	}
+	if result.Content != "I'll read both files for you." {
+		t.Errorf("Content = %q, want \"I'll read both files for you.\"", result.Content)
+	}
+}
+
+func TestOllamaClient_ChatWithTools_ServerError(t *testing.T) {
+	t.Parallel()
+
+	server := newMockOllamaServer(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "internal server error"}`))
+	})
+	defer server.Close()
+
+	client := newTestOllamaClient(server.URL, "test-model")
+	messages := []datatypes.Message{
+		{Role: "user", Content: "Hello"},
+	}
+
+	_, err := client.ChatWithTools(context.Background(), messages, GenerationParams{}, nil)
+
+	if err == nil {
+		t.Error("ChatWithTools() should return error on server error")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("Error should contain status code 500, got: %v", err)
+	}
+}
+
+func TestOllamaClient_ChatWithTools_ContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	server := newMockOllamaServer(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate slow response
+		time.Sleep(1 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	client := newTestOllamaClient(server.URL, "test-model")
+	messages := []datatypes.Message{
+		{Role: "user", Content: "Hello"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := client.ChatWithTools(ctx, messages, GenerationParams{}, nil)
+
+	if err == nil {
+		t.Error("ChatWithTools() should return error on context cancellation")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "context") {
+		t.Errorf("Error should be context related, got: %v", err)
+	}
+}

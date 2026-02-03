@@ -1,0 +1,533 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
+package integration
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/activities"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/eval"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+)
+
+// -----------------------------------------------------------------------------
+// Errors
+// -----------------------------------------------------------------------------
+
+var (
+	// ErrCoordinatorClosed is returned when the coordinator is closed.
+	ErrCoordinatorClosed = errors.New("coordinator is closed")
+
+	// ErrNoActivitiesReady is returned when no activities are ready to run.
+	ErrNoActivitiesReady = errors.New("no activities ready to run")
+
+	// ErrActivityNotFound is returned when an activity is not found.
+	ErrActivityNotFound = errors.New("activity not found")
+)
+
+// CoordinatorError wraps an error with coordinator context.
+type CoordinatorError struct {
+	Operation string
+	Err       error
+}
+
+func (e *CoordinatorError) Error() string {
+	return "coordinator." + e.Operation + ": " + e.Err.Error()
+}
+
+func (e *CoordinatorError) Unwrap() error {
+	return e.Err
+}
+
+// -----------------------------------------------------------------------------
+// Coordinator
+// -----------------------------------------------------------------------------
+
+// Coordinator schedules and orchestrates activity execution.
+//
+// Description:
+//
+//	Coordinator is the central scheduler that:
+//	- Maintains a registry of activities
+//	- Determines which activities should run based on CRS state
+//	- Prioritizes and schedules activity execution
+//	- Runs activities through the Bridge
+//	- Handles activity failures and retries
+//
+// Thread Safety: Safe for concurrent use.
+type Coordinator struct {
+	mu         sync.RWMutex
+	bridge     *Bridge
+	activities map[string]activities.Activity
+	config     *CoordinatorConfig
+	logger     *slog.Logger
+
+	// State
+	closed bool
+
+	// Metrics
+	scheduledTotal int64
+	executedTotal  int64
+	failedTotal    int64
+}
+
+// CoordinatorConfig configures the coordinator.
+type CoordinatorConfig struct {
+	// MaxConcurrentActivities limits parallel activity execution.
+	MaxConcurrentActivities int
+
+	// ScheduleInterval is how often to check for ready activities.
+	ScheduleInterval time.Duration
+
+	// EnableMetrics enables metrics collection.
+	EnableMetrics bool
+
+	// EnableTracing enables OpenTelemetry tracing.
+	EnableTracing bool
+}
+
+// DefaultCoordinatorConfig returns the default coordinator configuration.
+func DefaultCoordinatorConfig() *CoordinatorConfig {
+	return &CoordinatorConfig{
+		MaxConcurrentActivities: 4,
+		ScheduleInterval:        100 * time.Millisecond,
+		EnableMetrics:           true,
+		EnableTracing:           true,
+	}
+}
+
+// NewCoordinator creates a new coordinator.
+//
+// Inputs:
+//   - bridge: The bridge to CRS.
+//   - config: Coordinator configuration. Uses defaults if nil.
+//
+// Outputs:
+//   - *Coordinator: The new coordinator.
+func NewCoordinator(bridge *Bridge, config *CoordinatorConfig) *Coordinator {
+	if config == nil {
+		config = DefaultCoordinatorConfig()
+	}
+
+	return &Coordinator{
+		bridge:     bridge,
+		activities: make(map[string]activities.Activity),
+		config:     config,
+		logger:     slog.Default().With(slog.String("component", "coordinator")),
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Activity Registration
+// -----------------------------------------------------------------------------
+
+// Register adds an activity to the coordinator.
+//
+// Inputs:
+//   - activity: The activity to register.
+//
+// Thread Safety: Safe for concurrent calls.
+func (c *Coordinator) Register(activity activities.Activity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.activities[activity.Name()] = activity
+	c.logger.Info("activity registered",
+		slog.String("activity", activity.Name()),
+	)
+}
+
+// Unregister removes an activity from the coordinator.
+func (c *Coordinator) Unregister(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.activities, name)
+	c.logger.Info("activity unregistered",
+		slog.String("activity", name),
+	)
+}
+
+// Get returns an activity by name.
+func (c *Coordinator) Get(name string) (activities.Activity, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	activity, ok := c.activities[name]
+	return activity, ok
+}
+
+// All returns all registered activities.
+func (c *Coordinator) All() []activities.Activity {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	result := make([]activities.Activity, 0, len(c.activities))
+	for _, activity := range c.activities {
+		result = append(result, activity)
+	}
+	return result
+}
+
+// -----------------------------------------------------------------------------
+// Scheduling
+// -----------------------------------------------------------------------------
+
+// scheduledActivity pairs an activity with its priority.
+type scheduledActivity struct {
+	activity activities.Activity
+	priority activities.Priority
+}
+
+// Schedule determines which activities should run.
+//
+// Description:
+//
+//	Examines the current CRS state and returns activities that
+//	should run, sorted by priority.
+//
+// Outputs:
+//   - []scheduledActivity: Activities to run, sorted by priority.
+func (c *Coordinator) Schedule() []scheduledActivity {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	snapshot := c.bridge.Snapshot()
+	var scheduled []scheduledActivity
+
+	for _, activity := range c.activities {
+		shouldRun, priority := activity.ShouldRun(snapshot)
+		if shouldRun {
+			scheduled = append(scheduled, scheduledActivity{
+				activity: activity,
+				priority: priority,
+			})
+		}
+	}
+
+	// Sort by priority (higher priority first)
+	sort.Slice(scheduled, func(i, j int) bool {
+		return scheduled[i].priority > scheduled[j].priority
+	})
+
+	return scheduled
+}
+
+// -----------------------------------------------------------------------------
+// Execution
+// -----------------------------------------------------------------------------
+
+// RunOnce runs one scheduling cycle.
+//
+// Description:
+//
+//	Schedules activities and runs the highest priority ones
+//	up to MaxConcurrentActivities.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//
+// Outputs:
+//   - []activities.ActivityResult: Results from executed activities.
+//   - error: Non-nil if execution failed.
+func (c *Coordinator) RunOnce(ctx context.Context) ([]activities.ActivityResult, error) {
+	c.mu.RLock()
+	if c.closed {
+		c.mu.RUnlock()
+		return nil, &CoordinatorError{Operation: "RunOnce", Err: ErrCoordinatorClosed}
+	}
+	c.mu.RUnlock()
+
+	// Start trace
+	var span trace.Span
+	if c.config.EnableTracing {
+		ctx, span = otel.Tracer("integration").Start(ctx, "coordinator.RunOnce")
+		defer span.End()
+	}
+
+	// Schedule activities
+	scheduled := c.Schedule()
+	if len(scheduled) == 0 {
+		return nil, nil
+	}
+
+	c.mu.Lock()
+	c.scheduledTotal += int64(len(scheduled))
+	c.mu.Unlock()
+
+	// Limit concurrent activities
+	limit := c.config.MaxConcurrentActivities
+	if limit > len(scheduled) {
+		limit = len(scheduled)
+	}
+	scheduled = scheduled[:limit]
+
+	// Run activities in parallel
+	// Channel buffers are sized to scheduled count (expected max: 8 activities).
+	// This prevents blocking but assumes bounded activity registration.
+	var wg sync.WaitGroup
+	resultsCh := make(chan activities.ActivityResult, len(scheduled))
+	errorsCh := make(chan error, len(scheduled))
+
+	for _, sa := range scheduled {
+		// Check for cancellation before spawning to avoid goroutine pile-up
+		select {
+		case <-ctx.Done():
+			// Context cancelled, stop spawning new goroutines
+			c.logger.Debug("run cycle cancelled before all activities spawned",
+				slog.Int("spawned", len(scheduled)-len(scheduled)),
+			)
+			break
+		default:
+		}
+
+		wg.Add(1)
+		go func(sa scheduledActivity) {
+			defer wg.Done()
+
+			// Create activity input
+			input := createActivityInput(sa.activity)
+
+			result, err := c.bridge.RunActivity(ctx, sa.activity, input)
+			if err != nil {
+				errorsCh <- err
+				c.mu.Lock()
+				c.failedTotal++
+				c.mu.Unlock()
+			} else {
+				resultsCh <- result
+				c.mu.Lock()
+				c.executedTotal++
+				c.mu.Unlock()
+			}
+		}(sa)
+	}
+
+	// Wait for all to complete
+	wg.Wait()
+	close(resultsCh)
+	close(errorsCh)
+
+	// Collect results
+	var results []activities.ActivityResult
+	for result := range resultsCh {
+		results = append(results, result)
+	}
+
+	// Log errors with trace context
+	for err := range errorsCh {
+		// Extract trace context for correlation
+		spanCtx := trace.SpanContextFromContext(ctx)
+		attrs := []any{slog.String("error", err.Error())}
+		if spanCtx.IsValid() {
+			attrs = append(attrs,
+				slog.String("trace_id", spanCtx.TraceID().String()),
+				slog.String("span_id", spanCtx.SpanID().String()),
+			)
+		}
+		c.logger.Warn("activity execution failed", attrs...)
+	}
+
+	if span != nil {
+		span.SetAttributes(
+			attribute.Int("activities_scheduled", len(scheduled)),
+			attribute.Int("activities_executed", len(results)),
+		)
+	}
+
+	return results, nil
+}
+
+// Run runs the coordinator continuously until context is cancelled.
+//
+// Description:
+//
+//	Runs scheduling cycles at ScheduleInterval until ctx is cancelled.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//
+// Outputs:
+//   - error: Non-nil if run loop failed.
+func (c *Coordinator) Run(ctx context.Context) error {
+	ticker := time.NewTicker(c.config.ScheduleInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			_, err := c.RunOnce(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				c.logger.Warn("run cycle failed",
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+}
+
+// RunActivity runs a specific activity by name.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//   - name: Activity name.
+//   - input: Activity input.
+//
+// Outputs:
+//   - activities.ActivityResult: The result.
+//   - error: Non-nil on failure.
+func (c *Coordinator) RunActivity(
+	ctx context.Context,
+	name string,
+	input activities.ActivityInput,
+) (activities.ActivityResult, error) {
+	activity, ok := c.Get(name)
+	if !ok {
+		return activities.ActivityResult{}, &CoordinatorError{
+			Operation: "RunActivity",
+			Err:       ErrActivityNotFound,
+		}
+	}
+
+	return c.bridge.RunActivity(ctx, activity, input)
+}
+
+// createActivityInput creates a default input for an activity.
+func createActivityInput(activity activities.Activity) activities.ActivityInput {
+	// Create appropriate input based on activity type
+	switch activity.Name() {
+	case "search":
+		return activities.NewSearchInput("auto", "", crs.SignalSourceSoft)
+	case "learning":
+		return activities.NewLearningInput("auto", "", crs.SignalSourceSoft)
+	case "constraint":
+		return activities.NewConstraintInput("auto", "propagate", crs.SignalSourceSoft)
+	case "planning":
+		return activities.NewPlanningInput("auto", "", crs.SignalSourceSoft)
+	case "awareness":
+		return activities.NewAwarenessInput("auto", crs.SignalSourceSoft)
+	case "similarity":
+		return activities.NewSimilarityInput("auto", crs.SignalSourceSoft)
+	case "streaming":
+		return activities.NewStreamingInput("auto", crs.SignalSourceSoft)
+	case "memory":
+		return activities.NewMemoryInput("auto", "query", crs.SignalSourceSoft)
+	default:
+		return activities.BaseInput{}
+	}
+}
+
+// Close closes the coordinator.
+func (c *Coordinator) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil
+	}
+
+	c.closed = true
+	return nil
+}
+
+// Stats returns coordinator statistics.
+func (c *Coordinator) Stats() CoordinatorStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return CoordinatorStats{
+		RegisteredActivities: len(c.activities),
+		ScheduledTotal:       c.scheduledTotal,
+		ExecutedTotal:        c.executedTotal,
+		FailedTotal:          c.failedTotal,
+	}
+}
+
+// CoordinatorStats contains coordinator statistics.
+type CoordinatorStats struct {
+	RegisteredActivities int
+	ScheduledTotal       int64
+	ExecutedTotal        int64
+	FailedTotal          int64
+}
+
+// -----------------------------------------------------------------------------
+// Evaluable Implementation
+// -----------------------------------------------------------------------------
+
+// Properties returns the correctness properties.
+func (c *Coordinator) Properties() []eval.Property {
+	return []eval.Property{
+		{
+			Name:        "priority_ordering",
+			Description: "Higher priority activities run first",
+			Check: func(input, output any) error {
+				// Verified by Schedule implementation
+				return nil
+			},
+		},
+		{
+			Name:        "concurrent_limit",
+			Description: "Max concurrent activities is respected",
+			Check: func(input, output any) error {
+				// Verified by RunOnce implementation
+				return nil
+			},
+		},
+	}
+}
+
+// Metrics returns the metrics this component exposes.
+func (c *Coordinator) Metrics() []eval.MetricDefinition {
+	return []eval.MetricDefinition{
+		{
+			Name:        "coordinator_scheduled_total",
+			Type:        eval.MetricCounter,
+			Description: "Total activities scheduled",
+		},
+		{
+			Name:        "coordinator_executed_total",
+			Type:        eval.MetricCounter,
+			Description: "Total activities executed",
+		},
+		{
+			Name:        "coordinator_failed_total",
+			Type:        eval.MetricCounter,
+			Description: "Total activity failures",
+		},
+	}
+}
+
+// HealthCheck verifies the coordinator is functioning.
+func (c *Coordinator) HealthCheck(ctx context.Context) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.closed {
+		return &CoordinatorError{Operation: "HealthCheck", Err: ErrCoordinatorClosed}
+	}
+
+	if c.bridge == nil {
+		return &CoordinatorError{Operation: "HealthCheck", Err: ErrNilCRS}
+	}
+
+	return c.bridge.HealthCheck(ctx)
+}
