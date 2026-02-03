@@ -66,10 +66,12 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/classifier"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/gin-gonic/gin"
 )

@@ -372,6 +372,15 @@ func (a *OllamaAdapter) buildParams(request *Request) llm.GenerationParams {
 		params.Stop = request.StopSequences
 	}
 
+	// Pass through multi-model support fields
+	if request.ModelOverride != "" {
+		params.ModelOverride = request.ModelOverride
+	}
+
+	if request.KeepAlive != "" {
+		params.KeepAlive = request.KeepAlive
+	}
+
 	return params
 }
 

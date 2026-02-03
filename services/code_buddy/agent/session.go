@@ -137,6 +137,27 @@ type SessionConfig struct {
 	// Options: "fallback", "fail", "ask"
 	// Default: "fallback"
 	DegradationMode string `json:"degradation_mode"`
+
+	// ToolRouterEnabled enables the micro-LLM tool router for faster tool selection.
+	// When enabled, a fast model (like granite4:micro-h) pre-selects tools before
+	// the main reasoning LLM, reducing latency.
+	// Default: false (opt-in feature)
+	ToolRouterEnabled bool `json:"tool_router_enabled"`
+
+	// ToolRouterModel is the Ollama model to use for tool routing.
+	// Should be a small, fast model like "granite4:micro-h" or "granite4:3b-h".
+	// Default: "granite4:micro-h"
+	ToolRouterModel string `json:"tool_router_model"`
+
+	// ToolRouterTimeout is the maximum time for a routing decision.
+	// If exceeded, falls back to main LLM tool selection.
+	// Default: 500ms
+	ToolRouterTimeout time.Duration `json:"tool_router_timeout"`
+
+	// ToolRouterConfidence is the minimum confidence for accepting a routing decision.
+	// Below this threshold, falls back to main LLM tool selection.
+	// Default: 0.7
+	ToolRouterConfidence float64 `json:"tool_router_confidence"`
 }
 
 // DefaultSessionConfig returns production-ready default configuration.
@@ -169,6 +190,11 @@ func DefaultSessionConfig() *SessionConfig {
 		ReflectionThreshold:    10,
 		ConfidenceThreshold:    0.7,
 		DegradationMode:        "fallback",
+		// Tool Router defaults (opt-in feature)
+		ToolRouterEnabled:    false,
+		ToolRouterModel:      "granite4:micro-h",
+		ToolRouterTimeout:    500 * time.Millisecond,
+		ToolRouterConfidence: 0.7,
 	}
 }
 
@@ -214,6 +240,19 @@ func (c *SessionConfig) Validate() error {
 	}
 	if c.DegradationMode != "" && !isValidEnum(c.DegradationMode, ValidDegradationModes) {
 		return fmt.Errorf("%w: DegradationMode must be one of %v", ErrInvalidSession, ValidDegradationModes)
+	}
+
+	// Validate tool router configuration
+	if c.ToolRouterEnabled {
+		if c.ToolRouterModel == "" {
+			return fmt.Errorf("%w: ToolRouterModel must be set when ToolRouterEnabled is true", ErrInvalidSession)
+		}
+		if c.ToolRouterTimeout <= 0 {
+			return fmt.Errorf("%w: ToolRouterTimeout must be positive", ErrInvalidSession)
+		}
+		if c.ToolRouterConfidence < 0 || c.ToolRouterConfidence > 1 {
+			return fmt.Errorf("%w: ToolRouterConfidence must be between 0 and 1", ErrInvalidSession)
+		}
 	}
 
 	return nil
@@ -292,6 +331,14 @@ type Session struct {
 	// cachedSummary holds the cached reasoning summary.
 	// Invalidated when CRS changes.
 	cachedSummary *crs.ReasoningSummary
+
+	// toolRouter is the micro-LLM tool router for fast tool selection.
+	// Optional - nil when tool routing is not enabled.
+	toolRouter ToolRouter
+
+	// modelManager coordinates multiple Ollama models to prevent thrashing.
+	// Shared between tool router and main LLM.
+	modelManager ModelManager
 }
 
 // AssembledContext represents the current context window for the LLM.
@@ -458,14 +505,15 @@ func NewSession(projectRoot string, config *SessionConfig) (*Session, error) {
 
 	now := time.Now()
 	return &Session{
-		ID:           uuid.NewString(),
-		ProjectRoot:  projectRoot,
-		State:        StateIdle,
-		Config:       config,
-		History:      make([]HistoryEntry, 0),
-		Metrics:      &SessionMetrics{},
-		CreatedAt:    now,
-		LastActiveAt: now,
+		ID:            uuid.NewString(),
+		ProjectRoot:   projectRoot,
+		State:         StateIdle,
+		Config:        config,
+		History:       make([]HistoryEntry, 0),
+		Metrics:       &SessionMetrics{},
+		CreatedAt:     now,
+		LastActiveAt:  now,
+		traceRecorder: crs.NewTraceRecorder(crs.DefaultTraceConfig()),
 	}, nil
 }
 
@@ -871,6 +919,31 @@ func (s *Session) GetReasoningTrace() *crs.ReasoningTrace {
 	return &trace
 }
 
+// RecordTraceStep records a reasoning trace step.
+//
+// Description:
+//
+//	Records a step in the reasoning trace for audit and debugging.
+//	This is a convenience wrapper around the TraceRecorder.
+//	If trace recording is not enabled, this is a no-op.
+//
+// Inputs:
+//
+//	step - The trace step to record.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) RecordTraceStep(step crs.TraceStep) {
+	s.mu.RLock()
+	recorder := s.traceRecorder
+	s.mu.RUnlock()
+
+	if recorder == nil {
+		return
+	}
+
+	recorder.RecordStep(step)
+}
+
 // GetCRSExport returns the full CRS state export.
 //
 // Description:
@@ -915,4 +988,85 @@ func convertCRSSummary(src *crs.ReasoningSummary) *ReasoningSummary {
 		ExplorationDepth:   src.ExplorationDepth,
 		ConfidenceScore:    src.ConfidenceScore,
 	}
+}
+
+// -----------------------------------------------------------------------------
+// Tool Router Methods
+// -----------------------------------------------------------------------------
+
+// SetToolRouter sets the tool router for this session.
+//
+// Description:
+//
+//	Associates a ToolRouter instance with this session for fast tool selection.
+//	Should be called after session creation if tool routing is enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetToolRouter(router ToolRouter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolRouter = router
+}
+
+// GetToolRouter returns the tool router for this session.
+//
+// Outputs:
+//
+//	ToolRouter - The tool router, or nil if not enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetToolRouter() ToolRouter {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.toolRouter
+}
+
+// HasToolRouter returns true if tool routing is enabled for this session.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) HasToolRouter() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.toolRouter != nil
+}
+
+// SetModelManager sets the model manager for this session.
+//
+// Description:
+//
+//	Associates a ModelManager instance with this session for multi-model
+//	coordination. Used to prevent model thrashing when using tool router
+//	with main LLM.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetModelManager(manager ModelManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelManager = manager
+}
+
+// GetModelManager returns the model manager for this session.
+//
+// Outputs:
+//
+//	ModelManager - The model manager, or nil if not set.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetModelManager() ModelManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.modelManager
+}
+
+// IsToolRouterEnabled returns true if tool routing is configured and enabled.
+//
+// Description:
+//
+//	Checks both the configuration flag and whether a router has been set.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) IsToolRouterEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Config.ToolRouterEnabled && s.toolRouter != nil
 }

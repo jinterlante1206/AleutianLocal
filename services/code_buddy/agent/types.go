@@ -21,7 +21,10 @@
 //	Sessions are protected by internal synchronization.
 package agent
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // AgentState represents a state in the agent loop state machine.
 //
@@ -652,4 +655,108 @@ type SessionState struct {
 
 	// DegradedMode indicates if running with limited tools.
 	DegradedMode bool `json:"degraded_mode"`
+}
+
+// =============================================================================
+// Tool Router Interface
+// =============================================================================
+
+// ToolRouter selects the appropriate tool for a user query using a fast micro LLM.
+//
+// # Description
+//
+// ToolRouter uses a small, fast model (like granite4:micro-h) to pre-select
+// tools before the main reasoning LLM processes the request. This allows tool
+// selection to complete in ~50-100ms instead of the full LLM inference time.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+type ToolRouter interface {
+	// SelectTool chooses the best tool for the given query and context.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation/timeout.
+	//   - query: The user's question or request.
+	//   - availableTools: Tools currently available for selection.
+	//   - codeContext: Optional context about the codebase.
+	//
+	// Outputs:
+	//   - *ToolRouterSelection: The selected tool with confidence.
+	//   - error: Non-nil if routing fails (caller should fall back to main LLM).
+	SelectTool(ctx context.Context, query string, availableTools []ToolRouterSpec, codeContext *ToolRouterCodeContext) (*ToolRouterSelection, error)
+
+	// Model returns the model being used for routing.
+	Model() string
+
+	// Close releases any resources held by the router.
+	Close() error
+}
+
+// ToolRouterSelection represents the router's decision.
+type ToolRouterSelection struct {
+	// Tool is the selected tool name.
+	Tool string `json:"tool"`
+
+	// Confidence is the router's confidence (0.0-1.0).
+	Confidence float64 `json:"confidence"`
+
+	// ParamsHint contains optional parameter suggestions.
+	ParamsHint map[string]string `json:"params_hint,omitempty"`
+
+	// Reasoning explains why this tool was selected.
+	Reasoning string `json:"reasoning,omitempty"`
+
+	// Duration is how long the routing decision took.
+	Duration time.Duration `json:"duration,omitempty"`
+}
+
+// ToolRouterSpec describes a tool for the router.
+type ToolRouterSpec struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	BestFor     []string `json:"best_for,omitempty"`
+	Params      []string `json:"params,omitempty"`
+	Category    string   `json:"category,omitempty"`
+}
+
+// ToolRouterCodeContext provides context about the codebase.
+type ToolRouterCodeContext struct {
+	Language    string   `json:"language,omitempty"`
+	Files       int      `json:"files,omitempty"`
+	Symbols     int      `json:"symbols,omitempty"`
+	CurrentFile string   `json:"current_file,omitempty"`
+	RecentTools []string `json:"recent_tools,omitempty"`
+}
+
+// =============================================================================
+// Model Manager Interface
+// =============================================================================
+
+// ModelManager coordinates multiple LLM models to prevent thrashing.
+//
+// # Description
+//
+// When using multiple models (e.g., tool router + main reasoner), ModelManager
+// uses keep_alive to keep both models loaded in VRAM, preventing expensive
+// model reload cycles.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+type ModelManager interface {
+	// WarmModel pre-loads a model into VRAM with the specified keep_alive.
+	WarmModel(ctx context.Context, model string, keepAlive string) error
+
+	// GetLoadedModels returns currently tracked models.
+	GetLoadedModels() []ManagedModelInfo
+}
+
+// ManagedModelInfo contains information about a managed model.
+type ManagedModelInfo struct {
+	Name      string        `json:"name"`
+	IsLoaded  bool          `json:"is_loaded"`
+	KeepAlive string        `json:"keep_alive"`
+	LastUsed  time.Time     `json:"last_used"`
+	LoadTime  time.Duration `json:"load_time"`
 }

@@ -493,10 +493,10 @@ func TestAgentHandlers_HandleGetReasoningTrace_NotFound(t *testing.T) {
 	}
 }
 
-func TestAgentHandlers_HandleGetReasoningTrace_NoTraceRecorder(t *testing.T) {
+func TestAgentHandlers_HandleGetReasoningTrace_EmptyTrace(t *testing.T) {
 	mockLoop := &MockAgentLoop{
 		getSessionFunc: func(sessionID string) (*agent.Session, error) {
-			// Return session without trace recorder
+			// Return session with trace recorder (now always initialized)
 			session, _ := agent.NewSession("/test/project", nil)
 			return session, nil
 		},
@@ -510,9 +510,18 @@ func TestAgentHandlers_HandleGetReasoningTrace_NoTraceRecorder(t *testing.T) {
 
 	r.ServeHTTP(w, req)
 
-	// Should return 204 No Content when trace recorder not enabled
-	if w.Code != http.StatusNoContent {
-		t.Errorf("Status = %d, want %d", w.Code, http.StatusNoContent)
+	// Should return 200 OK with empty trace (trace recorder is now always enabled)
+	if w.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Verify the response contains an empty trace
+	var response ReasoningTraceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+	if response.TotalSteps != 0 {
+		t.Errorf("TotalSteps = %d, want 0", response.TotalSteps)
 	}
 }
 

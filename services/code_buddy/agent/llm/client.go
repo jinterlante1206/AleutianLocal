@@ -108,6 +108,16 @@ type Request struct {
 
 	// StopSequences defines sequences that stop generation.
 	StopSequences []string `json:"stop_sequences,omitempty"`
+
+	// ModelOverride allows using a different model for this request.
+	// Used for multi-model scenarios (e.g., tool routing with a fast model).
+	// Empty string means use the client's default model.
+	ModelOverride string `json:"model_override,omitempty"`
+
+	// KeepAlive controls how long the model stays loaded in VRAM.
+	// Values: "-1" = infinite, "5m" = 5 minutes (default), "0" = unload immediately.
+	// Used to prevent model thrashing when alternating between models.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 // Message represents a conversation message.

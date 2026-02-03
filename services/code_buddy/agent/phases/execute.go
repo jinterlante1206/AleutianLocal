@@ -22,10 +22,17 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/graph"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+// executePhaseTracer is the OpenTelemetry tracer for the execute phase.
+var executePhaseTracer = otel.Tracer("aleutian.agent.execute")
 
 // ExecutePhase handles the main tool execution loop.
 //
@@ -416,17 +423,42 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) *llm.Request {
 
 	request := llm.BuildRequest(deps.Context, toolDefs, p.maxTokens)
 
-	// Apply tool_choice from hybrid stack classifier.
-	// Note: We use a fresh context here since buildLLMRequest doesn't receive ctx.
-	// The selector's tracing will create a new root span for classification.
-	if p.toolChoiceSelector != nil && deps.Query != "" && len(toolDefs) > 0 {
+	// Try ToolRouter first for fast tool selection (micro LLM routing).
+	// If the router returns a confident selection, use it. Otherwise, fall back
+	// to the hybrid stack classifier.
+	routerUsed := false
+	if deps.Session != nil && deps.Session.IsToolRouterEnabled() && deps.Query != "" && len(toolDefs) > 0 {
+		router := deps.Session.GetToolRouter()
+		if router != nil {
+			routerSelection := p.tryToolRouterSelection(context.Background(), deps, router, toolDefs)
+			if routerSelection != nil {
+				// Router returned a confident selection - use it
+				request.ToolChoice = llm.ToolChoiceRequired(routerSelection.Tool)
+				routerUsed = true
+
+				slog.Info("ToolRouter selection applied",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("selected_tool", routerSelection.Tool),
+					slog.Float64("confidence", routerSelection.Confidence),
+					slog.Duration("routing_duration", routerSelection.Duration),
+					slog.String("reasoning", routerSelection.Reasoning),
+				)
+
+				// Emit routing event
+				p.emitToolRouting(deps, routerSelection)
+			}
+		}
+	}
+
+	// Fall back to hybrid stack classifier if router wasn't used or failed.
+	if !routerUsed && p.toolChoiceSelector != nil && deps.Query != "" && len(toolDefs) > 0 {
 		selection := p.toolChoiceSelector.SelectToolChoice(context.Background(), deps.Query, toolNames)
 
 		// Only set tool_choice for analytical queries
 		if selection.IsAnalytical {
 			request.ToolChoice = selection.ToolChoice
 
-			slog.Debug("tool_choice selected",
+			slog.Debug("tool_choice selected (fallback classifier)",
 				slog.String("session_id", deps.Session.ID),
 				slog.String("tool_choice_type", selection.ToolChoice.Type),
 				slog.String("suggested_tool", selection.SuggestedTool),
@@ -437,6 +469,221 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) *llm.Request {
 	}
 
 	return request
+}
+
+// tryToolRouterSelection attempts to get a tool selection from the ToolRouter.
+//
+// Description:
+//
+//	Converts tool definitions to ToolSpecs, calls the router, and returns
+//	the selection if confidence is above threshold. Returns nil on error
+//	or low confidence to allow fallback to other mechanisms.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies.
+//	router - The ToolRouter to use.
+//	toolDefs - Available tool definitions.
+//
+// Outputs:
+//
+//	*agent.ToolRouterSelection - The selection if confident, nil otherwise.
+func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Dependencies, router agent.ToolRouter, toolDefs []tools.ToolDefinition) *agent.ToolRouterSelection {
+	ctx, span := executePhaseTracer.Start(ctx, "ExecutePhase.tryToolRouterSelection")
+	defer span.End()
+
+	// Convert tool definitions to ToolSpecs for the router
+	toolSpecs := toolDefsToSpecs(toolDefs)
+
+	// Build code context for the router
+	codeContext := p.buildCodeContext(deps)
+
+	span.SetAttributes(
+		attribute.Int("num_tools", len(toolSpecs)),
+		attribute.String("query_preview", truncateQuery(deps.Query, 100)),
+	)
+
+	// Call the router
+	selection, err := router.SelectTool(ctx, deps.Query, toolSpecs, codeContext)
+	if err != nil {
+		// Log but don't fail - we'll fall back to the classifier
+		slog.Warn("ToolRouter selection failed, falling back to classifier",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+		span.SetAttributes(attribute.String("fallback_reason", "router_error"))
+		return nil
+	}
+
+	// Check confidence threshold
+	threshold := 0.7 // Default
+	if deps.Session.Config != nil && deps.Session.Config.ToolRouterConfidence > 0 {
+		threshold = deps.Session.Config.ToolRouterConfidence
+	}
+
+	if selection.Confidence < threshold {
+		slog.Debug("ToolRouter confidence below threshold",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("tool", selection.Tool),
+			slog.Float64("confidence", selection.Confidence),
+			slog.Float64("threshold", threshold),
+		)
+		span.SetAttributes(
+			attribute.String("fallback_reason", "low_confidence"),
+			attribute.Float64("confidence", selection.Confidence),
+			attribute.Float64("threshold", threshold),
+		)
+		return nil
+	}
+
+	span.SetAttributes(
+		attribute.String("selected_tool", selection.Tool),
+		attribute.Float64("confidence", selection.Confidence),
+		attribute.Int64("routing_duration_ms", selection.Duration.Milliseconds()),
+	)
+
+	return selection
+}
+
+// toolDefsToSpecs converts tool.ToolDefinition slice to agent.ToolRouterSpec slice.
+//
+// Inputs:
+//
+//	defs - Tool definitions to convert.
+//
+// Outputs:
+//
+//	[]agent.ToolRouterSpec - Converted tool specs.
+func toolDefsToSpecs(defs []tools.ToolDefinition) []agent.ToolRouterSpec {
+	specs := make([]agent.ToolRouterSpec, len(defs))
+	for i, def := range defs {
+		// Extract parameter names from the Parameters map
+		var params []string
+		if def.Parameters != nil {
+			params = make([]string, 0, len(def.Parameters))
+			for name := range def.Parameters {
+				params = append(params, name)
+			}
+		}
+
+		specs[i] = agent.ToolRouterSpec{
+			Name:        def.Name,
+			Description: def.Description,
+			Params:      params,
+			Category:    def.Category.String(),
+		}
+	}
+	return specs
+}
+
+// buildCodeContext creates a CodeContext from phase dependencies.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//
+// Outputs:
+//
+//	*agent.ToolRouterCodeContext - Context for the router.
+func (p *ExecutePhase) buildCodeContext(deps *Dependencies) *agent.ToolRouterCodeContext {
+	ctx := &agent.ToolRouterCodeContext{}
+
+	// Extract info from assembled context if available
+	if deps.Context != nil {
+		ctx.Files = len(deps.Context.CodeContext)
+		ctx.Symbols = countSymbolsInContext(deps.Context)
+
+		// Detect language from code entries
+		ctx.Language = detectLanguageFromContext(deps.Context)
+	}
+
+	// Get recent tools from session history if available
+	ctx.RecentTools = getRecentToolsFromSession(deps.Session)
+
+	return ctx
+}
+
+// countSymbolsInContext counts unique symbols referenced in the context.
+func countSymbolsInContext(ctx *agent.AssembledContext) int {
+	if ctx == nil {
+		return 0
+	}
+	// Count code entries as a proxy for symbols
+	return len(ctx.CodeContext)
+}
+
+// detectLanguageFromContext attempts to detect the primary language from context.
+func detectLanguageFromContext(ctx *agent.AssembledContext) string {
+	if ctx == nil || len(ctx.CodeContext) == 0 {
+		return ""
+	}
+
+	// Simple heuristic: look at file extensions in the code context
+	goCount, pyCount := 0, 0
+	for _, entry := range ctx.CodeContext {
+		if strings.HasSuffix(entry.FilePath, ".go") {
+			goCount++
+		} else if strings.HasSuffix(entry.FilePath, ".py") {
+			pyCount++
+		}
+	}
+
+	if goCount > pyCount {
+		return "go"
+	} else if pyCount > goCount {
+		return "python"
+	}
+	return ""
+}
+
+// getRecentToolsFromSession extracts recent tool names from session history.
+func getRecentToolsFromSession(s *agent.Session) []string {
+	if s == nil {
+		return nil
+	}
+
+	history := s.GetHistory()
+	if len(history) == 0 {
+		return nil
+	}
+
+	// Get last 5 unique tools
+	seen := make(map[string]bool)
+	var recent []string
+	for i := len(history) - 1; i >= 0 && len(recent) < 5; i-- {
+		entry := history[i]
+		if entry.Type == "tool_call" && entry.ToolName != "" && !seen[entry.ToolName] {
+			seen[entry.ToolName] = true
+			recent = append(recent, entry.ToolName)
+		}
+	}
+	return recent
+}
+
+// truncateQuery truncates a query string for logging.
+func truncateQuery(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// emitToolRouting emits a routing event when the ToolRouter is used.
+func (p *ExecutePhase) emitToolRouting(deps *Dependencies, selection *agent.ToolRouterSelection) {
+	if deps.EventEmitter == nil || selection == nil {
+		return
+	}
+
+	// Emit as a tool forcing event with routing-specific data
+	deps.EventEmitter.Emit(events.TypeToolForcing, &events.ToolForcingData{
+		Query:         deps.Query,
+		SuggestedTool: selection.Tool,
+		RetryCount:    0,
+		MaxRetries:    0,
+		StepNumber:    0,
+		Reason:        fmt.Sprintf("router_selection (confidence: %.2f, reasoning: %s)", selection.Confidence, selection.Reasoning),
+	})
 }
 
 // callLLM sends a request to the LLM and emits events.
@@ -681,6 +928,25 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 
 	// Emit step complete
 	p.emitStepComplete(deps, stepStart, stepNumber, 0)
+
+	// Record completion trace step
+	if deps.Session != nil {
+		completionStep := crs.TraceStep{
+			Action:   "complete",
+			Target:   "response",
+			Duration: time.Since(stepStart),
+			Metadata: map[string]string{
+				"step_number":   fmt.Sprintf("%d", stepNumber),
+				"output_tokens": fmt.Sprintf("%d", response.OutputTokens),
+				"response_len":  fmt.Sprintf("%d", len(responseContent)),
+			},
+		}
+		if groundingResult != nil {
+			completionStep.Metadata["grounded"] = fmt.Sprintf("%v", groundingResult.Grounded)
+			completionStep.Metadata["confidence"] = fmt.Sprintf("%.2f", groundingResult.Confidence)
+		}
+		deps.Session.RecordTraceStep(completionStep)
+	}
 
 	// Transition to complete
 	p.emitStateTransition(deps, agent.StateExecute, agent.StateComplete, "task completed")
@@ -1067,13 +1333,24 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					Success: false,
 					Error:   "blocked by safety check",
 				})
+				// Record blocked trace step
+				p.recordTraceStep(deps, &inv, nil, 0, "blocked by safety check")
 				continue
 			}
 		}
 
-		// Execute the tool
+		// Execute the tool with timing
+		toolStart := time.Now()
 		result := p.executeSingleTool(ctx, deps, &inv)
+		toolDuration := time.Since(toolStart)
 		results = append(results, result)
+
+		// Record trace step for this tool call
+		errMsg := ""
+		if !result.Success {
+			errMsg = result.Error
+		}
+		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
 		// Track file modifications for graph refresh
 		p.trackModifiedFiles(deps, result)
@@ -1083,6 +1360,112 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 	}
 
 	return results, blocked
+}
+
+// recordTraceStep records a reasoning trace step for a tool execution.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//	inv - The tool invocation.
+//	result - The tool result (may be nil for blocked calls).
+//	duration - How long the tool call took.
+//	errMsg - Error message if the call failed.
+func (p *ExecutePhase) recordTraceStep(deps *Dependencies, inv *agent.ToolInvocation, result *tools.Result, duration time.Duration, errMsg string) {
+	if deps.Session == nil {
+		return
+	}
+
+	// Build trace step
+	step := crs.TraceStep{
+		Action:   "tool_call",
+		Target:   inv.Tool,
+		Tool:     inv.Tool,
+		Duration: duration,
+		Error:    errMsg,
+		Metadata: make(map[string]string),
+	}
+
+	// Add tool parameters to metadata (truncated for safety)
+	if inv.Parameters != nil {
+		// Extract string params
+		if inv.Parameters.StringParams != nil {
+			for k, v := range inv.Parameters.StringParams {
+				if len(v) > 100 {
+					v = v[:100] + "..."
+				}
+				step.Metadata[k] = v
+			}
+		}
+		// Extract int params
+		if inv.Parameters.IntParams != nil {
+			for k, v := range inv.Parameters.IntParams {
+				step.Metadata[k] = fmt.Sprintf("%d", v)
+			}
+		}
+		// Extract bool params
+		if inv.Parameters.BoolParams != nil {
+			for k, v := range inv.Parameters.BoolParams {
+				step.Metadata[k] = fmt.Sprintf("%v", v)
+			}
+		}
+	}
+
+	// Extract symbols found from result if available
+	if result != nil && result.Success {
+		step.SymbolsFound = extractSymbolsFromResult(result)
+	}
+
+	deps.Session.RecordTraceStep(step)
+}
+
+// extractSymbolsFromResult extracts symbol IDs from a tool result.
+func extractSymbolsFromResult(result *tools.Result) []string {
+	if result == nil || result.Output == nil {
+		return nil
+	}
+
+	// Try to extract symbols from common result structures
+	var symbols []string
+
+	// Check if Output is a map
+	outputMap, ok := result.Output.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	// Check for Symbols field (used by many exploration tools)
+	if syms, ok := outputMap["symbols"]; ok {
+		if symList, ok := syms.([]interface{}); ok {
+			for _, s := range symList {
+				if symMap, ok := s.(map[string]interface{}); ok {
+					if id, ok := symMap["id"].(string); ok {
+						symbols = append(symbols, id)
+					}
+				}
+			}
+		}
+	}
+
+	// Check for EntryPoints field
+	if eps, ok := outputMap["entry_points"]; ok {
+		if epList, ok := eps.([]interface{}); ok {
+			for _, ep := range epList {
+				if epMap, ok := ep.(map[string]interface{}); ok {
+					if id, ok := epMap["id"].(string); ok {
+						symbols = append(symbols, id)
+					}
+				}
+			}
+		}
+	}
+
+	// Limit to first 20 symbols to avoid huge traces
+	if len(symbols) > 20 {
+		symbols = symbols[:20]
+	}
+
+	return symbols
 }
 
 // isBlockedBySafety checks if a tool invocation should be blocked.

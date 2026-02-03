@@ -63,6 +63,10 @@ import (
 //     Claude models that support extended thinking.
 //   - BudgetTokens: Token budget for thinking (max 65536). Only used when
 //     EnableThinking is true.
+//   - ModelOverride: Override the client's default model for this request.
+//     Used for multi-model scenarios like tool routing.
+//   - KeepAlive: Controls model VRAM lifetime. "-1" = infinite, "5m" = 5 min,
+//     "0" = unload immediately. Prevents model thrashing.
 //
 // # Examples
 //
@@ -93,6 +97,16 @@ type GenerationParams struct {
 	ToolDefinitions []interface{} `json:"tools,omitempty"`
 	EnableThinking  bool          `json:"thinking,omitempty"`
 	BudgetTokens    int           `json:"budget_tokens,omitempty"`
+
+	// ModelOverride allows overriding the client's default model for this request.
+	// Used for multi-model scenarios (e.g., tool routing with a fast model).
+	// Empty string means use the client's default model.
+	ModelOverride string `json:"model_override,omitempty"`
+
+	// KeepAlive controls how long the model stays loaded in VRAM after the request.
+	// Values: "-1" = infinite, "5m" = 5 minutes (default), "0" = unload immediately.
+	// Used to prevent model thrashing when alternating between models.
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 // =============================================================================

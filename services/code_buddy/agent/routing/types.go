@@ -1,0 +1,275 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
+// Package routing provides tool selection using a fast micro LLM.
+//
+// # Description
+//
+// The routing package implements a ToolRouter that uses a dedicated micro LLM
+// (like granite4:micro-h) to quickly classify queries and select the appropriate
+// tool before the main reasoning LLM processes the request.
+//
+// This separation of concerns allows:
+//   - Fast tool selection (~50-100ms) vs full LLM reasoning (~10-30s)
+//   - Better resource utilization (small model for routing, large for reasoning)
+//   - Parallel model execution on GPUs with sufficient VRAM
+//
+// # Thread Safety
+//
+// All types in this package are designed for concurrent use.
+package routing
+
+import (
+	"context"
+	"time"
+)
+
+// =============================================================================
+// Tool Router Interface
+// =============================================================================
+
+// ToolRouter selects the appropriate tool for a user query.
+//
+// # Description
+//
+// ToolRouter uses a fast micro LLM to classify queries into tool categories
+// before the main reasoning LLM processes the request. This allows tool
+// selection to complete in ~50-100ms instead of the full LLM inference time.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+//
+// # Example
+//
+//	router := NewGranite4Router(ollamaEndpoint, "granite4:micro-h")
+//	selection, err := router.SelectTool(ctx, "What functions call parseConfig?", tools, codeCtx)
+//	if err != nil {
+//	    // Fall back to letting main LLM choose
+//	}
+//	// Use selection.Tool to constrain main LLM
+type ToolRouter interface {
+	// SelectTool chooses the best tool for the given query and context.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation/timeout. Must not be nil.
+	//   - query: The user's question or request.
+	//   - availableTools: Tools currently available for selection.
+	//   - context: Optional code context (symbols, files loaded, etc.)
+	//
+	// Outputs:
+	//   - *ToolSelection: The selected tool and optional parameter hints.
+	//   - error: Non-nil if routing fails (caller should fall back to main LLM).
+	SelectTool(ctx context.Context, query string, availableTools []ToolSpec, context *CodeContext) (*ToolSelection, error)
+
+	// Model returns the model being used for routing.
+	Model() string
+
+	// Close releases any resources held by the router.
+	Close() error
+}
+
+// =============================================================================
+// Selection Result
+// =============================================================================
+
+// ToolSelection represents the router's decision.
+//
+// # Description
+//
+// Contains the selected tool name, confidence score, and optional hints
+// for parameter values. The confidence score can be used to decide whether
+// to trust the selection or fall back to the main LLM.
+type ToolSelection struct {
+	// Tool is the selected tool name (e.g., "find_symbol_usages").
+	Tool string `json:"tool"`
+
+	// Confidence is the router's confidence in this selection (0.0-1.0).
+	// Use this to decide whether to fall back to the main LLM.
+	// Recommended threshold: 0.7
+	Confidence float64 `json:"confidence"`
+
+	// ParamsHint contains optional parameter suggestions.
+	// Keys are parameter names, values are suggested values.
+	// The main LLM can use these as hints but isn't bound by them.
+	ParamsHint map[string]string `json:"params_hint,omitempty"`
+
+	// Reasoning is a brief explanation of why this tool was selected.
+	// Used for debugging and tracing.
+	Reasoning string `json:"reasoning,omitempty"`
+
+	// Duration is how long the routing decision took.
+	Duration time.Duration `json:"duration,omitempty"`
+}
+
+// IsConfident returns true if the selection confidence is above the threshold.
+//
+// # Inputs
+//
+//   - threshold: Minimum confidence to consider (e.g., 0.7).
+//
+// # Outputs
+//
+//   - bool: True if Confidence >= threshold.
+func (s *ToolSelection) IsConfident(threshold float64) bool {
+	return s.Confidence >= threshold
+}
+
+// =============================================================================
+// Tool Specification
+// =============================================================================
+
+// ToolSpec describes a tool for the router's system prompt.
+//
+// # Description
+//
+// Provides enough information about a tool for the router to make a
+// selection decision. This is a simplified view of the full tool definition
+// optimized for fast classification.
+type ToolSpec struct {
+	// Name is the tool's unique identifier (e.g., "find_symbol_usages").
+	Name string `json:"name"`
+
+	// Description explains what the tool does.
+	Description string `json:"description"`
+
+	// BestFor lists example use cases where this tool excels.
+	// Used in the system prompt to help the router understand when to select it.
+	BestFor []string `json:"best_for,omitempty"`
+
+	// Params lists the parameter names (without full schema).
+	// Used to generate parameter hints.
+	Params []string `json:"params,omitempty"`
+
+	// Category groups similar tools (e.g., "search", "read", "analyze").
+	// Helps the router with coarse-grained classification.
+	Category string `json:"category,omitempty"`
+}
+
+// =============================================================================
+// Code Context
+// =============================================================================
+
+// CodeContext provides optional context about the codebase.
+//
+// # Description
+//
+// Gives the router additional context to make better decisions.
+// For example, knowing the primary language helps select language-specific tools.
+type CodeContext struct {
+	// Language is the primary programming language (e.g., "go", "python").
+	Language string `json:"language,omitempty"`
+
+	// Files is the number of files currently loaded/indexed.
+	Files int `json:"files,omitempty"`
+
+	// Symbols is the number of symbols available for search.
+	Symbols int `json:"symbols,omitempty"`
+
+	// CurrentFile is the file currently being viewed/edited.
+	CurrentFile string `json:"current_file,omitempty"`
+
+	// RecentTools lists recently used tools (for context awareness).
+	RecentTools []string `json:"recent_tools,omitempty"`
+}
+
+// =============================================================================
+// Router Configuration
+// =============================================================================
+
+// RouterConfig configures the tool router behavior.
+//
+// # Description
+//
+// Controls the router's model selection, timeout, and fallback behavior.
+type RouterConfig struct {
+	// Model is the Ollama model to use for routing (e.g., "granite4:micro-h").
+	Model string `json:"model"`
+
+	// OllamaEndpoint is the Ollama server URL (e.g., "http://localhost:11434").
+	OllamaEndpoint string `json:"ollama_endpoint"`
+
+	// Timeout is the maximum time for a routing decision.
+	// Recommended: 500ms. If exceeded, returns error for fallback.
+	Timeout time.Duration `json:"timeout"`
+
+	// Temperature controls randomness. Lower = more deterministic.
+	// Recommended: 0.1 for routing (we want consistency).
+	Temperature float64 `json:"temperature"`
+
+	// ConfidenceThreshold is the minimum confidence for a selection.
+	// Below this, the router returns an error for fallback to main LLM.
+	ConfidenceThreshold float64 `json:"confidence_threshold"`
+
+	// KeepAlive controls how long the router model stays in VRAM.
+	// "-1" = infinite (recommended when using with main LLM).
+	KeepAlive string `json:"keep_alive"`
+
+	// MaxTokens limits the router's response length.
+	// Should be small since we only need JSON output.
+	// Recommended: 256.
+	MaxTokens int `json:"max_tokens"`
+}
+
+// DefaultRouterConfig returns sensible defaults for the router.
+//
+// # Outputs
+//
+//   - RouterConfig: Default configuration.
+func DefaultRouterConfig() RouterConfig {
+	return RouterConfig{
+		Model:               "granite4:micro-h",
+		OllamaEndpoint:      "http://localhost:11434",
+		Timeout:             500 * time.Millisecond,
+		Temperature:         0.1,
+		ConfidenceThreshold: 0.7,
+		KeepAlive:           "-1",
+		MaxTokens:           256,
+	}
+}
+
+// =============================================================================
+// Error Types
+// =============================================================================
+
+// RouterError represents an error from the tool router.
+type RouterError struct {
+	// Code is a machine-readable error code.
+	Code string `json:"code"`
+
+	// Message is a human-readable error message.
+	Message string `json:"message"`
+
+	// Retryable indicates if the error might resolve on retry.
+	Retryable bool `json:"retryable"`
+}
+
+// Error implements the error interface.
+func (e *RouterError) Error() string {
+	return e.Code + ": " + e.Message
+}
+
+// Common router error codes.
+const (
+	ErrCodeTimeout          = "ROUTER_TIMEOUT"
+	ErrCodeLowConfidence    = "ROUTER_LOW_CONFIDENCE"
+	ErrCodeParseError       = "ROUTER_PARSE_ERROR"
+	ErrCodeModelUnavailable = "ROUTER_MODEL_UNAVAILABLE"
+	ErrCodeNoTools          = "ROUTER_NO_TOOLS"
+)
+
+// NewRouterError creates a new RouterError.
+func NewRouterError(code, message string, retryable bool) *RouterError {
+	return &RouterError{
+		Code:      code,
+		Message:   message,
+		Retryable: retryable,
+	}
+}
