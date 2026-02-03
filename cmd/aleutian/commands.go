@@ -381,6 +381,10 @@ func init() {
 	verifySessionCmd.Flags().Bool("full", false, "Perform full verification (recompute all hashes)")
 	verifySessionCmd.Flags().Bool("json", false, "Output verification result as JSON")
 
+	// Session list JSON output (CLI-01f)
+	listSessionsCmd.Flags().BoolVar(&sessionListJSON, "json", false,
+		"Output as JSON for scripting")
+
 	// chat command - RAG is default, use --no-rag to disable
 	rootCmd.AddCommand(chatCmd)
 	chatCmd.Flags().String("resume", "", "Resume a conversation using a specific session ID.")
@@ -404,6 +408,10 @@ func init() {
 	weaviateCmd.AddCommand(weaviateSummaryCmd)
 	weaviateCmd.AddCommand(weaviateWipeoutCmd)
 	weaviateWipeoutCmd.Flags().Bool("force", false, "Required to confirm the deletion of all data.")
+
+	// Weaviate summary JSON output (CLI-01f)
+	weaviateSummaryCmd.Flags().BoolVar(&weaviateSummaryJSON, "json", false,
+		"Output as JSON for scripting")
 	weaviateCmd.AddCommand(weaviateDeleteDocCmd)
 
 	// Document management commands
@@ -445,10 +453,21 @@ func init() {
 	policyCmd.AddCommand(dumpPolicyCmd)
 	policyCmd.AddCommand(testPolicyCmd)
 
+	// Policy command flags (JSON output support - CLI-01f)
+	verifyPolicyCmd.Flags().BoolVar(&policyVerifyJSON, "json", false,
+		"Output as JSON for scripting")
+	dumpPolicyCmd.Flags().BoolVar(&policyDumpJSON, "json", false,
+		"Output as JSON instead of YAML")
+	testPolicyCmd.Flags().BoolVar(&policyTestJSON, "json", false,
+		"Output as JSON for scripting")
+	testPolicyCmd.Flags().BoolVar(&policyTestRedact, "redact", false,
+		"Redact matched content in output")
+
 	// Health Intelligence (Phase 9B)
 	rootCmd.AddCommand(healthCmd)
 
 	// Code Analysis (Phase CLI-01)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(graphCmd)
+	rootCmd.AddCommand(impactCmd)
 }
