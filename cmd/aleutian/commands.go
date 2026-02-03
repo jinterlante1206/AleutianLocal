@@ -447,4 +447,8 @@ func init() {
 
 	// Health Intelligence (Phase 9B)
 	rootCmd.AddCommand(healthCmd)
+
+	// Code Analysis (Phase CLI-01)
+	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(graphCmd)
 }
