@@ -541,12 +541,12 @@ func (t *findConfigUsageTool) Category() ToolCategory {
 func (t *findConfigUsageTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name:        "find_config_usage",
-		Description: "Finds where configuration values are used in the codebase",
+		Description: "Finds where configuration values are used in the codebase. If config_key is empty or omitted, discovers all configuration access points.",
 		Parameters: map[string]ParamDef{
 			"config_key": {
 				Type:        ParamTypeString,
-				Description: "The configuration key or pattern to search for",
-				Required:    true,
+				Description: "The configuration key or pattern to search for. Leave empty to discover all config access points (environment variables, config files, flags).",
+				Required:    false, // Changed to optional for discovery mode
 			},
 		},
 		Category:    CategoryExploration,
@@ -558,12 +558,19 @@ func (t *findConfigUsageTool) Definition() ToolDefinition {
 }
 
 func (t *findConfigUsageTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	configKey, ok := params["config_key"].(string)
-	if !ok || configKey == "" {
-		return &Result{Success: false, Error: "config_key is required"}, nil
+	configKey, _ := params["config_key"].(string)
+
+	var result *explore.ConfigUsage
+	var err error
+
+	if configKey == "" {
+		// Discovery mode: find all config access points
+		result, err = t.finder.DiscoverConfigs(ctx)
+	} else {
+		// Specific search mode
+		result, err = t.finder.FindConfigUsage(ctx, configKey)
 	}
 
-	result, err := t.finder.FindConfigUsage(ctx, configKey)
 	if err != nil {
 		return &Result{Success: false, Error: err.Error()}, nil
 	}
@@ -822,22 +829,16 @@ func StaticToolDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "find_config_usage",
-			Description: "Finds where configuration values are defined and used",
+			Description: "Finds where configuration values are used in the codebase. If config_key is empty or omitted, discovers all configuration access points.",
 			Parameters: map[string]ParamDef{
-				"pattern": {
+				"config_key": {
 					Type:        ParamTypeString,
-					Description: "Pattern to search for in config names",
+					Description: "The configuration key or pattern to search for. Leave empty to discover all config access points (environment variables, config files, flags).",
 					Required:    false,
-				},
-				"include_env": {
-					Type:        ParamTypeBool,
-					Description: "Include environment variable references",
-					Required:    false,
-					Default:     true,
 				},
 			},
 			Category:    CategoryExploration,
-			Priority:    60,
+			Priority:    65,
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     10 * time.Second,

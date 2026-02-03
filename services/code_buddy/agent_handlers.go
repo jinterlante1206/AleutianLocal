@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/code_buddy/agent/mcts/crs"
@@ -562,11 +563,11 @@ func (h *AgentHandlers) HandleGetCRSExport(c *gin.Context) {
 //
 //	Creates a Granite4Router with the session's configuration and wraps it
 //	with a RouterAdapter to implement the agent.ToolRouter interface.
-//	Also warms the router model to minimize first-request latency.
+//	Blocks until the router model is warmed to ensure tool selection works.
 //
 // Inputs:
 //
-//	ctx - Context for warming the model.
+//	ctx - Context for the request (used for logging, not warmup).
 //	session - The session to configure.
 //	logger - Logger for diagnostics.
 //
@@ -584,7 +585,7 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		ConfidenceThreshold: session.Config.ToolRouterConfidence,
 		Temperature:         0.1, // Low temperature for consistent routing
 		MaxTokens:           256,
-		KeepAlive:           "-1", // Keep model loaded indefinitely
+		KeepAlive:           "24h", // Keep model loaded (24 hours)
 	}
 
 	// Create the Granite4 router
@@ -604,17 +605,21 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		"timeout", routerConfig.Timeout,
 		"confidence_threshold", routerConfig.ConfidenceThreshold)
 
-	// Warm the router model in background (non-blocking)
-	go func() {
-		if warmErr := router.WarmRouter(ctx); warmErr != nil {
-			logger.Warn("Failed to warm router model",
-				"error", warmErr,
-				"model", routerConfig.Model)
-		} else {
-			logger.Info("Router model warmed successfully",
-				"model", routerConfig.Model)
-		}
-	}()
+	// Warm the router model SYNCHRONOUSLY with background context.
+	// We use context.Background() with timeout instead of request context
+	// because the request context may be cancelled when HTTP response is sent,
+	// but we need the model to stay loaded for subsequent tool routing calls.
+	warmupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	logger.Info("Warming router model (blocking)", "model", routerConfig.Model)
+	if warmErr := router.WarmRouter(warmupCtx); warmErr != nil {
+		logger.Error("Failed to warm router model",
+			"error", warmErr,
+			"model", routerConfig.Model)
+		return warmErr
+	}
+	logger.Info("Router model warmed successfully", "model", routerConfig.Model)
 
 	return nil
 }

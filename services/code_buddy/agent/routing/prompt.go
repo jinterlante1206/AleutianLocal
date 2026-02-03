@@ -83,6 +83,15 @@ Category: {{.Category}}
 {{- if .Context.RecentTools}}
 - Recent tools used: {{join .Context.RecentTools ", "}}
 {{- end}}
+{{- if .Context.PreviousErrors}}
+
+## IMPORTANT: Failed Tools
+The following tools recently failed. DO NOT suggest them again unless you can solve the error:
+{{range .Context.PreviousErrors}}
+- {{.Tool}}: {{.Error}}
+{{- end}}
+Choose a DIFFERENT tool that can accomplish the same goal.
+{{- end}}
 {{- else}}
 - No additional context provided
 {{- end}}
@@ -92,6 +101,7 @@ Category: {{.Category}}
 2. Select the SINGLE most appropriate tool
 3. Be decisive - pick one tool even if multiple might work
 4. Consider the context when making your selection
+5. AVOID tools that recently failed (see Failed Tools section if present)
 
 ## Output Format
 Respond with ONLY a JSON object. No explanation, no markdown, just JSON:

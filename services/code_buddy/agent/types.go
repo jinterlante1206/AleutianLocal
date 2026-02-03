@@ -722,11 +722,19 @@ type ToolRouterSpec struct {
 
 // ToolRouterCodeContext provides context about the codebase.
 type ToolRouterCodeContext struct {
-	Language    string   `json:"language,omitempty"`
-	Files       int      `json:"files,omitempty"`
-	Symbols     int      `json:"symbols,omitempty"`
-	CurrentFile string   `json:"current_file,omitempty"`
-	RecentTools []string `json:"recent_tools,omitempty"`
+	Language       string            `json:"language,omitempty"`
+	Files          int               `json:"files,omitempty"`
+	Symbols        int               `json:"symbols,omitempty"`
+	CurrentFile    string            `json:"current_file,omitempty"`
+	RecentTools    []string          `json:"recent_tools,omitempty"`
+	PreviousErrors []ToolRouterError `json:"previous_errors,omitempty"`
+}
+
+// ToolRouterError captures a failed tool attempt for router feedback.
+type ToolRouterError struct {
+	Tool      string `json:"tool"`
+	Error     string `json:"error"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 // =============================================================================

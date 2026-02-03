@@ -190,8 +190,8 @@ func DefaultSessionConfig() *SessionConfig {
 		ReflectionThreshold:    10,
 		ConfidenceThreshold:    0.7,
 		DegradationMode:        "fallback",
-		// Tool Router defaults (opt-in feature)
-		ToolRouterEnabled:    false,
+		// Tool Router defaults (enabled by default for faster tool selection)
+		ToolRouterEnabled:    true,
 		ToolRouterModel:      "granite4:micro-h",
 		ToolRouterTimeout:    500 * time.Millisecond,
 		ToolRouterConfidence: 0.7,
@@ -339,6 +339,10 @@ type Session struct {
 	// modelManager coordinates multiple Ollama models to prevent thrashing.
 	// Shared between tool router and main LLM.
 	modelManager ModelManager
+
+	// recentToolErrors tracks tools that failed recently.
+	// Fed back to the tool router to avoid suggesting the same tool.
+	recentToolErrors []ToolRouterError
 }
 
 // AssembledContext represents the current context window for the LLM.
@@ -1069,4 +1073,66 @@ func (s *Session) IsToolRouterEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Config.ToolRouterEnabled && s.toolRouter != nil
+}
+
+// RecordToolError records a tool failure for router feedback.
+//
+// Description:
+//
+//	Records that a tool failed with an error. This is fed back to the
+//	tool router so it can avoid suggesting the same tool again.
+//	Only keeps the last 5 errors to avoid unbounded growth.
+//
+// Inputs:
+//
+//	tool - The tool name that failed.
+//	errMsg - The error message.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) RecordToolError(tool, errMsg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err := ToolRouterError{
+		Tool:      tool,
+		Error:     errMsg,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	s.recentToolErrors = append(s.recentToolErrors, err)
+
+	// Keep only the last 5 errors
+	if len(s.recentToolErrors) > 5 {
+		s.recentToolErrors = s.recentToolErrors[len(s.recentToolErrors)-5:]
+	}
+}
+
+// GetRecentToolErrors returns recent tool failures for router feedback.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetRecentToolErrors() []ToolRouterError {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(s.recentToolErrors) == 0 {
+		return nil
+	}
+
+	// Return a copy to avoid race conditions
+	result := make([]ToolRouterError, len(s.recentToolErrors))
+	copy(result, s.recentToolErrors)
+	return result
+}
+
+// ClearToolErrors clears all recorded tool errors.
+//
+// Description:
+//
+//	Call this when errors have been addressed or a new query starts.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) ClearToolErrors() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recentToolErrors = nil
 }

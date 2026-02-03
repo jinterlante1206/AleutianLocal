@@ -71,6 +71,18 @@ func (a *RouterAdapter) SelectTool(ctx context.Context, query string, availableT
 			CurrentFile: codeContext.CurrentFile,
 			RecentTools: codeContext.RecentTools,
 		}
+
+		// Convert PreviousErrors if present
+		if len(codeContext.PreviousErrors) > 0 {
+			routingContext.PreviousErrors = make([]ToolError, len(codeContext.PreviousErrors))
+			for i, err := range codeContext.PreviousErrors {
+				routingContext.PreviousErrors[i] = ToolError{
+					Tool:      err.Tool,
+					Error:     err.Error,
+					Timestamp: err.Timestamp,
+				}
+			}
+		}
 	}
 
 	// Call the underlying router

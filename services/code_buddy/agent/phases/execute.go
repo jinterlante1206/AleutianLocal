@@ -349,6 +349,12 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 
 	// Parse and execute tool calls
 	invocations := llm.ParseToolCalls(response)
+
+	// CRITICAL: Add assistant message with tool calls to conversation history BEFORE execution.
+	// This ensures the LLM sees "I requested tool X" followed by "tool X returned Y".
+	// Without this, tool results become orphaned and the LLM keeps re-requesting the same tool.
+	p.addAssistantToolCallToHistory(deps, response, invocations)
+
 	toolResults, blocked := p.executeToolCalls(ctx, deps, invocations)
 
 	// Update context with results
@@ -599,6 +605,11 @@ func (p *ExecutePhase) buildCodeContext(deps *Dependencies) *agent.ToolRouterCod
 
 	// Get recent tools from session history if available
 	ctx.RecentTools = getRecentToolsFromSession(deps.Session)
+
+	// Get recent tool errors for router feedback
+	if deps.Session != nil {
+		ctx.PreviousErrors = deps.Session.GetRecentToolErrors()
+	}
 
 	return ctx
 }
@@ -1365,6 +1376,10 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		errMsg := ""
 		if !result.Success {
 			errMsg = result.Error
+			// Record error for router feedback
+			if deps.Session != nil {
+				deps.Session.RecordToolError(inv.Tool, errMsg)
+			}
 		}
 		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
@@ -1588,6 +1603,66 @@ func (p *ExecutePhase) executeSingleTool(ctx context.Context, deps *Dependencies
 	}
 
 	return result
+}
+
+// addAssistantToolCallToHistory adds an assistant message with tool calls to conversation history.
+//
+// Description:
+//
+//	When the LLM returns a response with tool calls, we must record that
+//	the assistant requested those tools BEFORE adding the tool results.
+//	This creates the proper message sequence:
+//	  user: "query"
+//	  assistant: [tool_call: find_entry_points]
+//	  tool: [result]
+//	  assistant: "final answer"
+//
+//	Without this step, tool results become orphaned - the LLM sees tool
+//	results but doesn't see that it requested them, causing it to
+//	re-request the same tools in an infinite loop.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//	response - The LLM response containing tool calls.
+//	invocations - Parsed tool invocations.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *ExecutePhase) addAssistantToolCallToHistory(deps *Dependencies, response *llm.Response, invocations []agent.ToolInvocation) {
+	if deps.Context == nil || len(invocations) == 0 {
+		return
+	}
+
+	// Build a description of what tools the assistant called
+	var toolCallDesc strings.Builder
+	toolCallDesc.WriteString("[Tool calls: ")
+	for i, inv := range invocations {
+		if i > 0 {
+			toolCallDesc.WriteString(", ")
+		}
+		toolCallDesc.WriteString(inv.Tool)
+	}
+	toolCallDesc.WriteString("]")
+
+	// Add assistant message showing it requested tools
+	// This ensures the conversation history shows the assistant's intent
+	assistantMsg := agent.Message{
+		Role:    "assistant",
+		Content: toolCallDesc.String(),
+	}
+
+	// Use ContextManager if available for thread safety
+	if deps.ContextManager != nil {
+		deps.ContextManager.AddMessage(deps.Context, assistantMsg.Role, assistantMsg.Content)
+	} else {
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, assistantMsg)
+	}
+
+	slog.Debug("Added assistant tool call to history",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("tool_count", len(invocations)),
+		slog.String("tools", toolCallDesc.String()),
+	)
 }
 
 // updateContextWithResults updates context with tool results.

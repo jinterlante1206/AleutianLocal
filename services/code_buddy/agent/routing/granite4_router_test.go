@@ -396,8 +396,8 @@ func TestDefaultRouterConfig(t *testing.T) {
 	if config.ConfidenceThreshold != 0.7 {
 		t.Errorf("ConfidenceThreshold = %.2f, want 0.7", config.ConfidenceThreshold)
 	}
-	if config.KeepAlive != "-1" {
-		t.Errorf("KeepAlive = %s, want -1", config.KeepAlive)
+	if config.KeepAlive != "24h" {
+		t.Errorf("KeepAlive = %s, want 24h", config.KeepAlive)
 	}
 	if config.MaxTokens != 256 {
 		t.Errorf("MaxTokens = %d, want 256", config.MaxTokens)

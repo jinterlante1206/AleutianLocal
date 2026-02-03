@@ -550,6 +550,70 @@ func DefaultTypeScriptConfigPatterns() []ConfigPattern {
 	}
 }
 
+// DiscoverConfigs finds all configuration access points in the codebase.
+//
+// Description:
+//
+//	Scans the entire codebase and returns all configuration access points,
+//	including environment variables, config file reads, and flag definitions.
+//	This is useful for discovery queries where the user doesn't know what
+//	configs exist.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//
+// Outputs:
+//
+//	*ConfigUsage - All discovered configuration access points.
+//	error - Non-nil if the operation was canceled.
+//
+// Performance:
+//
+//	Target latency: < 2s for typical codebases.
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (f *ConfigFinder) DiscoverConfigs(ctx context.Context) (*ConfigUsage, error) {
+	if ctx == nil {
+		return nil, ErrInvalidInput
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, ErrContextCanceled
+	}
+
+	usage := &ConfigUsage{
+		ConfigKey: "*", // Wildcard indicates discovery mode
+		UsedIn:    make([]ConfigUse, 0),
+	}
+
+	// Find all config accessors across all symbols
+	for _, kind := range []ast.SymbolKind{
+		ast.SymbolKindFunction,
+		ast.SymbolKindMethod,
+	} {
+		symbols := f.index.GetByKind(kind)
+		for _, sym := range symbols {
+			if err := ctx.Err(); err != nil {
+				return usage, ErrContextCanceled
+			}
+
+			if f.isConfigAccessor(sym) {
+				usage.UsedIn = append(usage.UsedIn, ConfigUse{
+					Function: sym.Name,
+					FilePath: sym.FilePath,
+					Line:     sym.StartLine,
+					Context:  f.getConfigContext(sym),
+				})
+			}
+		}
+	}
+
+	return usage, nil
+}
+
 // TraceConfigUsage traces where a config value flows after being read.
 //
 // Description:

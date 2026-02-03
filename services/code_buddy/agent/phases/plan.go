@@ -111,6 +111,10 @@ func (p *PlanPhase) Execute(ctx context.Context, deps *Dependencies) (agent.Agen
 		slog.String("query", deps.Query),
 	)
 
+	// Clear tool errors from previous queries so the router starts fresh.
+	// This prevents stale error feedback from affecting new unrelated queries.
+	deps.Session.ClearToolErrors()
+
 	// Check if query needs clarification
 	if p.isQueryAmbiguous(deps.Query) {
 		slog.Info("Query is ambiguous, requesting clarification",

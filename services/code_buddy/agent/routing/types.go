@@ -178,6 +178,28 @@ type CodeContext struct {
 
 	// RecentTools lists recently used tools (for context awareness).
 	RecentTools []string `json:"recent_tools,omitempty"`
+
+	// PreviousErrors contains tools that failed in this session.
+	// The router should avoid suggesting these unless it can fix the issue.
+	PreviousErrors []ToolError `json:"previous_errors,omitempty"`
+}
+
+// ToolError captures a failed tool attempt for router feedback.
+//
+// # Description
+//
+// When a tool fails (e.g., missing required parameter), the error is recorded
+// and fed back to the router. This helps the router avoid suggesting the same
+// tool repeatedly when it cannot be used successfully.
+type ToolError struct {
+	// Tool is the tool name that failed.
+	Tool string `json:"tool"`
+
+	// Error is the error message from the failure.
+	Error string `json:"error"`
+
+	// Timestamp when the error occurred.
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 // =============================================================================
@@ -230,7 +252,7 @@ func DefaultRouterConfig() RouterConfig {
 		Timeout:             500 * time.Millisecond,
 		Temperature:         0.1,
 		ConfidenceThreshold: 0.7,
-		KeepAlive:           "-1",
+		KeepAlive:           "24h",
 		MaxTokens:           256,
 	}
 }
