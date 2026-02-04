@@ -806,6 +806,9 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			Source:      crs.SignalSourceHard,
 		})
 
+		// CRS-06: Emit EventCircuitBreaker to Coordinator
+		p.emitCoordinatorEvent(ctx, deps, integration.EventCircuitBreaker, nil, nil, cbReason)
+
 		// Force "answer" to synthesize a response from gathered information
 		return &agent.ToolRouterSelection{
 			Tool:       "answer",
@@ -2065,6 +2068,12 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 				ErrorCategory: errorCategory,
 				Source:        crs.SignalSourceHard,
 			})
+
+			// CRS-06: Emit EventToolFailed to Coordinator
+			p.emitCoordinatorEvent(ctx, deps, integration.EventToolFailed, &inv, result, errMsg)
+		} else {
+			// CRS-06: Emit EventToolExecuted to Coordinator for successful execution
+			p.emitCoordinatorEvent(ctx, deps, integration.EventToolExecuted, &inv, result, "")
 		}
 		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
@@ -2086,6 +2095,10 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 				slog.String("tool", inv.Tool),
 				slog.String("reason", cycleReason),
 			)
+
+			// CRS-06: Emit EventCycleDetected to Coordinator
+			p.emitCoordinatorEvent(ctx, deps, integration.EventCycleDetected, &inv, nil, cycleReason)
+
 			// Continue processing - the cycle states are already marked disproven
 			// The circuit breaker will fire on the next tool selection
 		}
@@ -2584,6 +2597,78 @@ func (p *ExecutePhase) emitError(deps *Dependencies, err error, recoverable bool
 		Error:       err.Error(),
 		Recoverable: recoverable,
 	})
+}
+
+// =============================================================================
+// CRS-06: Coordinator Event Emission
+// =============================================================================
+
+// emitCoordinatorEvent emits an event to the MCTS Coordinator.
+//
+// Description:
+//
+//	If a Coordinator is configured, emits the event which triggers appropriate
+//	MCTS activities (Search, Learning, Awareness, etc.). The Coordinator
+//	orchestrates activities based on the event type and current session state.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies containing Coordinator.
+//	event - The agent event to emit.
+//	inv - The tool invocation (may be nil).
+//	result - The tool result (may be nil).
+//	errorMsg - Error message if applicable.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ExecutePhase) emitCoordinatorEvent(
+	ctx context.Context,
+	deps *Dependencies,
+	event integration.AgentEvent,
+	inv *agent.ToolInvocation,
+	result *tools.Result,
+	errorMsg string,
+) {
+	if deps.Coordinator == nil || deps.Session == nil {
+		return
+	}
+
+	// Build event data
+	data := &integration.EventData{
+		SessionID: deps.Session.ID,
+	}
+
+	// Add tool information if available
+	if inv != nil {
+		data.Tool = inv.Tool
+	}
+
+	// Add error information if available
+	if result != nil && !result.Success {
+		data.Error = result.Error
+	} else if errorMsg != "" {
+		data.Error = errorMsg
+	}
+
+	// Get step number from session
+	if deps.Session != nil {
+		data.StepNumber = deps.Session.GetMetric(agent.MetricSteps)
+	}
+
+	// Handle the event - activities are executed asynchronously
+	_, err := deps.Coordinator.HandleEvent(ctx, event, data)
+	if err != nil {
+		slog.Warn("CRS-06: Coordinator event handling failed",
+			slog.String("event", string(event)),
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+	} else {
+		slog.Debug("CRS-06: Coordinator event handled",
+			slog.String("event", string(event)),
+			slog.String("session_id", deps.Session.ID),
+		)
+	}
 }
 
 // getStringParamFromToolParams extracts a string parameter from ToolParameters.
