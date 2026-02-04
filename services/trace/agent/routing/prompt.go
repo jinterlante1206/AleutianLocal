@@ -48,7 +48,12 @@ type PromptData struct {
 }
 
 // systemPromptTemplate is the template for the routing system prompt.
-const systemPromptTemplate = `You are a tool router for a code assistant. Your job is to select the SINGLE BEST tool for the user's query.
+//
+// History-Aware Routing: This prompt is designed to leverage Mamba2's
+// O(n) linear complexity and 1M token context window. By including full
+// tool history with summaries, the router can make informed decisions
+// about what information is still missing.
+const systemPromptTemplate = `You are a tool router for a code assistant. Your job is to select the SINGLE BEST NEXT tool for the user's query.
 
 ## Available Tools
 {{range .Tools}}
@@ -80,8 +85,24 @@ Category: {{.Category}}
 {{- if .Context.CurrentFile}}
 - Current file: {{.Context.CurrentFile}}
 {{- end}}
-{{- if .Context.RecentTools}}
+{{- if gt .Context.StepNumber 0}}
+- Current step: {{.Context.StepNumber}}
+{{- end}}
+{{- if .Context.Progress}}
+- Progress so far: {{.Context.Progress}}
+{{- end}}
+{{- if .Context.ToolHistory}}
+
+## CRITICAL: Tool History (DO NOT REPEAT)
+The following tools have ALREADY been called. Review what was learned and select a DIFFERENT tool:
+{{range .Context.ToolHistory}}
+- Step {{.StepNumber}}: {{.Tool}} → {{if .Success}}✓ {{.Summary}}{{else}}✗ FAILED{{end}}
+{{- end}}
+
+Based on this history, what information is STILL MISSING to answer the user's query?
+{{- else if .Context.RecentTools}}
 - Recent tools used: {{join .Context.RecentTools ", "}}
+DO NOT suggest these tools again unless absolutely necessary.
 {{- end}}
 {{- if .Context.PreviousErrors}}
 
@@ -98,19 +119,21 @@ Choose a DIFFERENT tool that can accomplish the same goal.
 
 ## Instructions
 1. Analyze the user's query
-2. Select the SINGLE most appropriate tool
-3. Be decisive - pick one tool even if multiple might work
-4. Consider the context when making your selection
-5. AVOID tools that recently failed (see Failed Tools section if present)
+2. Review the tool history to see what has ALREADY been tried
+3. Identify what information is STILL MISSING
+4. Select the SINGLE most appropriate NEXT tool to gather that missing information
+5. DO NOT repeat tools that already succeeded (check Tool History above)
+6. If enough information has been gathered, select "answer" to provide the response
+7. AVOID tools that recently failed
 
 ## Output Format
 Respond with ONLY a JSON object. No explanation, no markdown, just JSON:
-{"tool": "<tool_name>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}
+{"tool": "<tool_name>", "confidence": <0.0-1.0>, "reasoning": "<what we still need to know>"}
 
 Example outputs:
-{"tool": "find_symbol_usages", "confidence": 0.95, "reasoning": "Query asks about function callers"}
-{"tool": "read_file", "confidence": 0.8, "reasoning": "User wants to see file contents"}
-{"tool": "grep_codebase", "confidence": 0.7, "reasoning": "Searching for text pattern"}`
+{"tool": "find_symbol_usages", "confidence": 0.95, "reasoning": "Need to find callers after locating the function"}
+{"tool": "read_file", "confidence": 0.8, "reasoning": "Found the file, need to see its contents"}
+{"tool": "answer", "confidence": 0.9, "reasoning": "Have entry points and implementation details, ready to answer"}`
 
 // userPromptTemplate is the template for the user message.
 const userPromptTemplate = `User query: {{.Query}}

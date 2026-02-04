@@ -95,12 +95,10 @@ type ReadParams struct {
 }
 
 // Validate checks that ReadParams are valid.
+// Note: Relative paths are allowed and should be resolved by the tool against the working directory.
 func (p *ReadParams) Validate() error {
 	if p.FilePath == "" {
 		return errors.New("file_path is required")
-	}
-	if !filepath.IsAbs(p.FilePath) {
-		return errors.New("file_path must be absolute")
 	}
 	if strings.Contains(p.FilePath, "..") {
 		return errors.New("file_path must not contain '..'")
@@ -152,12 +150,10 @@ type WriteParams struct {
 }
 
 // Validate checks that WriteParams are valid.
+// Note: Relative paths are allowed and should be resolved by the tool against the working directory.
 func (p *WriteParams) Validate() error {
 	if p.FilePath == "" {
 		return errors.New("file_path is required")
-	}
-	if !filepath.IsAbs(p.FilePath) {
-		return errors.New("file_path must be absolute")
 	}
 	if strings.Contains(p.FilePath, "..") {
 		return errors.New("file_path must not contain '..'")
@@ -203,12 +199,10 @@ type EditParams struct {
 }
 
 // Validate checks that EditParams are valid.
+// Note: Relative paths are allowed and should be resolved by the tool against the working directory.
 func (p *EditParams) Validate() error {
 	if p.FilePath == "" {
 		return errors.New("file_path is required")
-	}
-	if !filepath.IsAbs(p.FilePath) {
-		return errors.New("file_path must be absolute")
 	}
 	if strings.Contains(p.FilePath, "..") {
 		return errors.New("file_path must not contain '..'")
@@ -242,6 +236,7 @@ var (
 	ErrNoMatch       = errors.New("old_string not found in file")
 	ErrMultipleMatch = errors.New("old_string matches multiple times; use replace_all=true or provide more context")
 	ErrFileNotRead   = errors.New("file must be read before editing")
+	ErrConflict      = errors.New("file was modified externally since last read; re-read and retry")
 )
 
 // EditError provides detailed error information for edit failures.
@@ -456,6 +451,11 @@ type Config struct {
 
 	// ReadTracking tracks which files have been read (for Edit validation).
 	ReadTracking map[string]time.Time
+
+	// ContentHashes stores content hashes for optimistic locking.
+	// When a file is read, its hash is stored. During edit, we verify
+	// the hash matches to detect external modifications.
+	ContentHashes map[string]string
 }
 
 // NewConfig creates a new Config with the given working directory.
@@ -467,9 +467,10 @@ func NewConfig(workingDir string) *Config {
 		realDir = workingDir // Fallback if resolution fails
 	}
 	return &Config{
-		WorkingDir:   realDir,
-		AllowedPaths: []string{realDir},
-		ReadTracking: make(map[string]time.Time),
+		WorkingDir:    realDir,
+		AllowedPaths:  []string{realDir},
+		ReadTracking:  make(map[string]time.Time),
+		ContentHashes: make(map[string]string),
 	}
 }
 
@@ -550,6 +551,38 @@ func (c *Config) WasFileRead(path string) bool {
 	return ok
 }
 
+// StoreContentHash records the content hash of a file when read.
+// This enables optimistic locking during edits.
+func (c *Config) StoreContentHash(path string, hash string) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	if c.ContentHashes == nil {
+		c.ContentHashes = make(map[string]string)
+	}
+	c.ContentHashes[absPath] = hash
+}
+
+// GetContentHash retrieves the stored content hash for a file.
+// Returns empty string if no hash was stored.
+func (c *Config) GetContentHash(path string) string {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return c.ContentHashes[absPath]
+}
+
+// ClearContentHash removes the stored hash for a file after successful write.
+func (c *Config) ClearContentHash(path string) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	delete(c.ContentHashes, absPath)
+}
+
 // SensitivePaths contains paths that should never be written to.
 var SensitivePaths = []string{
 	"/etc/passwd",
@@ -617,18 +650,13 @@ type DiffParams struct {
 }
 
 // Validate checks that DiffParams are valid.
+// Note: Relative paths are allowed and should be resolved by the tool against the working directory.
 func (p *DiffParams) Validate() error {
 	if p.FileA == "" {
 		return errors.New("file_a is required")
 	}
 	if p.FileB == "" {
 		return errors.New("file_b is required")
-	}
-	if !filepath.IsAbs(p.FileA) {
-		return errors.New("file_a must be absolute")
-	}
-	if !filepath.IsAbs(p.FileB) {
-		return errors.New("file_b must be absolute")
 	}
 	if p.ContextLines < 0 || p.ContextLines > MaxContextLines {
 		return fmt.Errorf("context_lines must be between 0 and %d", MaxContextLines)
@@ -716,12 +744,10 @@ type JSONParams struct {
 }
 
 // JSONParamsValidate checks that JSONParams are valid.
+// Note: Relative paths are allowed and should be resolved by the tool against the working directory.
 func (p *JSONParams) ValidateParams() error {
 	if p.FilePath == "" {
 		return errors.New("file_path is required")
-	}
-	if !filepath.IsAbs(p.FilePath) {
-		return errors.New("file_path must be absolute")
 	}
 	return nil
 }

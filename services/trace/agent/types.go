@@ -721,6 +721,13 @@ type ToolRouterSpec struct {
 }
 
 // ToolRouterCodeContext provides context about the codebase.
+//
+// # History-Aware Routing
+//
+// This struct is designed to leverage Mamba2's O(n) linear complexity and
+// 1M token context window. By including tool history with summaries, the
+// router can make informed decisions about what information is still needed
+// rather than suggesting the same tools repeatedly.
 type ToolRouterCodeContext struct {
 	Language       string            `json:"language,omitempty"`
 	Files          int               `json:"files,omitempty"`
@@ -728,6 +735,40 @@ type ToolRouterCodeContext struct {
 	CurrentFile    string            `json:"current_file,omitempty"`
 	RecentTools    []string          `json:"recent_tools,omitempty"`
 	PreviousErrors []ToolRouterError `json:"previous_errors,omitempty"`
+
+	// ToolHistory contains the sequence of tools used with their results.
+	// This enables history-aware routing where the router can see what
+	// was already tried and what was learned from each tool.
+	ToolHistory []ToolHistoryEntry `json:"tool_history,omitempty"`
+
+	// Progress describes the current state of information gathering.
+	// Example: "Found 3 entry points, read 2 files, identified main handler"
+	Progress string `json:"progress,omitempty"`
+
+	// StepNumber is the current execution step (1-indexed).
+	StepNumber int `json:"step_number,omitempty"`
+}
+
+// ToolHistoryEntry captures a tool execution with its outcome.
+//
+// # Description
+//
+// Records what tool was called, what it found, and whether it succeeded.
+// This gives the router context about what information is already available,
+// enabling it to suggest the NEXT logical tool rather than repeating.
+type ToolHistoryEntry struct {
+	// Tool is the tool name that was called.
+	Tool string `json:"tool"`
+
+	// Summary is a brief description of what was found/returned.
+	// Example: "Found 5 callers of parseConfig in pkg/config/"
+	Summary string `json:"summary"`
+
+	// Success indicates whether the tool call succeeded.
+	Success bool `json:"success"`
+
+	// StepNumber when this tool was called.
+	StepNumber int `json:"step_number,omitempty"`
 }
 
 // ToolRouterError captures a failed tool attempt for router feedback.

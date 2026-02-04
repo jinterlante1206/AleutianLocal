@@ -296,6 +296,13 @@ func (e *Emitter) IncrementStep() int {
 	return e.currentStep
 }
 
+// CurrentStep returns the current step number without incrementing.
+func (e *Emitter) CurrentStep() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.currentStep
+}
+
 // GetBuffer returns a copy of buffered events.
 func (e *Emitter) GetBuffer() []Event {
 	e.mu.RLock()

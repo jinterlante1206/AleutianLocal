@@ -1136,3 +1136,28 @@ func (s *Session) ClearToolErrors() {
 	defer s.mu.Unlock()
 	s.recentToolErrors = nil
 }
+
+// GetTraceSteps returns all recorded trace steps from this session.
+//
+// Description:
+//
+//	Extracts trace steps from the trace recorder for history-aware routing.
+//	This allows the router to see what tools were already called and what
+//	they found, enabling better next-tool suggestions.
+//
+// Outputs:
+//
+//	[]crs.TraceStep - The recorded trace steps, or nil if no recorder.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetTraceSteps() []crs.TraceStep {
+	s.mu.RLock()
+	recorder := s.traceRecorder
+	s.mu.RUnlock()
+
+	if recorder == nil {
+		return nil
+	}
+
+	return recorder.GetSteps()
+}

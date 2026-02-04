@@ -258,7 +258,8 @@ type Config struct {
 	RepoPath string
 
 	// Strategy is the checkpoint strategy to use.
-	// Default: StrategyBranch
+	// Default: StrategyWorktree (prevents LSP/IDE conflicts)
+	// Note: Use StrategyBranch if worktrees not supported or disk space is a concern.
 	Strategy Strategy
 
 	// TransactionTTL is how long a transaction can be active before
@@ -298,9 +299,21 @@ type Config struct {
 }
 
 // DefaultConfig returns a Config with sensible defaults.
+//
+// # Note on Strategy Default
+//
+// The default is StrategyWorktree to prevent IDE/LSP conflicts. When the agent
+// uses branch switching, the user's gopls/LSP sees thousands of file changes,
+// causing cache invalidation and IDE freezes. Worktrees isolate agent work to
+// a separate directory, leaving the user's workspace untouched.
+//
+// Use StrategyBranch if:
+//   - Git worktrees are not supported (older git versions)
+//   - Disk space is constrained (worktrees require ~2x repo size)
+//   - User explicitly requests branch-based isolation
 func DefaultConfig() Config {
 	return Config{
-		Strategy:        StrategyBranch,
+		Strategy:        StrategyWorktree,
 		TransactionTTL:  30 * time.Minute,
 		GitTimeout:      30 * time.Second,
 		MaxTrackedFiles: 10000,

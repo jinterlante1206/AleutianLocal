@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -52,7 +53,7 @@ func (t *JSONTool) Definition() tools.ToolDefinition {
 		Parameters: map[string]tools.ParamDef{
 			"file_path": {
 				Type:        tools.ParamTypeString,
-				Description: "Absolute path to the JSON file",
+				Description: "Path to the JSON file. Can be absolute or relative to the project root.",
 				Required:    true,
 			},
 			"query": {
@@ -111,6 +112,11 @@ func (t *JSONTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	}
 	if validate, ok := params["validate"].(bool); ok {
 		p.Validate = validate
+	}
+
+	// Resolve relative paths to absolute using working directory
+	if p.FilePath != "" && !filepath.IsAbs(p.FilePath) {
+		p.FilePath = filepath.Join(t.config.WorkingDir, p.FilePath)
 	}
 
 	// Validate params

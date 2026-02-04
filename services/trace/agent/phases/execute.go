@@ -428,10 +428,15 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) *llm.Request {
 
 	request := llm.BuildRequest(deps.Context, toolDefs, p.maxTokens)
 
-	// Try ToolRouter first for fast tool selection (micro LLM routing).
-	// If the router returns a confident selection, use it. Otherwise, fall back
-	// to the hybrid stack classifier.
+	// History-Aware Routing: Route on EVERY step with full context.
+	// The router (Granite4:3b-h with Mamba2 architecture) handles O(n) linear
+	// complexity and can efficiently process tool history to avoid the
+	// "Amnesiac Router" bug where it keeps suggesting the same tool.
+	//
+	// Key insight: Mamba2's 1M token context window and linear complexity
+	// means we can pass full tool history without performance penalty.
 	routerUsed := false
+
 	if deps.Session != nil && deps.Session.IsToolRouterEnabled() && deps.Query != "" && len(toolDefs) > 0 {
 		router := deps.Session.GetToolRouter()
 		if router != nil {
@@ -441,7 +446,7 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) *llm.Request {
 				request.ToolChoice = llm.ToolChoiceRequired(routerSelection.Tool)
 				routerUsed = true
 
-				slog.Info("ToolRouter selection applied",
+				slog.Info("ToolRouter selection applied (history-aware)",
 					slog.String("session_id", deps.Session.ID),
 					slog.String("selected_tool", routerSelection.Tool),
 					slog.Float64("confidence", routerSelection.Confidence),
@@ -584,6 +589,13 @@ func toolDefsToSpecs(defs []tools.ToolDefinition) []agent.ToolRouterSpec {
 
 // buildCodeContext creates a CodeContext from phase dependencies.
 //
+// Description:
+//
+//	Builds a rich CodeContext for history-aware routing. Includes full tool
+//	history with summaries to leverage Mamba2's long-context efficiency.
+//	The router can see what tools were already called and what they found,
+//	enabling it to suggest the NEXT logical tool rather than repeating.
+//
 // Inputs:
 //
 //	deps - Phase dependencies.
@@ -603,15 +615,174 @@ func (p *ExecutePhase) buildCodeContext(deps *Dependencies) *agent.ToolRouterCod
 		ctx.Language = detectLanguageFromContext(deps.Context)
 	}
 
-	// Get recent tools from session history if available
+	// Get recent tools from session history if available (legacy support)
 	ctx.RecentTools = getRecentToolsFromSession(deps.Session)
 
 	// Get recent tool errors for router feedback
 	if deps.Session != nil {
 		ctx.PreviousErrors = deps.Session.GetRecentToolErrors()
+
+		// Build tool history with summaries for history-aware routing
+		ctx.ToolHistory = buildToolHistoryFromSession(deps.Session)
+
+		// Build progress summary
+		ctx.Progress = buildProgressSummary(deps.Session)
+
+		// Set step number
+		if deps.EventEmitter != nil {
+			ctx.StepNumber = deps.EventEmitter.CurrentStep()
+		}
 	}
 
 	return ctx
+}
+
+// maxToolHistoryEntries limits the number of tool history entries passed to the router.
+// This keeps context manageable while still providing sufficient history for
+// the router to make informed decisions about the next tool.
+const maxToolHistoryEntries = 10
+
+// buildToolHistoryFromSession extracts tool history with summaries from session.
+//
+// Description:
+//
+//	Iterates through the session's trace steps and builds a history of
+//	tool calls with brief summaries of what each tool found. This enables
+//	history-aware routing where the router can see what was already tried.
+//
+// Inputs:
+//
+//	s - The session to extract history from.
+//
+// Outputs:
+//
+//	[]agent.ToolHistoryEntry - Tool history with summaries.
+func buildToolHistoryFromSession(s *agent.Session) []agent.ToolHistoryEntry {
+	if s == nil {
+		return nil
+	}
+
+	traceSteps := s.GetTraceSteps()
+	if len(traceSteps) == 0 {
+		return nil
+	}
+
+	var history []agent.ToolHistoryEntry
+	stepNum := 0
+
+	for _, step := range traceSteps {
+		// Only include tool_call actions
+		if step.Action != "tool_call" {
+			continue
+		}
+
+		stepNum++
+		entry := agent.ToolHistoryEntry{
+			Tool:       step.Tool,
+			Success:    step.Error == "",
+			StepNumber: stepNum,
+		}
+
+		// Build summary based on tool type and results
+		entry.Summary = buildToolSummary(step)
+
+		history = append(history, entry)
+	}
+
+	// Limit to last N entries to keep context manageable
+	if len(history) > maxToolHistoryEntries {
+		history = history[len(history)-maxToolHistoryEntries:]
+	}
+
+	return history
+}
+
+// buildToolSummary creates a brief summary of what a tool call found.
+//
+// Inputs:
+//
+//	step - The trace step for the tool call.
+//
+// Outputs:
+//
+//	string - Brief summary of the result.
+func buildToolSummary(step crs.TraceStep) string {
+	if step.Error != "" {
+		return "FAILED: " + truncateString(step.Error, 50)
+	}
+
+	// Extract summary from metadata if available
+	if summary, ok := step.Metadata["summary"]; ok && summary != "" {
+		return truncateString(summary, 100)
+	}
+
+	// Build summary based on symbols found
+	if len(step.SymbolsFound) > 0 {
+		return fmt.Sprintf("Found %d symbols", len(step.SymbolsFound))
+	}
+
+	// Default to a generic success message with target
+	if step.Target != "" {
+		return "Processed " + truncateString(step.Target, 50)
+	}
+
+	return "Completed successfully"
+}
+
+// buildProgressSummary creates a summary of current progress.
+//
+// Inputs:
+//
+//	s - The session to summarize.
+//
+// Outputs:
+//
+//	string - Progress summary.
+func buildProgressSummary(s *agent.Session) string {
+	if s == nil {
+		return ""
+	}
+
+	traceSteps := s.GetTraceSteps()
+	if len(traceSteps) == 0 {
+		return "No tools called yet"
+	}
+
+	// Count tools by category
+	toolCounts := make(map[string]int)
+	toolOrder := make([]string, 0) // Track insertion order for deterministic output
+	totalSymbols := 0
+
+	for _, step := range traceSteps {
+		if step.Action == "tool_call" && step.Error == "" {
+			if toolCounts[step.Tool] == 0 {
+				toolOrder = append(toolOrder, step.Tool)
+			}
+			toolCounts[step.Tool]++
+			totalSymbols += len(step.SymbolsFound)
+		}
+	}
+
+	// Build summary in deterministic order
+	var parts []string
+	for _, tool := range toolOrder {
+		parts = append(parts, fmt.Sprintf("%s(%d)", tool, toolCounts[tool]))
+	}
+
+	summary := fmt.Sprintf("Tools used: %s", strings.Join(parts, ", "))
+	if totalSymbols > 0 {
+		summary += fmt.Sprintf("; %d symbols found", totalSymbols)
+	}
+
+	return summary
+}
+
+// truncateString truncates a string to maxLen with ellipsis.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // countSymbolsInContext counts unique symbols referenced in the context.

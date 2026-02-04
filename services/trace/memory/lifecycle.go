@@ -296,6 +296,254 @@ func (m *LifecycleManager) PromoteToActive(ctx context.Context, memoryID string)
 	return true, nil
 }
 
+// ScopeValidationResult contains the results of scope validation.
+type ScopeValidationResult struct {
+	// MemoriesOrphaned is the count of memories marked as orphaned.
+	MemoriesOrphaned int
+
+	// MemoriesValidated is the count of memories with valid scopes.
+	MemoriesValidated int
+
+	// Errors contains any non-fatal errors encountered.
+	Errors []string
+}
+
+// ValidateScopes checks memory scopes against current project files.
+//
+// # Description
+//
+// After a graph rebuild, call this method with the current file list to detect
+// memories whose scope patterns no longer match any files. Such memories are
+// marked as Orphaned because they reference files that no longer exist.
+//
+// This solves the "Ephemeral Graph vs Persistent Memory" problem where:
+// 1. Agent learns: "Always check auth in `pkg/users/handler.go`"
+// 2. User refactors: `pkg/users/` → `internal/identity/`
+// 3. Graph rebuilds correctly (source-driven)
+// 4. This method detects the memory is now orphaned
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation.
+//   - currentFiles: List of file paths currently in the project.
+//
+// # Outputs
+//
+//   - *ScopeValidationResult: Statistics about validation.
+//   - error: Non-nil if validation fails completely.
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func (m *LifecycleManager) ValidateScopes(ctx context.Context, currentFiles []string) (*ScopeValidationResult, error) {
+	result := &ScopeValidationResult{
+		Errors: make([]string, 0),
+	}
+
+	slog.Info("Starting scope validation", "data_space", m.dataSpace, "file_count", len(currentFiles))
+
+	// Build file set for fast lookup
+	fileSet := make(map[string]bool, len(currentFiles))
+	for _, f := range currentFiles {
+		fileSet[f] = true
+	}
+
+	// Find all active memories with non-empty scopes
+	memories, err := m.findScopedMemories(ctx)
+	if err != nil {
+		return result, fmt.Errorf("finding scoped memories: %w", err)
+	}
+
+	const maxErrorsBeforeAbort = 10
+	for _, memory := range memories {
+		// Check context cancellation
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		// Check error threshold
+		if len(result.Errors) >= maxErrorsBeforeAbort {
+			return result, fmt.Errorf("too many errors (%d), aborting validation", len(result.Errors))
+		}
+
+		// Check if scope matches any current file
+		if !m.scopeMatchesAny(memory.Scope, fileSet) {
+			// Mark as orphaned
+			if err := m.markOrphaned(ctx, memory.MemoryID); err != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("marking %s as orphaned: %v", memory.MemoryID, err))
+				continue
+			}
+			result.MemoriesOrphaned++
+			slog.Info("Memory orphaned",
+				"memory_id", memory.MemoryID,
+				"scope", memory.Scope)
+		} else {
+			result.MemoriesValidated++
+		}
+	}
+
+	slog.Info("Scope validation complete",
+		"orphaned", result.MemoriesOrphaned,
+		"validated", result.MemoriesValidated,
+		"errors", len(result.Errors))
+
+	return result, nil
+}
+
+// findScopedMemories finds all active memories with non-empty scopes.
+func (m *LifecycleManager) findScopedMemories(ctx context.Context) ([]CodeMemory, error) {
+	whereFilter := filters.Where().
+		WithOperator(filters.And).
+		WithOperands([]*filters.WhereBuilder{
+			filters.Where().
+				WithPath([]string{"dataSpace"}).
+				WithOperator(filters.Equal).
+				WithValueString(m.dataSpace),
+			filters.Where().
+				WithPath([]string{"status"}).
+				WithOperator(filters.Equal).
+				WithValueString(string(StatusActive)),
+			filters.Where().
+				WithPath([]string{"scope"}).
+				WithOperator(filters.NotEqual).
+				WithValueString(""),
+		})
+
+	fields := []graphql.Field{
+		{Name: "memoryId"},
+		{Name: "content"},
+		{Name: "memoryType"},
+		{Name: "scope"},
+		{Name: "confidence"},
+		{Name: "source"},
+		{Name: "createdAt"},
+		{Name: "lastUsed"},
+		{Name: "useCount"},
+		{Name: "dataSpace"},
+		{Name: "status"},
+	}
+
+	result, err := m.client.GraphQL().Get().
+		WithClassName(CodeMemoryClassName).
+		WithFields(fields...).
+		WithWhere(whereFilter).
+		WithLimit(1000). // Process larger batch for scope validation
+		Do(ctx)
+
+	if err != nil {
+		return nil, fmt.Errorf("querying scoped memories: %w", err)
+	}
+
+	if result.Errors != nil && len(result.Errors) > 0 {
+		return nil, fmt.Errorf("query error: %s", result.Errors[0].Message)
+	}
+
+	return m.parseResults(result)
+}
+
+// scopeMatchesAny checks if a scope glob pattern matches any file in the set.
+func (m *LifecycleManager) scopeMatchesAny(scope string, fileSet map[string]bool) bool {
+	// Direct match check first
+	if fileSet[scope] {
+		return true
+	}
+
+	// For glob patterns, we need to check if any file matches
+	// Common patterns: "pkg/users/*", "*.go", "internal/**/*.go"
+	for file := range fileSet {
+		if matchGlob(scope, file) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchGlob performs simple glob matching.
+// Supports: * (any single path segment), ** (any path depth), ? (any single char)
+func matchGlob(pattern, path string) bool {
+	// Simple implementation - for production, use doublestar or similar
+	// This handles the most common cases
+	if pattern == path {
+		return true
+	}
+	if pattern == "*" {
+		return true
+	}
+
+	// Handle ** for recursive matching
+	if len(pattern) >= 2 && pattern[:2] == "**" {
+		// ** matches any path, try matching rest of pattern against any suffix
+		rest := ""
+		if len(pattern) > 2 {
+			if pattern[2] == '/' {
+				rest = pattern[3:]
+			} else {
+				rest = pattern[2:]
+			}
+		}
+		if rest == "" {
+			return true
+		}
+		// Try matching rest against path and all suffixes
+		for i := 0; i <= len(path); i++ {
+			if matchGlob(rest, path[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Handle single * wildcard
+	if len(pattern) > 0 && pattern[0] == '*' {
+		rest := pattern[1:]
+		// * matches until next /
+		for i := 0; i <= len(path); i++ {
+			if i > 0 && path[i-1] == '/' {
+				break // * doesn't cross directory boundaries
+			}
+			if matchGlob(rest, path[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Character-by-character matching
+	if len(pattern) == 0 || len(path) == 0 {
+		return len(pattern) == 0 && len(path) == 0
+	}
+
+	if pattern[0] == '?' || pattern[0] == path[0] {
+		return matchGlob(pattern[1:], path[1:])
+	}
+
+	return false
+}
+
+// markOrphaned sets a memory's status to orphaned.
+func (m *LifecycleManager) markOrphaned(ctx context.Context, memoryID string) error {
+	weaviateID, err := m.store.getWeaviateID(ctx, memoryID)
+	if err != nil {
+		return err
+	}
+
+	err = m.client.Data().Updater().
+		WithClassName(CodeMemoryClassName).
+		WithID(weaviateID).
+		WithProperties(map[string]interface{}{
+			"status": string(StatusOrphaned),
+		}).
+		WithMerge().
+		Do(ctx)
+
+	if err != nil {
+		return fmt.Errorf("marking memory as orphaned: %w", err)
+	}
+
+	return nil
+}
+
 // findStaleMemories finds memories that haven't been used within the threshold.
 func (m *LifecycleManager) findStaleMemories(ctx context.Context, threshold time.Time) ([]CodeMemory, error) {
 	whereFilter := filters.Where().

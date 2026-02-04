@@ -63,6 +63,10 @@ type MemoryStatus string
 const (
 	StatusActive   MemoryStatus = "active"
 	StatusArchived MemoryStatus = "archived"
+	// StatusOrphaned indicates a memory's scope no longer matches any files.
+	// This happens when files are deleted or refactored and the memory's
+	// file glob pattern no longer matches any existing files.
+	StatusOrphaned MemoryStatus = "orphaned"
 )
 
 // Sentinel errors for memory operations.

@@ -320,6 +320,139 @@ func TestChatWithToolsResult(t *testing.T) {
 	}
 }
 
+// TestParseArguments tests the parseArguments function that converts JSON
+// tool arguments into typed ToolParameters.
+func TestParseArguments(t *testing.T) {
+	t.Run("empty string returns empty params", func(t *testing.T) {
+		params := parseArguments("")
+		if len(params.StringParams) != 0 || len(params.IntParams) != 0 || len(params.BoolParams) != 0 {
+			t.Error("expected empty params maps")
+		}
+	})
+
+	t.Run("empty object returns empty params", func(t *testing.T) {
+		params := parseArguments("{}")
+		if len(params.StringParams) != 0 || len(params.IntParams) != 0 || len(params.BoolParams) != 0 {
+			t.Error("expected empty params maps")
+		}
+	})
+
+	t.Run("string parameter parsed correctly", func(t *testing.T) {
+		params := parseArguments(`{"file_path": "/path/to/file.go"}`)
+
+		if val, ok := params.StringParams["file_path"]; !ok {
+			t.Error("expected file_path in StringParams")
+		} else if val != "/path/to/file.go" {
+			t.Errorf("file_path = %q, want '/path/to/file.go'", val)
+		}
+	})
+
+	t.Run("integer parameter parsed correctly", func(t *testing.T) {
+		params := parseArguments(`{"depth": 3, "limit": 100}`)
+
+		if val, ok := params.IntParams["depth"]; !ok {
+			t.Error("expected depth in IntParams")
+		} else if val != 3 {
+			t.Errorf("depth = %d, want 3", val)
+		}
+
+		if val, ok := params.IntParams["limit"]; !ok {
+			t.Error("expected limit in IntParams")
+		} else if val != 100 {
+			t.Errorf("limit = %d, want 100", val)
+		}
+	})
+
+	t.Run("boolean parameter parsed correctly", func(t *testing.T) {
+		params := parseArguments(`{"show_hidden": true, "recursive": false}`)
+
+		if val, ok := params.BoolParams["show_hidden"]; !ok {
+			t.Error("expected show_hidden in BoolParams")
+		} else if !val {
+			t.Error("show_hidden should be true")
+		}
+
+		if val, ok := params.BoolParams["recursive"]; !ok {
+			t.Error("expected recursive in BoolParams")
+		} else if val {
+			t.Error("recursive should be false")
+		}
+	})
+
+	t.Run("mixed parameters parsed correctly", func(t *testing.T) {
+		params := parseArguments(`{"file_path": "/test.go", "depth": 2, "show_hidden": true}`)
+
+		if val, ok := params.StringParams["file_path"]; !ok || val != "/test.go" {
+			t.Errorf("file_path = %q, want '/test.go'", val)
+		}
+		if val, ok := params.IntParams["depth"]; !ok || val != 2 {
+			t.Errorf("depth = %d, want 2", val)
+		}
+		if val, ok := params.BoolParams["show_hidden"]; !ok || !val {
+			t.Errorf("show_hidden = %v, want true", val)
+		}
+	})
+
+	t.Run("raw JSON is preserved", func(t *testing.T) {
+		jsonStr := `{"file_path": "/test.go", "depth": 2}`
+		params := parseArguments(jsonStr)
+
+		if string(params.RawJSON) != jsonStr {
+			t.Errorf("RawJSON = %q, want %q", string(params.RawJSON), jsonStr)
+		}
+	})
+
+	t.Run("null values are skipped", func(t *testing.T) {
+		params := parseArguments(`{"file_path": "/test.go", "optional": null}`)
+
+		if val, ok := params.StringParams["file_path"]; !ok || val != "/test.go" {
+			t.Errorf("file_path = %q, want '/test.go'", val)
+		}
+		if _, ok := params.StringParams["optional"]; ok {
+			t.Error("optional should not be in StringParams (was null)")
+		}
+	})
+
+	t.Run("invalid JSON still sets RawJSON", func(t *testing.T) {
+		params := parseArguments(`{not valid json}`)
+
+		// Should have RawJSON set even if parsing failed
+		if len(params.RawJSON) == 0 {
+			t.Error("expected RawJSON to be set even for invalid JSON")
+		}
+		// But typed maps should be empty
+		if len(params.StringParams) != 0 || len(params.IntParams) != 0 || len(params.BoolParams) != 0 {
+			t.Error("expected empty typed maps for invalid JSON")
+		}
+	})
+
+	t.Run("real-world Read tool parameters", func(t *testing.T) {
+		// This is what GLM model might actually send
+		params := parseArguments(`{"file_path": "/Users/test/main.go", "offset": 0, "limit": 100}`)
+
+		if val, ok := params.StringParams["file_path"]; !ok || val != "/Users/test/main.go" {
+			t.Errorf("file_path = %q, want '/Users/test/main.go'", val)
+		}
+		if val, ok := params.IntParams["offset"]; !ok || val != 0 {
+			t.Errorf("offset = %d, want 0", val)
+		}
+		if val, ok := params.IntParams["limit"]; !ok || val != 100 {
+			t.Errorf("limit = %d, want 100", val)
+		}
+	})
+
+	t.Run("real-world Glob tool parameters", func(t *testing.T) {
+		params := parseArguments(`{"pattern": "**/*.go", "path": "/project/src"}`)
+
+		if val, ok := params.StringParams["pattern"]; !ok || val != "**/*.go" {
+			t.Errorf("pattern = %q, want '**/*.go'", val)
+		}
+		if val, ok := params.StringParams["path"]; !ok || val != "/project/src" {
+			t.Errorf("path = %q, want '/project/src'", val)
+		}
+	})
+}
+
 func TestOllamaAdapter_convertMessages_ToolResults(t *testing.T) {
 	// BUG FIX TEST: Verify that tool messages with content in ToolResults
 	// are correctly converted (not sent as empty messages).

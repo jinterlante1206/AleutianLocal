@@ -50,7 +50,7 @@ func (t *WriteTool) Definition() tools.ToolDefinition {
 		Parameters: map[string]tools.ParamDef{
 			"file_path": {
 				Type:        tools.ParamTypeString,
-				Description: "Absolute path for the file to write",
+				Description: "Path for the file to write. Can be absolute or relative to the project root.",
 				Required:    true,
 			},
 			"content": {
@@ -86,6 +86,11 @@ func (t *WriteTool) Execute(ctx context.Context, params map[string]any) (*tools.
 	}
 	if content, ok := params["content"].(string); ok {
 		p.Content = content
+	}
+
+	// Resolve relative paths to absolute using working directory
+	if p.FilePath != "" && !filepath.IsAbs(p.FilePath) {
+		p.FilePath = filepath.Join(t.config.WorkingDir, p.FilePath)
 	}
 
 	// Validate

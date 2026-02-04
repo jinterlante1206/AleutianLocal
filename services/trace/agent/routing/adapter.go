@@ -70,6 +70,8 @@ func (a *RouterAdapter) SelectTool(ctx context.Context, query string, availableT
 			Symbols:     codeContext.Symbols,
 			CurrentFile: codeContext.CurrentFile,
 			RecentTools: codeContext.RecentTools,
+			Progress:    codeContext.Progress,
+			StepNumber:  codeContext.StepNumber,
 		}
 
 		// Convert PreviousErrors if present
@@ -80,6 +82,19 @@ func (a *RouterAdapter) SelectTool(ctx context.Context, query string, availableT
 					Tool:      err.Tool,
 					Error:     err.Error,
 					Timestamp: err.Timestamp,
+				}
+			}
+		}
+
+		// Convert ToolHistory for history-aware routing
+		if len(codeContext.ToolHistory) > 0 {
+			routingContext.ToolHistory = make([]ToolHistoryEntry, len(codeContext.ToolHistory))
+			for i, entry := range codeContext.ToolHistory {
+				routingContext.ToolHistory[i] = ToolHistoryEntry{
+					Tool:       entry.Tool,
+					Summary:    entry.Summary,
+					Success:    entry.Success,
+					StepNumber: entry.StepNumber,
 				}
 			}
 		}
