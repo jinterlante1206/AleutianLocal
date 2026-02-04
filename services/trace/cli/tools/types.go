@@ -22,6 +22,8 @@ package tools
 import (
 	"context"
 	"time"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 )
 
 // ToolCategory represents the category a tool belongs to.
@@ -219,6 +221,11 @@ type Result struct {
 
 	// Metadata contains additional result metadata.
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// TraceStep is the CRS trace step for this tool execution.
+	// Tools that want full CRS integration should populate this.
+	// The dispatcher/execute phase will record it to the session.
+	TraceStep *crs.TraceStep `json:"trace_step,omitempty"`
 }
 
 // Invocation represents a pending or completed tool call.

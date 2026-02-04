@@ -1048,3 +1048,201 @@ func BenchmarkPinnedInstructions_TokenCount(b *testing.B) {
 		_ = p.TokenCount()
 	}
 }
+
+// --- Compression Tests ---
+
+func TestPinnedInstructions_Compress(t *testing.T) {
+	t.Run("does nothing when under target", func(t *testing.T) {
+		p := NewPinnedInstructions(WithTokenBudget(5000))
+		_ = p.SetOriginalQuery("Short query")
+
+		freed := p.Compress(1000)
+
+		if freed != 0 {
+			t.Errorf("expected 0 tokens freed, got %d", freed)
+		}
+	})
+
+	t.Run("removes finding details first", func(t *testing.T) {
+		tc := &mockTokenCounter{tokensPerChar: 1.0}
+		p := NewPinnedInstructions(
+			WithTokenBudget(5000),
+			WithTokenCounter(tc),
+		)
+		_ = p.SetOriginalQuery("Query")
+
+		// Add findings with long details
+		for i := 0; i < 5; i++ {
+			_ = p.AddFinding(context.Background(), Finding{
+				Summary: "Summary",
+				Detail:  strings.Repeat("detail", 50), // 300 chars
+				Source:  "file.go",
+			})
+		}
+
+		beforeTokens := p.TokenCount()
+		freed := p.Compress(beforeTokens / 2)
+
+		if freed <= 0 {
+			t.Error("expected tokens to be freed")
+		}
+
+		// Verify details are removed
+		for _, f := range p.GetFindings() {
+			if f.Detail != "" {
+				t.Error("details should be removed")
+			}
+		}
+	})
+
+	t.Run("aggregates findings when over 3", func(t *testing.T) {
+		tc := &mockTokenCounter{tokensPerChar: 1.0}
+		p := NewPinnedInstructions(
+			WithTokenBudget(5000),
+			WithTokenCounter(tc),
+		)
+		_ = p.SetOriginalQuery("Query")
+
+		// Add many findings
+		for i := 0; i < 8; i++ {
+			_ = p.AddFinding(context.Background(), Finding{
+				Summary: strings.Repeat("summary", 10),
+				Source:  "file.go",
+			})
+		}
+
+		// Target very low to trigger aggregation
+		p.Compress(100)
+
+		findings := p.GetFindings()
+		if len(findings) > 3 {
+			t.Errorf("expected at most 3 findings after aggregation, got %d", len(findings))
+		}
+
+		// Should have an aggregated finding
+		hasAggregated := false
+		for _, f := range findings {
+			if strings.Contains(f.Summary, "Identified") {
+				hasAggregated = true
+				break
+			}
+		}
+		if !hasAggregated && len(findings) > 0 {
+			t.Error("expected aggregated finding")
+		}
+	})
+
+	t.Run("shortens constraints", func(t *testing.T) {
+		tc := &mockTokenCounter{tokensPerChar: 1.0}
+		p := NewPinnedInstructions(
+			WithTokenBudget(5000),
+			WithTokenCounter(tc),
+		)
+		_ = p.SetOriginalQuery("Query")
+
+		// Add long constraints
+		for i := 0; i < 5; i++ {
+			_ = p.AddConstraint(strings.Repeat("constraint", 20)) // 200 chars
+		}
+
+		p.Compress(200)
+
+		for _, c := range p.GetConstraints() {
+			if len(c) > 60 { // 50 + some buffer for "..."
+				t.Errorf("constraint should be shortened, got length %d", len(c))
+			}
+		}
+	})
+
+	t.Run("nil receiver returns 0", func(t *testing.T) {
+		var p *PinnedInstructions
+
+		freed := p.Compress(100)
+
+		if freed != 0 {
+			t.Errorf("nil receiver should return 0, got %d", freed)
+		}
+	})
+}
+
+func TestPinnedInstructions_CompressToFit(t *testing.T) {
+	t.Run("does nothing when code budget is satisfied", func(t *testing.T) {
+		p := NewPinnedInstructions(WithTokenBudget(1000))
+		_ = p.SetOriginalQuery("Short query")
+
+		// Total 100K, trace 50K, pinned ~50 tokens = plenty of code budget
+		freed := p.CompressToFit(100000, 50000)
+
+		if freed != 0 {
+			t.Errorf("expected 0 tokens freed, got %d", freed)
+		}
+	})
+
+	t.Run("compresses when code budget is squeezed", func(t *testing.T) {
+		tc := &mockTokenCounter{tokensPerChar: 1.0}
+		p := NewPinnedInstructions(
+			WithTokenBudget(5000),
+			WithTokenCounter(tc),
+		)
+		_ = p.SetOriginalQuery("Query")
+
+		// Add a lot of content to the pinned block
+		for i := 0; i < 10; i++ {
+			_ = p.AddFinding(context.Background(), Finding{
+				Summary: strings.Repeat("x", 90),
+				Detail:  strings.Repeat("y", 400),
+				Source:  "file.go",
+			})
+		}
+
+		// Total 10K, trace 6K, pinned is ~5K = only 4K available
+		// MinCodeBudget is 4096, so we're right at the edge
+		initialTokens := p.TokenCount()
+
+		// Total 8K, trace 4K, pinned ~5K = need to shrink pinned
+		freed := p.CompressToFit(8000, 4000)
+
+		if freed <= 0 && initialTokens > 1000 {
+			t.Error("expected tokens to be freed when code budget is squeezed")
+		}
+	})
+
+	t.Run("respects minimum pinned budget", func(t *testing.T) {
+		tc := &mockTokenCounter{tokensPerChar: 1.0}
+		p := NewPinnedInstructions(
+			WithTokenBudget(5000),
+			WithTokenCounter(tc),
+		)
+		_ = p.SetOriginalQuery("Query")
+		_ = p.SetPlan([]PlanStep{{Description: "Step 1"}})
+
+		// Very constrained: total 1K, trace 500
+		// Can't compress pinned below minimum
+		p.CompressToFit(1000, 500)
+
+		// Should still have core content
+		if p.OriginalQuery() == "" {
+			t.Error("should preserve original query")
+		}
+	})
+
+	t.Run("nil receiver returns 0", func(t *testing.T) {
+		var p *PinnedInstructions
+
+		freed := p.CompressToFit(100000, 50000)
+
+		if freed != 0 {
+			t.Errorf("nil receiver should return 0, got %d", freed)
+		}
+	})
+}
+
+func TestMinCodeBudget_Constant(t *testing.T) {
+	// Verify the constant is reasonable
+	if MinCodeBudget < 2048 {
+		t.Errorf("MinCodeBudget should be at least 2048, got %d", MinCodeBudget)
+	}
+	if MinCodeBudget > 8192 {
+		t.Errorf("MinCodeBudget should not exceed 8192, got %d", MinCodeBudget)
+	}
+}

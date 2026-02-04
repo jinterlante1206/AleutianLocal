@@ -474,7 +474,9 @@ func (e *Executor) buildResult(
 // Description:
 //
 //	Resumes DAG execution from a previously saved state, useful for
-//	implementing checkpoint/resume functionality.
+//	implementing checkpoint/resume functionality. Before resuming,
+//	it calls OnResume on all completed RehydratableNodes to restore
+//	any ephemeral state (e.g., respawn LSP processes).
 //
 // Inputs:
 //
@@ -518,6 +520,13 @@ func (e *Executor) RunFromState(ctx context.Context, state *State) (*Result, err
 		slog.Int("completed_nodes", state.CompletedCount()),
 	)
 
+	// Rehydrate completed nodes that have ephemeral state
+	if err := e.rehydrateNodes(ctx, state); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "rehydration failed")
+		return nil, fmt.Errorf("rehydrating nodes: %w", err)
+	}
+
 	nodeDurations := make(map[string]time.Duration)
 
 	// Execute remaining nodes
@@ -554,4 +563,113 @@ func (e *Executor) RunFromState(ctx context.Context, state *State) (*Result, err
 	}
 
 	return result, nil
+}
+
+// rehydrateNodes restores ephemeral state for completed RehydratableNodes.
+//
+// Description:
+//
+//	Iterates through all completed nodes and calls OnResume on those that
+//	implement RehydratableNode. If rehydration fails, the node is marked
+//	as pending so it will be re-executed.
+//
+// The Zombie Problem This Solves:
+//
+//	After checkpoint restore, a node marked "complete" may have lost its
+//	ephemeral resources (e.g., LSP process died). Without rehydration:
+//	  1. Checkpoint says LSP_SPAWN = Complete
+//	  2. TYPE_CHECK runs, calls LSP
+//	  3. PANIC: LSP manager is nil
+//
+//	With rehydration:
+//	  1. Checkpoint says LSP_SPAWN = Complete
+//	  2. rehydrateNodes calls LSPNode.OnResume()
+//	  3. OnResume sees process is dead, respawns it
+//	  4. TYPE_CHECK runs successfully
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	state - The restored state with completed nodes.
+//
+// Outputs:
+//
+//	error - Non-nil if any critical rehydration fails.
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (e *Executor) rehydrateNodes(ctx context.Context, state *State) error {
+	ctx, span := tracer.Start(ctx, "dag.rehydrateNodes",
+		trace.WithAttributes(
+			attribute.String("dag.name", e.dag.Name()),
+			attribute.String("dag.session_id", state.SessionID),
+		),
+	)
+	defer span.End()
+
+	state.mu.RLock()
+	completedNames := make([]string, 0, len(state.CompletedNodes))
+	for name := range state.CompletedNodes {
+		completedNames = append(completedNames, name)
+	}
+	state.mu.RUnlock()
+
+	rehydrated := 0
+	failed := 0
+
+	for _, name := range completedNames {
+		node, ok := e.dag.GetNode(name)
+		if !ok {
+			continue
+		}
+
+		// Check if node implements RehydratableNode
+		rehydratable, ok := node.(RehydratableNode)
+		if !ok {
+			continue
+		}
+
+		// Get the node's output for rehydration
+		output, _ := state.GetOutput(name)
+
+		e.logger.Debug("rehydrating node",
+			slog.String("node", name),
+		)
+
+		// Call OnResume to restore ephemeral state
+		if err := rehydratable.OnResume(ctx, output); err != nil {
+			e.logger.Warn("node rehydration failed, will re-execute",
+				slog.String("node", name),
+				slog.String("error", err.Error()),
+			)
+
+			// Mark node as not completed so it will be re-executed
+			state.mu.Lock()
+			delete(state.CompletedNodes, name)
+			state.NodeStatuses[name] = NodeStatusPending
+			state.mu.Unlock()
+
+			span.AddEvent("rehydration_failed", trace.WithAttributes(
+				attribute.String("node", name),
+				attribute.String("error", err.Error()),
+			))
+
+			failed++
+		} else {
+			rehydrated++
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("rehydrated_count", rehydrated),
+		attribute.Int("failed_count", failed),
+	)
+
+	e.logger.Info("node rehydration complete",
+		slog.Int("rehydrated", rehydrated),
+		slog.Int("failed_will_rerun", failed),
+	)
+
+	return nil
 }

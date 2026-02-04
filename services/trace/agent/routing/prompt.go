@@ -12,6 +12,8 @@ package routing
 
 import (
 	"bytes"
+	"fmt"
+	"log/slog"
 	"strings"
 	"text/template"
 )
@@ -93,23 +95,45 @@ Category: {{.Category}}
 {{- end}}
 {{- if .Context.ToolHistory}}
 
-## CRITICAL: Tool History (DO NOT REPEAT)
-The following tools have ALREADY been called. Review what was learned and select a DIFFERENT tool:
+[!] CRITICAL CONSTRAINT: Tool History (DO NOT REPEAT) [!]
+═══════════════════════════════════════════════════════════════════
+The following tools have ALREADY been executed in this session.
+You MUST NOT suggest these tools again:
+
 {{range .Context.ToolHistory}}
-- Step {{.StepNumber}}: {{.Tool}} → {{if .Success}}✓ {{.Summary}}{{else}}✗ FAILED{{end}}
+{{if .Success}}[OK] Step {{.StepNumber}}: {{.Tool}} → SUCCESS
+    Result: {{.Summary}}
+{{else}}[FAIL] Step {{.StepNumber}}: {{.Tool}} → FAILED
+    Error: {{.Summary}}
+{{end}}
 {{- end}}
 
-Based on this history, what information is STILL MISSING to answer the user's query?
+FORBIDDEN TOOLS (DO NOT suggest these):
+{{- range .Context.ToolHistory}}
+{{- if .Success}}
+  - {{.Tool}} (already succeeded)
+{{- else}}
+  - {{.Tool}} (already failed)
+{{- end}}
+{{- end}}
+
+NEXT STEP LOGIC:
+1. Review what information was successfully gathered above
+2. Identify what is STILL MISSING to answer the user's query
+3. Select a DIFFERENT tool NOT in the forbidden list
+4. If enough information gathered → select "answer" to synthesize response
+
+What critical information is MISSING that requires a NEW tool?
 {{- else if .Context.RecentTools}}
-- Recent tools used: {{join .Context.RecentTools ", "}}
-DO NOT suggest these tools again unless absolutely necessary.
+Recent tools used: {{join .Context.RecentTools ", "}}
+Prefer DIFFERENT tools unless absolutely necessary.
 {{- end}}
 {{- if .Context.PreviousErrors}}
 
-## IMPORTANT: Failed Tools
-The following tools recently failed. DO NOT suggest them again unless you can solve the error:
+[!] FAILED TOOLS - AVOID THESE [!]
+The following tools recently failed. DO NOT suggest them again:
 {{range .Context.PreviousErrors}}
-- {{.Tool}}: {{.Error}}
+  - {{.Tool}}: {{.Error}}
 {{- end}}
 Choose a DIFFERENT tool that can accomplish the same goal.
 {{- end}}
@@ -117,14 +141,29 @@ Choose a DIFFERENT tool that can accomplish the same goal.
 - No additional context provided
 {{- end}}
 
-## Instructions
-1. Analyze the user's query
-2. Review the tool history to see what has ALREADY been tried
-3. Identify what information is STILL MISSING
-4. Select the SINGLE most appropriate NEXT tool to gather that missing information
-5. DO NOT repeat tools that already succeeded (check Tool History above)
-6. If enough information has been gathered, select "answer" to provide the response
-7. AVOID tools that recently failed
+## DECISION PROTOCOL (FOLLOW STRICTLY)
+
+STEP 1: Check Tool History
+  - Have we already gathered sufficient information?
+  - If YES → select "answer" (do not call more tools unnecessarily)
+  - If NO → proceed to STEP 2
+
+STEP 2: Identify Missing Information
+  - What SPECIFIC information is STILL needed?
+  - Be precise about what gap exists
+
+STEP 3: Select NEXT Tool
+  - Choose ONE tool NOT in the forbidden list above
+  - The tool must gather NEW information we don't have yet
+  - DO NOT repeat successful tools (check [OK] entries above)
+  - DO NOT retry failed tools (check [FAIL] entries above)
+
+STEP 4: Validate Your Selection
+  - Is this tool in the forbidden list? → If YES, STOP and choose different tool
+  - Will this tool add NEW information? → If NO, select "answer" instead
+  - Have we tried this tool before? → If YES, STOP and choose different tool
+
+CRITICAL: If unsure whether to continue or answer, choose "answer"
 
 ## Output Format
 Respond with ONLY a JSON object. No explanation, no markdown, just JSON:
@@ -147,15 +186,24 @@ Select the best tool and respond with JSON only.`
 //   - *PromptBuilder: Configured builder.
 //   - error: Non-nil if template parsing fails.
 func NewPromptBuilder() (*PromptBuilder, error) {
+	slog.Debug("NewPromptBuilder: Creating prompt builder")
+
 	funcMap := template.FuncMap{
 		"join": strings.Join,
 	}
 
+	slog.Debug("NewPromptBuilder: Parsing system prompt template",
+		"template_length", len(systemPromptTemplate))
+
 	tmpl, err := template.New("system").Funcs(funcMap).Parse(systemPromptTemplate)
 	if err != nil {
+		slog.Error("NewPromptBuilder: Template parsing failed",
+			"error", err,
+			"error_type", fmt.Sprintf("%T", err))
 		return nil, err
 	}
 
+	slog.Debug("NewPromptBuilder: Prompt builder created successfully")
 	return &PromptBuilder{
 		tmpl: tmpl,
 	}, nil

@@ -58,12 +58,83 @@ type ollamaGenerateResponse struct {
 }
 
 type ollamaChatRequest struct {
-	Model     string                 `json:"model"`
-	Messages  []datatypes.Message    `json:"messages"`
-	Stream    bool                   `json:"stream"`
-	Options   map[string]interface{} `json:"options,omitempty"`
-	Tools     []OllamaTool           `json:"tools,omitempty"`
-	KeepAlive string                 `json:"keep_alive,omitempty"` // "-1" = infinite, "5m" = 5 minutes, "0" = unload immediately
+	Model      string                 `json:"model"`
+	Messages   []datatypes.Message    `json:"messages"`
+	Stream     bool                   `json:"stream"`
+	Options    map[string]interface{} `json:"options,omitempty"`
+	Tools      []OllamaTool           `json:"tools,omitempty"`
+	ToolChoice *ollamaToolChoice      `json:"tool_choice,omitempty"` // Controls tool selection behavior
+	KeepAlive  string                 `json:"keep_alive,omitempty"`  // "-1" = infinite, "5m" = 5 minutes, "0" = unload immediately
+}
+
+// ollamaToolChoice represents the tool_choice parameter for Ollama's API.
+//
+// Description:
+//
+//	Controls whether and which tools the model calls. Follows OpenAI-compatible format.
+//	- type "auto": Model decides whether to call tools
+//	- type "none": Model cannot call tools
+//	- type "any"/"required": Model MUST call at least one tool
+//	- type "function" with function.name: Model MUST call the specified tool
+//
+// Thread Safety: This type is immutable and safe for concurrent read access.
+type ollamaToolChoice struct {
+	Type     string                    `json:"type,omitempty"`
+	Function *ollamaToolChoiceFunction `json:"function,omitempty"`
+}
+
+// ollamaToolChoiceFunction specifies a specific function to call.
+type ollamaToolChoiceFunction struct {
+	Name string `json:"name"`
+}
+
+// convertToolChoice converts a GenerationParams ToolChoice to Ollama's API format.
+//
+// Description:
+//
+//	Maps the generic ToolChoice type to Ollama's expected format:
+//	- "auto" → type: "auto" (model decides)
+//	- "none" → type: "none" (no tools)
+//	- "any"  → type: "required" (must call some tool, OpenAI-compatible)
+//	- "tool" with Name → type: "function" with function.name set
+//
+// Inputs:
+//
+//	tc - The ToolChoice to convert. If nil, returns nil (use model default).
+//
+// Outputs:
+//
+//	*ollamaToolChoice - The converted format, or nil if tc is nil.
+//
+// Thread Safety: This function is safe for concurrent use.
+func convertToolChoice(tc *ToolChoice) *ollamaToolChoice {
+	if tc == nil {
+		return nil
+	}
+
+	switch tc.Type {
+	case "auto":
+		return &ollamaToolChoice{Type: "auto"}
+	case "none":
+		return &ollamaToolChoice{Type: "none"}
+	case "any":
+		// OpenAI uses "required" for forcing any tool
+		return &ollamaToolChoice{Type: "required"}
+	case "tool":
+		// Force specific tool using OpenAI-compatible format
+		return &ollamaToolChoice{
+			Type: "function",
+			Function: &ollamaToolChoiceFunction{
+				Name: tc.Name,
+			},
+		}
+	default:
+		// Unknown type, let model decide
+		slog.Warn("Unknown tool_choice type, defaulting to auto",
+			slog.String("type", tc.Type),
+		)
+		return &ollamaToolChoice{Type: "auto"}
+	}
 }
 
 // =============================================================================
@@ -467,6 +538,13 @@ func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
 		options["stop"] = params.Stop
 	}
 
+	// Set context window size if provided.
+	// CRITICAL: This MUST be passed on every request to prevent Ollama from
+	// resetting to default 4096 context window. CB-31d fix.
+	if params.NumCtx != nil && *params.NumCtx > 0 {
+		options["num_ctx"] = *params.NumCtx
+	}
+
 	// Use ModelOverride if provided, otherwise use client's default model
 	model := o.model
 	if params.ModelOverride != "" {
@@ -571,10 +649,20 @@ func (o *OllamaClient) ChatWithTools(ctx context.Context, messages []datatypes.M
 	span.SetAttributes(attribute.Int("llm.num_messages", len(messages)))
 	span.SetAttributes(attribute.Int("llm.num_tools", len(tools)))
 
+	// Log tool_choice if set (important for debugging tool forcing)
+	toolChoiceType := "auto"
+	toolChoiceName := ""
+	if params.ToolChoice != nil {
+		toolChoiceType = params.ToolChoice.Type
+		toolChoiceName = params.ToolChoice.Name
+	}
+
 	slog.Debug("Chat with tools via Ollama",
 		"model", o.model,
 		"num_messages", len(messages),
 		"num_tools", len(tools),
+		"tool_choice_type", toolChoiceType,
+		"tool_choice_name", toolChoiceName,
 	)
 
 	chatURL := o.baseURL + "/api/chat"
@@ -607,6 +695,13 @@ func (o *OllamaClient) ChatWithTools(ctx context.Context, messages []datatypes.M
 		options["stop"] = params.Stop
 	}
 
+	// Set context window size if provided.
+	// CRITICAL: This MUST be passed on every request to prevent Ollama from
+	// resetting to default 4096 context window. CB-31d fix.
+	if params.NumCtx != nil && *params.NumCtx > 0 {
+		options["num_ctx"] = *params.NumCtx
+	}
+
 	// Use ModelOverride if provided, otherwise use client's default model
 	model := o.model
 	if params.ModelOverride != "" {
@@ -614,12 +709,13 @@ func (o *OllamaClient) ChatWithTools(ctx context.Context, messages []datatypes.M
 	}
 
 	payload := ollamaChatRequest{
-		Model:     model,
-		Messages:  messages,
-		Stream:    false,
-		Options:   options,
-		Tools:     tools,
-		KeepAlive: params.KeepAlive, // Pass through keep_alive for multi-model support
+		Model:      model,
+		Messages:   messages,
+		Stream:     false,
+		Options:    options,
+		Tools:      tools,
+		ToolChoice: convertToolChoice(params.ToolChoice),
+		KeepAlive:  params.KeepAlive, // Pass through keep_alive for multi-model support
 	}
 	reqBody, err := json.Marshal(payload)
 	if err != nil {
@@ -1467,6 +1563,11 @@ func (o *OllamaClient) buildStreamOptions(params GenerationParams) map[string]in
 
 	if len(params.Stop) > 0 {
 		options["stop"] = params.Stop
+	}
+
+	// Set context window size if provided
+	if params.NumCtx != nil && *params.NumCtx > 0 {
+		options["num_ctx"] = *params.NumCtx
 	}
 
 	return options

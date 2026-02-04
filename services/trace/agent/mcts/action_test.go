@@ -450,3 +450,80 @@ func TestPlannedAction_Validate_ValidPathsWithinProject(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// HasSideEffects Tests (for parallel MCTS write serialization)
+// =============================================================================
+
+func TestPlannedAction_HasSideEffects(t *testing.T) {
+	tests := []struct {
+		name           string
+		actionType     ActionType
+		hasSideEffects bool
+	}{
+		{"edit has side effects", ActionTypeEdit, true},
+		{"create has side effects", ActionTypeCreate, true},
+		{"delete has side effects", ActionTypeDelete, true},
+		{"run_test is read-only", ActionTypeRunTest, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action := &PlannedAction{
+				Type:        tt.actionType,
+				Description: "Test action",
+			}
+
+			got := action.HasSideEffects()
+			if got != tt.hasSideEffects {
+				t.Errorf("HasSideEffects() = %v, want %v", got, tt.hasSideEffects)
+			}
+		})
+	}
+}
+
+func TestPlannedAction_HasSideEffects_NilAction(t *testing.T) {
+	var action *PlannedAction
+	if action.HasSideEffects() {
+		t.Error("nil action should not have side effects")
+	}
+}
+
+func TestPlannedAction_HasSideEffects_UnknownType(t *testing.T) {
+	action := &PlannedAction{
+		Type:        ActionType("unknown"),
+		Description: "Test action",
+	}
+
+	// Unknown types should be treated as having side effects for safety
+	if !action.HasSideEffects() {
+		t.Error("unknown action type should be treated as having side effects")
+	}
+}
+
+func TestPlannedAction_IsReadOnly(t *testing.T) {
+	tests := []struct {
+		name       string
+		actionType ActionType
+		isReadOnly bool
+	}{
+		{"edit is not read-only", ActionTypeEdit, false},
+		{"create is not read-only", ActionTypeCreate, false},
+		{"delete is not read-only", ActionTypeDelete, false},
+		{"run_test is read-only", ActionTypeRunTest, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action := &PlannedAction{
+				Type:        tt.actionType,
+				Description: "Test action",
+			}
+
+			got := action.IsReadOnly()
+			if got != tt.isReadOnly {
+				t.Errorf("IsReadOnly() = %v, want %v", got, tt.isReadOnly)
+			}
+		})
+	}
+}

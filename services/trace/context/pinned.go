@@ -704,10 +704,14 @@ func (p *PinnedInstructions) renderFullLocked() string {
 		b.WriteString("### Key Findings\n")
 		for _, f := range p.keyFindings {
 			if f.Source != "" {
-				b.WriteString(fmt.Sprintf("- `%s` - %s\n", f.Source, f.Summary))
+				b.WriteString(fmt.Sprintf("- `%s` - %s", f.Source, f.Summary))
 			} else {
-				b.WriteString(fmt.Sprintf("- %s\n", f.Summary))
+				b.WriteString(fmt.Sprintf("- %s", f.Summary))
 			}
+			if f.Detail != "" {
+				b.WriteString(fmt.Sprintf(": %s", f.Detail))
+			}
+			b.WriteString("\n")
 		}
 		b.WriteString("\n")
 	}
@@ -847,10 +851,14 @@ func (p *PinnedInstructions) renderWithContentLocked(findings []Finding, constra
 		b.WriteString("### Key Findings\n")
 		for _, f := range findings {
 			if f.Source != "" {
-				b.WriteString(fmt.Sprintf("- `%s` - %s\n", f.Source, f.Summary))
+				b.WriteString(fmt.Sprintf("- `%s` - %s", f.Source, f.Summary))
 			} else {
-				b.WriteString(fmt.Sprintf("- %s\n", f.Summary))
+				b.WriteString(fmt.Sprintf("- %s", f.Summary))
 			}
+			if f.Detail != "" {
+				b.WriteString(fmt.Sprintf(": %s", f.Detail))
+			}
+			b.WriteString("\n")
 		}
 		b.WriteString("\n")
 	}
@@ -998,6 +1006,189 @@ func (p *PinnedInstructions) IsEmpty() bool {
 		len(p.constraints) == 0
 }
 
+// Compress aggressively reduces token usage by summarizing findings.
+//
+// Description:
+//
+//	When the pinned block exceeds its budget, Compress() actively reduces
+//	content size by:
+//	  1. Removing finding details (keeping only summaries)
+//	  2. Grouping similar findings into aggregated bullets
+//	  3. Shortening constraint text
+//
+//	This addresses the "Pinned Budget Context Squeeze" problem where an
+//	ever-growing pinned block squeezes out the code budget:
+//
+//	Before Compress:
+//	  - Finding 1: [long summary] - [long detail]
+//	  - Finding 2: [long summary] - [long detail]
+//	  ...10 findings...
+//
+//	After Compress:
+//	  - Found 10 issues: [brief aggregated summary]
+//
+//	Unlike renderTruncatedLocked() which just removes items, Compress()
+//	preserves information through summarization.
+//
+// Inputs:
+//
+//	targetTokens - Target token count to achieve. If 0, uses maxTokenBudget/2.
+//
+// Outputs:
+//
+//	int - Tokens freed (difference between old and new token count).
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PinnedInstructions) Compress(targetTokens int) int {
+	if p == nil {
+		return 0
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Get current token count
+	currentTokens := p.tokenCounter.Count(p.renderFullLocked())
+	if targetTokens <= 0 {
+		targetTokens = p.maxTokenBudget / 2
+	}
+
+	if currentTokens <= targetTokens {
+		return 0 // Already under target
+	}
+
+	oldTokens := currentTokens
+
+	// Strategy 1: Remove finding details (keep summaries only)
+	if len(p.keyFindings) > 0 {
+		for i := range p.keyFindings {
+			p.keyFindings[i].Detail = ""
+		}
+		p.invalidateCache()
+
+		currentTokens = p.tokenCounter.Count(p.renderFullLocked())
+		if currentTokens <= targetTokens {
+			recordPinnedCompression(oldTokens - currentTokens)
+			return oldTokens - currentTokens
+		}
+	}
+
+	// Strategy 2: Aggregate findings if more than 3
+	if len(p.keyFindings) > 3 {
+		// Group findings by counting them
+		aggregated := Finding{
+			Summary:   fmt.Sprintf("Identified %d key findings (see trace for details)", len(p.keyFindings)),
+			Source:    "aggregated",
+			Timestamp: time.Now(),
+		}
+
+		// Keep at most 2 most recent findings plus aggregate
+		if len(p.keyFindings) >= 2 {
+			p.keyFindings = []Finding{
+				p.keyFindings[len(p.keyFindings)-1], // Most recent
+				p.keyFindings[len(p.keyFindings)-2], // Second most recent
+				aggregated,
+			}
+		} else {
+			p.keyFindings = []Finding{aggregated}
+		}
+		p.invalidateCache()
+
+		currentTokens = p.tokenCounter.Count(p.renderFullLocked())
+		if currentTokens <= targetTokens {
+			recordPinnedCompression(oldTokens - currentTokens)
+			return oldTokens - currentTokens
+		}
+	}
+
+	// Strategy 3: Shorten constraints to first 50 chars
+	if len(p.constraints) > 0 {
+		for i := range p.constraints {
+			if len(p.constraints[i]) > 50 {
+				p.constraints[i] = p.constraints[i][:47] + "..."
+			}
+		}
+		p.invalidateCache()
+
+		currentTokens = p.tokenCounter.Count(p.renderFullLocked())
+		if currentTokens <= targetTokens {
+			recordPinnedCompression(oldTokens - currentTokens)
+			return oldTokens - currentTokens
+		}
+	}
+
+	// Strategy 4: Aggregate constraints
+	if len(p.constraints) > 3 {
+		aggregated := fmt.Sprintf("%d constraints apply (see original task)", len(p.constraints))
+		p.constraints = []string{aggregated}
+		p.invalidateCache()
+
+		currentTokens = p.tokenCounter.Count(p.renderFullLocked())
+	}
+
+	recordPinnedCompression(oldTokens - currentTokens)
+	return oldTokens - currentTokens
+}
+
+// CompressToFit reduces the pinned block to ensure a minimum code budget.
+//
+// Description:
+//
+//	Given a total token window and the current trace size, calculates how
+//	much space is available for code. If the pinned block is consuming
+//	too much, it compresses to ensure MinCodeBudget tokens remain.
+//
+//	This is the primary method for enforcing the context budget hierarchy:
+//	  1. MinCodeBudget is guaranteed (code visibility)
+//	  2. Pinned block is compressed if needed
+//	  3. Trace is truncated last (handled by TraceRecorder)
+//
+// Inputs:
+//
+//	totalWindow - Total tokens available for the LLM context.
+//	traceTokens - Tokens currently used by the trace/history.
+//
+// Outputs:
+//
+//	int - Tokens freed from the pinned block.
+//
+// Example:
+//
+//	// Before a session turn, ensure code budget is available
+//	traceTokens := trace.TokenCount()
+//	pinnedTokens := pinned.TokenCount()
+//	codeAvailable := totalWindow - traceTokens - pinnedTokens
+//
+//	if codeAvailable < MinCodeBudget {
+//	    freed := pinned.CompressToFit(totalWindow, traceTokens)
+//	    // If still not enough, truncate trace
+//	}
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PinnedInstructions) CompressToFit(totalWindow, traceTokens int) int {
+	if p == nil {
+		return 0
+	}
+
+	currentPinnedTokens := p.TokenCount()
+	codeAvailable := totalWindow - traceTokens - currentPinnedTokens
+
+	if codeAvailable >= MinCodeBudget {
+		return 0 // Already have enough space for code
+	}
+
+	// Calculate how much pinned needs to shrink
+	deficit := MinCodeBudget - codeAvailable
+	targetPinnedTokens := currentPinnedTokens - deficit
+
+	// Ensure pinned doesn't go below minimum viable
+	if targetPinnedTokens < MinPinnedBudget {
+		targetPinnedTokens = MinPinnedBudget
+	}
+
+	return p.Compress(targetPinnedTokens)
+}
+
 // MarshalJSON implements json.Marshaler for persistence.
 func (p *PinnedInstructions) MarshalJSON() ([]byte, error) {
 	if p == nil {
@@ -1085,6 +1276,8 @@ var (
 	pinnedCacheHits     metric.Int64Counter
 	pinnedCacheMisses   metric.Int64Counter
 	pinnedTruncations   metric.Int64Counter
+	pinnedCompressions  metric.Int64Counter
+	pinnedTokensFreed   metric.Int64Counter
 
 	pinnedMetricsOnce sync.Once
 	pinnedMetricsErr  error
@@ -1166,6 +1359,24 @@ func initPinnedMetrics() error {
 			pinnedMetricsErr = err
 			return
 		}
+
+		pinnedCompressions, err = meter.Int64Counter(
+			"codebuddy_pinned_compression_total",
+			metric.WithDescription("Number of times pinned block was compressed"),
+		)
+		if err != nil {
+			pinnedMetricsErr = err
+			return
+		}
+
+		pinnedTokensFreed, err = meter.Int64Counter(
+			"codebuddy_pinned_tokens_freed_total",
+			metric.WithDescription("Total tokens freed via compression"),
+		)
+		if err != nil {
+			pinnedMetricsErr = err
+			return
+		}
 	})
 	return pinnedMetricsErr
 }
@@ -1230,4 +1441,14 @@ func recordPinnedTruncation() {
 		return
 	}
 	pinnedTruncations.Add(context.Background(), 1)
+}
+
+func recordPinnedCompression(tokensFreed int) {
+	if err := initPinnedMetrics(); err != nil {
+		return
+	}
+	pinnedCompressions.Add(context.Background(), 1)
+	if tokensFreed > 0 {
+		pinnedTokensFreed.Add(context.Background(), int64(tokensFreed))
+	}
 }

@@ -75,6 +75,78 @@ func NewGrounder(config *Config) Grounder {
 		checkers = append(checkers, NewPhantomPackageChecker(config.PhantomPackageCheckerConfig))
 	}
 
+	// Layer 10: Semantic Drift Checker (detects query-response mismatch)
+	// CRITICAL: This checker catches responses that don't address the original query.
+	// Previously not registered despite having config - fixed in cb_30a.
+	if config.SemanticDriftCheckerConfig != nil && config.SemanticDriftCheckerConfig.Enabled {
+		checkers = append(checkers, NewSemanticDriftChecker(config.SemanticDriftCheckerConfig))
+	}
+
+	// Layer 11: Structural Claim Checker (validates structural claims about codebase)
+	if config.StructuralClaimCheckerConfig != nil && config.StructuralClaimCheckerConfig.Enabled {
+		checkers = append(checkers, NewStructuralClaimChecker(config.StructuralClaimCheckerConfig))
+	}
+
+	// Layer 12: Phantom File Checker (detects references to non-existent files)
+	if config.PhantomCheckerConfig != nil && config.PhantomCheckerConfig.Enabled {
+		checkers = append(checkers, NewPhantomFileChecker(config.PhantomCheckerConfig))
+	}
+
+	// Layer 13: Phantom Symbol Checker (detects references to non-existent symbols)
+	if config.PhantomSymbolCheckerConfig != nil && config.PhantomSymbolCheckerConfig.Enabled {
+		checkers = append(checkers, NewPhantomSymbolChecker(config.PhantomSymbolCheckerConfig))
+	}
+
+	// Layer 14: Attribute Checker (validates attribute claims about symbols)
+	if config.AttributeCheckerConfig != nil && config.AttributeCheckerConfig.Enabled {
+		checkers = append(checkers, NewAttributeChecker(config.AttributeCheckerConfig))
+	}
+
+	// Layer 15: Line Number Checker (validates line number citations)
+	if config.LineNumberCheckerConfig != nil && config.LineNumberCheckerConfig.Enabled {
+		checkers = append(checkers, NewLineNumberChecker(config.LineNumberCheckerConfig))
+	}
+
+	// Layer 16: Relationship Checker (validates import/call relationship claims)
+	if config.RelationshipCheckerConfig != nil && config.RelationshipCheckerConfig.Enabled {
+		checkers = append(checkers, NewRelationshipChecker(config.RelationshipCheckerConfig))
+	}
+
+	// Layer 17: Behavioral Checker (validates behavioral claims about code)
+	if config.BehavioralCheckerConfig != nil && config.BehavioralCheckerConfig.Enabled {
+		checkers = append(checkers, NewBehavioralChecker(config.BehavioralCheckerConfig))
+	}
+
+	// Layer 18: Quantitative Checker (validates numeric claims)
+	if config.QuantitativeCheckerConfig != nil && config.QuantitativeCheckerConfig.Enabled {
+		checkers = append(checkers, NewQuantitativeChecker(config.QuantitativeCheckerConfig))
+	}
+
+	// Layer 19: Code Snippet Checker (validates code snippets match actual code)
+	if config.CodeSnippetCheckerConfig != nil && config.CodeSnippetCheckerConfig.Enabled {
+		checkers = append(checkers, NewCodeSnippetChecker(config.CodeSnippetCheckerConfig))
+	}
+
+	// Layer 20: API Library Checker (validates API/library usage claims)
+	if config.APILibraryCheckerConfig != nil && config.APILibraryCheckerConfig.Enabled {
+		checkers = append(checkers, NewAPILibraryChecker(config.APILibraryCheckerConfig))
+	}
+
+	// Layer 21: Temporal Checker (flags unverifiable temporal claims)
+	if config.TemporalCheckerConfig != nil && config.TemporalCheckerConfig.Enabled {
+		checkers = append(checkers, NewTemporalChecker(config.TemporalCheckerConfig))
+	}
+
+	// Layer 22: Cross Context Checker (detects context confusion)
+	if config.CrossContextCheckerConfig != nil && config.CrossContextCheckerConfig.Enabled {
+		checkers = append(checkers, NewCrossContextChecker(config.CrossContextCheckerConfig))
+	}
+
+	// Layer 23: Confidence Checker (detects overconfident claims without evidence)
+	if config.ConfidenceCheckerConfig != nil && config.ConfidenceCheckerConfig.Enabled {
+		checkers = append(checkers, NewConfidenceChecker(config.ConfidenceCheckerConfig))
+	}
+
 	return NewDefaultGrounder(*config, checkers...)
 }
 

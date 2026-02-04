@@ -24,6 +24,7 @@
 package file
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -440,6 +441,54 @@ type GrepMatch struct {
 // Path Safety
 // ============================================================================
 
+// LSPReleaser provides methods to coordinate file access with LSP servers.
+//
+// Description:
+//
+//	On Windows, LSP servers (like gopls) hold file handles open, which
+//	prevents atomic file operations (os.Rename). This interface allows
+//	the WriteTool to notify LSP servers to release file handles before
+//	writing, and reopen them afterward.
+//
+// Thread Safety:
+//
+//	Implementations must be safe for concurrent use.
+type LSPReleaser interface {
+	// ReleaseFile tells LSP servers to close the file.
+	// Called before atomic writes on Windows.
+	ReleaseFile(ctx context.Context, filePath string) error
+
+	// ReopenFile tells LSP servers to reopen the file with new content.
+	// Called after atomic writes on Windows.
+	ReopenFile(ctx context.Context, filePath string, content string, languageID string) error
+}
+
+// GraphRefresher provides synchronous graph updates after file writes.
+//
+// Description:
+//
+//	When the agent writes a file, the code graph becomes stale. Instead of
+//	waiting for fsnotify to detect the change and trigger an asynchronous
+//	refresh (which can cause event storms and stale queries), this interface
+//	allows the WriteTool to refresh the graph synchronously BEFORE returning.
+//
+//	This prevents the "event storm loop" where:
+//	1. Agent writes file
+//	2. fsnotify fires, graph refresher starts parsing
+//	3. Agent writes again (before refresh completes)
+//	4. Agent queries graph - gets STALE version
+//	5. Agent thinks fix didn't work, writes again → infinite loop
+//
+// Thread Safety:
+//
+//	Implementations must be safe for concurrent use.
+type GraphRefresher interface {
+	// RefreshFiles synchronously refreshes the graph for the given file paths.
+	// Returns after the graph is updated. If an error occurs, the graph may
+	// be partially updated but should not corrupt existing data.
+	RefreshFiles(ctx context.Context, paths []string) error
+}
+
 // Config holds configuration for file tools.
 type Config struct {
 	// AllowedPaths is a list of paths that file operations are allowed in.
@@ -456,6 +505,16 @@ type Config struct {
 	// When a file is read, its hash is stored. During edit, we verify
 	// the hash matches to detect external modifications.
 	ContentHashes map[string]string
+
+	// LSPReleaser coordinates file access with LSP servers.
+	// Optional. If nil, no LSP coordination is performed.
+	// Required for Windows to avoid "Access is denied" errors during atomic writes.
+	LSPReleaser LSPReleaser
+
+	// GraphRefresher provides synchronous graph updates after file writes.
+	// Optional. If nil, no synchronous refresh is performed.
+	// Recommended to prevent event storms and stale graph queries.
+	GraphRefresher GraphRefresher
 }
 
 // NewConfig creates a new Config with the given working directory.

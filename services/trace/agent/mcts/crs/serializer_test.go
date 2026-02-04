@@ -65,6 +65,23 @@ func (m *mockConstraintIndexView) Size() int {
 	return len(m.data)
 }
 
+// CRS-04: Clause methods
+func (m *mockConstraintIndexView) GetClause(clauseID string) (*Clause, bool) {
+	return nil, false
+}
+
+func (m *mockConstraintIndexView) AllClauses() map[string]*Clause {
+	return make(map[string]*Clause)
+}
+
+func (m *mockConstraintIndexView) ClauseCount() int {
+	return 0
+}
+
+func (m *mockConstraintIndexView) CheckAssignment(assignment map[string]bool) ClauseCheckResult {
+	return ClauseCheckResult{}
+}
+
 // mockSimilarityIndexView implements SimilarityIndexView for testing.
 type mockSimilarityIndexView struct {
 	pairCount int

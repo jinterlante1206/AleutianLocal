@@ -218,14 +218,9 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 				if f.enableTools && cached.Graph != nil && cached.Index != nil {
 					registry := tools.NewRegistry()
 
-					// Register all CB-20 exploration tools (graph-based)
-					registry.Register(tools.NewFindEntryPointsTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewTraceDataFlowTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewTraceErrorFlowTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewBuildMinimalContextTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewFindSimilarCodeTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewSummarizeFileTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewFindConfigUsageTool(cached.Graph, cached.Index))
+					// Register all CB-20/CB-31b exploration tools (graph-based)
+					// Use the centralized registration function
+					tools.RegisterExploreTools(registry, cached.Graph, cached.Index)
 
 					// Register CB-30 file operation tools (Read, Write, Edit, Glob, Grep, Diff, Tree, JSON)
 					projectRoot := session.GetProjectRoot()

@@ -111,6 +111,11 @@ type ModelWarmupConfig struct {
 	// MaxWaitMs is the timeout for warmup in milliseconds.
 	// 0 means use default (60 seconds).
 	MaxWaitMs int
+
+	// NumCtx is the context window size for this model.
+	// MUST be set to prevent Ollama from using default 4096.
+	// Recommended: 16384 for router, 65536 for main agent.
+	NumCtx int
 }
 
 // NewMultiModelManager creates a new MultiModelManager.
@@ -192,7 +197,7 @@ func (m *MultiModelManager) WarmModels(ctx context.Context, configs []ModelWarmu
 
 	// Load models sequentially to avoid VRAM contention
 	for _, cfg := range sorted {
-		if err := m.WarmModel(ctx, cfg.Model, cfg.KeepAlive); err != nil {
+		if err := m.WarmModel(ctx, cfg.Model, cfg.KeepAlive, cfg.NumCtx); err != nil {
 			m.logger.Error("Failed to warm model",
 				slog.String("model", cfg.Model),
 				slog.String("error", err.Error()),
@@ -226,13 +231,20 @@ func (m *MultiModelManager) WarmModels(ctx context.Context, configs []ModelWarmu
 // # Outputs
 //
 //   - error: Non-nil if the model fails to load.
-func (m *MultiModelManager) WarmModel(ctx context.Context, model string, keepAlive string) error {
+func (m *MultiModelManager) WarmModel(ctx context.Context, model string, keepAlive string, numCtx int) error {
 	startTime := time.Now()
 
 	m.logger.Info("Warming model",
 		slog.String("model", model),
 		slog.String("keep_alive", keepAlive),
+		slog.Int("num_ctx", numCtx),
 	)
+
+	// Build options with num_ctx to ensure model loads with correct context window
+	options := make(map[string]interface{})
+	if numCtx > 0 {
+		options["num_ctx"] = numCtx
+	}
 
 	// Create minimal warmup request
 	req := ollamaChatRequest{
@@ -242,6 +254,7 @@ func (m *MultiModelManager) WarmModel(ctx context.Context, model string, keepAli
 		},
 		Stream:    false,
 		KeepAlive: keepAlive,
+		Options:   options,
 	}
 
 	reqBody, err := json.Marshal(req)
@@ -317,6 +330,19 @@ func (m *MultiModelManager) WarmModel(ctx context.Context, model string, keepAli
 func (m *MultiModelManager) Chat(ctx context.Context, model string,
 	messages []datatypes.Message, params GenerationParams) (string, error) {
 
+	// CB-31d: Log every Chat call to trace router usage
+	numCtx := 0
+	if params.NumCtx != nil {
+		numCtx = *params.NumCtx
+	}
+	slog.Info("CB-31d MultiModelManager.Chat CALLED",
+		slog.String("model", model),
+		slog.Int("num_messages", len(messages)),
+		slog.Int("num_ctx", numCtx),
+		slog.String("keep_alive", params.KeepAlive),
+		slog.String("base_url", m.baseURL),
+	)
+
 	ctx, span := tracer.Start(ctx, "MultiModelManager.Chat")
 	defer span.End()
 	span.SetAttributes(attribute.String("llm.model", model))
@@ -385,6 +411,11 @@ func (m *MultiModelManager) Chat(ctx context.Context, model string,
 		managed.LastUsed = time.Now()
 	}
 	m.mu.Unlock()
+
+	slog.Info("CB-31d MultiModelManager.Chat SUCCEEDED",
+		slog.String("model", model),
+		slog.Int("response_len", len(chatResp.Message.Content)),
+	)
 
 	return chatResp.Message.Content, nil
 }
@@ -605,6 +636,13 @@ func (m *MultiModelManager) buildOptions(params GenerationParams) map[string]int
 
 	if len(params.Stop) > 0 {
 		options["stop"] = params.Stop
+	}
+
+	// Set context window size if provided.
+	// CRITICAL: This MUST be passed on every request to prevent Ollama from
+	// resetting to default 4096 context window. CB-31d fix.
+	if params.NumCtx != nil && *params.NumCtx > 0 {
+		options["num_ctx"] = *params.NumCtx
 	}
 
 	return options

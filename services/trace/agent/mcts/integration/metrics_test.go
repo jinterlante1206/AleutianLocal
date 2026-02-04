@@ -147,19 +147,19 @@ func TestRecordStepMetrics(t *testing.T) {
 	t.Run("step with constraints", func(t *testing.T) {
 		step := &crs.TraceStep{
 			ConstraintsAdded: []crs.ConstraintUpdate{
-				{ID: "c1", Type: "mutual_exclusion", Nodes: []string{"a", "b"}},
-				{ID: "c2", Type: "implication", Nodes: []string{"c", "d"}},
-				{ID: "c3", Type: "ordering", Nodes: []string{"e", "f"}},
-				{ID: "c4", Type: "resource", Nodes: []string{"g", "h"}},
+				{ID: "c1", Type: crs.ConstraintTypeMutualExclusion, Nodes: []string{"a", "b"}},
+				{ID: "c2", Type: crs.ConstraintTypeImplication, Nodes: []string{"c", "d"}},
+				{ID: "c3", Type: crs.ConstraintTypeOrdering, Nodes: []string{"e", "f"}},
+				{ID: "c4", Type: crs.ConstraintTypeResource, Nodes: []string{"g", "h"}},
 			},
 		}
 		RecordStepMetrics("constraint", step)
 	})
 
-	t.Run("step with empty constraint type defaults to unknown", func(t *testing.T) {
+	t.Run("step with unknown constraint type defaults to unknown", func(t *testing.T) {
 		step := &crs.TraceStep{
 			ConstraintsAdded: []crs.ConstraintUpdate{
-				{ID: "c1", Type: "", Nodes: []string{"a", "b"}},
+				{ID: "c1", Type: crs.ConstraintTypeUnknown, Nodes: []string{"a", "b"}},
 			},
 		}
 		RecordStepMetrics("constraint", step)
@@ -185,10 +185,10 @@ func TestRecordStepMetrics(t *testing.T) {
 	t.Run("step with all data", func(t *testing.T) {
 		step := &crs.TraceStep{
 			ProofUpdates: []crs.ProofUpdate{
-				{NodeID: "node1", Status: "proven"},
+				{NodeID: "node1", Type: crs.ProofUpdateTypeProven, Source: crs.SignalSourceHard, Status: "proven"},
 			},
 			ConstraintsAdded: []crs.ConstraintUpdate{
-				{ID: "c1", Type: "mutual_exclusion", Nodes: []string{"a", "b"}},
+				{ID: "c1", Type: crs.ConstraintTypeMutualExclusion, Nodes: []string{"a", "b"}},
 			},
 			DependenciesFound: []crs.DependencyEdge{
 				{From: "a", To: "b"},

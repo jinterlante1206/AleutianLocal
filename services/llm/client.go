@@ -39,6 +39,52 @@ import (
 )
 
 // =============================================================================
+// Tool Choice Types
+// =============================================================================
+
+// ToolChoice specifies how the model should select tools.
+//
+// Description:
+//
+//	The tool_choice parameter controls whether and which tools the model calls.
+//	This enables forcing tool usage at the API level rather than relying on prompts.
+//
+// Fields:
+//
+//   - Type: Controls tool selection behavior:
+//     "auto": Model decides whether to call tools (default)
+//     "any": Model MUST call at least one tool
+//     "tool": Model MUST call the specific named tool
+//     "none": Model cannot call tools (text response only)
+//   - Name: Required when Type is "tool". Specifies which tool to force.
+//
+// Thread Safety: This type is immutable and safe for concurrent read access.
+type ToolChoice struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
+}
+
+// ToolChoiceAuto allows the model to decide whether to call tools.
+func ToolChoiceAuto() *ToolChoice {
+	return &ToolChoice{Type: "auto"}
+}
+
+// ToolChoiceAny forces the model to call at least one tool.
+func ToolChoiceAny() *ToolChoice {
+	return &ToolChoice{Type: "any"}
+}
+
+// ToolChoiceRequired forces the model to call a specific tool by name.
+func ToolChoiceRequired(toolName string) *ToolChoice {
+	return &ToolChoice{Type: "tool", Name: toolName}
+}
+
+// ToolChoiceNone prevents the model from calling any tools.
+func ToolChoiceNone() *ToolChoice {
+	return &ToolChoice{Type: "none"}
+}
+
+// =============================================================================
 // Generation Parameters
 // =============================================================================
 
@@ -107,6 +153,17 @@ type GenerationParams struct {
 	// Values: "-1" = infinite, "5m" = 5 minutes (default), "0" = unload immediately.
 	// Used to prevent model thrashing when alternating between models.
 	KeepAlive string `json:"keep_alive,omitempty"`
+
+	// NumCtx sets the context window size (number of tokens).
+	// For models like Granite4 with Mamba-2 architecture, this can be set high (e.g., 131072).
+	// If nil or 0, uses Ollama's default (typically 2048-4096).
+	NumCtx *int `json:"num_ctx,omitempty"`
+
+	// ToolChoice controls tool selection behavior when tools are provided.
+	// If nil, defaults to "auto" (model decides).
+	// Used to force tool usage at the API level for analytical queries.
+	// Fixed in cb_30a to pass through to Ollama adapter.
+	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
 }
 
 // =============================================================================

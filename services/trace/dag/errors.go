@@ -55,6 +55,10 @@ var (
 
 	// ErrInvalidInput is returned when input validation fails.
 	ErrInvalidInput = errors.New("invalid input")
+
+	// ErrRehydrationFailed is returned when a node cannot restore its ephemeral state.
+	// This signals that the node should be re-executed rather than assumed complete.
+	ErrRehydrationFailed = errors.New("node rehydration failed: ephemeral state cannot be restored")
 )
 
 // NodeError wraps an error with the node that caused it.

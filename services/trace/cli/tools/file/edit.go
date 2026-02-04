@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,6 +220,19 @@ func (t *EditTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 			Error:    fmt.Sprintf("failed to write file: %v", err),
 			Duration: time.Since(start),
 		}, nil
+	}
+
+	// Synchronous graph refresh BEFORE returning to prevent event storm.
+	// This ensures the graph is updated immediately, so subsequent queries
+	// see fresh data instead of triggering a write->notify->parse->write loop.
+	if t.config.GraphRefresher != nil {
+		if err := t.config.GraphRefresher.RefreshFiles(ctx, []string{p.FilePath}); err != nil {
+			// Log but don't fail the edit - graph will eventually catch up via fsnotify
+			slog.Warn("failed to refresh graph after edit",
+				slog.String("file", p.FilePath),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	result := &EditResult{

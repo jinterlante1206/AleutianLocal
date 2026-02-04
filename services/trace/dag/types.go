@@ -64,6 +64,66 @@ type Node interface {
 	Timeout() time.Duration
 }
 
+// RehydratableNode is implemented by nodes that manage ephemeral state
+// which cannot survive checkpoint/restart (e.g., running processes, open connections).
+//
+// Description:
+//
+//	When a DAG is resumed from a checkpoint, nodes marked "complete" may have
+//	ephemeral resources that no longer exist (e.g., LSP processes that died,
+//	network connections that closed). RehydratableNode allows these nodes to
+//	restore their ephemeral state before downstream nodes attempt to use it.
+//
+// The Zombie Problem:
+//
+//	Without rehydration, this sequence causes a panic:
+//	  1. Agent runs Step 1 (Parse), Step 2 (Start LSP)
+//	  2. DAG saves Checkpoint - LSP_SPAWN marked "Complete"
+//	  3. System crashes
+//	  4. System loads Checkpoint
+//	  5. Step 3 (TYPE_CHECK) calls LSP
+//	  6. PANIC: LSP.Manager is nil (process didn't survive restart)
+//
+// Thread Safety:
+//
+//	OnResume must be safe for concurrent use. The executor calls OnResume
+//	on all completed RehydratableNodes before resuming execution.
+type RehydratableNode interface {
+	Node
+
+	// OnResume restores ephemeral state after checkpoint load.
+	//
+	// Description:
+	//
+	//   Called after loading a checkpoint, before resuming DAG execution.
+	//   Implementations should check if their ephemeral resources still exist
+	//   and recreate them if necessary.
+	//
+	// Inputs:
+	//
+	//   ctx - Context for cancellation. Must not be nil.
+	//   output - The node's output from the checkpoint. May be nil.
+	//
+	// Outputs:
+	//
+	//   error - Non-nil if rehydration fails and the node should be re-executed.
+	//
+	// Example:
+	//
+	//   func (n *LSPNode) OnResume(ctx context.Context, output any) error {
+	//       lspOutput, ok := output.(*LSPSpawnOutput)
+	//       if !ok || lspOutput.Manager == nil {
+	//           return ErrRehydrationFailed // Will cause re-execution
+	//       }
+	//       // Check if process is still alive
+	//       if !lspOutput.Manager.IsHealthy() {
+	//           return n.manager.RespawnAll(ctx)
+	//       }
+	//       return nil
+	//   }
+	OnResume(ctx context.Context, output any) error
+}
+
 // NodeStatus represents the execution status of a node.
 type NodeStatus string
 
@@ -343,4 +403,62 @@ type Result struct {
 
 	// NodeDurations tracks execution time per node.
 	NodeDurations map[string]time.Duration `json:"node_durations,omitempty"`
+}
+
+// ExecutorConfig configures the DAG executor behavior.
+type ExecutorConfig struct {
+	// VerificationMode enables lightweight execution for MCTS scoring.
+	//
+	// When true, the executor:
+	//   - Skips setup/initialization nodes (nodes with "setup" or "init" in name)
+	//   - Disables detailed per-node tracing spans
+	//   - Only runs verification nodes (lint, test, security)
+	//   - Returns minimal scoring result instead of full trace
+	//
+	// This addresses the DAG vs MCTS performance tension where MCTS rollouts
+	// need fast leaf verification (<100ms) without full pipeline overhead.
+	//
+	// Default: false
+	VerificationMode bool
+
+	// SkipNodes lists node names to skip in verification mode.
+	// These are typically heavy setup nodes that aren't needed for scoring.
+	// Default: []string{"PARSE_FILES", "LOAD_CACHE", "BUILD_GRAPH"}
+	SkipNodes []string
+
+	// VerificationNodes lists the only nodes to run in verification mode.
+	// If empty, runs all nodes except those in SkipNodes.
+	// Default: []string{"LINT_CHECK", "TYPE_CHECK", "SECURITY_SCAN"}
+	VerificationNodes []string
+}
+
+// DefaultExecutorConfig returns sensible defaults for normal execution.
+func DefaultExecutorConfig() ExecutorConfig {
+	return ExecutorConfig{
+		VerificationMode:  false,
+		SkipNodes:         []string{},
+		VerificationNodes: []string{},
+	}
+}
+
+// VerificationExecutorConfig returns config optimized for MCTS verification.
+//
+// # Description
+//
+// Use this configuration when calling DAG from MCTS rollout scoring.
+// It skips heavy setup nodes and only runs lightweight verification,
+// targeting <100ms per leaf verification.
+//
+// # Usage
+//
+//	config := dag.VerificationExecutorConfig()
+//	executor, _ := dag.NewExecutorWithConfig(dag, logger, config)
+//	result, _ := executor.Run(ctx, nil)
+//	score := extractScore(result)
+func VerificationExecutorConfig() ExecutorConfig {
+	return ExecutorConfig{
+		VerificationMode:  true,
+		SkipNodes:         []string{"PARSE_FILES", "LOAD_CACHE", "BUILD_GRAPH", "SPAWN_LSP"},
+		VerificationNodes: []string{"LINT_CHECK", "TYPE_CHECK", "SECURITY_SCAN", "TEST_RUNNER"},
+	}
 }

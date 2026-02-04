@@ -34,6 +34,7 @@ type snapshot struct {
 	dependencyData *dependencyGraph
 	historyData    []HistoryEntry
 	streamingData  *streamingStats
+	clauseData     map[string]*Clause // CRS-04: learned clauses
 }
 
 // newSnapshot creates a new immutable snapshot from current state.
@@ -52,6 +53,7 @@ type snapshot struct {
 //   - deps: Dependency graph to copy.
 //   - history: History entries to copy.
 //   - streaming: Streaming stats to copy.
+//   - clauses: Learned clause data to copy. (CRS-04)
 //
 // Outputs:
 //   - *snapshot: The new immutable snapshot.
@@ -65,6 +67,7 @@ func newSnapshot(
 	deps *dependencyGraph,
 	history []HistoryEntry,
 	streaming *streamingStats,
+	clauses map[string]*Clause,
 ) *snapshot {
 	s := &snapshot{
 		generation: generation,
@@ -122,6 +125,23 @@ func newSnapshot(
 		s.streamingData = newStreamingStats()
 	}
 
+	// Deep copy clause data (CRS-04)
+	if clauses != nil {
+		s.clauseData = make(map[string]*Clause, len(clauses))
+		for k, v := range clauses {
+			// Deep copy the clause struct
+			clauseCopy := *v
+			// Deep copy literals slice
+			if v.Literals != nil {
+				clauseCopy.Literals = make([]Literal, len(v.Literals))
+				copy(clauseCopy.Literals, v.Literals)
+			}
+			s.clauseData[k] = &clauseCopy
+		}
+	} else {
+		s.clauseData = make(map[string]*Clause)
+	}
+
 	return s
 }
 
@@ -142,7 +162,7 @@ func (s *snapshot) ProofIndex() ProofIndexView {
 
 // ConstraintIndex returns the constraint index view.
 func (s *snapshot) ConstraintIndex() ConstraintIndexView {
-	return &constraintIndexView{data: s.constraintData}
+	return &constraintIndexView{data: s.constraintData, clauses: s.clauseData}
 }
 
 // SimilarityIndex returns the similarity index view.
@@ -192,7 +212,8 @@ func (v *proofIndexView) Size() int {
 // -----------------------------------------------------------------------------
 
 type constraintIndexView struct {
-	data map[string]Constraint
+	data    map[string]Constraint
+	clauses map[string]*Clause // CRS-04: learned clauses
 }
 
 func (v *constraintIndexView) Get(constraintID string) (Constraint, bool) {
@@ -229,6 +250,59 @@ func (v *constraintIndexView) All() map[string]Constraint {
 
 func (v *constraintIndexView) Size() int {
 	return len(v.data)
+}
+
+// --- Clause Methods (CRS-04) ---
+
+// GetClause returns a learned clause by ID.
+func (v *constraintIndexView) GetClause(clauseID string) (*Clause, bool) {
+	clause, ok := v.clauses[clauseID]
+	if !ok {
+		return nil, false
+	}
+	// Return a copy to maintain immutability
+	clauseCopy := *clause
+	if clause.Literals != nil {
+		clauseCopy.Literals = make([]Literal, len(clause.Literals))
+		copy(clauseCopy.Literals, clause.Literals)
+	}
+	return &clauseCopy, true
+}
+
+// AllClauses returns all learned clauses.
+func (v *constraintIndexView) AllClauses() map[string]*Clause {
+	// Return a copy to maintain immutability
+	result := make(map[string]*Clause, len(v.clauses))
+	for k, clause := range v.clauses {
+		clauseCopy := *clause
+		if clause.Literals != nil {
+			clauseCopy.Literals = make([]Literal, len(clause.Literals))
+			copy(clauseCopy.Literals, clause.Literals)
+		}
+		result[k] = &clauseCopy
+	}
+	return result
+}
+
+// ClauseCount returns the number of learned clauses.
+func (v *constraintIndexView) ClauseCount() int {
+	return len(v.clauses)
+}
+
+// CheckAssignment checks if an assignment violates any learned clauses.
+func (v *constraintIndexView) CheckAssignment(assignment map[string]bool) ClauseCheckResult {
+	for _, clause := range v.clauses {
+		if clause.IsViolated(assignment) {
+			return ClauseCheckResult{
+				Conflict:       true,
+				ViolatedClause: clause,
+				Reason:         "assignment violates learned clause: " + clause.String(),
+			}
+		}
+	}
+	return ClauseCheckResult{
+		Conflict: false,
+	}
 }
 
 // -----------------------------------------------------------------------------

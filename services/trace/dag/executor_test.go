@@ -703,3 +703,217 @@ func TestBaseNode_Execute_ReturnsError(t *testing.T) {
 		t.Errorf("expected ErrInvalidInput, got: %v", err)
 	}
 }
+
+// --- Rehydration Tests ---
+
+// RehydratableTestNode is a test node that implements RehydratableNode.
+type RehydratableTestNode struct {
+	TestNode
+	rehydrateCalled bool
+	rehydrateError  error
+	rehydrateMu     sync.Mutex
+}
+
+func NewRehydratableTestNode(name string, deps []string) *RehydratableTestNode {
+	return &RehydratableTestNode{
+		TestNode: *NewTestNode(name, deps),
+	}
+}
+
+func (n *RehydratableTestNode) OnResume(ctx context.Context, output any) error {
+	n.rehydrateMu.Lock()
+	defer n.rehydrateMu.Unlock()
+	n.rehydrateCalled = true
+	return n.rehydrateError
+}
+
+func (n *RehydratableTestNode) WasRehydrated() bool {
+	n.rehydrateMu.Lock()
+	defer n.rehydrateMu.Unlock()
+	return n.rehydrateCalled
+}
+
+func (n *RehydratableTestNode) WithRehydrateError(err error) *RehydratableTestNode {
+	n.rehydrateError = err
+	return n
+}
+
+func TestExecutor_RunFromState_RehydratesCompletedNodes(t *testing.T) {
+	// Create DAG: A (rehydratable) → B
+	nodeA := NewRehydratableTestNode("A", nil)
+	nodeB := NewTestNode("B", []string{"A"})
+
+	dag, err := NewBuilder("test").
+		AddNode(nodeA).
+		AddNode(nodeB).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	// Create state with A already completed
+	state := NewState("test-session")
+	state.SetCompleted("A", "A_output")
+
+	executor, _ := NewExecutor(dag, nil)
+	result, err := executor.RunFromState(context.Background(), state)
+
+	if err != nil {
+		t.Fatalf("RunFromState() error = %v", err)
+	}
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+
+	// Verify A's OnResume was called
+	if !nodeA.WasRehydrated() {
+		t.Error("node A OnResume was not called")
+	}
+
+	// Verify B was executed (not A since it was already complete)
+	if !nodeB.WasExecuted() {
+		t.Error("node B was not executed")
+	}
+}
+
+func TestExecutor_RunFromState_RehydrationFailureReexecutesNode(t *testing.T) {
+	// Create DAG: A (rehydratable) → B
+	nodeA := NewRehydratableTestNode("A", nil).WithRehydrateError(ErrRehydrationFailed)
+	nodeB := NewTestNode("B", []string{"A"})
+
+	dag, err := NewBuilder("test").
+		AddNode(nodeA).
+		AddNode(nodeB).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	// Create state with A already completed
+	state := NewState("test-session")
+	state.SetCompleted("A", "A_output")
+
+	executor, _ := NewExecutor(dag, nil)
+	result, err := executor.RunFromState(context.Background(), state)
+
+	if err != nil {
+		t.Fatalf("RunFromState() error = %v", err)
+	}
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+
+	// Verify A's OnResume was called
+	if !nodeA.WasRehydrated() {
+		t.Error("node A OnResume was not called")
+	}
+
+	// Verify A was re-executed because rehydration failed
+	if !nodeA.WasExecuted() {
+		t.Error("node A should have been re-executed after rehydration failure")
+	}
+
+	// Verify B was also executed
+	if !nodeB.WasExecuted() {
+		t.Error("node B was not executed")
+	}
+}
+
+func TestExecutor_RunFromState_NonRehydratableNodesSkipped(t *testing.T) {
+	// Create DAG with only regular nodes (no rehydration needed)
+	nodeA := NewTestNode("A", nil)
+	nodeB := NewTestNode("B", []string{"A"})
+
+	dag, err := NewBuilder("test").
+		AddNode(nodeA).
+		AddNode(nodeB).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	// Create state with A already completed
+	state := NewState("test-session")
+	state.SetCompleted("A", "A_output")
+
+	executor, _ := NewExecutor(dag, nil)
+	result, err := executor.RunFromState(context.Background(), state)
+
+	if err != nil {
+		t.Fatalf("RunFromState() error = %v", err)
+	}
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+
+	// A should not be re-executed (it doesn't implement RehydratableNode)
+	if nodeA.WasExecuted() {
+		t.Error("node A should NOT have been executed (already complete, not rehydratable)")
+	}
+
+	// B should be executed
+	if !nodeB.WasExecuted() {
+		t.Error("node B was not executed")
+	}
+}
+
+func TestExecutor_RunFromState_MixedRehydratableNodes(t *testing.T) {
+	// Create DAG: A (rehydratable) → B (regular) → C (rehydratable)
+	// With A and B already completed
+	nodeA := NewRehydratableTestNode("A", nil)
+	nodeB := NewTestNode("B", []string{"A"})
+	nodeC := NewRehydratableTestNode("C", []string{"B"})
+
+	dag, err := NewBuilder("test").
+		AddNode(nodeA).
+		AddNode(nodeB).
+		AddNode(nodeC).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	// Create state with A and B already completed
+	state := NewState("test-session")
+	state.SetCompleted("A", "A_output")
+	state.SetCompleted("B", "B_output")
+
+	executor, _ := NewExecutor(dag, nil)
+	result, err := executor.RunFromState(context.Background(), state)
+
+	if err != nil {
+		t.Fatalf("RunFromState() error = %v", err)
+	}
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+
+	// A should be rehydrated (completed and rehydratable)
+	if !nodeA.WasRehydrated() {
+		t.Error("node A OnResume was not called")
+	}
+
+	// A should not be re-executed (rehydration succeeded)
+	if nodeA.WasExecuted() {
+		t.Error("node A should not have been re-executed (rehydration succeeded)")
+	}
+
+	// B should not be touched (regular node already complete)
+	if nodeB.WasExecuted() {
+		t.Error("node B should not have been re-executed")
+	}
+
+	// C should NOT be rehydrated (not completed yet)
+	if nodeC.WasRehydrated() {
+		t.Error("node C should not have been rehydrated (not completed)")
+	}
+
+	// C should be executed normally
+	if !nodeC.WasExecuted() {
+		t.Error("node C was not executed")
+	}
+}

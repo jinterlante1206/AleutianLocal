@@ -280,6 +280,12 @@ type RouterConfig struct {
 	// Should be small since we only need JSON output.
 	// Recommended: 256.
 	MaxTokens int `json:"max_tokens"`
+
+	// NumCtx sets the context window size for the router model.
+	// Router only needs to see current query, available tools, and recent history.
+	// Recommended: 16384 (16K tokens) to minimize VRAM usage and allow main agent larger context.
+	// Note: On systems with limited VRAM (32GB), keeping router context low allows main agent 64K+ context.
+	NumCtx int `json:"num_ctx"`
 }
 
 // DefaultRouterConfig returns sensible defaults for the router.
@@ -296,6 +302,7 @@ func DefaultRouterConfig() RouterConfig {
 		ConfidenceThreshold: 0.7,
 		KeepAlive:           "24h",
 		MaxTokens:           256,
+		NumCtx:              16384, // 16K context window (router doesn't need huge context)
 	}
 }
 

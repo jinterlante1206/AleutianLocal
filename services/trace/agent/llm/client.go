@@ -161,6 +161,32 @@ type ToolCallResult struct {
 	IsError bool `json:"is_error,omitempty"`
 }
 
+// EmptyResponseError indicates the LLM returned an empty response.
+//
+// This typically indicates a problem with the model, context, or request.
+// Empty responses should not silently pass through as they cause downstream
+// issues in the agent loop.
+//
+// Fixed in cb_30a.
+type EmptyResponseError struct {
+	// Duration is how long the request took before returning empty.
+	Duration time.Duration
+
+	// MessageCount is the number of input messages sent.
+	MessageCount int
+
+	// Model is the model that returned the empty response.
+	Model string
+}
+
+// Error implements the error interface.
+func (e *EmptyResponseError) Error() string {
+	return fmt.Sprintf(
+		"LLM returned empty response after %v (model: %s, messages: %d)",
+		e.Duration, e.Model, e.MessageCount,
+	)
+}
+
 // Response represents an LLM response.
 type Response struct {
 	// Content is the text response.

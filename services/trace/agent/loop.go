@@ -19,6 +19,72 @@ import (
 	"time"
 )
 
+// =============================================================================
+// Session Cleanup Hooks
+// =============================================================================
+
+// SessionCleanupFunc is a function called when a session is closed.
+// It receives the session ID to clean up.
+type SessionCleanupFunc func(sessionID string)
+
+// sessionCleanupHooks stores registered cleanup functions.
+// Key is a unique name for the hook, value is the cleanup function.
+var sessionCleanupHooks = struct {
+	mu    sync.RWMutex
+	hooks map[string]SessionCleanupFunc
+}{
+	hooks: make(map[string]SessionCleanupFunc),
+}
+
+// RegisterSessionCleanupHook registers a cleanup function to be called
+// when sessions are closed.
+//
+// Description:
+//
+//	Phases and other components can register cleanup functions that will be
+//	called when CloseSession is invoked. This allows components to clean up
+//	session-specific state without creating import cycles.
+//
+// Inputs:
+//
+//	name - Unique name for this hook (used for debugging and unregistration).
+//	fn - The cleanup function to call.
+//
+// Thread Safety: Safe for concurrent use.
+func RegisterSessionCleanupHook(name string, fn SessionCleanupFunc) {
+	sessionCleanupHooks.mu.Lock()
+	defer sessionCleanupHooks.mu.Unlock()
+	sessionCleanupHooks.hooks[name] = fn
+	slog.Debug("Registered session cleanup hook", slog.String("name", name))
+}
+
+// UnregisterSessionCleanupHook removes a cleanup hook.
+//
+// Inputs:
+//
+//	name - The name of the hook to remove.
+//
+// Thread Safety: Safe for concurrent use.
+func UnregisterSessionCleanupHook(name string) {
+	sessionCleanupHooks.mu.Lock()
+	defer sessionCleanupHooks.mu.Unlock()
+	delete(sessionCleanupHooks.hooks, name)
+}
+
+// runSessionCleanupHooks calls all registered cleanup hooks for a session.
+func runSessionCleanupHooks(sessionID string) {
+	sessionCleanupHooks.mu.RLock()
+	defer sessionCleanupHooks.mu.RUnlock()
+
+	for name, fn := range sessionCleanupHooks.hooks {
+		slog.Debug("Running session cleanup hook",
+			slog.String("hook", name),
+			slog.String("session_id", sessionID),
+		)
+		fn(sessionID)
+	}
+}
+
 // AgentLoop defines the interface for running agent sessions.
 //
 // The agent loop orchestrates the state machine, phases, tools, and LLM
@@ -104,6 +170,28 @@ type AgentLoop interface {
 	//
 	// Thread Safety: This method is safe for concurrent use.
 	GetSession(sessionID string) (*Session, error)
+
+	// CloseSession permanently closes a session and releases all resources.
+	//
+	// Description:
+	//   Closes a session that will no longer be used. This cleans up all
+	//   session-specific state including UCB1 contexts, caches, and removes
+	//   the session from the session store. Unlike Abort, this is for
+	//   intentional cleanup when a session is definitively finished.
+	//
+	//   Call this when:
+	//   - User explicitly ends the conversation
+	//   - Session timeout for inactive sessions
+	//   - Application shutdown cleanup
+	//
+	// Inputs:
+	//   sessionID - The session ID to close.
+	//
+	// Outputs:
+	//   error - Non-nil if session not found.
+	//
+	// Thread Safety: This method is safe for concurrent use.
+	CloseSession(sessionID string) error
 }
 
 // LoopDependencies contains dependencies for the agent loop.
@@ -513,6 +601,49 @@ func (l *DefaultAgentLoop) Abort(ctx context.Context, sessionID string) error {
 	session.AddHistoryEntry(HistoryEntry{
 		Type:  "abort",
 		Error: "session aborted by user",
+	})
+
+	return nil
+}
+
+// CloseSession implements AgentLoop.
+//
+// Description:
+//
+//	Permanently closes a session and releases all resources. This removes
+//	the session from the session store and runs all registered cleanup hooks.
+//	Unlike Abort, this is for intentional cleanup when a session is
+//	definitively finished (user ends conversation, timeout, or shutdown).
+//
+// Inputs:
+//
+//	sessionID - The session ID to close.
+//
+// Outputs:
+//
+//	error - Non-nil if session not found.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (l *DefaultAgentLoop) CloseSession(sessionID string) error {
+	session, ok := l.sessions.Get(sessionID)
+	if !ok {
+		return ErrSessionNotFound
+	}
+
+	slog.Info("Closing session",
+		slog.String("session_id", sessionID),
+		slog.String("final_state", string(session.GetState())),
+	)
+
+	// Run all registered cleanup hooks
+	runSessionCleanupHooks(sessionID)
+
+	// Remove from session store
+	l.sessions.Delete(sessionID)
+
+	session.AddHistoryEntry(HistoryEntry{
+		Type:  "session_closed",
+		Input: "session explicitly closed",
 	})
 
 	return nil

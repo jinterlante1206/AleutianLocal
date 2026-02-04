@@ -176,14 +176,14 @@ func TestExtractTraceStep_FullExtraction(t *testing.T) {
 	require.Len(t, step.ProofUpdates, 2)
 	assert.Equal(t, "node1", step.ProofUpdates[0].NodeID)
 	assert.Equal(t, "proven", step.ProofUpdates[0].Status)
-	assert.Equal(t, "hard", step.ProofUpdates[0].Source)
+	assert.Equal(t, crs.SignalSourceHard, step.ProofUpdates[0].Source)
 	assert.Equal(t, "node2", step.ProofUpdates[1].NodeID)
 	assert.Equal(t, "expanded", step.ProofUpdates[1].Status)
 
 	// Verify constraints
 	require.Len(t, step.ConstraintsAdded, 1)
 	assert.Equal(t, "c1", step.ConstraintsAdded[0].ID)
-	assert.Equal(t, "mutual_exclusion", step.ConstraintsAdded[0].Type)
+	assert.Equal(t, crs.ConstraintTypeMutualExclusion, step.ConstraintsAdded[0].Type)
 	assert.Equal(t, []string{"a", "b"}, step.ConstraintsAdded[0].Nodes)
 
 	// Verify dependencies
@@ -231,7 +231,7 @@ func TestExtractProofUpdates_SingleUpdate(t *testing.T) {
 	require.Len(t, updates, 1)
 	assert.Equal(t, "node1", updates[0].NodeID)
 	assert.Equal(t, "proven", updates[0].Status)
-	assert.Equal(t, "hard", updates[0].Source)
+	assert.Equal(t, crs.SignalSourceHard, updates[0].Source)
 }
 
 func TestExtractProofUpdates_DeterministicOrder(t *testing.T) {
@@ -330,10 +330,10 @@ func TestExtractConstraints_AddedConstraints(t *testing.T) {
 
 	require.Len(t, constraints, 2)
 	assert.Equal(t, "c1", constraints[0].ID)
-	assert.Equal(t, "mutual_exclusion", constraints[0].Type)
+	assert.Equal(t, crs.ConstraintTypeMutualExclusion, constraints[0].Type)
 	assert.Equal(t, []string{"a", "b"}, constraints[0].Nodes)
 	assert.Equal(t, "c2", constraints[1].ID)
-	assert.Equal(t, "implication", constraints[1].Type)
+	assert.Equal(t, crs.ConstraintTypeImplication, constraints[1].Type)
 }
 
 func TestExtractConstraints_UpdatedConstraints(t *testing.T) {
@@ -346,7 +346,7 @@ func TestExtractConstraints_UpdatedConstraints(t *testing.T) {
 
 	require.Len(t, constraints, 1)
 	assert.Equal(t, "c1", constraints[0].ID)
-	assert.Equal(t, "ordering", constraints[0].Type)
+	assert.Equal(t, crs.ConstraintTypeOrdering, constraints[0].Type)
 }
 
 func TestExtractConstraints_NodesCopied(t *testing.T) {

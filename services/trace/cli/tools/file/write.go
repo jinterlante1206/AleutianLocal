@@ -13,8 +13,10 @@ package file
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
@@ -134,13 +136,53 @@ func (t *WriteTool) Execute(ctx context.Context, params map[string]any) (*tools.
 		}, nil
 	}
 
+	// On Windows, coordinate with LSP servers to release file handles
+	// before atomic write (os.Rename) to avoid "Access is denied" errors.
+	needsLSPCoordination := runtime.GOOS == "windows" && t.config.LSPReleaser != nil
+	if needsLSPCoordination {
+		if err := t.config.LSPReleaser.ReleaseFile(ctx, p.FilePath); err != nil {
+			// Log but continue - best effort
+			slog.Warn("failed to release file for LSP",
+				slog.String("file", p.FilePath),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
 	// Perform atomic write
-	if err := atomicWriteFile(p.FilePath, []byte(p.Content), 0644); err != nil {
+	writeErr := atomicWriteFile(p.FilePath, []byte(p.Content), 0644)
+
+	// On Windows, reopen the file in LSP servers after write
+	if needsLSPCoordination {
+		langID := languageIDFromPath(p.FilePath)
+		if reopenErr := t.config.LSPReleaser.ReopenFile(ctx, p.FilePath, p.Content, langID); reopenErr != nil {
+			// Log but continue - best effort
+			slog.Warn("failed to reopen file for LSP",
+				slog.String("file", p.FilePath),
+				slog.String("error", reopenErr.Error()),
+			)
+		}
+	}
+
+	if writeErr != nil {
 		return &tools.Result{
 			Success:  false,
-			Error:    fmt.Sprintf("failed to write file: %v", err),
+			Error:    fmt.Sprintf("failed to write file: %v", writeErr),
 			Duration: time.Since(start),
 		}, nil
+	}
+
+	// Synchronous graph refresh BEFORE returning to prevent event storm.
+	// This ensures the graph is updated immediately, so subsequent queries
+	// see fresh data instead of triggering a write->notify->parse->write loop.
+	if t.config.GraphRefresher != nil {
+		if err := t.config.GraphRefresher.RefreshFiles(ctx, []string{p.FilePath}); err != nil {
+			// Log but don't fail the write - graph will eventually catch up via fsnotify
+			slog.Warn("failed to refresh graph after write",
+				slog.String("file", p.FilePath),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	result := &WriteResult{
@@ -209,4 +251,76 @@ func atomicWriteFile(path string, content []byte, perm os.FileMode) error {
 
 	success = true
 	return nil
+}
+
+// languageIDFromPath returns the LSP language identifier for a file path.
+//
+// Description:
+//
+//	Maps common file extensions to LSP language identifiers. Returns
+//	"plaintext" for unknown extensions.
+//
+// Thread Safety:
+//
+//	Safe for concurrent use (pure function).
+func languageIDFromPath(path string) string {
+	ext := filepath.Ext(path)
+	switch ext {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".ts":
+		return "typescript"
+	case ".tsx":
+		return "typescriptreact"
+	case ".js":
+		return "javascript"
+	case ".jsx":
+		return "javascriptreact"
+	case ".rs":
+		return "rust"
+	case ".java":
+		return "java"
+	case ".c":
+		return "c"
+	case ".cpp", ".cc", ".cxx":
+		return "cpp"
+	case ".h", ".hpp":
+		return "cpp"
+	case ".rb":
+		return "ruby"
+	case ".php":
+		return "php"
+	case ".cs":
+		return "csharp"
+	case ".swift":
+		return "swift"
+	case ".kt", ".kts":
+		return "kotlin"
+	case ".scala":
+		return "scala"
+	case ".sh", ".bash":
+		return "shellscript"
+	case ".sql":
+		return "sql"
+	case ".html", ".htm":
+		return "html"
+	case ".css":
+		return "css"
+	case ".scss":
+		return "scss"
+	case ".less":
+		return "less"
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".xml":
+		return "xml"
+	case ".md":
+		return "markdown"
+	default:
+		return "plaintext"
+	}
 }

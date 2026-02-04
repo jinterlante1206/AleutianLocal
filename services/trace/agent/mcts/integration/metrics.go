@@ -243,6 +243,83 @@ var (
 		},
 		[]string{"activity"},
 	)
+
+	// --- CRS-03: Cycle Detection Metrics ---
+
+	// crsCyclesDetectedTotal counts reasoning cycles detected.
+
+	// --- CRS-04: Learning Activity Metrics ---
+
+	// crsClausesLearnedTotal counts learned clauses by failure type.
+	//
+	// Description:
+	//   Tracks how many clauses have been learned from failures.
+	//   Helps understand what types of failures are driving learning.
+	//
+	// Labels:
+	//   - failure_type: "cycle_detected", "circuit_breaker", "tool_error", "safety"
+	crsClausesLearnedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "code_buddy",
+			Subsystem: "crs",
+			Name:      "clauses_learned_total",
+			Help:      "Total learned clauses by failure type",
+		},
+		[]string{"failure_type"},
+	)
+
+	// crsDecisionsBlockedTotal counts decisions blocked by learned clauses.
+	//
+	// Description:
+	//   Tracks how often learned clauses prevent repeated mistakes.
+	//   High counts indicate effective learning.
+	//
+	// Labels:
+	//   - tool: The tool that was blocked
+	crsDecisionsBlockedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "code_buddy",
+			Subsystem: "crs",
+			Name:      "decisions_blocked_total",
+			Help:      "Total decisions blocked by learned clauses",
+		},
+		[]string{"tool"},
+	)
+	//
+	// Description:
+	//   Tracks cycles detected by both Brent's algorithm (real-time) and
+	//   Tarjan SCC (post-session analysis).
+	//
+	// Labels:
+	//   - algorithm: "brent" for real-time, "tarjan" for post-session
+	crsCyclesDetectedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "code_buddy",
+			Subsystem: "crs",
+			Name:      "cycles_detected_total",
+			Help:      "Total reasoning cycles detected by algorithm",
+		},
+		[]string{"algorithm"},
+	)
+
+	// crsCycleLengthHistogram measures the length of detected cycles.
+	//
+	// Description:
+	//   Helps understand cycle complexity. Longer cycles are harder
+	//   to detect early and may indicate deeper reasoning issues.
+	//
+	// Labels:
+	//   - algorithm: "brent" for real-time, "tarjan" for post-session
+	crsCycleLengthHistogram = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "code_buddy",
+			Subsystem: "crs",
+			Name:      "cycle_length",
+			Help:      "Distribution of detected cycle lengths",
+			Buckets:   []float64{1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 50},
+		},
+		[]string{"algorithm"},
+	)
 )
 
 // -----------------------------------------------------------------------------
@@ -327,11 +404,11 @@ func RecordStepMetrics(activityName string, step *crs.TraceStep) {
 
 	// Count constraints by type (total counters)
 	for _, constraint := range step.ConstraintsAdded {
-		constraintType := constraint.Type
-		if constraintType == "" {
-			constraintType = "unknown"
+		constraintTypeStr := constraint.Type.String()
+		if constraintTypeStr == "" {
+			constraintTypeStr = "unknown"
 		}
-		crsConstraintsAddedTotal.WithLabelValues(constraintType).Inc()
+		crsConstraintsAddedTotal.WithLabelValues(constraintTypeStr).Inc()
 	}
 
 	// Count dependencies (total counter)
@@ -413,6 +490,110 @@ func RecordRecordingError(errorType string) {
 // Thread Safety: Safe for concurrent use.
 func RecordRecordingDuration(startTime time.Time) {
 	crsRecordingDurationSeconds.Observe(time.Since(startTime).Seconds())
+}
+
+// -----------------------------------------------------------------------------
+// CRS-03: Cycle Detection Metric Recording
+// -----------------------------------------------------------------------------
+
+// RecordCycleDetected records a detected reasoning cycle.
+//
+// Description:
+//
+//	Called when Brent's algorithm (real-time) or Tarjan SCC (post-session)
+//	detects a cycle. Increments the counter and observes the cycle length.
+//
+// Inputs:
+//
+//	algorithm - "brent" for real-time detection, "tarjan" for post-session.
+//	cycleLength - The number of states in the detected cycle.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordCycleDetected(algorithm string, cycleLength int) {
+	if algorithm != "brent" && algorithm != "tarjan" {
+		algorithm = "unknown"
+	}
+	crsCyclesDetectedTotal.WithLabelValues(algorithm).Inc()
+	crsCycleLengthHistogram.WithLabelValues(algorithm).Observe(float64(cycleLength))
+}
+
+// RecordBrentCycleDetected records a cycle detected by Brent's algorithm.
+//
+// Description:
+//
+//	Convenience function for real-time cycle detection.
+//
+// Inputs:
+//
+//	cycleLength - The number of states in the detected cycle.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordBrentCycleDetected(cycleLength int) {
+	RecordCycleDetected("brent", cycleLength)
+}
+
+// RecordTarjanCyclesDetected records cycles detected by Tarjan SCC analysis.
+//
+// Description:
+//
+//	Called after post-session analysis. Records all cyclic SCCs found.
+//
+// Inputs:
+//
+//	analysis - The cycle analysis result from AnalyzeSessionCycles.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordTarjanCyclesDetected(analysis *crs.CycleAnalysis) {
+	if analysis == nil {
+		return
+	}
+
+	for _, scc := range analysis.CyclicSCCs {
+		crsCyclesDetectedTotal.WithLabelValues("tarjan").Inc()
+		crsCycleLengthHistogram.WithLabelValues("tarjan").Observe(float64(len(scc)))
+	}
+}
+
+// -----------------------------------------------------------------------------
+// CRS-04: Learning Activity Metric Recording
+// -----------------------------------------------------------------------------
+
+// RecordClauseLearned records a learned clause from a failure.
+//
+// Description:
+//
+//	Called when CDCL learns a new clause from a failure event.
+//	Tracks learning activity effectiveness.
+//
+// Inputs:
+//
+//	failureType - The type of failure that triggered learning.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordClauseLearned(failureType string) {
+	if failureType == "" {
+		failureType = "unknown"
+	}
+	crsClausesLearnedTotal.WithLabelValues(failureType).Inc()
+}
+
+// RecordDecisionBlocked records a decision blocked by a learned clause.
+//
+// Description:
+//
+//	Called when CheckDecisionAllowed returns false, indicating
+//	a learned clause prevented a potential mistake.
+//
+// Inputs:
+//
+//	tool - The tool that was blocked.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordDecisionBlocked(tool string) {
+	if tool == "" {
+		tool = "unknown"
+	}
+	crsDecisionsBlockedTotal.WithLabelValues(tool).Inc()
 }
 
 // -----------------------------------------------------------------------------

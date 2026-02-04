@@ -14,8 +14,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/explore"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -34,12 +39,22 @@ import (
 //	g - The code graph
 //	idx - The symbol index
 func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolIndex) {
+	// Level 0: Project overview (highest priority)
+	registry.Register(NewGraphOverviewTool(g, idx))
+
+	// Level 1: Package-level navigation
+	registry.Register(NewExplorePackageTool(g, idx))
+	registry.Register(NewListPackagesTool(idx))
+
+	// Level 2: File-level exploration
+	registry.Register(NewSummarizeFileTool(g, idx))
+
+	// Level 3: Symbol-level tracing
 	registry.Register(NewFindEntryPointsTool(g, idx))
 	registry.Register(NewTraceDataFlowTool(g, idx))
 	registry.Register(NewTraceErrorFlowTool(g, idx))
 	registry.Register(NewBuildMinimalContextTool(g, idx))
 	registry.Register(NewFindSimilarCodeTool(g, idx))
-	registry.Register(NewSummarizeFileTool(g, idx))
 	registry.Register(NewFindConfigUsageTool(g, idx))
 }
 
@@ -615,6 +630,238 @@ func getIntParam(params map[string]any, key string) (int, bool) {
 }
 
 // ============================================================================
+// list_packages Tool
+// ============================================================================
+
+// listPackagesTool lists all Go packages in the codebase.
+type listPackagesTool struct {
+	index *index.SymbolIndex
+}
+
+// NewListPackagesTool creates the list_packages tool.
+//
+// Description:
+//
+//	Creates a tool that lists all Go packages in the codebase by extracting
+//	unique package names from the symbol index. This directly answers questions
+//	like "What packages exist?" without requiring the model to be creative.
+//
+// Inputs:
+//
+//	idx - The symbol index containing parsed symbols.
+//
+// Outputs:
+//
+//	Tool - The list_packages tool.
+func NewListPackagesTool(idx *index.SymbolIndex) Tool {
+	return &listPackagesTool{
+		index: idx,
+	}
+}
+
+func (t *listPackagesTool) Name() string {
+	return "list_packages"
+}
+
+func (t *listPackagesTool) Category() ToolCategory {
+	return CategoryExploration
+}
+
+func (t *listPackagesTool) Definition() ToolDefinition {
+	return ToolDefinition{
+		Name:        "list_packages",
+		Description: "Lists all packages/modules in the codebase with their paths, file counts, and symbol counts. Use this to understand project structure and package organization.",
+		Parameters: map[string]ParamDef{
+			"include_tests": {
+				Type:        ParamTypeBool,
+				Description: "Include test packages (*_test) in results",
+				Required:    false,
+				Default:     false,
+			},
+			"filter": {
+				Type:        ParamTypeString,
+				Description: "Filter packages by name prefix (e.g., 'pkg/api' to show only api-related packages)",
+				Required:    false,
+			},
+		},
+		Category:    CategoryExploration,
+		Priority:    95, // Higher than find_entry_points for package-related questions
+		Requires:    []string{"graph_initialized"},
+		SideEffects: false,
+		Timeout:     5 * time.Second,
+	}
+}
+
+// PackageInfo contains information about a discovered package.
+type PackageInfo struct {
+	Name        string   `json:"name"`
+	Path        string   `json:"path"`
+	Files       []string `json:"files"`
+	FileCount   int      `json:"file_count"`
+	SymbolCount int      `json:"symbol_count"`
+	Types       int      `json:"types"`
+	Functions   int      `json:"functions"`
+	IsTest      bool     `json:"is_test,omitempty"`
+}
+
+// ListPackagesResult is the output of the list_packages tool.
+type ListPackagesResult struct {
+	Packages   []PackageInfo `json:"packages"`
+	TotalCount int           `json:"total_count"`
+}
+
+func (t *listPackagesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+	start := time.Now()
+
+	includeTests := false
+	if v, ok := params["include_tests"].(bool); ok {
+		includeTests = v
+	}
+
+	filter := ""
+	if v, ok := params["filter"].(string); ok {
+		filter = v
+	}
+
+	// Get all package symbols directly - more efficient than iterating all files
+	packageSymbols := t.index.GetByKind(ast.SymbolKindPackage)
+
+	// Group by package name and collect file info
+	packageMap := make(map[string]*PackageInfo)
+	filesByPackage := make(map[string]map[string]bool)
+
+	for _, pkgSym := range packageSymbols {
+		pkgName := pkgSym.Name
+		if pkgName == "" {
+			continue
+		}
+
+		// Apply filter
+		if filter != "" && !strings.HasPrefix(pkgName, filter) && !strings.HasPrefix(pkgSym.FilePath, filter) {
+			continue
+		}
+
+		// Skip test packages if not requested
+		isTest := strings.HasSuffix(pkgName, "_test") || strings.HasSuffix(pkgSym.FilePath, "_test.go")
+		if isTest && !includeTests {
+			continue
+		}
+
+		// Initialize package info if not exists
+		if _, exists := packageMap[pkgName]; !exists {
+			packageMap[pkgName] = &PackageInfo{
+				Name:   pkgName,
+				Path:   extractPackagePath(pkgSym.FilePath),
+				IsTest: isTest,
+			}
+			filesByPackage[pkgName] = make(map[string]bool)
+		}
+
+		// Track files
+		filesByPackage[pkgName][pkgSym.FilePath] = true
+	}
+
+	// Now count symbols per package by getting symbols from files
+	for pkgName, files := range filesByPackage {
+		info := packageMap[pkgName]
+		for filePath := range files {
+			symbols := t.index.GetByFile(filePath)
+			for _, sym := range symbols {
+				if sym.Kind == ast.SymbolKindPackage {
+					continue // Don't count the package symbol itself
+				}
+				info.SymbolCount++
+				switch sym.Kind {
+				case ast.SymbolKindStruct, ast.SymbolKindClass, ast.SymbolKindInterface, ast.SymbolKindType, ast.SymbolKindEnum:
+					info.Types++
+				case ast.SymbolKindFunction, ast.SymbolKindMethod:
+					info.Functions++
+				}
+			}
+		}
+	}
+
+	// Build result
+	packages := make([]PackageInfo, 0, len(packageMap))
+	for pkgName, info := range packageMap {
+		files := filesByPackage[pkgName]
+		info.FileCount = len(files)
+		info.Files = make([]string, 0, len(files))
+		for f := range files {
+			info.Files = append(info.Files, f)
+		}
+		// Sort files for deterministic output
+		sort.Strings(info.Files)
+		packages = append(packages, *info)
+	}
+
+	// Sort packages by name for deterministic output
+	sort.Slice(packages, func(i, j int) bool {
+		return packages[i].Name < packages[j].Name
+	})
+
+	result := &ListPackagesResult{
+		Packages:   packages,
+		TotalCount: len(packages),
+	}
+
+	duration := time.Since(start)
+
+	// Build CRS trace step for full observability
+	packageNames := make([]string, 0, len(packages))
+	for _, pkg := range packages {
+		packageNames = append(packageNames, pkg.Name)
+	}
+
+	stepBuilder := crs.NewTraceStepBuilder().
+		WithAction("list_packages").
+		WithTarget("project").
+		WithTool("list_packages").
+		WithDuration(duration).
+		WithSymbolsFound(packageNames).
+		WithMetadata("navigation_level", "1").
+		WithMetadata("total_packages", strconv.Itoa(result.TotalCount)).
+		WithMetadata("filter", filter).
+		WithMetadata("include_tests", strconv.FormatBool(includeTests))
+
+	// Mark each package as proven (existence confirmed via AST)
+	for _, pkg := range packages {
+		stepBuilder.WithProofUpdate(
+			"pkg:"+pkg.Name,
+			"proven",
+			fmt.Sprintf("Found in %d files with %d symbols", pkg.FileCount, pkg.SymbolCount),
+			"hard", // AST parsing is hard signal
+		)
+	}
+
+	traceStep := stepBuilder.Build()
+
+	output, _ := json.Marshal(result)
+	return &Result{
+		Success:    true,
+		Output:     result,
+		OutputText: string(output),
+		TokensUsed: estimateTokens(string(output)),
+		Duration:   duration,
+		TraceStep:  &traceStep,
+		Metadata: map[string]any{
+			"level":           "package",
+			"packages_found":  result.TotalCount,
+			"navigation_tool": true,
+		},
+	}, nil
+}
+
+// extractPackagePath extracts the directory path from a file path.
+func extractPackagePath(filePath string) string {
+	lastSlash := strings.LastIndex(filePath, "/")
+	if lastSlash > 0 {
+		return filePath[:lastSlash]
+	}
+	return "."
+}
+
+// ============================================================================
 // Mock Tool for Testing
 // ============================================================================
 
@@ -842,6 +1089,28 @@ func StaticToolDefinitions() []ToolDefinition {
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     10 * time.Second,
+		},
+		{
+			Name:        "list_packages",
+			Description: "Lists all packages/modules in the codebase with their paths, file counts, and symbol counts. Use this to understand project structure and package organization.",
+			Parameters: map[string]ParamDef{
+				"include_tests": {
+					Type:        ParamTypeBool,
+					Description: "Include test packages (*_test) in results",
+					Required:    false,
+					Default:     false,
+				},
+				"filter": {
+					Type:        ParamTypeString,
+					Description: "Filter packages by name prefix (e.g., 'pkg/api' to show only api-related packages)",
+					Required:    false,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    95,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
 		},
 	}
 }

@@ -99,6 +99,11 @@ var (
 	// Phantom package metrics (CB-28d-8)
 	phantomPackagesTotal metric.Int64Counter
 
+	// Router metrics (CB-31d)
+	routerHardForcedTotal   metric.Int64Counter
+	routerFallbackTotal     metric.Int64Counter
+	routerHardForcedLatency metric.Float64Histogram
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -393,6 +398,35 @@ func initMetrics() error {
 		phantomPackagesTotal, err = meter.Int64Counter(
 			"grounding_phantom_packages_total",
 			metric.WithDescription("Phantom package path references detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Router metrics (CB-31d)
+		routerHardForcedTotal, err = meter.Int64Counter(
+			"router_hard_forced_total",
+			metric.WithDescription("Total router hard-forced tool executions by tool and outcome"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		routerFallbackTotal, err = meter.Int64Counter(
+			"router_fallback_total",
+			metric.WithDescription("Total router fallbacks to Main LLM by tool and reason"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		routerHardForcedLatency, err = meter.Float64Histogram(
+			"router_hard_forced_latency_seconds",
+			metric.WithDescription("Latency for router hard-forced tool executions"),
+			metric.WithUnit("s"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -1094,4 +1128,68 @@ func RecordPhantomPackage(ctx context.Context, packagePath string) {
 	)
 
 	phantomPackagesTotal.Add(ctx, 1, attrs)
+}
+
+// RecordRouterHardForced records a router hard-forced tool execution.
+//
+// # Description
+//
+// This metric tracks when the router selects a tool and the Execute phase
+// bypasses the Main LLM entirely, executing the tool directly. This is the
+// "hard forcing" mechanism introduced in CB-31d to prevent Split-Brain failures.
+//
+// # Inputs
+//
+//   - toolName: Name of the tool that was hard-forced (e.g., "list_packages").
+//   - success: Whether the direct execution succeeded or required fallback.
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func RecordRouterHardForced(toolName string, success bool) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	outcome := "success"
+	if !success {
+		outcome = "fallback"
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("outcome", outcome),
+	)
+
+	routerHardForcedTotal.Add(context.Background(), 1, attrs)
+}
+
+// RecordRouterFallback records when router hard-forcing falls back to Main LLM.
+//
+// # Description
+//
+// This metric tracks when the router selects a tool for hard forcing, but
+// the direct execution fails (either parameter extraction or tool execution),
+// requiring fallback to the Main LLM. High rates indicate parameter extraction
+// or tool execution issues that need investigation.
+//
+// # Inputs
+//
+//   - toolName: Name of the tool that failed hard forcing (e.g., "explore_package").
+//   - reason: Reason for fallback (e.g., "param_extraction_failed", "execution_failed").
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func RecordRouterFallback(toolName, reason string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("reason", reason),
+	)
+
+	routerFallbackTotal.Add(context.Background(), 1, attrs)
 }

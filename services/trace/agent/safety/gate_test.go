@@ -12,6 +12,7 @@ package safety
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -406,4 +407,502 @@ func TestContextCancellation(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for cancelled context")
 	}
+}
+
+// =============================================================================
+// Supply Chain Checker Tests
+// =============================================================================
+
+func TestSupplyChainChecker_BlocksInstallCommands(t *testing.T) {
+	gate := NewDefaultGate(nil) // AllowPackageInstall is false by default
+
+	tests := []struct {
+		name       string
+		command    string
+		wantPassed bool
+		wantCrit   int
+	}{
+		// NPM
+		{"npm install blocked", "npm install express", false, 1},
+		{"npm i blocked", "npm i express", false, 1},
+		{"npm add blocked", "npm add express", false, 1},
+		{"npm ci blocked", "npm ci", false, 1},
+		{"npm run allowed", "npm run build", true, 0},
+		{"npm test allowed", "npm test", true, 0},
+		{"npm start allowed", "npm start", true, 0},
+		{"npm audit allowed", "npm audit", true, 0},
+
+		// Yarn
+		{"yarn add blocked", "yarn add lodash", false, 1},
+		{"yarn install blocked", "yarn install", false, 1},
+		{"yarn run allowed", "yarn run test", true, 0},
+		{"yarn test allowed", "yarn test", true, 0},
+
+		// pnpm
+		{"pnpm add blocked", "pnpm add react", false, 1},
+		{"pnpm install blocked", "pnpm install", false, 1},
+		{"pnpm i blocked", "pnpm i", false, 1},
+		{"pnpm run allowed", "pnpm run build", true, 0},
+
+		// pip
+		{"pip install blocked", "pip install requests", false, 1},
+		{"pip3 install blocked", "pip3 install numpy", false, 1},
+		{"pip list allowed", "pip list", true, 0},
+		{"pip freeze allowed", "pip freeze", true, 0},
+
+		// poetry
+		{"poetry add blocked", "poetry add django", false, 1},
+		{"poetry install blocked", "poetry install", false, 1},
+		{"poetry run allowed", "poetry run pytest", true, 0},
+
+		// cargo
+		{"cargo install blocked", "cargo install ripgrep", false, 1},
+		{"cargo build allowed", "cargo build", true, 0},
+		{"cargo test allowed", "cargo test", true, 0},
+		{"cargo run allowed", "cargo run", true, 0},
+		{"cargo check allowed", "cargo check", true, 0},
+
+		// go
+		{"go get blocked", "go get github.com/pkg/errors", false, 1},
+		{"go install blocked", "go install github.com/golangci/golangci-lint", false, 1},
+		{"go build allowed", "go build ./...", true, 0},
+		{"go test allowed", "go test ./...", true, 0},
+		{"go fmt allowed", "go fmt ./...", true, 0},
+		{"go vet allowed", "go vet ./...", true, 0},
+		{"go mod tidy allowed", "go mod tidy", true, 0},
+
+		// gem
+		{"gem install blocked", "gem install rails", false, 1},
+		{"gem list allowed", "gem list", true, 0},
+
+		// bundle
+		{"bundle install blocked", "bundle install", false, 1},
+		{"bundle add blocked", "bundle add rspec", false, 1},
+		{"bundle exec allowed", "bundle exec rspec", true, 0},
+
+		// composer
+		{"composer install blocked", "composer install", false, 1},
+		{"composer require blocked", "composer require laravel/laravel", false, 1},
+		{"composer run allowed", "composer run test", true, 0},
+
+		// dotnet
+		{"dotnet add blocked", "dotnet add package Newtonsoft.Json", false, 1},
+		{"dotnet build allowed", "dotnet build", true, 0},
+		{"dotnet test allowed", "dotnet test", true, 0},
+
+		// System package managers
+		{"apt install blocked", "apt install vim", false, 1},
+		{"apt-get install blocked", "apt-get install curl", false, 1},
+		{"brew install blocked", "brew install jq", false, 1},
+		{"yum install blocked", "yum install gcc", false, 1},
+		{"dnf install blocked", "dnf install python3", false, 1},
+		{"pacman -S blocked", "pacman -S firefox", false, 1},
+
+		// Non-package manager commands are allowed
+		{"ls allowed", "ls -la", true, 0},
+		{"cat allowed", "cat README.md", true, 0},
+		{"git status allowed", "git status", true, 0},
+		{"make allowed", "make build", true, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			change := ProposedChange{
+				Type:   "shell_command",
+				Target: tt.command,
+			}
+
+			result, err := gate.Check(context.Background(), []ProposedChange{change})
+			if err != nil {
+				t.Fatalf("Check failed: %v", err)
+			}
+			if result.Passed != tt.wantPassed {
+				t.Errorf("Passed = %v, want %v for command %q", result.Passed, tt.wantPassed, tt.command)
+			}
+			if result.CriticalCount != tt.wantCrit {
+				t.Errorf("CriticalCount = %d, want %d for command %q", result.CriticalCount, tt.wantCrit, tt.command)
+			}
+		})
+	}
+}
+
+func TestSupplyChainChecker_AllowPackageInstall(t *testing.T) {
+	config := DefaultGateConfig()
+	config.AllowPackageInstall = true
+	gate := NewDefaultGate(&config)
+
+	// When AllowPackageInstall is true, install commands should pass
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"npm install", "npm install express"},
+		{"pip install", "pip install requests"},
+		{"cargo install", "cargo install ripgrep"},
+		{"go get", "go get github.com/pkg/errors"},
+		{"yarn add", "yarn add lodash"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			change := ProposedChange{
+				Type:   "shell_command",
+				Target: tt.command,
+			}
+
+			result, err := gate.Check(context.Background(), []ProposedChange{change})
+			if err != nil {
+				t.Fatalf("Check failed: %v", err)
+			}
+			if !result.Passed {
+				t.Errorf("expected command %q to pass with AllowPackageInstall=true", tt.command)
+			}
+		})
+	}
+}
+
+func TestSupplyChainChecker_HandlesPathPrefixes(t *testing.T) {
+	gate := NewDefaultGate(nil)
+
+	// Commands invoked with full path should still be caught
+	tests := []struct {
+		name       string
+		command    string
+		wantPassed bool
+	}{
+		{"/usr/bin/npm install blocked", "/usr/bin/npm install express", false},
+		{"/usr/local/bin/pip install blocked", "/usr/local/bin/pip install requests", false},
+		{"/home/user/.cargo/bin/cargo install blocked", "/home/user/.cargo/bin/cargo install ripgrep", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			change := ProposedChange{
+				Type:   "shell_command",
+				Target: tt.command,
+			}
+
+			result, err := gate.Check(context.Background(), []ProposedChange{change})
+			if err != nil {
+				t.Fatalf("Check failed: %v", err)
+			}
+			if result.Passed != tt.wantPassed {
+				t.Errorf("Passed = %v, want %v for command %q", result.Passed, tt.wantPassed, tt.command)
+			}
+		})
+	}
+}
+
+func TestSupplyChainChecker_IssueDetails(t *testing.T) {
+	gate := NewDefaultGate(nil)
+
+	change := ProposedChange{
+		Type:   "shell_command",
+		Target: "npm install malicious-package",
+	}
+
+	result, err := gate.Check(context.Background(), []ProposedChange{change})
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+
+	if len(result.Issues) == 0 {
+		t.Fatal("expected at least one issue")
+	}
+
+	// Find the supply chain issue
+	var supplyChainIssue *Issue
+	for i := range result.Issues {
+		if result.Issues[i].Code == "SUPPLY_CHAIN_INSTALL" {
+			supplyChainIssue = &result.Issues[i]
+			break
+		}
+	}
+
+	if supplyChainIssue == nil {
+		t.Fatal("expected SUPPLY_CHAIN_INSTALL issue")
+	}
+
+	if supplyChainIssue.Severity != SeverityCritical {
+		t.Errorf("Severity = %s, want %s", supplyChainIssue.Severity, SeverityCritical)
+	}
+
+	if !strings.Contains(supplyChainIssue.Message, "postinstall") {
+		t.Errorf("Message should mention postinstall scripts: %s", supplyChainIssue.Message)
+	}
+
+	if !strings.Contains(supplyChainIssue.Suggestion, "--allow-install") {
+		t.Errorf("Suggestion should mention --allow-install flag: %s", supplyChainIssue.Suggestion)
+	}
+}
+
+func TestSupplyChainChecker_IgnoresNonShellCommands(t *testing.T) {
+	gate := NewDefaultGate(nil)
+
+	// File writes should not trigger supply chain checker
+	change := ProposedChange{
+		Type:    "file_write",
+		Target:  "/project/package.json",
+		Content: `{"dependencies": {"express": "^4.0.0"}}`,
+	}
+
+	result, err := gate.Check(context.Background(), []ProposedChange{change})
+	if err != nil {
+		t.Fatalf("Check failed: %v", err)
+	}
+
+	// Should pass (supply chain checker only looks at shell_command)
+	if !result.Passed {
+		t.Error("file_write should not trigger supply chain checker")
+	}
+}
+
+func TestSupplyChainChecker_EmptyCommand(t *testing.T) {
+	checker := &SupplyChainChecker{config: DefaultGateConfig()}
+
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"empty string", ""},
+		{"whitespace only", "   "},
+		{"single command no subcommand", "npm"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			change := &ProposedChange{
+				Type:   "shell_command",
+				Target: tt.command,
+			}
+
+			issues := checker.Check(context.Background(), change)
+			if len(issues) > 0 {
+				t.Errorf("expected no issues for %q, got %v", tt.command, issues)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Safety-CDCL Integration Tests (Issue #6)
+// -----------------------------------------------------------------------------
+
+func TestIsSafetyError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errMsg   string
+		expected bool
+	}{
+		{
+			name:     "blocked by safety check prefix",
+			errMsg:   "blocked by safety check",
+			expected: true,
+		},
+		{
+			name:     "blocked with details",
+			errMsg:   "blocked by safety check: SUPPLY_CHAIN_INSTALL",
+			expected: true,
+		},
+		{
+			name:     "contains safety check",
+			errMsg:   "operation failed due to safety check",
+			expected: true,
+		},
+		{
+			name:     "supply chain install code",
+			errMsg:   "SUPPLY_CHAIN_INSTALL blocked",
+			expected: true,
+		},
+		{
+			name:     "path blocked code",
+			errMsg:   "PATH_BLOCKED: .git/config",
+			expected: true,
+		},
+		{
+			name:     "command blocked code",
+			errMsg:   "COMMAND_BLOCKED: rm -rf",
+			expected: true,
+		},
+		{
+			name:     "generic tool error",
+			errMsg:   "file not found",
+			expected: false,
+		},
+		{
+			name:     "compilation error",
+			errMsg:   "undefined: foo",
+			expected: false,
+		},
+		{
+			name:     "empty error",
+			errMsg:   "",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsSafetyError(tt.errMsg)
+			if got != tt.expected {
+				t.Errorf("IsSafetyError(%q) = %v, want %v", tt.errMsg, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExtractConstraints(t *testing.T) {
+	t.Run("nil result returns nil", func(t *testing.T) {
+		constraints := ExtractConstraints(nil, "node1")
+		if constraints != nil {
+			t.Errorf("expected nil, got %v", constraints)
+		}
+	})
+
+	t.Run("empty issues returns nil", func(t *testing.T) {
+		result := &Result{Passed: true, Issues: nil}
+		constraints := ExtractConstraints(result, "node1")
+		if constraints != nil {
+			t.Errorf("expected nil, got %v", constraints)
+		}
+	})
+
+	t.Run("non-critical issues are skipped", func(t *testing.T) {
+		result := &Result{
+			Passed: false,
+			Issues: []Issue{
+				{
+					Severity: SeverityWarning,
+					Code:     "FILE_SIZE_WARNING",
+					Message:  "File is large",
+				},
+			},
+		}
+		constraints := ExtractConstraints(result, "node1")
+		if len(constraints) != 0 {
+			t.Errorf("expected 0 constraints for warning, got %d", len(constraints))
+		}
+	})
+
+	t.Run("critical issues create constraints", func(t *testing.T) {
+		result := &Result{
+			Passed: false,
+			Issues: []Issue{
+				{
+					Severity: SeverityCritical,
+					Code:     "SUPPLY_CHAIN_INSTALL",
+					Message:  "npm install blocked",
+					Change: &ProposedChange{
+						Type:   "shell_command",
+						Target: "npm install express",
+					},
+				},
+			},
+		}
+		constraints := ExtractConstraints(result, "node1")
+		if len(constraints) != 1 {
+			t.Fatalf("expected 1 constraint, got %d", len(constraints))
+		}
+		if constraints[0].IssueCode != "SUPPLY_CHAIN_INSTALL" {
+			t.Errorf("IssueCode = %q, want SUPPLY_CHAIN_INSTALL", constraints[0].IssueCode)
+		}
+		if constraints[0].Pattern != "command:npm install express" {
+			t.Errorf("Pattern = %q, want command:npm install express", constraints[0].Pattern)
+		}
+		if constraints[0].ConflictingNodes[0] != "node1" {
+			t.Errorf("ConflictingNodes[0] = %q, want node1", constraints[0].ConflictingNodes[0])
+		}
+	})
+
+	t.Run("file write creates path pattern", func(t *testing.T) {
+		result := &Result{
+			Passed: false,
+			Issues: []Issue{
+				{
+					Severity: SeverityCritical,
+					Code:     "PATH_BLOCKED",
+					Message:  ".git path blocked",
+					Change: &ProposedChange{
+						Type:   "file_write",
+						Target: "/project/.git/config",
+					},
+				},
+			},
+		}
+		constraints := ExtractConstraints(result, "test_node")
+		if len(constraints) != 1 {
+			t.Fatalf("expected 1 constraint, got %d", len(constraints))
+		}
+		if constraints[0].Pattern != "path:/project/.git/config" {
+			t.Errorf("Pattern = %q, want path:/project/.git/config", constraints[0].Pattern)
+		}
+	})
+
+	t.Run("multiple issues create multiple constraints", func(t *testing.T) {
+		result := &Result{
+			Passed: false,
+			Issues: []Issue{
+				{
+					Severity: SeverityCritical,
+					Code:     "PATH_BLOCKED",
+					Message:  ".env blocked",
+					Change: &ProposedChange{
+						Type:   "file_write",
+						Target: ".env",
+					},
+				},
+				{
+					Severity: SeverityCritical,
+					Code:     "COMMAND_BLOCKED",
+					Message:  "rm -rf blocked",
+					Change: &ProposedChange{
+						Type:   "shell_command",
+						Target: "rm -rf /",
+					},
+				},
+			},
+		}
+		constraints := ExtractConstraints(result, "multi_node")
+		if len(constraints) != 2 {
+			t.Fatalf("expected 2 constraints, got %d", len(constraints))
+		}
+	})
+}
+
+func TestResult_ToErrorMessage(t *testing.T) {
+	t.Run("nil result returns base message", func(t *testing.T) {
+		var r *Result
+		msg := r.ToErrorMessage()
+		if msg != SafetyBlockedError {
+			t.Errorf("got %q, want %q", msg, SafetyBlockedError)
+		}
+	})
+
+	t.Run("empty issues returns base message", func(t *testing.T) {
+		r := &Result{Issues: nil}
+		msg := r.ToErrorMessage()
+		if msg != SafetyBlockedError {
+			t.Errorf("got %q, want %q", msg, SafetyBlockedError)
+		}
+	})
+
+	t.Run("includes critical issue codes", func(t *testing.T) {
+		r := &Result{
+			Issues: []Issue{
+				{Severity: SeverityCritical, Code: "SUPPLY_CHAIN_INSTALL"},
+				{Severity: SeverityWarning, Code: "FILE_SIZE_WARNING"}, // Should be excluded
+				{Severity: SeverityCritical, Code: "PATH_BLOCKED"},
+			},
+		}
+		msg := r.ToErrorMessage()
+		if !strings.Contains(msg, "SUPPLY_CHAIN_INSTALL") {
+			t.Errorf("expected message to contain SUPPLY_CHAIN_INSTALL, got %q", msg)
+		}
+		if !strings.Contains(msg, "PATH_BLOCKED") {
+			t.Errorf("expected message to contain PATH_BLOCKED, got %q", msg)
+		}
+		if strings.Contains(msg, "FILE_SIZE_WARNING") {
+			t.Errorf("expected message to NOT contain FILE_SIZE_WARNING, got %q", msg)
+		}
+	})
 }

@@ -11,12 +11,17 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // MetricField represents a session metric field for type-safe increments.
@@ -343,6 +348,46 @@ type Session struct {
 	// recentToolErrors tracks tools that failed recently.
 	// Fed back to the tool router to avoid suggesting the same tool.
 	recentToolErrors []ToolRouterError
+
+	// safetyViolations tracks safety-blocked operations for CDCL learning.
+	// Safety violations are hard signals that CDCL should learn from.
+	safetyViolations []SafetyViolation
+
+	// cycleDetector detects reasoning cycles in real-time using Brent's algorithm.
+	// CRS-03: Initialized when CRS is enabled for the session.
+	cycleDetector *crs.CycleDetector
+}
+
+// SafetyViolation represents a safety-blocked operation for CDCL learning.
+//
+// Safety violations are classified as hard signals because:
+// 1. They represent definitive failures (the action WILL be blocked)
+// 2. CDCL should learn to avoid patterns that trigger safety blocks
+// 3. Unlike soft signals, safety rules are deterministic
+type SafetyViolation struct {
+	// NodeID is the MCTS node where the violation occurred.
+	NodeID string `json:"node_id"`
+
+	// ErrorMessage is the safety error message.
+	ErrorMessage string `json:"error_message"`
+
+	// Timestamp is when the violation was recorded.
+	Timestamp time.Time `json:"timestamp"`
+
+	// Constraints are the extracted constraints for CDCL.
+	Constraints []SafetyConstraintInfo `json:"constraints,omitempty"`
+}
+
+// SafetyConstraintInfo contains constraint information from safety violations.
+type SafetyConstraintInfo struct {
+	// IssueCode is the safety issue code (e.g., "SUPPLY_CHAIN_INSTALL").
+	IssueCode string `json:"issue_code"`
+
+	// Pattern describes what triggered the violation.
+	Pattern string `json:"pattern"`
+
+	// Reason explains why this is blocked.
+	Reason string `json:"reason"`
 }
 
 // AssembledContext represents the current context window for the LLM.
@@ -823,6 +868,45 @@ func (s *Session) HasCRS() bool {
 	return s.CRS != nil
 }
 
+// GetCycleDetector returns the cycle detector for this session.
+//
+// Description:
+//
+//	Returns the Brent's algorithm cycle detector for real-time cycle detection.
+//	CRS-03: The detector is lazily initialized when first accessed if CRS is enabled.
+//
+// Outputs:
+//
+//	*crs.CycleDetector - The cycle detector, or nil if CRS is not enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+// A-03: Uses double-check locking to reduce contention on hot path.
+func (s *Session) GetCycleDetector() *crs.CycleDetector {
+	// Fast path: read lock first to check if already initialized
+	s.mu.RLock()
+	if s.cycleDetector != nil {
+		detector := s.cycleDetector
+		s.mu.RUnlock()
+		return detector
+	}
+	// Also check if CRS is nil (no detector needed)
+	if s.CRS == nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	s.mu.RUnlock()
+
+	// Slow path: acquire write lock for initialization
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if s.cycleDetector == nil && s.CRS != nil {
+		s.cycleDetector = crs.NewCycleDetector(nil)
+	}
+	return s.cycleDetector
+}
+
 // SetTraceRecorder sets the trace recorder for this session.
 //
 // Thread Safety: This method is safe for concurrent use.
@@ -1107,6 +1191,108 @@ func (s *Session) RecordToolError(tool, errMsg string) {
 	}
 }
 
+// RecordSafetyViolation records a safety-blocked operation for CDCL learning.
+//
+// Description:
+//
+//	Records a safety violation as a hard signal for CDCL learning.
+//	Safety violations are classified as hard signals because they represent
+//	definitive failures - the action WILL be blocked. CDCL should learn to
+//	avoid patterns that trigger safety blocks.
+//
+//	This addresses Issue #6: Safety Blocking Learning Signal. Without this,
+//	safety-blocked actions would be soft errors that MCTS/CDCL ignores,
+//	potentially retrying the same blocked pattern.
+//
+// Inputs:
+//
+//	nodeID - The MCTS node ID where the violation occurred.
+//	errMsg - The safety error message.
+//	constraints - The extracted constraints from safety issues.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) RecordSafetyViolation(nodeID, errMsg string, constraints []safety.SafetyConstraint) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Convert safety constraints to session format
+	constraintInfos := make([]SafetyConstraintInfo, len(constraints))
+	for i, c := range constraints {
+		constraintInfos[i] = SafetyConstraintInfo{
+			IssueCode: c.IssueCode,
+			Pattern:   c.Pattern,
+			Reason:    c.Reason,
+		}
+	}
+
+	violation := SafetyViolation{
+		NodeID:       nodeID,
+		ErrorMessage: errMsg,
+		Timestamp:    time.Now(),
+		Constraints:  constraintInfos,
+	}
+
+	s.safetyViolations = append(s.safetyViolations, violation)
+
+	// Keep only the last 10 violations to avoid unbounded growth
+	if len(s.safetyViolations) > 10 {
+		s.safetyViolations = s.safetyViolations[len(s.safetyViolations)-10:]
+	}
+
+	// Record metric
+	recordSafetyViolation(nodeID)
+}
+
+// GetSafetyViolations returns recent safety violations for CDCL learning.
+//
+// Description:
+//
+//	Returns safety violations that should be processed by CDCL as hard
+//	signals. Each violation contains constraints that encode patterns
+//	to avoid.
+//
+// Outputs:
+//
+//	[]SafetyViolation - Recent safety violations, or nil if none.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetSafetyViolations() []SafetyViolation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(s.safetyViolations) == 0 {
+		return nil
+	}
+
+	// Return a copy to avoid race conditions
+	result := make([]SafetyViolation, len(s.safetyViolations))
+	copy(result, s.safetyViolations)
+	return result
+}
+
+// ClearSafetyViolations clears all recorded safety violations.
+//
+// Description:
+//
+//	Call this after CDCL has processed the violations or when starting
+//	a new query.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) ClearSafetyViolations() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.safetyViolations = nil
+}
+
+// HasPendingSafetyViolations returns true if there are unprocessed violations.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) HasPendingSafetyViolations() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.safetyViolations) > 0
+}
+
 // GetRecentToolErrors returns recent tool failures for router feedback.
 //
 // Thread Safety: This method is safe for concurrent use.
@@ -1160,4 +1346,54 @@ func (s *Session) GetTraceSteps() []crs.TraceStep {
 	}
 
 	return recorder.GetSteps()
+}
+
+// -----------------------------------------------------------------------------
+// Safety Violation Metrics (Issue #6)
+// -----------------------------------------------------------------------------
+
+var (
+	sessionMeter = otel.Meter("aleutian.agent.session")
+
+	safetyViolationsTotal  metric.Int64Counter
+	safetyConstraintsTotal metric.Int64Counter
+
+	safetyMetricsOnce sync.Once
+	safetyMetricsErr  error
+)
+
+// initSafetyMetrics initializes safety-related metrics.
+func initSafetyMetrics() error {
+	safetyMetricsOnce.Do(func() {
+		var err error
+
+		safetyViolationsTotal, err = sessionMeter.Int64Counter(
+			"agent_safety_violations_total",
+			metric.WithDescription("Total safety violations recorded for CDCL learning"),
+		)
+		if err != nil {
+			safetyMetricsErr = err
+			return
+		}
+
+		safetyConstraintsTotal, err = sessionMeter.Int64Counter(
+			"agent_safety_constraints_total",
+			metric.WithDescription("Total safety-derived constraints extracted"),
+		)
+		if err != nil {
+			safetyMetricsErr = err
+			return
+		}
+	})
+	return safetyMetricsErr
+}
+
+// recordSafetyViolation records a safety violation metric.
+func recordSafetyViolation(nodeID string) {
+	if err := initSafetyMetrics(); err != nil {
+		return
+	}
+	safetyViolationsTotal.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("node_id", nodeID),
+	))
 }

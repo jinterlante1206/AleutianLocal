@@ -223,3 +223,38 @@ func (a *PlannedAction) Clone() *PlannedAction {
 		// validated and projectRoot are not copied - clone needs re-validation
 	}
 }
+
+// HasSideEffects returns true if this action modifies the filesystem.
+//
+// Description:
+//
+//	Actions with side effects (edit, create, delete) modify files on disk.
+//	These must be serialized in parallel MCTS to prevent corruption.
+//	Read-only actions (run_test) can safely run in parallel.
+//
+// Outputs:
+//
+//	bool - True if action writes to filesystem.
+//
+// Thread Safety: Safe for concurrent use.
+func (a *PlannedAction) HasSideEffects() bool {
+	if a == nil {
+		return false
+	}
+	switch a.Type {
+	case ActionTypeEdit, ActionTypeCreate, ActionTypeDelete:
+		return true
+	case ActionTypeRunTest:
+		return false
+	default:
+		// Unknown action types are treated as having side effects for safety
+		return true
+	}
+}
+
+// IsReadOnly returns true if this action only reads without modifying state.
+//
+// Thread Safety: Safe for concurrent use.
+func (a *PlannedAction) IsReadOnly() bool {
+	return !a.HasSideEffects()
+}

@@ -130,8 +130,8 @@ func extractProofUpdates(delta crs.Delta, depth int) []crs.ProofUpdate {
 			proof := d.Updates[nodeID]
 			updates = append(updates, crs.ProofUpdate{
 				NodeID: nodeID,
-				Status: proof.Status.String(),
-				Source: proof.Source.String(),
+				Status: proof.Status.String(), // Keep string for backwards compat
+				Source: proof.Source,          // Use typed SignalSource
 			})
 		}
 
@@ -193,7 +193,7 @@ func extractConstraints(delta crs.Delta, depth int) []crs.ConstraintUpdate {
 
 			updates = append(updates, crs.ConstraintUpdate{
 				ID:    c.ID,
-				Type:  c.Type.String(),
+				Type:  c.Type, // Use typed ConstraintType
 				Nodes: nodes,
 			})
 		}
@@ -213,7 +213,7 @@ func extractConstraints(delta crs.Delta, depth int) []crs.ConstraintUpdate {
 
 				updates = append(updates, crs.ConstraintUpdate{
 					ID:    c.ID,
-					Type:  c.Type.String(),
+					Type:  c.Type, // Use typed ConstraintType
 					Nodes: nodes,
 				})
 			}
