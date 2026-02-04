@@ -18,6 +18,8 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
@@ -51,6 +53,9 @@ type DefaultDependenciesFactory struct {
 
 	// enableTools enables ToolRegistry creation when graph is available
 	enableTools bool
+
+	// enableCoordinator enables MCTS activity coordination
+	enableCoordinator bool
 }
 
 // DependenciesFactoryOption configures a DefaultDependenciesFactory.
@@ -150,6 +155,27 @@ func WithResponseGrounder(grounder grounding.Grounder) DependenciesFactoryOption
 	}
 }
 
+// WithCoordinatorEnabled enables MCTS activity coordination.
+//
+// Description:
+//
+//	When enabled, Creates a Coordinator for each session that orchestrates
+//	MCTS activities (Search, Learning, Constraint, Planning, Awareness,
+//	Similarity, Streaming, Memory) in response to agent events.
+//
+// Inputs:
+//
+//	enabled - Whether to enable the coordinator.
+//
+// Outputs:
+//
+//	DependenciesFactoryOption - The configuration function.
+func WithCoordinatorEnabled(enabled bool) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.enableCoordinator = enabled
+	}
+}
+
 // Create implements agent.DependenciesFactory.
 //
 // Description:
@@ -246,6 +272,29 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 				}
 			}
 		}
+	}
+
+	// Create Coordinator if enabled
+	if f.enableCoordinator {
+		// Create CRS for this session
+		sessionCRS := crs.New(nil)
+
+		// Create Bridge connecting activities to CRS
+		bridge := integration.NewBridge(sessionCRS, nil)
+
+		// Create Coordinator with default configuration
+		coordConfig := integration.DefaultCoordinatorConfig()
+		coordConfig.EnableTracing = true
+		coordConfig.EnableMetrics = true
+		coordConfig.ActivityConfigs = integration.DefaultActivityConfigs()
+
+		coordinator := integration.NewCoordinator(bridge, coordConfig)
+
+		deps.Coordinator = coordinator
+
+		slog.Info("Coordinator created for session",
+			slog.String("session_id", session.ID),
+		)
 	}
 
 	return deps, nil
