@@ -12,6 +12,7 @@ package crs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -287,7 +288,8 @@ func (c *crsImpl) applyCore(ctx context.Context, delta Delta, spanName string) (
 		c.applyErrorCount.Add(1)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "apply failed")
-		return metrics, fmt.Errorf("%w: %w", ErrApplyRollback, err)
+		// Include delta type in error for debugging (P3 fix: C1)
+		return metrics, fmt.Errorf("%w (delta type: %s): %w", ErrApplyRollback, delta.Type(), err)
 	}
 
 	// Increment generation
@@ -578,6 +580,174 @@ func (c *crsImpl) Restore(ctx context.Context, cp Checkpoint) error {
 	)
 
 	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Disk Persistence Methods (GR-33)
+// -----------------------------------------------------------------------------
+
+// SaveCheckpointToDisk persists current state to disk.
+//
+// Description:
+//
+//	Creates a checkpoint and saves it to disk via the persistence
+//	manager. This is the primary method for cross-session persistence.
+//	Also triggers a journal checkpoint to clear old deltas.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - pm: Persistence manager. Must not be nil.
+//   - projectHash: Project identifier. Must be valid (8-64 hex chars).
+//   - journal: The journal to backup. Must not be nil.
+//
+// Outputs:
+//   - *BackupMetadata: Metadata about the created backup.
+//   - error: Non-nil on failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	if pm == nil {
+		return nil, fmt.Errorf("persistence manager must not be nil")
+	}
+	if journal == nil {
+		return nil, fmt.Errorf("journal must not be nil")
+	}
+
+	// Start tracing
+	ctx, span := otel.Tracer("crs").Start(ctx, "crs.SaveCheckpointToDisk",
+		trace.WithAttributes(
+			attribute.String("project_hash", projectHash),
+		),
+	)
+	defer span.End()
+
+	// First create in-memory checkpoint
+	checkpoint, err := c.Checkpoint(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "create checkpoint failed")
+		return nil, fmt.Errorf("create checkpoint: %w", err)
+	}
+
+	// Checkpoint the journal to clear old deltas
+	if err := journal.Checkpoint(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "journal checkpoint failed")
+		return nil, fmt.Errorf("journal checkpoint: %w", err)
+	}
+
+	// Save to disk
+	opts := &BackupOptions{
+		SessionID: checkpoint.ID, // Use checkpoint ID as session identifier
+	}
+	metadata, err := pm.SaveBackup(ctx, projectHash, journal, opts)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "save backup failed")
+		return nil, fmt.Errorf("save backup: %w", err)
+	}
+
+	span.SetAttributes(
+		attribute.Int64("generation", metadata.Generation),
+		attribute.Int64("compressed_size", metadata.CompressedSize),
+	)
+
+	c.logger.Info("checkpoint saved to disk",
+		slog.String("project_hash", projectHash),
+		slog.Int64("generation", metadata.Generation),
+		slog.Int64("compressed_bytes", metadata.CompressedSize),
+	)
+
+	return metadata, nil
+}
+
+// LoadCheckpointFromDisk restores state from disk.
+//
+// Description:
+//
+//	Loads a backup and replays the journal to restore CRS state.
+//	Returns nil if no backup exists (first run).
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - pm: Persistence manager. Must not be nil.
+//   - projectHash: Project identifier. Must be valid (8-64 hex chars).
+//   - journal: Journal to restore.
+//
+// Outputs:
+//   - *BackupMetadata: Metadata about restored backup, nil if none.
+//   - error: Non-nil on failure (not on missing backup).
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) LoadCheckpointFromDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	if pm == nil {
+		return nil, fmt.Errorf("persistence manager must not be nil")
+	}
+	if journal == nil {
+		return nil, fmt.Errorf("journal must not be nil")
+	}
+
+	// Start tracing
+	ctx, span := otel.Tracer("crs").Start(ctx, "crs.LoadCheckpointFromDisk",
+		trace.WithAttributes(
+			attribute.String("project_hash", projectHash),
+		),
+	)
+	defer span.End()
+
+	// Attempt to load backup
+	metadata, err := pm.LoadBackup(ctx, projectHash, journal)
+	if errors.Is(err, ErrBackupNotFound) {
+		span.SetAttributes(attribute.Bool("backup_found", false))
+		c.logger.Info("no backup found, starting fresh",
+			slog.String("project_hash", projectHash),
+		)
+		return nil, nil // First run, no backup exists
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "load backup failed")
+		return nil, fmt.Errorf("load backup: %w", err)
+	}
+
+	span.SetAttributes(attribute.Bool("backup_found", true))
+
+	// Replay journal to restore CRS state
+	deltas, err := journal.Replay(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "replay journal failed")
+		return nil, fmt.Errorf("replay journal: %w", err)
+	}
+
+	// Apply all deltas
+	for i, delta := range deltas {
+		if _, err := c.Apply(ctx, delta); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "apply delta failed")
+			return nil, fmt.Errorf("apply delta %d: %w", i, err)
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int64("restored_generation", metadata.Generation),
+		attribute.Int("deltas_replayed", len(deltas)),
+	)
+
+	c.logger.Info("CRS state restored from disk",
+		slog.String("project_hash", projectHash),
+		slog.Int64("generation", metadata.Generation),
+		slog.Int("deltas_replayed", len(deltas)),
+		slog.Duration("backup_age", metadata.Age()),
+	)
+
+	return metadata, nil
 }
 
 // -----------------------------------------------------------------------------
