@@ -30,6 +30,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
@@ -150,6 +151,21 @@ type Dependencies struct {
 	// Optional - if nil, MCTS activity coordination is disabled.
 	// Use HandleEvent to emit events and trigger appropriate activities.
 	Coordinator *integration.Coordinator
+
+	// CRS is the Code Reasoning State for MCTS integration.
+	// Optional - if nil, CRS-based reasoning is disabled.
+	// Use for session restore, checkpoint management, and proof tracking.
+	CRS crs.CRS
+
+	// PersistenceManager handles CRS checkpoint storage.
+	// Optional - if nil, CRS persistence is disabled.
+	// GR-33/GR-36: Required for session restore and checkpoint save.
+	PersistenceManager *crs.PersistenceManager
+
+	// BadgerJournal stores CRS deltas for replay.
+	// Optional - if nil, delta journaling is disabled.
+	// GR-33/GR-36: Required for session restore to replay deltas.
+	BadgerJournal *crs.BadgerJournal
 }
 
 // GraphProvider initializes and provides access to the code graph.

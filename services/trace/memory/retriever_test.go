@@ -158,7 +158,7 @@ func TestCalculateScore(t *testing.T) {
 		},
 	}
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	t.Run("high confidence recent memory scores high", func(t *testing.T) {
 		memory := CodeMemory{
@@ -177,7 +177,7 @@ func TestCalculateScore(t *testing.T) {
 	t.Run("low confidence old memory scores low", func(t *testing.T) {
 		memory := CodeMemory{
 			Confidence: 0.1,
-			LastUsed:   now.Add(-365 * 24 * time.Hour), // 1 year ago
+			LastUsed:   time.Now().Add(-365 * 24 * time.Hour).UnixMilli(), // 1 year ago
 			Scope:      "pkg/*",
 		}
 
@@ -212,7 +212,7 @@ func TestCalculateScore(t *testing.T) {
 
 		oldMemory := CodeMemory{
 			Confidence: 0.5,
-			LastUsed:   now.Add(-60 * 24 * time.Hour), // 60 days ago
+			LastUsed:   time.Now().Add(-60 * 24 * time.Hour).UnixMilli(), // 60 days ago
 			Scope:      "*",
 		}
 

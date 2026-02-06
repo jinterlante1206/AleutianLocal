@@ -269,7 +269,7 @@ func TestProgressReporting(t *testing.T) {
 
 	// Verify progress time updated
 	newProgress := algo.LastProgress()
-	if !newProgress.After(initialProgress) {
+	if newProgress <= initialProgress {
 		t.Error("Progress time should have been updated")
 	}
 }
@@ -294,7 +294,7 @@ func TestReportProgress_Helper(t *testing.T) {
 	ReportProgress(ctx)
 
 	newProgress := algo.LastProgress()
-	if !newProgress.After(initialProgress) {
+	if newProgress <= initialProgress {
 		t.Error("ReportProgress helper should update progress time")
 	}
 }

@@ -18,6 +18,80 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 )
 
+// -----------------------------------------------------------------------------
+// Mock Implementations for Testing
+// -----------------------------------------------------------------------------
+
+type mockProofIndexView struct {
+	data map[string]crs.ProofNumber
+}
+
+func (m *mockProofIndexView) Get(nodeID string) (crs.ProofNumber, bool) {
+	pn, ok := m.data[nodeID]
+	return pn, ok
+}
+
+func (m *mockProofIndexView) All() map[string]crs.ProofNumber {
+	return m.data
+}
+
+func (m *mockProofIndexView) Size() int {
+	return len(m.data)
+}
+
+type mockDependencyIndexView struct {
+	edges map[string][]string
+}
+
+func (m *mockDependencyIndexView) DependsOn(nodeID string) []string {
+	if m.edges != nil {
+		return m.edges[nodeID]
+	}
+	return nil
+}
+
+func (m *mockDependencyIndexView) DependedBy(nodeID string) []string {
+	return nil
+}
+
+func (m *mockDependencyIndexView) HasCycle(nodeID string) bool {
+	return false
+}
+
+func (m *mockDependencyIndexView) Size() int {
+	count := 0
+	for _, deps := range m.edges {
+		count += len(deps)
+	}
+	return count
+}
+
+func (m *mockDependencyIndexView) AllEdges() map[string][]string {
+	return m.edges
+}
+
+func (m *mockDependencyIndexView) IsGraphBacked() bool {
+	return false
+}
+
+type mockSnapshot struct {
+	generation int64
+	createdAt  int64
+	proof      crs.ProofIndexView
+	dependency crs.DependencyIndexView
+}
+
+func (m *mockSnapshot) Generation() int64                        { return m.generation }
+func (m *mockSnapshot) CreatedAt() int64                         { return m.createdAt }
+func (m *mockSnapshot) ProofIndex() crs.ProofIndexView           { return m.proof }
+func (m *mockSnapshot) ConstraintIndex() crs.ConstraintIndexView { return nil }
+func (m *mockSnapshot) SimilarityIndex() crs.SimilarityIndexView { return nil }
+func (m *mockSnapshot) DependencyIndex() crs.DependencyIndexView { return m.dependency }
+func (m *mockSnapshot) HistoryIndex() crs.HistoryIndexView       { return nil }
+func (m *mockSnapshot) StreamingIndex() crs.StreamingIndexView   { return nil }
+func (m *mockSnapshot) Query() crs.QueryAPI                      { return nil }
+func (m *mockSnapshot) GraphQuery() crs.GraphQuery               { return nil }
+
 func setupPNMCTSTestCRS(t *testing.T) crs.CRS {
 	t.Helper()
 	c := crs.New(nil)
@@ -34,18 +108,39 @@ func setupPNMCTSTestCRS(t *testing.T) crs.CRS {
 		t.Fatalf("failed to apply proof delta: %v", err)
 	}
 
-	// Add dependency edges: root -> child1 -> leaf1, root -> child2
-	depDelta := crs.NewDependencyDelta(crs.SignalSourceHard)
-	depDelta.AddEdges = [][2]string{
-		{"root", "child1"},
-		{"root", "child2"},
-		{"child1", "leaf1"},
-	}
-	if _, err := c.Apply(ctx, depDelta); err != nil {
-		t.Fatalf("failed to apply dependency delta: %v", err)
-	}
+	// NOTE: GR-32 deprecated DependencyDelta.Apply(). Dependencies are now
+	// read from the graph. For tests that need dependencies, use
+	// setupPNMCTSTestSnapshot() instead.
 
 	return c
+}
+
+// setupPNMCTSTestSnapshot creates a mock snapshot with proof and dependency data.
+// This replaces the deprecated DependencyDelta.Apply() pattern.
+func setupPNMCTSTestSnapshot(t *testing.T) crs.Snapshot {
+	t.Helper()
+
+	now := time.Now().UnixMilli()
+
+	proofData := map[string]crs.ProofNumber{
+		"root":   {Proof: 10, Disproof: 5, Status: crs.ProofStatusExpanded, UpdatedAt: now},
+		"child1": {Proof: 5, Disproof: 3, Status: crs.ProofStatusUnknown, UpdatedAt: now},
+		"child2": {Proof: 8, Disproof: 4, Status: crs.ProofStatusUnknown, UpdatedAt: now},
+		"leaf1":  {Proof: 1, Disproof: 1, Status: crs.ProofStatusUnknown, UpdatedAt: now},
+	}
+
+	// Dependency edges: root -> child1 -> leaf1, root -> child2
+	edges := map[string][]string{
+		"root":   {"child1", "child2"},
+		"child1": {"leaf1"},
+	}
+
+	return &mockSnapshot{
+		generation: 1,
+		createdAt:  now,
+		proof:      &mockProofIndexView{data: proofData},
+		dependency: &mockDependencyIndexView{edges: edges},
+	}
 }
 
 func TestNewPNMCTS(t *testing.T) {
@@ -72,9 +167,10 @@ func TestNewPNMCTS(t *testing.T) {
 }
 
 func TestPNMCTS_Process(t *testing.T) {
-	c := setupPNMCTSTestCRS(t)
+	// Use mock snapshot instead of CRS.Snapshot() to test with dependency edges.
+	// GR-32 deprecated DependencyDelta.Apply(), so we need mocks.
+	snapshot := setupPNMCTSTestSnapshot(t)
 	ctx := context.Background()
-	snapshot := c.Snapshot()
 
 	algo := NewPNMCTS(nil)
 
@@ -149,9 +245,9 @@ func TestPNMCTS_Process(t *testing.T) {
 }
 
 func TestPNMCTS_ProofNumberUpdate(t *testing.T) {
-	c := setupPNMCTSTestCRS(t)
+	// Use mock snapshot instead of CRS.Snapshot() to test with dependency edges.
+	snapshot := setupPNMCTSTestSnapshot(t)
 	ctx := context.Background()
-	snapshot := c.Snapshot()
 
 	algo := NewPNMCTS(nil)
 

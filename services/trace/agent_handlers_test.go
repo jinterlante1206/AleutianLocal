@@ -73,8 +73,8 @@ func (m *MockAgentLoop) GetState(sessionID string) (*agent.SessionState, error) 
 		ID:           sessionID,
 		ProjectRoot:  "/test/project",
 		State:        agent.StateComplete,
-		CreatedAt:    time.Now(),
-		LastActiveAt: time.Now(),
+		CreatedAt:    time.Now().UnixMilli(),
+		LastActiveAt: time.Now().UnixMilli(),
 	}, nil
 }
 
@@ -349,8 +349,8 @@ func TestAgentHandlers_HandleAgentState_Success(t *testing.T) {
 				State:        agent.StateExecute,
 				StepCount:    5,
 				TokensUsed:   2000,
-				CreatedAt:    time.Now().Add(-5 * time.Minute),
-				LastActiveAt: time.Now(),
+				CreatedAt:    time.Now().Add(-5 * time.Minute).UnixMilli(),
+				LastActiveAt: time.Now().UnixMilli(),
 			}, nil
 		},
 	}

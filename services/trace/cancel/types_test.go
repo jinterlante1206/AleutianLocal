@@ -359,7 +359,7 @@ func TestResourceLimits_HasLimits(t *testing.T) {
 }
 
 func TestCancelReason(t *testing.T) {
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	reason := CancelReason{
 		Type:      CancelTimeout,
 		Message:   "Test timeout",
@@ -380,7 +380,7 @@ func TestCancelReason(t *testing.T) {
 	if reason.Component != "test-algo" {
 		t.Errorf("Component = %v, want 'test-algo'", reason.Component)
 	}
-	if !reason.Timestamp.Equal(now) {
+	if reason.Timestamp != now {
 		t.Errorf("Timestamp = %v, want %v", reason.Timestamp, now)
 	}
 }

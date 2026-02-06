@@ -32,6 +32,11 @@ const (
 	// Triggers: Memory (initialize history), Streaming (initialize sketches)
 	EventSessionStart AgentEvent = "session_start"
 
+	// EventSessionRestored is emitted when a session is restored from checkpoint.
+	// Triggers: Memory (load history), Awareness (recompute analytics)
+	// GR-36: Added for session restore coordination.
+	EventSessionRestored AgentEvent = "session_restored"
+
 	// EventQueryReceived is emitted when a user query is received.
 	// Triggers: Similarity (find similar queries), Planning (decompose task), Search (select first tool)
 	EventQueryReceived AgentEvent = "query_received"
@@ -112,6 +117,18 @@ type EventData struct {
 
 	// Metadata contains additional event-specific data.
 	Metadata map[string]any
+
+	// Generation is the CRS generation (for restore events).
+	// GR-36: Used by EventSessionRestored.
+	Generation int64
+
+	// CheckpointAge is the age of restored checkpoint in milliseconds.
+	// GR-36: Used by EventSessionRestored.
+	CheckpointAgeMs int64
+
+	// ModifiedFileCount is the number of files modified since checkpoint.
+	// GR-36: Used by EventSessionRestored.
+	ModifiedFileCount int
 }
 
 // =============================================================================
@@ -143,6 +160,11 @@ var EventActivityMapping = map[AgentEvent][]ActivityName{
 	EventSessionStart: {
 		ActivityMemory,    // Initialize history
 		ActivityStreaming, // Initialize sketches
+	},
+	EventSessionRestored: {
+		ActivityMemory,    // Load restored history
+		ActivityAwareness, // Recompute graph analytics with restored state
+		ActivityStreaming, // Restore streaming statistics
 	},
 	EventQueryReceived: {
 		ActivitySimilarity, // Find similar past queries
