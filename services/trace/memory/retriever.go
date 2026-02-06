@@ -291,7 +291,7 @@ func (r *MemoryRetriever) parseAndRankResults(result *models.GraphQLResponse, sc
 	}
 
 	results := make([]RetrieveResult, 0, len(objects))
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	for _, obj := range objects {
 		m, ok := obj.(map[string]interface{})
@@ -313,13 +313,13 @@ func (r *MemoryRetriever) parseAndRankResults(result *models.GraphQLResponse, sc
 
 		if createdStr := getString(m, "createdAt"); createdStr != "" {
 			if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
-				memory.CreatedAt = t
+				memory.CreatedAt = t.UnixMilli()
 			}
 		}
 
 		if lastUsedStr := getString(m, "lastUsed"); lastUsedStr != "" {
 			if t, err := time.Parse(time.RFC3339, lastUsedStr); err == nil {
-				memory.LastUsed = t
+				memory.LastUsed = t.UnixMilli()
 			}
 		}
 
@@ -349,12 +349,12 @@ func (r *MemoryRetriever) parseAndRankResults(result *models.GraphQLResponse, sc
 }
 
 // calculateScore computes the combined ranking score.
-func (r *MemoryRetriever) calculateScore(memory CodeMemory, relevance float64, now time.Time, scope string) float64 {
+func (r *MemoryRetriever) calculateScore(memory CodeMemory, relevance float64, now int64, scope string) float64 {
 	// Confidence score (0-1)
 	confidenceScore := memory.Confidence
 
 	// Recency score (0-1) with exponential decay
-	daysSinceUse := now.Sub(memory.LastUsed).Hours() / 24
+	daysSinceUse := (time.Duration(now-memory.LastUsed) * time.Millisecond).Hours() / 24
 	recencyScore := math.Exp(-daysSinceUse / r.config.RecencyDecayDays)
 
 	// Relevance score (0-1) from semantic search

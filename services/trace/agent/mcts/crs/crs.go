@@ -62,6 +62,18 @@ type crsImpl struct {
 	clauseData   map[string]*Clause
 	clauseConfig ClausePersistence
 
+	// Delta history (GR-35) - channel-based, no lock needed
+	deltaHistory *DeltaHistoryWorker
+
+	// Current session ID for delta history tracking
+	currentSessionID string
+
+	// Graph provider (GR-28) - protected by mu
+	graphProvider GraphQuery
+
+	// Graph-backed dependency index (GR-32) - protected by mu
+	graphBackedDepIndex *GraphBackedDependencyIndex
+
 	// StepRecord data (CRS-01) - separate lock for step recording
 	// Uses per-session locking for better concurrency
 	stepMu   sync.RWMutex
@@ -72,6 +84,9 @@ type crsImpl struct {
 	applyCount      atomic.Int64
 	applyErrorCount atomic.Int64
 	stepRecordCount atomic.Int64
+
+	// GR-32 Code Review Fix: Rate-limit DependencyDelta deprecation warning
+	depDeltaWarnOnce sync.Once
 }
 
 // sessionSteps holds step records for a single session.
@@ -102,9 +117,11 @@ func New(config *Config) CRS {
 		config = DefaultConfig()
 	}
 
+	logger := slog.Default().With(slog.String("component", "crs"))
+
 	return &crsImpl{
 		config:         config,
-		logger:         slog.Default().With(slog.String("component", "crs")),
+		logger:         logger,
 		proofData:      make(map[string]ProofNumber),
 		constraintData: make(map[string]Constraint),
 		similarityData: make(map[string]map[string]float64),
@@ -113,6 +130,7 @@ func New(config *Config) CRS {
 		streamingData:  newStreamingStats(),
 		clauseData:     make(map[string]*Clause),
 		clauseConfig:   DefaultClauseConfig,
+		deltaHistory:   NewDeltaHistoryWorker(DefaultMaxDeltaRecords, logger),
 		stepData:       make(map[string]*sessionSteps),
 	}
 }
@@ -128,7 +146,7 @@ func (c *crsImpl) Snapshot() Snapshot {
 
 	c.snapshotCount.Add(1)
 
-	return newSnapshot(
+	snap := newSnapshot(
 		c.generation.Load(),
 		c.proofData,
 		c.constraintData,
@@ -138,10 +156,40 @@ func (c *crsImpl) Snapshot() Snapshot {
 		c.streamingData,
 		c.clauseData,
 	)
+
+	// GR-28: Include graph provider in snapshot
+	snap.setGraphQuery(c.graphProvider)
+
+	// GR-32: Include graph-backed dependency index in snapshot
+	snap.setGraphBackedDepIndex(c.graphBackedDepIndex)
+
+	return snap
 }
 
 // Apply atomically applies a delta to the state.
 func (c *crsImpl) Apply(ctx context.Context, delta Delta) (ApplyMetrics, error) {
+	metrics, err := c.applyCore(ctx, delta, "crs.Apply")
+	if err != nil {
+		return metrics, err
+	}
+
+	// Record in delta history with default source (GR-35)
+	if c.deltaHistory != nil {
+		c.deltaHistory.Record(
+			delta,
+			metrics.NewGeneration,
+			delta.Source().String(), // Use signal source as default
+			c.currentSessionID,
+			nil,
+		)
+	}
+
+	return metrics, nil
+}
+
+// applyCore performs the core apply logic without recording to delta history.
+// Used by both Apply and ApplyWithSource to avoid duplicate recording.
+func (c *crsImpl) applyCore(ctx context.Context, delta Delta, spanName string) (ApplyMetrics, error) {
 	if ctx == nil {
 		return ApplyMetrics{}, ErrNilContext
 	}
@@ -157,7 +205,7 @@ func (c *crsImpl) Apply(ctx context.Context, delta Delta) (ApplyMetrics, error) 
 	}
 
 	// Start tracing
-	ctx, span := otel.Tracer("crs").Start(ctx, "crs.Apply",
+	ctx, span := otel.Tracer("crs").Start(ctx, spanName,
 		trace.WithAttributes(
 			attribute.String("delta_type", delta.Type().String()),
 			attribute.String("source", delta.Source().String()),
@@ -268,6 +316,146 @@ func (c *crsImpl) Generation() int64 {
 	return c.generation.Load()
 }
 
+// SetSessionID sets the current session ID for delta history tracking.
+//
+// Description:
+//
+//	Deltas recorded via Apply() will be associated with this session ID.
+//	Call this at the start of each agent session.
+//
+// Inputs:
+//   - sessionID: The session identifier. Can be empty to clear.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) SetSessionID(sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.currentSessionID = sessionID
+}
+
+// ApplyWithSource applies a delta with explicit source and metadata tracking.
+//
+// Description:
+//
+//	Like Apply(), but allows specifying a custom source string and metadata
+//	for delta history recording. Use this when you want to track which
+//	activity or component caused the delta.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - delta: The delta to apply. Must not be nil.
+//   - source: Human-readable source identifier (e.g., "AwarenessActivity").
+//   - metadata: Optional additional context for the delta.
+//
+// Outputs:
+//   - ApplyMetrics: Metrics about the apply operation.
+//   - error: Non-nil on validation failure or apply error.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) ApplyWithSource(ctx context.Context, delta Delta, source string, metadata map[string]string) (ApplyMetrics, error) {
+	// Use core apply logic (does not record to delta history)
+	metrics, err := c.applyCore(ctx, delta, "crs.ApplyWithSource")
+	if err != nil {
+		return metrics, err
+	}
+
+	// Record with explicit source and metadata (GR-35)
+	// Only one record is created, unlike if we called Apply
+	if c.deltaHistory != nil {
+		c.deltaHistory.Record(
+			delta,
+			metrics.NewGeneration,
+			source,
+			c.currentSessionID,
+			metadata,
+		)
+	}
+
+	return metrics, nil
+}
+
+// DeltaHistory returns the delta history worker for querying.
+//
+// Outputs:
+//   - DeltaHistoryView: Read-only view of delta history. May be nil if not initialized.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) DeltaHistory() DeltaHistoryView {
+	return c.deltaHistory
+}
+
+// Close releases resources held by the CRS.
+//
+// Description:
+//
+//	Stops the delta history worker goroutine. Should be called when the
+//	CRS is no longer needed to prevent goroutine leaks.
+//
+// Thread Safety: Safe for concurrent use. Idempotent.
+func (c *crsImpl) Close() {
+	if c.deltaHistory != nil {
+		c.deltaHistory.Close()
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Graph Integration Methods (GR-28)
+// -----------------------------------------------------------------------------
+
+// SetGraphProvider sets the graph query provider.
+//
+// Description:
+//
+//	Registers a GraphQuery implementation that will be included in all
+//	future snapshots. Activities can then call snapshot.GraphQuery() to
+//	access the actual code graph.
+//
+//	Call this after the graph is initialized and after graph refreshes
+//	to update the adapter with the new graph state.
+//
+// Inputs:
+//   - provider: The graph query implementation. May be nil to clear.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) SetGraphProvider(provider GraphQuery) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Close old provider if it exists and is different
+	if c.graphProvider != nil && c.graphProvider != provider {
+		if err := c.graphProvider.Close(); err != nil {
+			c.logger.Warn("failed to close old graph provider",
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
+	c.graphProvider = provider
+
+	// GR-32: Create graph-backed dependency index
+	if provider != nil {
+		depIndex, err := NewGraphBackedDependencyIndex(provider)
+		if err != nil {
+			c.logger.Error("failed to create graph-backed dependency index",
+				slog.String("error", err.Error()),
+			)
+			c.graphBackedDepIndex = nil
+		} else {
+			c.graphBackedDepIndex = depIndex
+			c.logger.Info("graph-backed dependency index created")
+		}
+
+		c.logger.Info("graph provider set",
+			slog.Int("node_count", provider.NodeCount()),
+			slog.Int("edge_count", provider.EdgeCount()),
+			slog.Int64("generation", provider.Generation()),
+		)
+	} else {
+		c.graphBackedDepIndex = nil
+		c.logger.Info("graph provider cleared")
+	}
+}
+
 // Checkpoint creates a restorable checkpoint.
 func (c *crsImpl) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	if ctx == nil {
@@ -298,7 +486,7 @@ func (c *crsImpl) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	return Checkpoint{
 		ID:         uuid.New().String(),
 		Generation: c.generation.Load(),
-		CreatedAt:  time.Now(),
+		CreatedAt:  time.Now().UnixMilli(),
 		data:       snap,
 	}, nil
 }
@@ -379,7 +567,7 @@ func (c *crsImpl) applyProofDelta(d *ProofDelta, metrics *ApplyMetrics) error {
 		c.proofData[nodeID] = proof
 		metrics.EntriesModified++
 	}
-	metrics.IndexesUpdated = append(metrics.IndexesUpdated, "proof")
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexProof)
 	return nil
 }
 
@@ -402,7 +590,7 @@ func (c *crsImpl) applyConstraintDelta(d *ConstraintDelta, metrics *ApplyMetrics
 		metrics.EntriesModified++
 	}
 
-	metrics.IndexesUpdated = append(metrics.IndexesUpdated, "constraint")
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexConstraint)
 	return nil
 }
 
@@ -415,37 +603,31 @@ func (c *crsImpl) applySimilarityDelta(d *SimilarityDelta, metrics *ApplyMetrics
 		c.similarityData[node1][node2] = dist
 		metrics.EntriesModified++
 	}
-	metrics.IndexesUpdated = append(metrics.IndexesUpdated, "similarity")
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexSimilarity)
 	return nil
 }
 
 func (c *crsImpl) applyDependencyDelta(d *DependencyDelta, metrics *ApplyMetrics) error {
-	// Remove edges first
-	for _, edge := range d.RemoveEdges {
-		from, to := edge[0], edge[1]
-		if deps, ok := c.dependencyData.forward[from]; ok {
-			delete(deps, to)
-		}
-		if deps, ok := c.dependencyData.reverse[to]; ok {
-			delete(deps, from)
-		}
-		metrics.EntriesModified++
+	// GR-32: No-op - dependencies are now read from the graph directly via
+	// GraphBackedDependencyIndex. This method is deprecated.
+	//
+	// The DependencyDelta type is kept for journal backward compatibility but
+	// has no effect. All dependency queries now go through the graph.
+	if len(d.AddEdges) > 0 || len(d.RemoveEdges) > 0 {
+		// GR-32 Code Review Fix: Rate-limit warning to once per CRS instance
+		c.depDeltaWarnOnce.Do(func() {
+			c.logger.Warn("DependencyDelta.Apply is deprecated (GR-32); dependencies come from graph. This warning will only appear once.")
+		})
 	}
 
-	// Add edges
-	for _, edge := range d.AddEdges {
-		c.dependencyData.addEdge(edge[0], edge[1])
-		metrics.EntriesModified++
-	}
-
-	metrics.IndexesUpdated = append(metrics.IndexesUpdated, "dependency")
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexDependency)
 	return nil
 }
 
 func (c *crsImpl) applyHistoryDelta(d *HistoryDelta, metrics *ApplyMetrics) error {
 	c.historyData = append(c.historyData, d.Entries...)
 	metrics.EntriesModified += len(d.Entries)
-	metrics.IndexesUpdated = append(metrics.IndexesUpdated, "history")
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexHistory)
 	return nil
 }
 
@@ -472,7 +654,7 @@ func (c *crsImpl) applyStreamingDelta(d *StreamingDelta, metrics *ApplyMetrics) 
 		metrics.EntriesModified++
 	}
 
-	metrics.IndexesUpdated = append(metrics.IndexesUpdated, "streaming")
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexStreaming)
 	return nil
 }
 
@@ -725,8 +907,8 @@ func (c *crsImpl) RecordStep(ctx context.Context, step StepRecord) error {
 	}
 
 	// Auto-set timestamp if not set (BEFORE validation)
-	if step.Timestamp.IsZero() {
-		step.Timestamp = time.Now()
+	if step.Timestamp == 0 {
+		step.Timestamp = time.Now().UnixMilli()
 	}
 
 	// Validate the step AFTER auto-assignment
@@ -964,7 +1146,7 @@ func (c *crsImpl) UpdateProofNumber(ctx context.Context, update ProofUpdate) err
 			Disproof:  DefaultInitialProofNumber,
 			Status:    ProofStatusUnknown,
 			Source:    update.Source,
-			UpdatedAt: time.Now(),
+			UpdatedAt: time.Now().UnixMilli(),
 		}
 	}
 
@@ -1015,7 +1197,7 @@ func (c *crsImpl) UpdateProofNumber(ctx context.Context, update ProofUpdate) err
 	}
 
 	pn.Source = update.Source
-	pn.UpdatedAt = time.Now()
+	pn.UpdatedAt = time.Now().UnixMilli()
 	c.proofData[update.NodeID] = pn
 
 	c.logger.Debug("proof number updated",
@@ -1135,6 +1317,12 @@ func (c *crsImpl) PropagateDisproof(ctx context.Context, nodeID string) int {
 	queue := []queueItem{{nodeID, 0}}
 	affected := 0
 
+	// GR-32 Code Review Fix: Take snapshot ONCE before the loop to avoid
+	// creating deep copies on every BFS iteration. The DependencyIndex delegates
+	// to the live graph, so this is safe.
+	snap := c.Snapshot()
+	depIndex := snap.DependencyIndex()
+
 	for len(queue) > 0 {
 		// Check cancellation
 		select {
@@ -1153,14 +1341,8 @@ func (c *crsImpl) PropagateDisproof(ctx context.Context, nodeID string) int {
 		}
 		visited[current.id] = true
 
-		// Get parent decisions that led to this node
-		c.mu.RLock()
-		parents := c.dependencyData.reverse[current.id]
-		parentList := make([]string, 0, len(parents))
-		for parent := range parents {
-			parentList = append(parentList, parent)
-		}
-		c.mu.RUnlock()
+		// Get parent decisions that led to this node (GR-32: use DependencyIndex)
+		parentList := depIndex.DependedBy(current.id)
 
 		for _, parentID := range parentList {
 			if visited[parentID] {
@@ -1246,7 +1428,7 @@ func (c *crsImpl) AddClause(ctx context.Context, clause *Clause) error {
 		if c.isSemanticDuplicate(existing, clause) {
 			// Update existing instead of adding duplicate
 			existing.UseCount++
-			existing.LastUsed = time.Now()
+			existing.LastUsed = time.Now().UnixMilli()
 			span.SetAttributes(attribute.Bool("duplicate", true))
 			c.logger.Debug("clause duplicate detected, updating existing",
 				slog.String("existing_id", existing.ID),
@@ -1262,9 +1444,9 @@ func (c *crsImpl) AddClause(ctx context.Context, clause *Clause) error {
 	}
 
 	// Add clause with timestamps
-	now := time.Now()
-	clause.LearnedAt = now
-	clause.LastUsed = now // CR-2: Initialize LastUsed to prevent immediate LRU eviction
+	nowMillis := time.Now().UnixMilli()
+	clause.LearnedAt = nowMillis
+	clause.LastUsed = nowMillis // CR-2: Initialize LastUsed to prevent immediate LRU eviction
 	c.clauseData[clause.ID] = clause
 
 	span.SetAttributes(attribute.Int("total_clauses", len(c.clauseData)))
@@ -1318,10 +1500,11 @@ func (c *crsImpl) isSemanticDuplicate(a, b *Clause) bool {
 // Caller must hold c.mu write lock.
 func (c *crsImpl) evictLRUClauseLocked() {
 	var lruID string
-	var lruTime time.Time
+	var lruTime int64 = 0 // Unix milliseconds; 0 is invalid, so first clause always wins
 
 	for id, clause := range c.clauseData {
-		if lruID == "" || clause.LastUsed.Before(lruTime) {
+		// Find the clause with the smallest (oldest) LastUsed timestamp
+		if lruID == "" || clause.LastUsed < lruTime {
 			lruID = id
 			lruTime = clause.LastUsed
 		}
@@ -1355,7 +1538,7 @@ func (c *crsImpl) CheckDecisionAllowed(sessionID string, tool string) (bool, str
 		if clause.IsViolated(assignment) {
 			// Update usage stats inline (we already hold the write lock)
 			clause.UseCount++
-			clause.LastUsed = time.Now()
+			clause.LastUsed = time.Now().UnixMilli()
 
 			return false, fmt.Sprintf("violates learned clause %s: %s", clause.ID, clause.String())
 		}
@@ -1428,12 +1611,13 @@ func (c *crsImpl) GarbageCollectClauses() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	now := time.Now()
+	nowMillis := time.Now().UnixMilli()
+	ttlMillis := c.clauseConfig.TTL.Milliseconds()
 	removed := 0
 
 	for id, clause := range c.clauseData {
 		// Check TTL
-		if now.Sub(clause.LearnedAt) > c.clauseConfig.TTL {
+		if nowMillis-clause.LearnedAt > ttlMillis {
 			delete(c.clauseData, id)
 			removed++
 		}

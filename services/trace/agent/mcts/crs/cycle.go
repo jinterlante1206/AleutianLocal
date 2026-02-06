@@ -455,7 +455,7 @@ func CheckCycleOnStep(
 	// Record circuit breaker step for cycle detection
 	cbStep := StepRecord{
 		StepNumber: cbStepNumber,
-		Timestamp:  time.Now(),
+		Timestamp:  time.Now().UnixMilli(),
 		SessionID:  step.SessionID,
 		Actor:      ActorSystem,
 		Decision:   DecisionCircuitBreaker,

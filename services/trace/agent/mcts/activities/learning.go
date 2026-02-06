@@ -133,6 +133,24 @@ func NewLearningInput(requestID, conflictNodeID string, source crs.SignalSource)
 	}
 }
 
+// SetErrorInfo sets the error information for learning.
+//
+// Description:
+//
+//	Adds error details that can be used by CDCL to generate more specific
+//	conflict clauses. The error category helps classify the type of failure.
+//
+// Inputs:
+//
+//	errorMsg - The error message.
+//	category - The error category for classification.
+//
+// Thread Safety: Not safe for concurrent use - call before passing to activity.
+func (i *LearningInput) SetErrorInfo(errorMsg string, category crs.ErrorCategory) {
+	i.ErrorMessage = errorMsg
+	i.ErrorType = string(category)
+}
+
 // -----------------------------------------------------------------------------
 // Activity Implementation
 // -----------------------------------------------------------------------------

@@ -14,6 +14,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 )
 
 // setupTestCRS creates a CRS with test data for query testing.
@@ -57,23 +59,24 @@ func setupTestCRS(t *testing.T) CRS {
 		t.Fatalf("failed to apply similarity delta: %v", err)
 	}
 
-	// Add dependency data
-	depDelta := NewDependencyDelta(SignalSourceHard)
-	depDelta.AddEdges = [][2]string{
-		{"node-1", "node-2"},
-		{"node-2", "node-3"},
-		{"node-3", "node-4"},
-		{"node-1", "node-5"},
-	}
-	if _, err := c.Apply(ctx, depDelta); err != nil {
-		t.Fatalf("failed to apply dependency delta: %v", err)
-	}
+	// GR-32: Set up dependency data via graph-backed index instead of DependencyDelta
+	// Dependency edges: node-1 -> {node-2, node-5}, node-2 -> node-3, node-3 -> node-4
+	mock := newMockGraphQuery()
+	mock.callees["node-1"] = []*ast.Symbol{{ID: "node-2"}, {ID: "node-5"}}
+	mock.callees["node-2"] = []*ast.Symbol{{ID: "node-3"}}
+	mock.callees["node-3"] = []*ast.Symbol{{ID: "node-4"}}
+	mock.callers["node-2"] = []*ast.Symbol{{ID: "node-1"}}
+	mock.callers["node-3"] = []*ast.Symbol{{ID: "node-2"}}
+	mock.callers["node-4"] = []*ast.Symbol{{ID: "node-3"}}
+	mock.callers["node-5"] = []*ast.Symbol{{ID: "node-1"}}
+	mock.callEdgeCount = 4
+	c.SetGraphProvider(mock)
 
 	// Add history data
 	histDelta := NewHistoryDelta(SignalSourceHard, []HistoryEntry{
-		{ID: "h1", NodeID: "node-1", Action: "select", Result: "success", Source: SignalSourceHard, Timestamp: time.Now().Add(-2 * time.Hour)},
-		{ID: "h2", NodeID: "node-2", Action: "expand", Result: "failure", Source: SignalSourceSoft, Timestamp: time.Now().Add(-1 * time.Hour)},
-		{ID: "h3", NodeID: "node-1", Action: "prune", Result: "success", Source: SignalSourceHard, Timestamp: time.Now()},
+		{ID: "h1", NodeID: "node-1", Action: "select", Result: "success", Source: SignalSourceHard, Timestamp: time.Now().Add(-2 * time.Hour).UnixMilli()},
+		{ID: "h2", NodeID: "node-2", Action: "expand", Result: "failure", Source: SignalSourceSoft, Timestamp: time.Now().Add(-1 * time.Hour).UnixMilli()},
+		{ID: "h3", NodeID: "node-1", Action: "prune", Result: "success", Source: SignalSourceHard, Timestamp: time.Now().UnixMilli()},
 	})
 	if _, err := c.Apply(ctx, histDelta); err != nil {
 		t.Fatalf("failed to apply history delta: %v", err)

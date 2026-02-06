@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -783,16 +784,31 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 
 		// Check timeout
 		if session.Config.TotalTimeout > 0 && time.Since(startTime) > session.Config.TotalTimeout {
+			elapsed := time.Since(startTime)
+
+			// cb_30b: Enhanced timeout diagnostics
+			// Log detailed information to help debug timeout issues
+			slog.Error("Session timeout exceeded",
+				slog.String("session_id", session.ID),
+				slog.Duration("elapsed", elapsed),
+				slog.Duration("timeout", session.Config.TotalTimeout),
+				slog.Int("steps_completed", session.Metrics.TotalSteps),
+				slog.Int("tokens_used", session.Metrics.TotalTokens),
+				slog.String("last_state", string(session.GetState())),
+			)
+
 			// LP-001: Record audit trail before setting error state
 			session.AddHistoryEntry(HistoryEntry{
 				Type:  "timeout",
-				Input: fmt.Sprintf("exceeded %v", session.Config.TotalTimeout),
+				Input: fmt.Sprintf("exceeded %v after %d steps", session.Config.TotalTimeout, session.Metrics.TotalSteps),
 				Error: ErrTimeout.Error(),
 			})
 			if transErr := l.transition(session, StateError, "timeout exceeded"); transErr != nil {
 				slog.Warn("Failed to transition to error state", slog.String("error", transErr.Error()))
 			}
-			return l.buildErrorResult(session, ErrTimeout, startTime), nil
+
+			// cb_30b: Return result with partial trace for debugging
+			return l.buildTimeoutResult(session, startTime, elapsed), nil
 		}
 
 		currentState := session.GetState()
@@ -983,6 +999,84 @@ func (l *DefaultAgentLoop) buildClarifyResult(session *Session, startTime time.T
 	}
 }
 
+// buildTimeoutResult creates a RunResult for a timed-out session.
+//
+// Description:
+//
+//	Creates a detailed error result for timeout cases with diagnostic information
+//	to help debug why the session timed out. Includes elapsed time, steps completed,
+//	and partial trace data. cb_30b enhancement for better timeout debugging.
+//
+// Inputs:
+//
+//	session - The timed-out session.
+//	startTime - When execution started.
+//	elapsed - Total elapsed time.
+//
+// Outputs:
+//
+//	*RunResult - Error result with timeout diagnostics.
+func (l *DefaultAgentLoop) buildTimeoutResult(session *Session, startTime time.Time, elapsed time.Duration) *RunResult {
+	// Build diagnostic message with partial progress
+	diagMsg := fmt.Sprintf(
+		"timeout after %v with %d steps completed, %d tokens used",
+		elapsed.Round(time.Millisecond),
+		session.Metrics.TotalSteps,
+		session.Metrics.TotalTokens,
+	)
+
+	// Try to get partial response from last assistant message
+	// cb_30b: Skip "[Tool calls: ...]" placeholder messages - they're not useful responses
+	partialResponse := ""
+	if ctx := session.GetCurrentContext(); ctx != nil && len(ctx.ConversationHistory) > 0 {
+		for i := len(ctx.ConversationHistory) - 1; i >= 0; i-- {
+			msg := ctx.ConversationHistory[i]
+			if msg.Role == "assistant" && msg.Content != "" {
+				// Skip tool call placeholder messages (cb_30b fix)
+				if strings.HasPrefix(msg.Content, "[Tool calls:") {
+					continue
+				}
+				partialResponse = msg.Content
+				break
+			}
+		}
+	}
+
+	result := &RunResult{
+		State:      StateError,
+		TokensUsed: session.Metrics.TotalTokens,
+		StepsTaken: session.Metrics.TotalSteps,
+		ToolsUsed:  l.collectToolInvocations(session),
+		Error: &AgentError{
+			Code:        "TIMEOUT",
+			Message:     diagMsg,
+			Recoverable: false,
+		},
+	}
+
+	// If we have a partial response, include it in the result
+	// This allows the caller to see what progress was made
+	if partialResponse != "" {
+		result.Response = partialResponse + "\n\n*[Response incomplete due to timeout]*"
+	}
+
+	// Record timeout in CRS trace for debugging (cb_30b enhancement)
+	trace := session.GetReasoningTrace()
+	traceLen := 0
+	if trace != nil {
+		traceLen = len(trace.Trace)
+	}
+	slog.Info("buildTimeoutResult: timeout diagnostics",
+		slog.String("session_id", session.ID),
+		slog.Duration("elapsed", elapsed),
+		slog.Int("steps", session.Metrics.TotalSteps),
+		slog.Int("trace_steps", traceLen),
+		slog.Bool("has_partial", partialResponse != ""),
+	)
+
+	return result
+}
+
 // buildErrorResult creates a RunResult for an error.
 func (l *DefaultAgentLoop) buildErrorResult(session *Session, err error, startTime time.Time) *RunResult {
 	return &RunResult{
@@ -1020,8 +1114,10 @@ func (l *DefaultAgentLoop) collectToolInvocations(session *Session) []ToolInvoca
 // Description:
 //
 //	Walks backward through conversation history to find the most recent
-//	assistant message with actual content. Empty assistant messages (which
-//	can occur from context overflow during LLM calls) are skipped.
+//	assistant message with actual content. Skips:
+//	- Empty assistant messages (can occur from context overflow)
+//	- Tool call placeholder messages like "[Tool calls: Read, Grep]"
+//	  (cb_30b fix: these are internal bookkeeping, not user-facing responses)
 //
 // Inputs:
 //
@@ -1039,12 +1135,33 @@ func (l *DefaultAgentLoop) getLastAssistantMessage(session *Session) string {
 	for i := len(ctx.ConversationHistory) - 1; i >= 0; i-- {
 		msg := ctx.ConversationHistory[i]
 		// Skip empty assistant messages (can occur from context overflow)
-		if msg.Role == "assistant" && msg.Content != "" {
-			return msg.Content
+		if msg.Role != "assistant" || msg.Content == "" {
+			continue
 		}
+
+		// cb_30b fix: Skip tool call placeholder messages
+		// These are internal bookkeeping added by addAssistantToolCallToHistory()
+		// They should never be returned as the final response
+		if strings.HasPrefix(msg.Content, "[Tool calls:") {
+			slog.Debug("getLastAssistantMessage: skipping tool call placeholder",
+				slog.String("session_id", session.ID),
+				slog.String("content_preview", truncateForLog(msg.Content, 50)),
+			)
+			continue
+		}
+
+		return msg.Content
 	}
 
 	return ""
+}
+
+// truncateForLog truncates a string for logging purposes.
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // InMemorySessionStore is a simple in-memory session store.

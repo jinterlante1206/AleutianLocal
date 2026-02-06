@@ -159,7 +159,7 @@ func (c *MultiFileChangeCoordinator) PlanChanges(
 		Order:         make([]string, 0),
 		Warnings:      make([]string, 0),
 		Limitations:   make([]string, 0),
-		CreatedAt:     time.Now(),
+		CreatedAt:     time.Now().UnixMilli(),
 	}
 
 	// Get blast radius to find affected files

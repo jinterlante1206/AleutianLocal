@@ -135,11 +135,11 @@ type PlanStep struct {
 	// Status is the current state of the step.
 	Status StepStatus `json:"status"`
 
-	// StartedAt is when the step began execution.
-	StartedAt time.Time `json:"started_at,omitempty"`
+	// StartedAt is when the step began execution (Unix milliseconds UTC).
+	StartedAt int64 `json:"started_at,omitempty"`
 
-	// CompletedAt is when the step finished (done or skipped).
-	CompletedAt time.Time `json:"completed_at,omitempty"`
+	// CompletedAt is when the step finished (done or skipped) (Unix milliseconds UTC).
+	CompletedAt int64 `json:"completed_at,omitempty"`
 }
 
 // Finding represents a key discovery worth preserving.
@@ -153,8 +153,8 @@ type Finding struct {
 	// Source is the file:line or tool that produced this finding.
 	Source string `json:"source"`
 
-	// Timestamp is when the finding was recorded.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when the finding was recorded (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 }
 
 // PinnedStats contains metrics about the pinned block.
@@ -466,7 +466,7 @@ func (p *PinnedInstructions) UpdateStepStatus(position int, status StepStatus) e
 	oldStatus := p.currentPlan[position].Status
 	p.currentPlan[position].Status = status
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	if status == StepInProgress && oldStatus != StepInProgress {
 		p.currentPlan[position].StartedAt = now
 	}
@@ -530,8 +530,8 @@ func (p *PinnedInstructions) AddFinding(ctx context.Context, f Finding) error {
 	}
 
 	// Set timestamp if not set
-	if f.Timestamp.IsZero() {
-		f.Timestamp = time.Now()
+	if f.Timestamp == 0 {
+		f.Timestamp = time.Now().UnixMilli()
 	}
 
 	p.keyFindings = append(p.keyFindings, f)
@@ -1079,7 +1079,7 @@ func (p *PinnedInstructions) Compress(targetTokens int) int {
 		aggregated := Finding{
 			Summary:   fmt.Sprintf("Identified %d key findings (see trace for details)", len(p.keyFindings)),
 			Source:    "aggregated",
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 		}
 
 		// Keep at most 2 most recent findings plus aggregate

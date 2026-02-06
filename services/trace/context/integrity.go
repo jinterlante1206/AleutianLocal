@@ -258,7 +258,7 @@ func (c *IntegrityChecker) Repair(ctx context.Context, report *IntegrityReport) 
 		}
 		if ok {
 			summary.Level = mismatch.ExpectedLevel
-			summary.UpdatedAt = time.Now()
+			summary.UpdatedAt = time.Now().UnixMilli()
 			c.cache.Set(summary)
 			result.LevelsFixed++
 		}

@@ -138,8 +138,8 @@ type VerifyResult struct {
 	// AllFresh is true if all checked files are unchanged.
 	AllFresh bool
 
-	// CheckedAt is when the verification was performed.
-	CheckedAt time.Time
+	// CheckedAt is when the verification was performed (Unix milliseconds UTC).
+	CheckedAt int64
 
 	// Duration is how long the verification took.
 	Duration time.Duration
@@ -220,8 +220,8 @@ type RebuildProgress struct {
 	// Failed is the number of files that failed to rebuild.
 	Failed int
 
-	// StartedAt is when the rebuild started.
-	StartedAt time.Time
+	// StartedAt is when the rebuild started (Unix milliseconds UTC).
+	StartedAt int64
 }
 
 // Percent returns the completion percentage.
@@ -234,7 +234,7 @@ func (p RebuildProgress) Percent() float64 {
 
 // Elapsed returns the time since the rebuild started.
 func (p RebuildProgress) Elapsed() time.Duration {
-	return time.Since(p.StartedAt)
+	return time.Duration(time.Now().UnixMilli()-p.StartedAt) * time.Millisecond
 }
 
 // RebuildCallback is called to report rebuild progress.

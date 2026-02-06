@@ -281,6 +281,6 @@ func GenerateGraphID(projectRoot string) string {
 // failedBuild represents a cached build error.
 type failedBuild struct {
 	err      error
-	failedAt time.Time
-	retryAt  time.Time
+	failedAt int64 // Unix milliseconds UTC
+	retryAt  int64 // Unix milliseconds UTC
 }

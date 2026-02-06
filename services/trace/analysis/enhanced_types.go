@@ -10,8 +10,6 @@
 
 package analysis
 
-import "time"
-
 // EnhancedBlastRadius extends BlastRadius with additional analysis dimensions.
 //
 // # Description
@@ -67,8 +65,8 @@ type EnhancedBlastRadius struct {
 	// Useful for debugging partial results.
 	EnricherResults []EnricherResult `json:"enricher_results,omitempty"`
 
-	// AnalyzedAt is when this analysis was performed.
-	AnalyzedAt time.Time `json:"analyzed_at"`
+	// AnalyzedAt is when this analysis was performed (Unix milliseconds UTC).
+	AnalyzedAt int64 `json:"analyzed_at"`
 
 	// GraphGeneration is the graph version used for analysis.
 	// Used for cache invalidation.
@@ -187,8 +185,8 @@ type ChurnScore struct {
 	// issue references (e.g., "#123") in the last 90 days.
 	BugReportsLinked int `json:"bug_reports_linked"`
 
-	// LastModified is when the file was last changed.
-	LastModified time.Time `json:"last_modified"`
+	// LastModified is when the file was last changed (Unix milliseconds UTC).
+	LastModified int64 `json:"last_modified"`
 
 	// ChurnLevel categorizes the churn rate.
 	// One of: "LOW", "MODERATE", "HIGH".

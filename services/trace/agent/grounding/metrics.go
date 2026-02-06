@@ -104,6 +104,10 @@ var (
 	routerFallbackTotal     metric.Int64Counter
 	routerHardForcedLatency metric.Float64Histogram
 
+	// Semantic repetition metrics (CB-30c)
+	semanticRepetitionTotal     metric.Int64Counter
+	semanticSimilarityHistogram metric.Float64Histogram
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -427,6 +431,26 @@ func initMetrics() error {
 			"router_hard_forced_latency_seconds",
 			metric.WithDescription("Latency for router hard-forced tool executions"),
 			metric.WithUnit("s"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Semantic repetition metrics (CB-30c)
+		semanticRepetitionTotal, err = meter.Int64Counter(
+			"semantic_repetition_total",
+			metric.WithDescription("Total semantic repetitions detected by tool"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		semanticSimilarityHistogram, err = meter.Float64Histogram(
+			"semantic_similarity_score",
+			metric.WithDescription("Distribution of semantic similarity scores between tool calls"),
+			metric.WithUnit("1"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -1192,4 +1216,34 @@ func RecordRouterFallback(toolName, reason string) {
 	)
 
 	routerFallbackTotal.Add(context.Background(), 1, attrs)
+}
+
+// RecordSemanticRepetition records when a semantic repetition is detected.
+//
+// Description:
+//
+//	This metric tracks when the agent detects that a proposed tool call is
+//	semantically similar to a recent tool call, indicating potential repetitive
+//	reasoning. CB-30c: Prevents repeated similar queries like Grep("parseConfig")
+//	followed by Grep("parse_config").
+//
+// Inputs:
+//
+//	toolName - Name of the tool that triggered semantic repetition.
+//	similarity - The Jaccard similarity score that triggered detection (0.0-1.0).
+//	comparedTo - The tool name from history that was similar.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordSemanticRepetition(toolName string, similarity float64, comparedTo string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("compared_to", comparedTo),
+	)
+
+	semanticRepetitionTotal.Add(context.Background(), 1, attrs)
+	semanticSimilarityHistogram.Record(context.Background(), similarity, attrs)
 }

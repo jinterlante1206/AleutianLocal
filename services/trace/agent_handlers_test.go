@@ -29,11 +29,12 @@ func init() {
 
 // MockAgentLoop implements agent.AgentLoop for testing.
 type MockAgentLoop struct {
-	runFunc        func(ctx context.Context, session *agent.Session, query string) (*agent.RunResult, error)
-	continueFunc   func(ctx context.Context, sessionID string, clarification string) (*agent.RunResult, error)
-	abortFunc      func(ctx context.Context, sessionID string) error
-	getStateFunc   func(sessionID string) (*agent.SessionState, error)
-	getSessionFunc func(sessionID string) (*agent.Session, error)
+	runFunc          func(ctx context.Context, session *agent.Session, query string) (*agent.RunResult, error)
+	continueFunc     func(ctx context.Context, sessionID string, clarification string) (*agent.RunResult, error)
+	abortFunc        func(ctx context.Context, sessionID string) error
+	getStateFunc     func(sessionID string) (*agent.SessionState, error)
+	getSessionFunc   func(sessionID string) (*agent.Session, error)
+	closeSessionFunc func(sessionID string) error
 }
 
 func (m *MockAgentLoop) Run(ctx context.Context, session *agent.Session, query string) (*agent.RunResult, error) {
@@ -83,6 +84,13 @@ func (m *MockAgentLoop) GetSession(sessionID string) (*agent.Session, error) {
 	}
 	session, _ := agent.NewSession("/test/project", nil)
 	return session, nil
+}
+
+func (m *MockAgentLoop) CloseSession(sessionID string) error {
+	if m.closeSessionFunc != nil {
+		return m.closeSessionFunc(sessionID)
+	}
+	return nil
 }
 
 func setupAgentTestRouter(handlers *AgentHandlers) *gin.Engine {

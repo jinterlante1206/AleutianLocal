@@ -363,7 +363,7 @@ func (u *UnitPropagation) createDelta(output *UnitPropOutput, proofs crs.ProofIn
 			// Mark conflicting nodes as DISPROVEN (hard signal)
 			pn.Status = crs.ProofStatusDisproven
 			pn.Source = crs.SignalSourceHard // Constraint conflict is deterministic
-			pn.UpdatedAt = time.Now()
+			pn.UpdatedAt = time.Now().UnixMilli()
 			updates[nodeID] = pn
 		}
 	}

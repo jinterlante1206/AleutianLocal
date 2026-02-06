@@ -550,7 +550,7 @@ func (r *Runner) buildResult(name string, samples []time.Duration, errorCount in
 	result := &Result{
 		Name:       name,
 		Iterations: totalIterations,
-		Timestamp:  time.Now(),
+		Timestamp:  time.Now().UnixMilli(),
 		Config:     config,
 		RawSamples: samples,
 		Errors:     errorCount,

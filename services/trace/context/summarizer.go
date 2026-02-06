@@ -181,7 +181,7 @@ func (s *Summarizer) GeneratePackageSummary(ctx context.Context, info *PackageIn
 	s.costEstimator.RecordUsage(response.InputTokens, response.OutputTokens)
 
 	// Cache the result
-	summary.UpdatedAt = time.Now()
+	summary.UpdatedAt = time.Now().UnixMilli()
 	s.cache.Set(summary)
 
 	return summary, nil
@@ -472,8 +472,8 @@ func (s *Summarizer) generatePartialPackageSummary(info *PackageInfo) *Summary {
 		Keywords:  keywords,
 		Partial:   true,
 		Language:  s.hierarchy.Language(),
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: time.Now().UnixMilli(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 }
 
@@ -500,8 +500,8 @@ func (s *Summarizer) generatePartialFileSummary(info *FileInfo) *Summary {
 		Hash:      info.ContentHash,
 		Partial:   true,
 		Language:  s.hierarchy.Language(),
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: time.Now().UnixMilli(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 }
 
@@ -521,8 +521,8 @@ func (s *Summarizer) generatePartialProjectSummary(info *ProjectInfo) *Summary {
 		Children:  info.Packages,
 		Partial:   true,
 		Language:  info.Language,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: time.Now().UnixMilli(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 }
 
@@ -626,8 +626,8 @@ func (s *Summarizer) parsePackageResponse(pkgPath string, response *LLMResponse)
 		ParentID:   parentID,
 		TokensUsed: response.TokensUsed,
 		Language:   s.hierarchy.Language(),
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		CreatedAt:  time.Now().UnixMilli(),
+		UpdatedAt:  time.Now().UnixMilli(),
 	}
 }
 
@@ -645,8 +645,8 @@ func (s *Summarizer) parseFileResponse(info *FileInfo, response *LLMResponse) *S
 		Hash:       info.ContentHash,
 		TokensUsed: response.TokensUsed,
 		Language:   s.hierarchy.Language(),
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		CreatedAt:  time.Now().UnixMilli(),
+		UpdatedAt:  time.Now().UnixMilli(),
 	}
 }
 
@@ -661,8 +661,8 @@ func (s *Summarizer) parseProjectResponse(info *ProjectInfo, response *LLMRespon
 		Children:   info.Packages,
 		TokensUsed: response.TokensUsed,
 		Language:   info.Language,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+		CreatedAt:  time.Now().UnixMilli(),
+		UpdatedAt:  time.Now().UnixMilli(),
 	}
 }
 

@@ -328,8 +328,8 @@ type FileInfo struct {
 	// Size is the file size in bytes.
 	Size int64 `json:"size"`
 
-	// ModTime is the last modification time.
-	ModTime time.Time `json:"mod_time"`
+	// ModTime is the last modification time (Unix milliseconds UTC).
+	ModTime int64 `json:"mod_time"`
 
 	// IsDir indicates if this is a directory.
 	IsDir bool `json:"is_dir,omitempty"`
@@ -499,7 +499,8 @@ type Config struct {
 	WorkingDir string
 
 	// ReadTracking tracks which files have been read (for Edit validation).
-	ReadTracking map[string]time.Time
+	// Maps file path to read time (Unix milliseconds UTC).
+	ReadTracking map[string]int64
 
 	// ContentHashes stores content hashes for optimistic locking.
 	// When a file is read, its hash is stored. During edit, we verify
@@ -528,7 +529,7 @@ func NewConfig(workingDir string) *Config {
 	return &Config{
 		WorkingDir:    realDir,
 		AllowedPaths:  []string{realDir},
-		ReadTracking:  make(map[string]time.Time),
+		ReadTracking:  make(map[string]int64),
 		ContentHashes: make(map[string]string),
 	}
 }
@@ -597,7 +598,7 @@ func (c *Config) MarkFileRead(path string) {
 	if err != nil {
 		return
 	}
-	c.ReadTracking[absPath] = time.Now()
+	c.ReadTracking[absPath] = time.Now().UnixMilli()
 }
 
 // WasFileRead checks if a file was previously read.

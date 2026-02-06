@@ -133,7 +133,7 @@ func (v *PatchValidator) Validate(ctx context.Context, patchContent, projectRoot
 		Permissions:    make([]PermissionIssue, 0),
 		Stats:          PatchStats{},
 		PatternVersion: PatternVersion,
-		ValidatedAt:    time.Now(),
+		ValidatedAt:    time.Now().UnixMilli(),
 	}
 
 	// 1. Size check

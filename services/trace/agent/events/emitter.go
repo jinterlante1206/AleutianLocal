@@ -202,7 +202,7 @@ func (e *Emitter) EmitWithMetadata(eventType Type, data any, metadata *EventMeta
 		ID:        uuid.NewString(),
 		Type:      eventType,
 		SessionID: sessionID,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Step:      step,
 		Data:      data,
 		Metadata:  metadata,
@@ -320,7 +320,7 @@ func (e *Emitter) GetBufferSince(since time.Time) []Event {
 
 	var events []Event
 	for _, event := range e.buffer {
-		if event.Timestamp.After(since) {
+		if time.UnixMilli(event.Timestamp).After(since) {
 			events = append(events, event)
 		}
 	}
@@ -391,7 +391,7 @@ func (m *MockEmitter) EmitWithMetadata(eventType Type, data any, metadata *Event
 	m.Events = append(m.Events, Event{
 		ID:        uuid.NewString(),
 		Type:      eventType,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Data:      data,
 		Metadata:  metadata,
 	})

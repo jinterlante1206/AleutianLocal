@@ -182,7 +182,7 @@ func (p *PNMCTS) Process(ctx context.Context, snapshot crs.Snapshot, input any) 
 				Disproof:  1,
 				Status:    crs.ProofStatusUnknown,
 				Source:    crs.SignalSourceUnknown,
-				UpdatedAt: time.Now(),
+				UpdatedAt: time.Now().UnixMilli(),
 			}
 		}
 	}
@@ -372,7 +372,7 @@ func (p *PNMCTS) updateProofNumbers(path []string, proofs map[string]crs.ProofNu
 		pn := proofs[nodeID]
 		pn.Proof = sumProof
 		pn.Disproof = minDisproof
-		pn.UpdatedAt = time.Now()
+		pn.UpdatedAt = time.Now().UnixMilli()
 		proofs[nodeID] = pn
 	}
 }

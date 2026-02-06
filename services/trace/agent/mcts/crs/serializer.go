@@ -379,7 +379,7 @@ func (s *Serializer) exportProofIndex(idx ProofIndexView) ProofIndexExport {
 			Disproof:  proof.Disproof,
 			Status:    proof.Status.String(),
 			Source:    proof.Source.String(),
-			UpdatedAt: proof.UpdatedAt,
+			UpdatedAt: time.UnixMilli(proof.UpdatedAt).UTC(),
 		})
 	}
 
@@ -408,7 +408,7 @@ func (s *Serializer) exportConstraintIndex(idx ConstraintIndexView) ConstraintIn
 			Expression: c.Expression,
 			Active:     c.Active,
 			Source:     c.Source.String(),
-			CreatedAt:  c.CreatedAt,
+			CreatedAt:  time.UnixMilli(c.CreatedAt).UTC(),
 		})
 	}
 
@@ -470,7 +470,7 @@ func (s *Serializer) exportHistoryIndex(idx HistoryIndexView) HistoryIndexExport
 			Action:    entry.Action,
 			Result:    entry.Result,
 			Source:    entry.Source.String(),
-			Timestamp: entry.Timestamp,
+			Timestamp: time.UnixMilli(entry.Timestamp).UTC(),
 			Metadata:  metadataCopy,
 		})
 	}

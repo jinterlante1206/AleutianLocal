@@ -236,8 +236,8 @@ type State struct {
 	// SessionID is the unique identifier for this execution.
 	SessionID string `json:"session_id"`
 
-	// StartedAt is when execution began.
-	StartedAt time.Time `json:"started_at"`
+	// StartedAt is when execution began (Unix milliseconds UTC).
+	StartedAt int64 `json:"started_at"`
 
 	// CompletedNodes tracks which nodes have finished.
 	CompletedNodes map[string]bool `json:"completed_nodes"`
@@ -262,7 +262,7 @@ type State struct {
 func NewState(sessionID string) *State {
 	return &State{
 		SessionID:      sessionID,
-		StartedAt:      time.Now(),
+		StartedAt:      time.Now().UnixMilli(),
 		CompletedNodes: make(map[string]bool),
 		NodeOutputs:    make(map[string]any),
 		NodeStatuses:   make(map[string]NodeStatus),
@@ -365,8 +365,8 @@ type Checkpoint struct {
 	// State is the execution state at checkpoint time.
 	State *State `json:"state"`
 
-	// Timestamp is when the checkpoint was created.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when the checkpoint was created (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Version is the checkpoint format version.
 	Version string `json:"version"`

@@ -153,7 +153,7 @@ func NewVerifier(opts ...VerifierOption) *Verifier {
 //	Safe for concurrent use.
 func (v *Verifier) FastVerify(ctx context.Context, projectRoot, path string, entry manifest.FileEntry) (VerifyResult, error) {
 	absPath := filepath.Join(projectRoot, path)
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	result := VerifyResult{
 		CheckedAt:    now,
 		FilesChecked: 1,
@@ -163,7 +163,7 @@ func (v *Verifier) FastVerify(ctx context.Context, projectRoot, path string, ent
 	if !v.cache.NeedsVerification(path) {
 		result.Status = StatusFresh
 		result.AllFresh = true
-		result.Duration = time.Since(now)
+		result.Duration = time.Duration(time.Now().UnixMilli()-now) * time.Millisecond
 		return result, nil
 	}
 
@@ -172,7 +172,7 @@ func (v *Verifier) FastVerify(ctx context.Context, projectRoot, path string, ent
 	if os.IsNotExist(err) {
 		result.Status = StatusStale
 		result.DeletedFiles = []string{path}
-		result.Duration = time.Since(now)
+		result.Duration = time.Duration(time.Now().UnixMilli()-now) * time.Millisecond
 		return result, nil
 	}
 	if err != nil {
@@ -183,14 +183,14 @@ func (v *Verifier) FastVerify(ctx context.Context, projectRoot, path string, ent
 	entryMtime := time.Unix(0, entry.Mtime)
 
 	// Case 1: Future mtime (clock skew) - never trust, always hash
-	if fileMtime.After(now) {
+	if fileMtime.After(time.UnixMilli(now)) {
 		return v.hashVerify(ctx, projectRoot, path, entry, stat, now)
 	}
 
 	// Case 2: mtime unchanged
 	if fileMtime.Equal(entryMtime) && stat.Size() == entry.Size {
 		// But if within resolution window, hash anyway
-		timeSinceModify := now.Sub(fileMtime)
+		timeSinceModify := (time.Duration(now-fileMtime.UnixMilli()) * time.Millisecond)
 		if timeSinceModify < v.mtimeResolution {
 			return v.hashVerify(ctx, projectRoot, path, entry, stat, now)
 		}
@@ -199,7 +199,7 @@ func (v *Verifier) FastVerify(ctx context.Context, projectRoot, path string, ent
 		v.cache.MarkVerified(path)
 		result.Status = StatusFresh
 		result.AllFresh = true
-		result.Duration = time.Since(now)
+		result.Duration = time.Duration(time.Now().UnixMilli()-now) * time.Millisecond
 		return result, nil
 	}
 
@@ -208,7 +208,7 @@ func (v *Verifier) FastVerify(ctx context.Context, projectRoot, path string, ent
 }
 
 // hashVerify performs hash-based verification using ManifestManager.
-func (v *Verifier) hashVerify(ctx context.Context, projectRoot, path string, entry manifest.FileEntry, stat os.FileInfo, startTime time.Time) (VerifyResult, error) {
+func (v *Verifier) hashVerify(ctx context.Context, projectRoot, path string, entry manifest.FileEntry, stat os.FileInfo, startTime int64) (VerifyResult, error) {
 	result := VerifyResult{
 		CheckedAt:    startTime,
 		FilesChecked: 1,
@@ -229,7 +229,7 @@ func (v *Verifier) hashVerify(ctx context.Context, projectRoot, path string, ent
 		result.AllFresh = true
 	}
 
-	result.Duration = time.Since(startTime)
+	result.Duration = time.Duration(time.Now().UnixMilli()-startTime) * time.Millisecond
 	return result, nil
 }
 
@@ -262,7 +262,7 @@ func (v *Verifier) hashVerify(ctx context.Context, projectRoot, path string, ent
 //
 //	Safe for concurrent use.
 func (v *Verifier) VerifyFiles(ctx context.Context, projectRoot string, entries map[string]manifest.FileEntry) (*VerifyResult, error) {
-	startTime := time.Now()
+	startTime := time.Now().UnixMilli()
 	result := &VerifyResult{
 		CheckedAt:    startTime,
 		StaleFiles:   make([]string, 0),
@@ -273,7 +273,7 @@ func (v *Verifier) VerifyFiles(ctx context.Context, projectRoot string, entries 
 	if len(entries) == 0 {
 		result.Status = StatusFresh
 		result.AllFresh = true
-		result.Duration = time.Since(startTime)
+		result.Duration = time.Duration(time.Now().UnixMilli()-startTime) * time.Millisecond
 		return result, nil
 	}
 
@@ -290,7 +290,7 @@ func (v *Verifier) VerifyFiles(ctx context.Context, projectRoot string, entries 
 		result.Status = StatusFresh
 		result.AllFresh = true
 		result.FilesChecked = len(entries)
-		result.Duration = time.Since(startTime)
+		result.Duration = time.Duration(time.Now().UnixMilli()-startTime) * time.Millisecond
 		return result, nil
 	}
 
@@ -351,7 +351,7 @@ func (v *Verifier) VerifyFiles(ctx context.Context, projectRoot string, entries 
 
 	// Determine final status
 	result.FilesChecked = len(entries)
-	result.Duration = time.Since(startTime)
+	result.Duration = time.Duration(time.Now().UnixMilli()-startTime) * time.Millisecond
 
 	if len(result.Errors) > 0 && len(result.StaleFiles) == 0 && len(result.DeletedFiles) == 0 {
 		result.Status = StatusError
@@ -425,7 +425,7 @@ func (v *Verifier) VerifyManifest(ctx context.Context, projectRoot string, m *ma
 		return &VerifyResult{
 			Status:    StatusFresh,
 			AllFresh:  true,
-			CheckedAt: time.Now(),
+			CheckedAt: time.Now().UnixMilli(),
 		}, nil
 	}
 

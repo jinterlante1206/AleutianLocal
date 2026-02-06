@@ -27,7 +27,7 @@ type baseContext struct {
 	id           string
 	level        Level
 	state        atomic.Int32 // State
-	startTime    time.Time
+	startTime    int64
 	lastProgress atomic.Int64 // Unix nano timestamp
 
 	ctx    context.Context
@@ -92,8 +92,8 @@ func (b *baseContext) Cancel(reason CancelReason) {
 
 	// Store the reason
 	b.reasonMu.Lock()
-	if reason.Timestamp.IsZero() {
-		reason.Timestamp = time.Now()
+	if reason.Timestamp == 0 {
+		reason.Timestamp = time.Now().UnixMilli()
 	}
 	b.reason = &reason
 	b.reasonMu.Unlock()
@@ -118,12 +118,12 @@ func (b *baseContext) ReportProgress() {
 }
 
 // LastProgress returns the last progress timestamp.
-func (b *baseContext) LastProgress() time.Time {
+func (b *baseContext) LastProgress() int64 {
 	nano := b.lastProgress.Load()
 	if nano == 0 {
 		return b.startTime
 	}
-	return time.Unix(0, nano)
+	return nano / 1e6
 }
 
 // SetPartialCollector sets the function to collect partial results.
@@ -172,7 +172,7 @@ func (b *baseContext) baseStatus() Status {
 		CancelReason:            b.getCancelReason(),
 		StartTime:               b.startTime,
 		LastProgress:            b.LastProgress(),
-		Duration:                time.Since(b.startTime),
+		Duration:                time.Duration(time.Now().UnixMilli()-b.startTime) * time.Millisecond,
 		PartialResultsAvailable: b.PartialResult() != nil,
 	}
 }
@@ -205,7 +205,7 @@ func newSessionContext(parent context.Context, config SessionConfig, ctrl *Cance
 		baseContext: baseContext{
 			id:         config.ID,
 			level:      LevelSession,
-			startTime:  time.Now(),
+			startTime:  time.Now().UnixMilli(),
 			ctx:        ctx,
 			cancel:     cancel,
 			controller: ctrl,
@@ -250,7 +250,7 @@ func (s *SessionContext) NewActivity(name string) *ActivityContext {
 		baseContext: baseContext{
 			id:         id,
 			level:      LevelActivity,
-			startTime:  time.Now(),
+			startTime:  time.Now().UnixMilli(),
 			ctx:        ctx,
 			cancel:     cancel,
 			parent:     s,
@@ -310,7 +310,7 @@ func (s *SessionContext) Cancel(reason CancelReason) {
 		Type:      CancelParent,
 		Message:   fmt.Sprintf("Parent session cancelled: %s", reason.Message),
 		Component: s.id,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 	}
 	for _, a := range activities {
 		a.Cancel(childReason)
@@ -409,7 +409,7 @@ func (a *ActivityContext) NewAlgorithm(name string, timeout time.Duration) *Algo
 		baseContext: baseContext{
 			id:         id,
 			level:      LevelAlgorithm,
-			startTime:  time.Now(),
+			startTime:  time.Now().UnixMilli(),
 			ctx:        ctx,
 			cancel:     cancel,
 			parent:     a,
@@ -470,7 +470,7 @@ func (a *ActivityContext) Cancel(reason CancelReason) {
 		Type:      CancelParent,
 		Message:   fmt.Sprintf("Parent activity cancelled: %s", reason.Message),
 		Component: a.id,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 	}
 	for _, alg := range algorithms {
 		alg.Cancel(childReason)

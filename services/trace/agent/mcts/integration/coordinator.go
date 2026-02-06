@@ -599,16 +599,34 @@ func (c *Coordinator) HandleEvent(
 		activityName := ActivityName(sa.activity.Name())
 		config := configs[activityName]
 
-		// Check dependencies
+		// CR-5 fix: Check dependencies with better distinction between missing and not-run
 		if config != nil && len(config.DependsOn) > 0 {
 			allDepsComplete := true
 			for _, dep := range config.DependsOn {
-				if !completedActivities[string(dep)] {
+				depRegistered := false
+				// Check if dependency is registered (in the toRun list or already completed)
+				for _, scheduled := range toRun {
+					if ActivityName(scheduled.activity.Name()) == dep {
+						depRegistered = true
+						break
+					}
+				}
+				if !depRegistered && !completedActivities[string(dep)] {
+					// Dependency is neither scheduled nor completed - it's missing
+					c.logger.Warn("dependency activity not registered, skipping dependent",
+						slog.String("activity", string(activityName)),
+						slog.String("missing_dependency", string(dep)),
+					)
 					allDepsComplete = false
-					c.logger.Debug("dependency not complete, skipping",
+					break
+				}
+				if !completedActivities[string(dep)] {
+					// Dependency is registered but not yet complete
+					c.logger.Debug("dependency not complete yet, skipping for now",
 						slog.String("activity", string(activityName)),
 						slog.String("dependency", string(dep)),
 					)
+					allDepsComplete = false
 					break
 				}
 			}
@@ -685,7 +703,12 @@ func (c *Coordinator) createInputFromEvent(
 		if data.Tool != "" {
 			conflictNode = "tool:" + data.Tool
 		}
-		return activities.NewLearningInput(data.SessionID, conflictNode, source)
+		// CR-10 fix: Include error message in learning input for better clause generation
+		input := activities.NewLearningInput(data.SessionID, conflictNode, source)
+		if data.Error != "" {
+			input.SetErrorInfo(data.Error, data.ErrorCategory)
+		}
+		return input
 	case "constraint":
 		operation := "propagate"
 		if event == EventCircuitBreaker {

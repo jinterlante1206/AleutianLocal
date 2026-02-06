@@ -354,6 +354,32 @@ func TestCoordinator_HandleEvent_DisabledActivity(t *testing.T) {
 }
 
 // =============================================================================
+// Filter Nil Safety Tests (CR-6, CR-7)
+// =============================================================================
+
+func TestSimpleQueryFilter_NilActivitiesReturnsNil(t *testing.T) {
+	filter := &SimpleQueryFilter{}
+	ctx := &EventContext{IsSimpleQuery: true}
+
+	// CR-6: nil input should return nil
+	result := filter.Filter(EventQueryReceived, nil, ctx)
+	if result != nil {
+		t.Error("Expected nil result for nil input")
+	}
+}
+
+func TestHighErrorRateFilter_NilActivitiesReturnsNil(t *testing.T) {
+	filter := &HighErrorRateFilter{Threshold: 0.5}
+	ctx := &EventContext{ErrorRate: 0.75}
+
+	// CR-7: nil input should return nil
+	result := filter.Filter(EventToolFailed, nil, ctx)
+	if result != nil {
+		t.Error("Expected nil result for nil input")
+	}
+}
+
+// =============================================================================
 // Benchmarks
 // =============================================================================
 

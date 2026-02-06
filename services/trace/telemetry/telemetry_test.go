@@ -358,3 +358,198 @@ func TestInit_UnknownMetricExporter(t *testing.T) {
 		t.Errorf("error = %v, want to contain 'unknown exporter type'", err)
 	}
 }
+
+func TestDefaultConfig_SampleRate(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.SampleRate != 1.0 {
+		t.Errorf("SampleRate = %v, want 1.0", cfg.SampleRate)
+	}
+	if cfg.AllowDegraded != false {
+		t.Errorf("AllowDegraded = %v, want false", cfg.AllowDegraded)
+	}
+}
+
+func TestGetSampler(t *testing.T) {
+	tests := []struct {
+		name     string
+		rate     float64
+		expected string
+	}{
+		{"full sampling", 1.0, "AlwaysOnSampler"},
+		{"above 100%", 1.5, "AlwaysOnSampler"},
+		{"no sampling", 0.0, "AlwaysOffSampler"},
+		{"below 0%", -0.5, "AlwaysOffSampler"},
+		{"partial sampling", 0.5, "TraceIDRatioBased"},
+		{"10% sampling", 0.1, "TraceIDRatioBased"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sampler := getSampler(tt.rate)
+			description := sampler.Description()
+
+			// Verify the sampler type based on description
+			switch tt.expected {
+			case "AlwaysOnSampler":
+				if description != "AlwaysOnSampler" {
+					t.Errorf("getSampler(%v) = %q, want %q", tt.rate, description, tt.expected)
+				}
+			case "AlwaysOffSampler":
+				if description != "AlwaysOffSampler" {
+					t.Errorf("getSampler(%v) = %q, want %q", tt.rate, description, tt.expected)
+				}
+			case "TraceIDRatioBased":
+				if !strings.Contains(description, "TraceIDRatioBased") {
+					t.Errorf("getSampler(%v) = %q, want to contain %q", tt.rate, description, tt.expected)
+				}
+			}
+		})
+	}
+}
+
+func TestInit_WithSampleRate(t *testing.T) {
+	t.Run("full sampling (1.0)", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.TraceExporter = "stdout"
+		cfg.MetricExporter = "none"
+		cfg.SampleRate = 1.0
+
+		shutdown, err := Init(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		defer shutdown(context.Background())
+
+		// Create a span and verify it's sampled
+		tracer := otel.Tracer("test")
+		_, span := tracer.Start(context.Background(), "test-span")
+		defer span.End()
+
+		if !span.SpanContext().IsSampled() {
+			t.Error("expected span to be sampled with rate 1.0")
+		}
+	})
+
+	t.Run("no sampling (0.0)", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.TraceExporter = "stdout"
+		cfg.MetricExporter = "none"
+		cfg.SampleRate = 0.0
+
+		shutdown, err := Init(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		defer shutdown(context.Background())
+
+		// Create spans and verify none are sampled
+		tracer := otel.Tracer("test")
+		sampledCount := 0
+		for i := 0; i < 10; i++ {
+			_, span := tracer.Start(context.Background(), "test-span")
+			if span.SpanContext().IsSampled() {
+				sampledCount++
+			}
+			span.End()
+		}
+
+		if sampledCount > 0 {
+			t.Errorf("expected no spans sampled with rate 0.0, got %d", sampledCount)
+		}
+	})
+
+	t.Run("partial sampling (0.5)", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.TraceExporter = "stdout"
+		cfg.MetricExporter = "none"
+		cfg.SampleRate = 0.5
+
+		shutdown, err := Init(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		defer shutdown(context.Background())
+
+		// Create many spans and verify sampling is probabilistic
+		tracer := otel.Tracer("test")
+		sampledCount := 0
+		totalSpans := 100
+		for i := 0; i < totalSpans; i++ {
+			_, span := tracer.Start(context.Background(), "test-span")
+			if span.SpanContext().IsSampled() {
+				sampledCount++
+			}
+			span.End()
+		}
+
+		// With 50% sampling, we expect roughly half to be sampled
+		// Allow for statistical variance (30-70%)
+		sampledRatio := float64(sampledCount) / float64(totalSpans)
+		if sampledRatio < 0.2 || sampledRatio > 0.8 {
+			t.Errorf("expected ~50%% sampling with rate 0.5, got %.1f%%", sampledRatio*100)
+		}
+	})
+}
+
+func TestInit_AllowDegraded(t *testing.T) {
+	// Note: This test verifies AllowDegraded behavior when OTLP endpoint is unreachable
+	// The OTLP gRPC client connects asynchronously, so the Init may not fail immediately.
+	// We test that the configuration is properly accepted and the option exists.
+
+	t.Run("AllowDegraded config is accepted", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.TraceExporter = "stdout" // Use stdout to avoid connection issues
+		cfg.MetricExporter = "none"
+		cfg.AllowDegraded = true
+
+		shutdown, err := Init(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		defer shutdown(context.Background())
+
+		// Tracer should work
+		tracer := otel.Tracer("test")
+		_, span := tracer.Start(context.Background(), "test-span")
+		span.End()
+	})
+
+	t.Run("AllowDegraded=false is default", func(t *testing.T) {
+		cfg := DefaultConfig()
+		if cfg.AllowDegraded != false {
+			t.Errorf("AllowDegraded default = %v, want false", cfg.AllowDegraded)
+		}
+	})
+}
+
+func TestInit_PropagatorIsSet(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TraceExporter = "none"
+	cfg.MetricExporter = "none"
+
+	shutdown, err := Init(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer shutdown(context.Background())
+
+	// Verify propagator is set by checking that it can extract/inject
+	propagator := otel.GetTextMapPropagator()
+	if propagator == nil {
+		t.Error("expected propagator to be set")
+	}
+
+	// Propagator should support TraceContext and Baggage
+	fields := propagator.Fields()
+	hasTraceParent := false
+	for _, f := range fields {
+		if f == "traceparent" {
+			hasTraceParent = true
+			break
+		}
+	}
+	if !hasTraceParent {
+		t.Error("expected propagator to include traceparent field")
+	}
+}

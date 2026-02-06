@@ -355,7 +355,7 @@ func (a *ChurnAnalyzer) calculateChurnScore(commits []gitCommit) *ChurnScore {
 	var changes30 int
 	var changes90 int
 	var bugFixes int
-	var lastModified time.Time
+	var lastModified int64
 	contributors := make(map[string]bool)
 
 	for _, commit := range commits {
@@ -368,8 +368,8 @@ func (a *ChurnAnalyzer) calculateChurnScore(commits []gitCommit) *ChurnScore {
 		if commit.IsBugFix || len(commit.IssueRefs) > 0 {
 			bugFixes++
 		}
-		if commit.Date.After(lastModified) {
-			lastModified = commit.Date
+		if commit.Date.UnixMilli() > lastModified {
+			lastModified = commit.Date.UnixMilli()
 		}
 		contributors[commit.Author] = true
 	}

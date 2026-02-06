@@ -12,6 +12,7 @@ package crs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -373,6 +374,89 @@ type CRS interface {
 	//
 	// Thread Safety: Safe for concurrent use.
 	GarbageCollectClauses() int
+
+	// -------------------------------------------------------------------------
+	// Delta History Methods (GR-35)
+	// -------------------------------------------------------------------------
+
+	// SetSessionID sets the current session ID for delta history tracking.
+	//
+	// Description:
+	//
+	//   Deltas recorded via Apply() will be associated with this session ID.
+	//   Call this at the start of each agent session.
+	//
+	// Inputs:
+	//   - sessionID: The session identifier. Can be empty to clear.
+	//
+	// Thread Safety: Safe for concurrent use.
+	SetSessionID(sessionID string)
+
+	// ApplyWithSource applies a delta with explicit source and metadata tracking.
+	//
+	// Description:
+	//
+	//   Like Apply(), but allows specifying a custom source string and metadata
+	//   for delta history recording. Use this when you want to track which
+	//   activity or component caused the delta.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation. Must not be nil.
+	//   - delta: The delta to apply. Must not be nil.
+	//   - source: Human-readable source identifier (e.g., "AwarenessActivity").
+	//   - metadata: Optional additional context for the delta.
+	//
+	// Outputs:
+	//   - ApplyMetrics: Metrics about the apply operation.
+	//   - error: Non-nil on validation failure or apply error.
+	//
+	// Thread Safety: Safe for concurrent use.
+	ApplyWithSource(ctx context.Context, delta Delta, source string, metadata map[string]string) (ApplyMetrics, error)
+
+	// DeltaHistory returns the delta history for querying.
+	//
+	// Description:
+	//
+	//   Returns the delta history worker which provides methods to query
+	//   what deltas were applied, when, and by whom. Use this to understand
+	//   causality and build reasoning traces.
+	//
+	// Outputs:
+	//   - DeltaHistoryView: Read-only view of delta history. May be nil if not initialized.
+	//
+	// Thread Safety: Safe for concurrent use.
+	DeltaHistory() DeltaHistoryView
+
+	// Close releases resources held by the CRS.
+	//
+	// Description:
+	//
+	//   Stops background workers (like delta history). Should be called when
+	//   the CRS is no longer needed to prevent goroutine leaks.
+	//
+	// Thread Safety: Safe for concurrent use. Idempotent.
+	Close()
+
+	// -------------------------------------------------------------------------
+	// Graph Integration Methods (GR-28)
+	// -------------------------------------------------------------------------
+
+	// SetGraphProvider sets the graph query provider.
+	//
+	// Description:
+	//
+	//   Registers a GraphQuery implementation that will be included in all
+	//   future snapshots. Activities can then call snapshot.GraphQuery() to
+	//   access the actual code graph.
+	//
+	//   Call this after the graph is initialized and after graph refreshes
+	//   to update the adapter with the new graph state.
+	//
+	// Inputs:
+	//   - provider: The graph query implementation. May be nil to clear.
+	//
+	// Thread Safety: Safe for concurrent use.
+	SetGraphProvider(provider GraphQuery)
 }
 
 // -----------------------------------------------------------------------------
@@ -392,8 +476,8 @@ type Snapshot interface {
 	// Generation returns the generation when this snapshot was created.
 	Generation() int64
 
-	// CreatedAt returns when this snapshot was created.
-	CreatedAt() time.Time
+	// CreatedAt returns when this snapshot was created (Unix milliseconds UTC).
+	CreatedAt() int64
 
 	// ProofIndex returns the proof numbers index view.
 	ProofIndex() ProofIndexView
@@ -423,6 +507,21 @@ type Snapshot interface {
 	// Outputs:
 	//   - QueryAPI: The query API. Never nil.
 	Query() QueryAPI
+
+	// GraphQuery returns read-only access to the code graph (GR-28).
+	//
+	// Description:
+	//
+	//   Returns the graph query interface for activities to query the actual
+	//   code graph structure. This enables activities to use graph algorithms
+	//   (PageRank, community detection, etc.) rather than relying solely on
+	//   CRS's internal DependencyIndex.
+	//
+	// Outputs:
+	//   - GraphQuery: The graph query interface, or nil if unavailable.
+	//
+	// Thread Safety: Safe for concurrent use (snapshot is immutable).
+	GraphQuery() GraphQuery
 }
 
 // -----------------------------------------------------------------------------
@@ -567,8 +666,8 @@ type ProofNumber struct {
 	// Source indicates where this proof came from.
 	Source SignalSource
 
-	// UpdatedAt is when this proof was last updated.
-	UpdatedAt time.Time
+	// UpdatedAt is when this proof was last updated (Unix milliseconds UTC).
+	UpdatedAt int64
 }
 
 // ProofStatus represents the proof status of a node.
@@ -695,8 +794,8 @@ type Constraint struct {
 	// Source indicates where this constraint came from.
 	Source SignalSource
 
-	// CreatedAt is when this constraint was created.
-	CreatedAt time.Time
+	// CreatedAt is when this constraint was created (Unix milliseconds UTC).
+	CreatedAt int64
 }
 
 // ConstraintType represents the type of constraint.
@@ -763,8 +862,8 @@ type HistoryEntry struct {
 	// Source indicates where this decision came from.
 	Source SignalSource
 
-	// Timestamp is when this decision was made.
-	Timestamp time.Time
+	// Timestamp is when this decision was made (Unix milliseconds UTC).
+	Timestamp int64
 
 	// Metadata contains additional context.
 	Metadata map[string]string
@@ -870,11 +969,134 @@ type Delta interface {
 	// Source returns the signal source for this delta.
 	Source() SignalSource
 
-	// Timestamp returns when this delta was created.
-	Timestamp() time.Time
+	// Timestamp returns when this delta was created (Unix milliseconds UTC).
+	Timestamp() int64
 
 	// IndexesAffected returns which indexes this delta will modify.
 	IndexesAffected() []string
+}
+
+// -----------------------------------------------------------------------------
+// Index Mask (GR-37: Zero-allocation bitmask)
+// -----------------------------------------------------------------------------
+
+// IndexMask identifies which CRS indexes were modified using a bitmask.
+//
+// Description:
+//
+//	Uses bitmask for O(1) operations and zero allocation. There are exactly
+//	6 CRS indexes, so a uint8 is sufficient.
+//
+// Thread Safety: IndexMask is immutable; safe for concurrent use.
+type IndexMask uint8
+
+const (
+	// IndexProof indicates the proof index was modified.
+	IndexProof IndexMask = 1 << iota
+	// IndexConstraint indicates the constraint index was modified.
+	IndexConstraint
+	// IndexSimilarity indicates the similarity index was modified.
+	IndexSimilarity
+	// IndexDependency indicates the dependency index was modified.
+	IndexDependency
+	// IndexHistory indicates the history index was modified.
+	IndexHistory
+	// IndexStreaming indicates the streaming index was modified.
+	IndexStreaming
+)
+
+// Has returns true if the mask contains the given index.
+func (m IndexMask) Has(idx IndexMask) bool {
+	return m&idx != 0
+}
+
+// Add returns a new mask with the given index added.
+func (m IndexMask) Add(idx IndexMask) IndexMask {
+	return m | idx
+}
+
+// Names returns the names of all indexes in the mask.
+//
+// Thread Safety: Allocates a new slice on each call.
+func (m IndexMask) Names() []string {
+	var names []string
+	if m.Has(IndexProof) {
+		names = append(names, "proof")
+	}
+	if m.Has(IndexConstraint) {
+		names = append(names, "constraint")
+	}
+	if m.Has(IndexSimilarity) {
+		names = append(names, "similarity")
+	}
+	if m.Has(IndexDependency) {
+		names = append(names, "dependency")
+	}
+	if m.Has(IndexHistory) {
+		names = append(names, "history")
+	}
+	if m.Has(IndexStreaming) {
+		names = append(names, "streaming")
+	}
+	return names
+}
+
+// String returns a comma-separated list of index names.
+func (m IndexMask) String() string {
+	return strings.Join(m.Names(), ",")
+}
+
+// MarshalJSON implements json.Marshaler for backwards-compatible JSON output.
+//
+// Outputs a JSON array of index names: ["proof", "constraint"]
+func (m IndexMask) MarshalJSON() ([]byte, error) {
+	return json.Marshal(m.Names())
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+//
+// Accepts either a JSON array of strings or a number (bitmask).
+func (m *IndexMask) UnmarshalJSON(data []byte) error {
+	// Try array of strings first (backwards compatible)
+	var names []string
+	if err := json.Unmarshal(data, &names); err == nil {
+		*m = IndexMaskFromStrings(names)
+		return nil
+	}
+	// Try number (new format)
+	var n uint8
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*m = IndexMask(n)
+	return nil
+}
+
+// IndexMaskFromStrings converts string names to IndexMask.
+func IndexMaskFromStrings(names []string) IndexMask {
+	var m IndexMask
+	for _, name := range names {
+		switch name {
+		case "proof":
+			m |= IndexProof
+		case "constraint":
+			m |= IndexConstraint
+		case "similarity":
+			m |= IndexSimilarity
+		case "dependency":
+			m |= IndexDependency
+		case "history":
+			m |= IndexHistory
+		case "streaming":
+			m |= IndexStreaming
+		}
+	}
+	return m
+}
+
+// IndexMaskFromDelta converts a delta's IndexesAffected to IndexMask.
+func IndexMaskFromDelta(delta Delta) IndexMask {
+	return IndexMaskFromStrings(delta.IndexesAffected())
 }
 
 // -----------------------------------------------------------------------------
@@ -892,8 +1114,9 @@ type ApplyMetrics struct {
 	// ValidationDuration is how long validation took.
 	ValidationDuration time.Duration
 
-	// IndexesUpdated lists which indexes were updated.
-	IndexesUpdated []string
+	// IndexesUpdated identifies which indexes were updated (bitmask).
+	// Use IndexesUpdated.Has(IndexProof) to check, .Names() for string slice.
+	IndexesUpdated IndexMask
 
 	// EntriesModified is the number of entries modified.
 	EntriesModified int
@@ -917,8 +1140,8 @@ type Checkpoint struct {
 	// Generation is the generation at checkpoint time.
 	Generation int64
 
-	// CreatedAt is when the checkpoint was created.
-	CreatedAt time.Time
+	// CreatedAt is when the checkpoint was created (Unix milliseconds UTC).
+	CreatedAt int64
 
 	// data holds the checkpoint data (opaque to consumers).
 	data any
@@ -1175,8 +1398,8 @@ type StepRecord struct {
 	// StepNumber is the 1-indexed step number.
 	StepNumber int `json:"step_number"`
 
-	// Timestamp is when this step started.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when this step started (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// SessionID links this step to its session. Must not be empty.
 	SessionID string `json:"session_id"`
@@ -1533,6 +1756,10 @@ const (
 
 	// FailureTypeSafety means the safety gate blocked the operation.
 	FailureTypeSafety FailureType = "safety"
+
+	// FailureTypeSemanticRepetition means a semantically similar tool call was detected.
+	// CB-30c: Added to prevent repeated similar queries (e.g., Grep("parseConfig") then Grep("parse_config")).
+	FailureTypeSemanticRepetition FailureType = "semantic_repetition"
 )
 
 // String returns the string representation of FailureType.
@@ -1544,7 +1771,8 @@ func (f FailureType) String() string {
 func (f FailureType) IsValid() bool {
 	switch f {
 	case FailureTypeToolError, FailureTypeCycleDetected, FailureTypeCircuitBreaker,
-		FailureTypeTimeout, FailureTypeInvalidOutput, FailureTypeSafety:
+		FailureTypeTimeout, FailureTypeInvalidOutput, FailureTypeSafety,
+		FailureTypeSemanticRepetition:
 		return true
 	default:
 		return false
@@ -1653,8 +1881,8 @@ type Clause struct {
 	// Must be HARD for CDCL-learned clauses.
 	Source SignalSource `json:"source"`
 
-	// LearnedAt is when this clause was created.
-	LearnedAt time.Time `json:"learned_at"`
+	// LearnedAt is when this clause was created (Unix milliseconds UTC).
+	LearnedAt int64 `json:"learned_at"`
 
 	// FailureType categorizes what kind of failure created this clause.
 	FailureType FailureType `json:"failure_type"`
@@ -1665,8 +1893,8 @@ type Clause struct {
 	// UseCount tracks how often this clause blocks decisions (for GC).
 	UseCount int64 `json:"use_count"`
 
-	// LastUsed is when this clause last blocked a decision.
-	LastUsed time.Time `json:"last_used,omitempty"`
+	// LastUsed is when this clause last blocked a decision (Unix milliseconds UTC).
+	LastUsed int64 `json:"last_used,omitempty"`
 }
 
 // String returns the string representation of a Clause.

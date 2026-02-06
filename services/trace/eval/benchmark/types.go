@@ -194,8 +194,8 @@ type Result struct {
 	// ErrorRate is Errors / Iterations.
 	ErrorRate float64
 
-	// Timestamp is when the benchmark was run.
-	Timestamp time.Time
+	// Timestamp is when the benchmark was run (Unix milliseconds UTC).
+	Timestamp int64
 
 	// Config is the configuration used for this benchmark.
 	Config *Config

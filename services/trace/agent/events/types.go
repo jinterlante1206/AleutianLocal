@@ -90,8 +90,8 @@ type Event struct {
 	// SessionID links the event to a session.
 	SessionID string `json:"session_id"`
 
-	// Timestamp is when the event occurred.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when the event occurred (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Step is the agent step number when this event occurred.
 	Step int `json:"step"`

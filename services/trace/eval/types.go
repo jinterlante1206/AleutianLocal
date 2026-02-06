@@ -471,8 +471,8 @@ type HealthResult struct {
 	// Duration is the time spent on the health check.
 	Duration time.Duration
 
-	// Timestamp is when the check was performed.
-	Timestamp time.Time
+	// Timestamp is when the check was performed (Unix milliseconds UTC).
+	Timestamp int64
 
 	// Details contains component-specific health information.
 	Details map[string]any

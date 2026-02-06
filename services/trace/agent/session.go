@@ -312,11 +312,11 @@ type Session struct {
 	// LastIntent is the classified intent of the last query.
 	LastIntent *QueryIntent `json:"last_intent,omitempty"`
 
-	// CreatedAt is when the session was created.
-	CreatedAt time.Time `json:"created_at"`
+	// CreatedAt is when the session was created (Unix milliseconds UTC).
+	CreatedAt int64 `json:"created_at"`
 
-	// LastActiveAt is when the session was last active.
-	LastActiveAt time.Time `json:"last_active_at"`
+	// LastActiveAt is when the session was last active (Unix milliseconds UTC).
+	LastActiveAt int64 `json:"last_active_at"`
 
 	// inProgress indicates if an operation is currently running.
 	inProgress bool
@@ -371,8 +371,8 @@ type SafetyViolation struct {
 	// ErrorMessage is the safety error message.
 	ErrorMessage string `json:"error_message"`
 
-	// Timestamp is when the violation was recorded.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when the violation was recorded (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Constraints are the extracted constraints for CDCL.
 	Constraints []SafetyConstraintInfo `json:"constraints,omitempty"`
@@ -552,7 +552,7 @@ func NewSession(projectRoot string, config *SessionConfig) (*Session, error) {
 		return nil, err
 	}
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	return &Session{
 		ID:            uuid.NewString(),
 		ProjectRoot:   projectRoot,
@@ -582,7 +582,7 @@ func (s *Session) SetState(state AgentState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.State = state
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 }
 
 // GetGraphID returns the graph ID if set.
@@ -601,7 +601,7 @@ func (s *Session) SetGraphID(graphID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.GraphID = graphID
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 }
 
 // AddHistoryEntry appends a history entry.
@@ -612,9 +612,9 @@ func (s *Session) AddHistoryEntry(entry HistoryEntry) {
 	defer s.mu.Unlock()
 	entry.Step = len(s.History)
 	entry.State = s.State
-	entry.Timestamp = time.Now()
+	entry.Timestamp = time.Now().UnixMilli()
 	s.History = append(s.History, entry)
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 }
 
 // GetHistory returns a copy of the history.
@@ -672,7 +672,7 @@ func (s *Session) IncrementMetric(field MetricField, value int) {
 	case MetricToolForcingRetries:
 		s.Metrics.ToolForcingRetries += value
 	}
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 }
 
 // SetDegradedMode sets the degraded mode flag.
@@ -682,7 +682,7 @@ func (s *Session) SetDegradedMode(degraded bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Metrics.DegradedMode = degraded
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 }
 
 // TryAcquire attempts to acquire the session for an operation.
@@ -697,7 +697,7 @@ func (s *Session) TryAcquire() bool {
 		return false
 	}
 	s.inProgress = true
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 	return true
 }
 
@@ -708,7 +708,7 @@ func (s *Session) Release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.inProgress = false
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 }
 
 // IsTerminated returns true if the session is in a terminal state.
@@ -736,7 +736,7 @@ func (s *Session) SetCurrentContext(ctx *AssembledContext) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.CurrentContext = ctx
-	s.LastActiveAt = time.Now()
+	s.LastActiveAt = time.Now().UnixMilli()
 }
 
 // ToSessionState converts to an external SessionState.
@@ -1228,7 +1228,7 @@ func (s *Session) RecordSafetyViolation(nodeID, errMsg string, constraints []saf
 	violation := SafetyViolation{
 		NodeID:       nodeID,
 		ErrorMessage: errMsg,
-		Timestamp:    time.Now(),
+		Timestamp:    time.Now().UnixMilli(),
 		Constraints:  constraintInfos,
 	}
 

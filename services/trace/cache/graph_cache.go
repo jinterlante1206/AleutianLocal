@@ -166,8 +166,8 @@ func (c *GraphCache) GetOrBuild(ctx context.Context, projectRoot string, build B
 	if fb := c.getCachedError(graphID); fb != nil {
 		return nil, nil, &ErrBuildFailed{
 			Err:      fb.err,
-			FailedAt: fb.failedAt,
-			RetryAt:  fb.retryAt,
+			FailedAt: time.UnixMilli(fb.failedAt),
+			RetryAt:  time.UnixMilli(fb.retryAt),
 		}
 	}
 
@@ -520,7 +520,7 @@ func (c *GraphCache) getCachedError(graphID string) *failedBuild {
 	}
 
 	// Check if error has expired
-	if time.Now().After(fb.retryAt) {
+	if time.Now().After(time.UnixMilli(fb.retryAt)) {
 		// Clean up in a separate goroutine to avoid lock escalation
 		go c.clearCachedError(graphID)
 		return nil
@@ -536,8 +536,8 @@ func (c *GraphCache) cacheError(graphID string, err error) {
 
 	c.failedBuilds[graphID] = &failedBuild{
 		err:      err,
-		failedAt: time.Now(),
-		retryAt:  time.Now().Add(c.options.ErrorCacheTTL),
+		failedAt: time.Now().UnixMilli(),
+		retryAt:  time.Now().Add(c.options.ErrorCacheTTL).UnixMilli(),
 	}
 }
 

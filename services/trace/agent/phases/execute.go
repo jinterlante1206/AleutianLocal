@@ -12,6 +12,7 @@ package phases
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,7 +23,6 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/classifier"
-	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
@@ -30,10 +30,10 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
-	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // executePhaseTracer is the OpenTelemetry tracer for the execute phase.
@@ -591,20 +591,30 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent
 
 					// CB-31d: When circuit breaker forces answer, add synthesis instruction
 					// to override any previous "call a tool" retry messages in conversation.
+					// CRS-07: Added explicit prohibition of XML tool_call syntax after
+					// trace_logs_30 showed GLM-4.7-flash outputting malformed XML that
+					// crashed Ollama's parser.
 					if circuitBreakerFired {
 						synthesisPrompt := `You have already gathered information from tools. Now synthesize a complete answer.
 
+CRITICAL - DO NOT OUTPUT ANY OF THESE PATTERNS:
+- <tool_call> or </tool_call> XML tags
+- <function> or </function> XML tags
+- Any XML-formatted tool invocations
+- Tool names by themselves without explanation
+
 DO NOT:
 - Say you need to call more tools
-- Output tool names
+- Output raw tool names
 - Say "I'll analyze..." without actually answering
+- Use any XML syntax in your response
 
 DO:
-- Use the information already gathered from previous tool calls
-- Provide a direct, comprehensive answer to the user's question
+- Use the information already gathered from previous tool calls shown above
+- Provide a direct, comprehensive answer in plain text
 - If information is incomplete, state what you found and what's missing
 
-Answer the user's question now based on the information gathered.`
+Answer the user's question now based on the tool results shown above.`
 						request.Messages = append(request.Messages, llm.Message{
 							Role:    "user",
 							Content: synthesisPrompt,
@@ -807,7 +817,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 		})
 
 		// CRS-06: Emit EventCircuitBreaker to Coordinator
-		p.emitCoordinatorEvent(ctx, deps, integration.EventCircuitBreaker, nil, nil, cbReason)
+		p.emitCoordinatorEvent(ctx, deps, integration.EventCircuitBreaker, nil, nil, cbReason, crs.ErrorCategoryInternal)
 
 		// Force "answer" to synthesize a response from gathered information
 		return &agent.ToolRouterSelection{
@@ -815,6 +825,54 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			Confidence: 0.8,
 			Reasoning:  fmt.Sprintf("Circuit breaker: %s. Synthesizing answer from gathered information.", cbReason),
 			Duration:   selection.Duration,
+		}
+	}
+
+	// CB-30c: Semantic repetition check
+	// Detects when the same tool is being called with semantically similar queries.
+	// This catches patterns like Grep("parseConfig") → Grep("parse_config") that
+	// the simple count-based circuit breaker misses.
+	if selection.Tool != "answer" && deps.Session != nil && deps.Query != "" {
+		isRepetitive, similarity, similarQuery := p.checkSemanticRepetition(ctx, deps, selection.Tool, deps.Query)
+
+		if isRepetitive {
+			srReason := fmt.Sprintf("semantic repetition: query %.0f%% similar to previous '%s'",
+				similarity*100, truncateQuery(similarQuery, 30))
+
+			slog.Warn("CB-30c Semantic repetition: forcing answer",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("tool", selection.Tool),
+				slog.Float64("similarity", similarity),
+				slog.String("similar_to", similarQuery),
+			)
+
+			span.SetAttributes(
+				attribute.String("semantic_repetition", "detected"),
+				attribute.Float64("similarity", similarity),
+				attribute.String("similar_to", truncateQuery(similarQuery, 50)),
+			)
+
+			// Record metric
+			grounding.RecordSemanticRepetition(selection.Tool, similarity, selection.Tool)
+
+			// CRS-04: Learn from semantic repetition
+			p.learnFromFailure(ctx, deps, crs.FailureEvent{
+				SessionID:   deps.Session.ID,
+				FailureType: crs.FailureTypeSemanticRepetition,
+				Tool:        selection.Tool,
+				Source:      crs.SignalSourceHard, // Jaccard is deterministic
+			})
+
+			// CRS-06: Emit EventSemanticRepetition to Coordinator
+			p.emitCoordinatorEvent(ctx, deps, integration.EventSemanticRepetition, nil, nil, srReason, crs.ErrorCategoryInternal)
+
+			// Force "answer" to synthesize
+			return &agent.ToolRouterSelection{
+				Tool:       "answer",
+				Confidence: 0.8,
+				Reasoning:  fmt.Sprintf("Semantic repetition: %s. Synthesizing answer from gathered information.", srReason),
+				Duration:   selection.Duration,
+			}
 		}
 	}
 
@@ -964,6 +1022,302 @@ func countToolCalls(history []agent.ToolHistoryEntry, toolName string) int {
 		}
 	}
 	return count
+}
+
+// semanticRepetitionThreshold is the Jaccard similarity threshold above which
+// tool calls are considered semantically repetitive.
+// CB-30c: Value of 0.7 means 70% of query terms must overlap.
+const semanticRepetitionThreshold = 0.7
+
+// maxSemanticHistorySteps limits how far back we look for semantic repetition.
+// Only check the last N steps for performance.
+const maxSemanticHistorySteps = 5
+
+// checkSemanticRepetition checks if the proposed tool call is semantically similar
+// to recent tool calls with the same tool name.
+//
+// Description:
+//
+//	Uses Jaccard similarity on query/pattern parameters to detect when
+//	the agent is calling the same tool with slightly different but semantically
+//	equivalent queries. This prevents loops like:
+//	- Grep("parseConfig") → Grep("parse_config") → Grep("ParseConfig")
+//
+//	CB-30c: Uses TraceSteps (which have Metadata with actual params) instead of
+//	CRS StepRecords (which don't populate ToolParams.Query).
+//
+// Inputs:
+//
+//	ctx - Context for tracing. Must not be nil.
+//	deps - Phase dependencies containing session.
+//	tool - The tool name being proposed.
+//	query - The query string from the current tool call (extracted from params).
+//
+// Outputs:
+//
+//	bool - True if this is a semantic repetition.
+//	float64 - The maximum similarity score found.
+//	string - The query from history that was most similar.
+//
+// Thread Safety: Safe for concurrent use (reads from session trace).
+func (p *ExecutePhase) checkSemanticRepetition(
+	ctx context.Context,
+	deps *Dependencies,
+	tool string,
+	query string,
+) (bool, float64, string) {
+	ctx, span := executePhaseTracer.Start(ctx, "ExecutePhase.checkSemanticRepetition",
+		trace.WithAttributes(
+			attribute.String("tool", tool),
+			attribute.String("query_preview", truncateQuery(query, 50)),
+		),
+	)
+	defer span.End()
+
+	if deps.Session == nil || query == "" {
+		return false, 0, ""
+	}
+
+	// Get trace steps from session (these have Metadata with actual params)
+	steps := deps.Session.GetTraceSteps()
+	if len(steps) == 0 {
+		return false, 0, ""
+	}
+
+	// Check last N steps for same tool with similar query
+	maxSimilarity := 0.0
+	similarQuery := ""
+	startIdx := len(steps) - maxSemanticHistorySteps
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	currentTerms := extractQueryTerms(query)
+	if len(currentTerms) == 0 {
+		return false, 0, ""
+	}
+
+	// Query param names to check in Metadata
+	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target"}
+
+	for i := len(steps) - 1; i >= startIdx; i-- {
+		step := steps[i]
+
+		// Only compare same tool (step.Tool contains the tool name)
+		if step.Tool != tool {
+			continue
+		}
+
+		// Extract query from Metadata
+		prevQuery := ""
+		for _, paramName := range queryParamNames {
+			if val, ok := step.Metadata[paramName]; ok && val != "" {
+				prevQuery = val
+				break
+			}
+		}
+
+		if prevQuery == "" {
+			continue
+		}
+
+		prevTerms := extractQueryTerms(prevQuery)
+		if len(prevTerms) == 0 {
+			continue
+		}
+
+		// Calculate Jaccard similarity
+		similarity := jaccardSimilarity(currentTerms, prevTerms)
+
+		if similarity > maxSimilarity {
+			maxSimilarity = similarity
+			similarQuery = prevQuery
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Float64("max_similarity", maxSimilarity),
+		attribute.Float64("threshold", semanticRepetitionThreshold),
+		attribute.Bool("is_repetitive", maxSimilarity >= semanticRepetitionThreshold),
+	)
+
+	if maxSimilarity >= semanticRepetitionThreshold {
+		span.AddEvent("semantic_repetition_detected",
+			trace.WithAttributes(
+				attribute.String("similar_to_query", similarQuery),
+			),
+		)
+		return true, maxSimilarity, similarQuery
+	}
+
+	return false, maxSimilarity, ""
+}
+
+// extractQueryTerms extracts terms from a query string for Jaccard comparison.
+//
+// Description:
+//
+//	Tokenizes the query into lowercase terms, normalizing for comparison.
+//	Handles common delimiters like spaces, underscores, and camelCase.
+//
+// Inputs:
+//
+//	query - The query string to tokenize.
+//
+// Outputs:
+//
+//	map[string]bool - Set of unique lowercase terms.
+func extractQueryTerms(query string) map[string]bool {
+	terms := make(map[string]bool)
+
+	// Split on common delimiters
+	query = strings.ToLower(query)
+	query = strings.ReplaceAll(query, "_", " ")
+	query = strings.ReplaceAll(query, "-", " ")
+	query = strings.ReplaceAll(query, ".", " ")
+	query = strings.ReplaceAll(query, "/", " ")
+
+	// Split camelCase: "parseConfig" → "parse config"
+	var expanded strings.Builder
+	for i, r := range query {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			expanded.WriteRune(' ')
+		}
+		expanded.WriteRune(r)
+	}
+	query = expanded.String()
+
+	// Extract words
+	words := strings.Fields(query)
+	for _, word := range words {
+		if len(word) >= 2 { // Skip single chars
+			terms[word] = true
+		}
+	}
+
+	return terms
+}
+
+// jaccardSimilarity calculates the Jaccard similarity between two term sets.
+//
+// Description:
+//
+//	Jaccard = |intersection| / |union|
+//	Returns 0.0 if either set is empty, 1.0 if identical.
+//
+// Inputs:
+//
+//	a, b - Term sets to compare.
+//
+// Outputs:
+//
+//	float64 - Similarity score in range [0.0, 1.0].
+func jaccardSimilarity(a, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0.0
+	}
+
+	intersectionCount := 0
+	for term := range a {
+		if b[term] {
+			intersectionCount++
+		}
+	}
+
+	// |union| = |a| + |b| - |intersection|
+	unionCount := len(a) + len(b) - intersectionCount
+
+	if unionCount == 0 {
+		return 0.0
+	}
+
+	return float64(intersectionCount) / float64(unionCount)
+}
+
+// extractToolQuery extracts the query/pattern parameter from a tool invocation.
+//
+// Description:
+//
+//	Different tools use different parameter names for their "query" concept.
+//	This function extracts the relevant parameter for semantic comparison.
+//
+// Inputs:
+//
+//	inv - The tool invocation to extract from.
+//
+// Outputs:
+//
+//	string - The query/pattern string, or empty if not found.
+func extractToolQuery(inv *agent.ToolInvocation) string {
+	if inv == nil || inv.Parameters == nil {
+		return ""
+	}
+
+	// Common query parameter names across tools
+	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target"}
+
+	// Check StringParams first
+	if inv.Parameters.StringParams != nil {
+		for _, name := range queryParamNames {
+			if val, ok := inv.Parameters.StringParams[name]; ok && val != "" {
+				return val
+			}
+		}
+	}
+
+	// Fallback: try to parse from RawJSON
+	if len(inv.Parameters.RawJSON) > 0 {
+		var rawParams map[string]interface{}
+		if err := json.Unmarshal(inv.Parameters.RawJSON, &rawParams); err == nil {
+			for _, name := range queryParamNames {
+				if val, ok := rawParams[name]; ok {
+					if strVal, isStr := val.(string); isStr && strVal != "" {
+						return strVal
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// estimateToolResultTokens estimates token count for tool output.
+//
+// Description:
+//
+//	Uses tiered estimation based on content type, as per CB-30c review:
+//	- JSON is denser (~3.5 chars/token)
+//	- Code is sparser (~5 chars/token)
+//	- Default prose (~4 chars/token)
+//
+// Inputs:
+//
+//	result - The tool output as a string.
+//
+// Outputs:
+//
+//	int - Estimated token count.
+func estimateToolResultTokens(result string) int {
+	if len(result) == 0 {
+		return 0
+	}
+
+	trimmed := strings.TrimSpace(result)
+
+	// JSON is denser (~3.5 chars/token)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return len(result) * 10 / 35
+	}
+
+	// Code is sparser (~5 chars/token due to whitespace and indentation)
+	if strings.Contains(result, "func ") || strings.Contains(result, "def ") ||
+		strings.Contains(result, "class ") || strings.Contains(result, "package ") {
+		return len(result) / 5
+	}
+
+	// Default prose (~4 chars/token)
+	return len(result) / 4
 }
 
 // categorizeToolError maps error messages to ErrorCategory for CDCL learning.
@@ -1164,14 +1518,6 @@ func buildProgressSummary(s *agent.Session) string {
 	return summary
 }
 
-// truncateString truncates a string to maxLen with ellipsis.
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
 // countSymbolsInContext counts unique symbols referenced in the context.
 func countSymbolsInContext(ctx *agent.AssembledContext) int {
 	if ctx == nil {
@@ -1227,48 +1573,6 @@ func getRecentToolsFromSession(s *agent.Session) []string {
 		}
 	}
 	return recent
-}
-
-// truncateQuery truncates a query string for logging.
-func truncateQuery(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-// emitToolRouting emits a routing event and records a trace step.
-func (p *ExecutePhase) emitToolRouting(deps *Dependencies, selection *agent.ToolRouterSelection) {
-	if selection == nil {
-		return
-	}
-
-	// Emit event if emitter is available
-	if deps.EventEmitter != nil {
-		deps.EventEmitter.Emit(events.TypeToolForcing, &events.ToolForcingData{
-			Query:         deps.Query,
-			SuggestedTool: selection.Tool,
-			RetryCount:    0,
-			MaxRetries:    0,
-			StepNumber:    0,
-			Reason:        fmt.Sprintf("router_selection (confidence: %.2f, reasoning: %s)", selection.Confidence, selection.Reasoning),
-		})
-	}
-
-	// Record trace step for routing decision
-	if deps.Session != nil {
-		traceStep := crs.TraceStep{
-			Action:   "tool_routing",
-			Target:   selection.Tool,
-			Duration: selection.Duration,
-			Metadata: map[string]string{
-				"confidence": fmt.Sprintf("%.2f", selection.Confidence),
-				"reasoning":  selection.Reasoning,
-				"query":      truncateQuery(deps.Query, 200),
-			},
-		}
-		deps.Session.RecordTraceStep(traceStep)
-	}
 }
 
 // callLLM sends a request to the LLM and emits events.
@@ -1358,52 +1662,6 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 
 	p.emitError(deps, err, false)
 	return agent.StateError, err
-}
-
-// synthesizeFromToolResults builds a summary response from gathered tool results.
-//
-// Description:
-//
-//	When the LLM returns an empty response (often due to context overflow),
-//	this function creates a useful response from the tool results already
-//	collected. This provides graceful degradation instead of failing.
-//
-// Inputs:
-//
-//	deps - Phase dependencies containing tool results.
-//
-// Outputs:
-//
-//	string - Synthesized summary, empty if nothing to synthesize.
-func (p *ExecutePhase) synthesizeFromToolResults(deps *Dependencies) string {
-	if deps.Context == nil || len(deps.Context.ToolResults) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("Based on the codebase analysis:\n\n")
-
-	// Summarize tool results
-	hasContent := false
-	for i, result := range deps.Context.ToolResults {
-		if result.Success && result.Output != "" {
-			// Truncate very long outputs
-			output := result.Output
-			if len(output) > 500 {
-				output = output[:500] + "..."
-			}
-			// Use index-based identifier since ToolResult doesn't have ToolName
-			sb.WriteString(fmt.Sprintf("**Tool Result %d** (ID: %s):\n%s\n\n", i+1, truncateString(result.InvocationID, 20), output))
-			hasContent = true
-		}
-	}
-
-	if !hasContent {
-		return ""
-	}
-
-	sb.WriteString("\n*Note: This summary was generated from tool outputs due to context limitations.*")
-	return sb.String()
 }
 
 // handleCompletion handles LLM responses with no tool calls.
@@ -1951,33 +2209,6 @@ Please revise with specific evidence and [file:line] citations.`, validation.Rea
 	return agent.StateExecute, nil
 }
 
-// emitToolForcing emits a tool forcing event.
-func (p *ExecutePhase) emitToolForcing(deps *Dependencies, req *ForcingRequest, hint string, stepNumber int) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	// Extract suggested tool from hint (best effort)
-	suggestedTool := ""
-	if req != nil && len(req.AvailableTools) > 0 {
-		// Get suggestion from classifier
-		if p.forcingPolicy != nil {
-			if dfp, ok := p.forcingPolicy.(*DefaultForcingPolicy); ok {
-				suggestedTool, _ = dfp.classifier.SuggestTool(context.Background(), req.Query, req.AvailableTools)
-			}
-		}
-	}
-
-	deps.EventEmitter.Emit(events.TypeToolForcing, &events.ToolForcingData{
-		Query:         req.Query,
-		SuggestedTool: suggestedTool,
-		RetryCount:    req.ForcingRetries + 1,
-		MaxRetries:    req.MaxRetries,
-		StepNumber:    stepNumber,
-		Reason:        "analytical_query_without_tools",
-	})
-}
-
 // executeToolCalls executes tool invocations with safety checks.
 //
 // Inputs:
@@ -2042,6 +2273,49 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			}
 		}
 
+		// CB-30c: Check for semantic repetition BEFORE executing the tool.
+		// This catches cases where the main LLM (not router) calls similar tools repeatedly.
+		if deps.Session != nil {
+			toolQuery := extractToolQuery(&inv)
+			if toolQuery != "" {
+				isRepetitive, similarity, similarQuery := p.checkSemanticRepetition(ctx, deps, inv.Tool, toolQuery)
+				if isRepetitive {
+					slog.Warn("CB-30c: Blocking semantically repetitive tool call",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", inv.Tool),
+						slog.String("query", toolQuery),
+						slog.Float64("similarity", similarity),
+						slog.String("similar_to", similarQuery),
+					)
+
+					// Record metric
+					grounding.RecordSemanticRepetition(inv.Tool, similarity, inv.Tool)
+
+					// Learn from repetition
+					p.learnFromFailure(ctx, deps, crs.FailureEvent{
+						SessionID:   deps.Session.ID,
+						FailureType: crs.FailureTypeSemanticRepetition,
+						Tool:        inv.Tool,
+						Source:      crs.SignalSourceHard,
+					})
+
+					// Emit event
+					p.emitCoordinatorEvent(ctx, deps, integration.EventSemanticRepetition, &inv, nil,
+						fmt.Sprintf("query %.0f%% similar to '%s'", similarity*100, truncateQuery(similarQuery, 30)),
+						crs.ErrorCategoryInternal)
+
+					// Return a result that indicates semantic repetition
+					// This will cause the completion handler to synthesize instead
+					results = append(results, &tools.Result{
+						Success: false,
+						Error:   fmt.Sprintf("Semantic repetition detected: query %.0f%% similar to previous. Synthesize from existing results.", similarity*100),
+					})
+					blocked = true
+					continue
+				}
+			}
+		}
+
 		// Execute the tool with timing
 		toolStart := time.Now()
 		result := p.executeSingleTool(ctx, deps, &inv)
@@ -2070,10 +2344,10 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			})
 
 			// CRS-06: Emit EventToolFailed to Coordinator
-			p.emitCoordinatorEvent(ctx, deps, integration.EventToolFailed, &inv, result, errMsg)
+			p.emitCoordinatorEvent(ctx, deps, integration.EventToolFailed, &inv, result, errMsg, errorCategory)
 		} else {
 			// CRS-06: Emit EventToolExecuted to Coordinator for successful execution
-			p.emitCoordinatorEvent(ctx, deps, integration.EventToolExecuted, &inv, result, "")
+			p.emitCoordinatorEvent(ctx, deps, integration.EventToolExecuted, &inv, result, "", crs.ErrorCategoryNone)
 		}
 		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
@@ -2097,7 +2371,7 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			)
 
 			// CRS-06: Emit EventCycleDetected to Coordinator
-			p.emitCoordinatorEvent(ctx, deps, integration.EventCycleDetected, &inv, nil, cycleReason)
+			p.emitCoordinatorEvent(ctx, deps, integration.EventCycleDetected, &inv, nil, cycleReason, crs.ErrorCategoryInternal)
 
 			// Continue processing - the cycle states are already marked disproven
 			// The circuit breaker will fire on the next tool selection
@@ -2424,14 +2698,41 @@ func (p *ExecutePhase) addAssistantToolCallToHistory(deps *Dependencies, respons
 
 // updateContextWithResults updates context with tool results.
 //
+// Description:
+//
+//	Adds tool execution results to the context's ToolResults slice.
+//	Uses ContextManager when available (preferred path with full context management),
+//	but falls back to direct append when ContextManager is nil (degraded mode).
+//	This fallback ensures ToolResults is always populated for synthesizeFromToolResults().
+//
+//	Fixed in cb_30b: Previously returned early when ContextManager was nil,
+//	causing ToolResults to be empty and synthesizeFromToolResults() to fail.
+//
 // Inputs:
 //
 //	ctx - Context for cancellation.
 //	deps - Phase dependencies.
 //	results - Tool execution results.
+//
+// Thread Safety: This method is safe for concurrent use.
 func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Dependencies, results []*tools.Result) {
-	// Skip if no ContextManager (degraded mode)
-	if deps.ContextManager == nil {
+	// Validate required dependencies
+	if deps.Context == nil {
+		sessionID := "unknown"
+		if deps.Session != nil {
+			sessionID = deps.Session.ID
+		}
+		slog.Warn("updateContextWithResults: deps.Context is nil, cannot store results",
+			slog.String("session_id", sessionID),
+			slog.Int("result_count", len(results)),
+		)
+		return
+	}
+
+	if deps.Session == nil {
+		slog.Warn("updateContextWithResults: deps.Session is nil, cannot persist results",
+			slog.Int("result_count", len(results)),
+		)
 		return
 	}
 
@@ -2440,15 +2741,79 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 			continue
 		}
 
-		updated, err := deps.ContextManager.Update(ctx, deps.Context, result)
-		if err != nil {
-			p.emitError(deps, fmt.Errorf("context update failed: %w", err), true)
-			continue
+		if deps.ContextManager != nil {
+			// Preferred path: Use ContextManager for full context management
+			// ContextManager handles: truncation, pruning, token estimation, event emission
+			updated, err := deps.ContextManager.Update(ctx, deps.Context, result)
+			if err != nil {
+				p.emitError(deps, fmt.Errorf("context update failed: %w", err), true)
+				// Fall through to direct append as fallback
+			} else {
+				// Update deps.Context with the new context and persist to session
+				deps.Context = updated
+				deps.Session.SetCurrentContext(updated)
+				continue
+			}
 		}
 
-		// Update deps.Context with the new context and persist to session
-		deps.Context = updated
-		deps.Session.SetCurrentContext(updated)
+		// Fallback: Direct append when ContextManager unavailable or failed
+		// This ensures ToolResults is always populated for synthesizeFromToolResults()
+		// cb_30b fix: Previously this path was missing, causing empty ToolResults
+		outputText := result.OutputText
+		truncated := result.Truncated
+
+		// Truncate long outputs to prevent context overflow (match ContextManager behavior)
+		const maxOutputLen = 4000 // Match DefaultMaxToolResultLength
+		if len(outputText) > maxOutputLen {
+			outputText = outputText[:maxOutputLen-3] + "..."
+			truncated = true
+		}
+
+		// Estimate tokens (simple heuristic: ~4 chars per token)
+		tokensUsed := result.TokensUsed
+		if tokensUsed == 0 && len(outputText) > 0 {
+			tokensUsed = (len(outputText) + 3) / 4
+		}
+
+		agentResult := agent.ToolResult{
+			InvocationID: uuid.NewString(),
+			Success:      result.Success,
+			Output:       outputText,
+			Error:        result.Error,
+			Duration:     result.Duration,
+			TokensUsed:   tokensUsed,
+			Cached:       result.Cached,
+			Truncated:    truncated,
+		}
+
+		// Append to ToolResults - safe because session access is serialized
+		// through the agent loop (one Execute call at a time per session)
+		deps.Context.ToolResults = append(deps.Context.ToolResults, agentResult)
+		deps.Session.SetCurrentContext(deps.Context)
+
+		// Record in CRS trace for observability (cb_30b enhancement)
+		// This ensures the fallback path is visible in reasoning traces
+		if deps.Session != nil {
+			deps.Session.RecordTraceStep(crs.TraceStep{
+				Action: "tool_result_stored",
+				Tool:   "context_fallback",
+				Target: agentResult.InvocationID,
+				Error:  result.Error,
+				Metadata: map[string]string{
+					"success":    fmt.Sprintf("%t", result.Success),
+					"output_len": fmt.Sprintf("%d", len(outputText)),
+					"truncated":  fmt.Sprintf("%t", truncated),
+					"path":       "fallback_direct_append",
+				},
+			})
+		}
+
+		slog.Debug("updateContextWithResults: direct append (no ContextManager)",
+			slog.String("session_id", deps.Session.ID),
+			slog.Bool("success", result.Success),
+			slog.Int("output_len", len(outputText)),
+			slog.Int("tokens_estimated", tokensUsed),
+		)
 	}
 }
 
@@ -2464,259 +2829,6 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 //	bool - True if reflection should occur.
 func (p *ExecutePhase) shouldReflect(deps *Dependencies, stepNumber int) bool {
 	return stepNumber > 0 && stepNumber%p.reflectionThreshold == 0
-}
-
-// emitLLMRequest emits an LLM request event.
-func (p *ExecutePhase) emitLLMRequest(deps *Dependencies, request *llm.Request) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	deps.EventEmitter.Emit(events.TypeLLMRequest, &events.LLMRequestData{
-		Model:     deps.LLMClient.Model(),
-		TokensIn:  request.MaxTokens, // Approximation
-		HasTools:  len(request.Tools) > 0,
-		ToolCount: len(request.Tools),
-	})
-}
-
-// emitLLMResponse emits an LLM response event.
-func (p *ExecutePhase) emitLLMResponse(deps *Dependencies, response *llm.Response) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	deps.EventEmitter.Emit(events.TypeLLMResponse, &events.LLMResponseData{
-		Model:         response.Model,
-		TokensOut:     response.OutputTokens,
-		Duration:      response.Duration,
-		StopReason:    response.StopReason,
-		HasToolCalls:  response.HasToolCalls(),
-		ToolCallCount: len(response.ToolCalls),
-	})
-}
-
-// emitToolInvocation emits a tool invocation event.
-func (p *ExecutePhase) emitToolInvocation(deps *Dependencies, inv *agent.ToolInvocation) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	// Convert ToolParameters to event parameters
-	deps.EventEmitter.Emit(events.TypeToolInvocation, &events.ToolInvocationData{
-		ToolName:     inv.Tool,
-		InvocationID: inv.ID,
-		Parameters:   toolParamsToEventParams(inv.Parameters),
-	})
-}
-
-// toolParamsToEventParams converts agent.ToolParameters to events.ToolInvocationParameters.
-func toolParamsToEventParams(params *agent.ToolParameters) *events.ToolInvocationParameters {
-	if params == nil {
-		return nil
-	}
-	return &events.ToolInvocationParameters{
-		StringParams: params.StringParams,
-		IntParams:    params.IntParams,
-		BoolParams:   params.BoolParams,
-		RawJSON:      params.RawJSON,
-	}
-}
-
-// emitToolResult emits a tool result event.
-func (p *ExecutePhase) emitToolResult(deps *Dependencies, inv *agent.ToolInvocation, result *tools.Result) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	deps.EventEmitter.Emit(events.TypeToolResult, &events.ToolResultData{
-		ToolName:     inv.Tool,
-		InvocationID: inv.ID,
-		Success:      result.Success,
-		Duration:     result.Duration,
-		TokensUsed:   result.TokensUsed,
-		Cached:       result.Cached,
-		Error:        result.Error,
-	})
-}
-
-// emitSafetyCheck emits a safety check event.
-func (p *ExecutePhase) emitSafetyCheck(deps *Dependencies, result *safety.Result) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	deps.EventEmitter.Emit(events.TypeSafetyCheck, &events.SafetyCheckData{
-		ChangesChecked: result.ChecksRun,
-		Passed:         result.Passed,
-		CriticalCount:  result.CriticalCount,
-		WarningCount:   result.WarningCount,
-		Blocked:        !result.Passed,
-	})
-}
-
-// emitStepComplete emits a step complete event.
-func (p *ExecutePhase) emitStepComplete(deps *Dependencies, stepStart time.Time, stepNumber, toolsInvoked int) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	tokensUsed := 0
-	if deps.Context != nil {
-		tokensUsed = deps.Context.TotalTokens
-	}
-
-	deps.EventEmitter.Emit(events.TypeStepComplete, &events.StepCompleteData{
-		StepNumber:   stepNumber,
-		Duration:     time.Since(stepStart),
-		ToolsInvoked: toolsInvoked,
-		TokensUsed:   tokensUsed,
-	})
-}
-
-// emitStateTransition emits a state transition event.
-func (p *ExecutePhase) emitStateTransition(deps *Dependencies, from, to agent.AgentState, reason string) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	deps.EventEmitter.Emit(events.TypeStateTransition, &events.StateTransitionData{
-		FromState: from,
-		ToState:   to,
-		Reason:    reason,
-	})
-}
-
-// emitError emits an error event.
-func (p *ExecutePhase) emitError(deps *Dependencies, err error, recoverable bool) {
-	if deps.EventEmitter == nil {
-		return
-	}
-
-	deps.EventEmitter.Emit(events.TypeError, &events.ErrorData{
-		Error:       err.Error(),
-		Recoverable: recoverable,
-	})
-}
-
-// =============================================================================
-// CRS-06: Coordinator Event Emission
-// =============================================================================
-
-// emitCoordinatorEvent emits an event to the MCTS Coordinator.
-//
-// Description:
-//
-//	If a Coordinator is configured, emits the event which triggers appropriate
-//	MCTS activities (Search, Learning, Awareness, etc.). The Coordinator
-//	orchestrates activities based on the event type and current session state.
-//
-// Inputs:
-//
-//	ctx - Context for cancellation.
-//	deps - Phase dependencies containing Coordinator.
-//	event - The agent event to emit.
-//	inv - The tool invocation (may be nil).
-//	result - The tool result (may be nil).
-//	errorMsg - Error message if applicable.
-//
-// Thread Safety: Safe for concurrent use.
-func (p *ExecutePhase) emitCoordinatorEvent(
-	ctx context.Context,
-	deps *Dependencies,
-	event integration.AgentEvent,
-	inv *agent.ToolInvocation,
-	result *tools.Result,
-	errorMsg string,
-) {
-	if deps.Coordinator == nil || deps.Session == nil {
-		return
-	}
-
-	// Build event data
-	data := &integration.EventData{
-		SessionID: deps.Session.ID,
-	}
-
-	// Add tool information if available
-	if inv != nil {
-		data.Tool = inv.Tool
-	}
-
-	// Add error information if available
-	if result != nil && !result.Success {
-		data.Error = result.Error
-	} else if errorMsg != "" {
-		data.Error = errorMsg
-	}
-
-	// Get step number from session
-	if deps.Session != nil {
-		data.StepNumber = deps.Session.GetMetric(agent.MetricSteps)
-	}
-
-	// Handle the event - activities are executed asynchronously
-	_, err := deps.Coordinator.HandleEvent(ctx, event, data)
-	if err != nil {
-		slog.Warn("CRS-06: Coordinator event handling failed",
-			slog.String("event", string(event)),
-			slog.String("session_id", deps.Session.ID),
-			slog.String("error", err.Error()),
-		)
-	} else {
-		slog.Debug("CRS-06: Coordinator event handled",
-			slog.String("event", string(event)),
-			slog.String("session_id", deps.Session.ID),
-		)
-	}
-}
-
-// getStringParamFromToolParams extracts a string parameter from ToolParameters.
-//
-// Inputs:
-//
-//	params - The tool parameters
-//	key - The parameter name
-//
-// Outputs:
-//
-//	string - The parameter value, or empty string if not found
-func getStringParamFromToolParams(params *agent.ToolParameters, key string) string {
-	if params == nil {
-		return ""
-	}
-	if v, ok := params.GetString(key); ok {
-		return v
-	}
-	return ""
-}
-
-// toolParamsToMap converts ToolParameters to a map for internal tool execution.
-//
-// Inputs:
-//
-//	params - The tool parameters
-//
-// Outputs:
-//
-//	map[string]any - Parameters as a map
-func toolParamsToMap(params *agent.ToolParameters) map[string]any {
-	result := make(map[string]any)
-	if params == nil {
-		return result
-	}
-
-	for k, v := range params.StringParams {
-		result[k] = v
-	}
-	for k, v := range params.IntParams {
-		result[k] = v
-	}
-	for k, v := range params.BoolParams {
-		result[k] = v
-	}
-
-	return result
 }
 
 // maybeRefreshGraph refreshes the graph if dirty files exist.
@@ -2834,20 +2946,6 @@ func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
 		names[i] = def.Name
 	}
 	return names
-}
-
-// emitGraphRefresh emits a graph refresh event.
-func (p *ExecutePhase) emitGraphRefresh(deps *Dependencies, result *graph.RefreshResult, fileCount int) {
-	if deps.EventEmitter == nil || result == nil {
-		return
-	}
-
-	deps.EventEmitter.Emit(events.TypeContextUpdate, &events.ContextUpdateData{
-		Action:          "graph_refresh",
-		EntriesAffected: fileCount,
-		TokensBefore:    result.NodesRemoved,
-		TokensAfter:     result.NodesAdded,
-	})
 }
 
 // =============================================================================
@@ -2993,13 +3091,39 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 
 	deps.Session.RecordTraceStep(stepBuilder.Build())
 
+	// CB-30c: Estimate and track tokens for tool output
+	// This ensures token metrics are non-zero even when using hard-forced tools
+	// without LLM calls (which was causing tokens_used=0 in trace_logs_36).
+	if result != nil && result.Output != nil {
+		outputStr := fmt.Sprintf("%v", result.Output)
+		estimatedTokens := estimateToolResultTokens(outputStr)
+		if estimatedTokens > 0 {
+			deps.Session.IncrementMetric(agent.MetricTokens, estimatedTokens)
+			slog.Debug("CB-30c: Estimated tokens for hard-forced tool",
+				slog.String("tool", toolName),
+				slog.Int("estimated_tokens", estimatedTokens),
+				slog.Int("output_len", len(outputStr)),
+			)
+		}
+	}
+
 	// Update context with tool result using ContextManager
+	// CRS-07 FIX: Previously discarded the updated context, causing tool results
+	// to be lost. Now properly stores the updated context so BuildRequest() can
+	// include tool results in LLM messages for synthesis.
 	if deps.ContextManager != nil && deps.Context != nil && result != nil {
-		_, err := deps.ContextManager.Update(ctx, deps.Context, result)
+		updated, err := deps.ContextManager.Update(ctx, deps.Context, result)
 		if err != nil {
 			slog.Warn("Failed to update context with hard-forced tool result",
 				slog.String("tool", toolName),
 				slog.String("error", err.Error()),
+			)
+		} else {
+			deps.Context = updated
+			deps.Session.SetCurrentContext(updated)
+			slog.Debug("CRS-07: Context updated with hard-forced tool result",
+				slog.String("tool", toolName),
+				slog.Int("tool_results_count", len(updated.ToolResults)),
 			)
 		}
 	}
@@ -3009,52 +3133,6 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 		NextState: agent.StateExecute, // Stay in execute to allow router to decide next step
 		Response:  fmt.Sprintf("Tool %s executed successfully (hard forced)", toolName),
 	}, nil
-}
-
-// extractPackageNameFromQuery extracts a package name from the user's query.
-//
-// Description:
-//
-//	Uses regex patterns to identify package references in natural language.
-//	TR-12 Fix: Rule-based extraction for explore_package tool.
-//
-// Inputs:
-//
-//	query - The user's query string.
-//
-// Outputs:
-//
-//	string - The extracted package name, or empty if not found.
-func extractPackageNameFromQuery(query string) string {
-	query = strings.ToLower(query)
-
-	// Pattern 1: "about package X" or "about the X package"
-	if idx := strings.Index(query, "package"); idx >= 0 {
-		after := query[idx+7:]
-		words := strings.Fields(after)
-		if len(words) > 0 {
-			pkg := strings.Trim(words[0], "?,.")
-			if pkg != "" && pkg != "the" && pkg != "a" && pkg != "an" {
-				return pkg
-			}
-			if len(words) > 1 {
-				pkg = strings.Trim(words[1], "?,.")
-				return pkg
-			}
-		}
-	}
-
-	// Pattern 2: "pkg/something" or "path/to/package"
-	if strings.Contains(query, "pkg/") || strings.Contains(query, "/") {
-		words := strings.Fields(query)
-		for _, word := range words {
-			if strings.Contains(word, "/") {
-				return strings.Trim(word, "?,.")
-			}
-		}
-	}
-
-	return ""
 }
 
 // containsToolCallPattern detects escaped tool call patterns in LLM text response.
@@ -3114,28 +3192,6 @@ func containsToolCallPattern(content string) bool {
 	}
 
 	return false
-}
-
-// truncateForLog truncates a string for logging without cutting mid-word.
-//
-// # Inputs
-//
-//   - s: String to truncate.
-//   - maxLen: Maximum length.
-//
-// # Outputs
-//
-//   - string: Truncated string with "..." suffix if truncated.
-func truncateForLog(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	// Find last space before maxLen
-	truncated := s[:maxLen]
-	if lastSpace := strings.LastIndex(truncated, " "); lastSpace > maxLen/2 {
-		truncated = truncated[:lastSpace]
-	}
-	return truncated + "..."
 }
 
 // retryDesperationWithStrongerPrompt retries LLM call with explicit no-tools instruction.
@@ -3497,7 +3553,7 @@ func (p *ExecutePhase) checkCycleAfterStep(
 
 	step := crs.StepRecord{
 		StepNumber: crsStepNumber,
-		Timestamp:  time.Now(),
+		Timestamp:  time.Now().UnixMilli(),
 		SessionID:  deps.Session.ID,
 		Actor:      actor,
 		Decision:   crs.DecisionExecuteTool,
@@ -3997,21 +4053,4 @@ func (p *ExecutePhase) selectToolWithUCB1(
 		Reasoning:  fmt.Sprintf("UCB1: router_conf=%.2f, proof_penalty=%.2f, exploration=%.2f", bestScore.RouterConfidence, bestScore.ProofPenalty, bestScore.ExplorationBonus),
 		Duration:   time.Since(startTime),
 	}, modified
-}
-
-// getAvailableToolNames extracts tool names from tool definitions.
-//
-// Inputs:
-//
-//	toolDefs - Tool definitions.
-//
-// Outputs:
-//
-//	[]string - List of tool names.
-func getAvailableToolNames(toolDefs []tools.ToolDefinition) []string {
-	names := make([]string, len(toolDefs))
-	for i, def := range toolDefs {
-		names[i] = def.Name
-	}
-	return names
 }

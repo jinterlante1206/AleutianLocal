@@ -391,7 +391,7 @@ func TestCRS_CheckDecisionAllowed(t *testing.T) {
 			Decision:   DecisionExecuteTool,
 			Tool:       "tool_A",
 			Outcome:    OutcomeSuccess,
-			Timestamp:  time.Now(),
+			Timestamp:  time.Now().UnixMilli(),
 		})
 	}
 
@@ -441,7 +441,7 @@ func TestCRS_GarbageCollectClauses(t *testing.T) {
 		Literals:    []Literal{{Variable: "tool:A", Negated: true}},
 		Source:      SignalSourceHard,
 		FailureType: FailureTypeCycleDetected,
-		LearnedAt:   time.Now().Add(-1 * time.Hour), // Old clause
+		LearnedAt:   time.Now().Add(-1 * time.Hour).UnixMilli(), // Old clause
 	}
 
 	// Directly add to clauseData to bypass LearnedAt update

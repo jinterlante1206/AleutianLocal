@@ -56,6 +56,11 @@ const (
 	// Triggers: Learning (learn from repeated failures), Constraint (add blocking constraint)
 	EventCircuitBreaker AgentEvent = "circuit_breaker"
 
+	// EventSemanticRepetition is emitted when semantically similar tool calls are detected.
+	// Triggers: Learning (learn from repetition), Constraint (add blocking constraint)
+	// CB-30c: Added to prevent repeated similar queries.
+	EventSemanticRepetition AgentEvent = "semantic_repetition"
+
 	// EventSynthesisStart is emitted when answer synthesis begins.
 	// Triggers: Similarity (find similar syntheses), Memory (get relevant history)
 	EventSynthesisStart AgentEvent = "synthesis_start"
@@ -71,6 +76,10 @@ const (
 //
 //	Contains the data associated with an agent event. Different fields
 //	are populated depending on the event type.
+//
+// Thread Safety: EventData is NOT safe for concurrent modification.
+// Create a new instance for each event. Fields should be set before
+// passing to HandleEvent and not modified thereafter.
 type EventData struct {
 	// SessionID is the session identifier.
 	SessionID string
@@ -155,6 +164,10 @@ var EventActivityMapping = map[AgentEvent][]ActivityName{
 	},
 	EventCircuitBreaker: {
 		ActivityLearning,   // Learn from repeated calls
+		ActivityConstraint, // Add blocking constraint
+	},
+	EventSemanticRepetition: {
+		ActivityLearning,   // Learn from semantic repetition (CB-30c)
 		ActivityConstraint, // Add blocking constraint
 	},
 	EventSynthesisStart: {
@@ -316,7 +329,8 @@ type SimpleQueryFilter struct{}
 
 // Filter implements ActivityFilter.
 func (f *SimpleQueryFilter) Filter(event AgentEvent, acts []ActivityName, ctx *EventContext) []ActivityName {
-	if ctx == nil || !ctx.IsSimpleQuery {
+	// CR-6 fix: Defensive nil checks
+	if acts == nil || ctx == nil || !ctx.IsSimpleQuery {
 		return acts
 	}
 
@@ -347,7 +361,8 @@ type HighErrorRateFilter struct {
 
 // Filter implements ActivityFilter.
 func (f *HighErrorRateFilter) Filter(event AgentEvent, acts []ActivityName, ctx *EventContext) []ActivityName {
-	if ctx == nil || ctx.ErrorRate < f.Threshold {
+	// CR-7 fix: Defensive nil checks
+	if acts == nil || ctx == nil || ctx.ErrorRate < f.Threshold {
 		return acts
 	}
 

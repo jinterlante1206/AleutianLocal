@@ -514,6 +514,17 @@ func (m *mockCRSForCycleAnalysis) CheckDecisionAllowed(string, string) (bool, st
 }
 func (m *mockCRSForCycleAnalysis) GarbageCollectClauses() int { return 0 }
 
+// GR-35: Delta history methods
+func (m *mockCRSForCycleAnalysis) SetSessionID(string) {}
+func (m *mockCRSForCycleAnalysis) ApplyWithSource(context.Context, Delta, string, map[string]string) (ApplyMetrics, error) {
+	return ApplyMetrics{}, nil
+}
+func (m *mockCRSForCycleAnalysis) DeltaHistory() DeltaHistoryView { return nil }
+func (m *mockCRSForCycleAnalysis) Close()                         {}
+
+// GR-28: Graph integration
+func (m *mockCRSForCycleAnalysis) SetGraphProvider(GraphQuery) {}
+
 func TestAnalyzeSessionCycles_NilContext(t *testing.T) {
 	mock := newMockCRSForCycleAnalysis()
 	_, err := AnalyzeSessionCycles(nil, mock, "test-session")

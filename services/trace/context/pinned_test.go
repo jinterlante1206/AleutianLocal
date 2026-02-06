@@ -274,12 +274,12 @@ func TestPinnedInstructions_UpdateStepStatus(t *testing.T) {
 	t.Run("sets StartedAt on InProgress", func(t *testing.T) {
 		p := NewPinnedInstructions()
 		_ = p.SetPlan([]PlanStep{{Description: "step 1", Status: StepPending}})
-		before := time.Now()
+		before := time.Now().UnixMilli()
 
 		_ = p.UpdateStepStatus(0, StepInProgress)
 
 		step := p.GetPlan()[0]
-		if step.StartedAt.Before(before) {
+		if step.StartedAt < before {
 			t.Error("StartedAt should be set")
 		}
 	})
@@ -287,12 +287,12 @@ func TestPinnedInstructions_UpdateStepStatus(t *testing.T) {
 	t.Run("sets CompletedAt on Done", func(t *testing.T) {
 		p := NewPinnedInstructions()
 		_ = p.SetPlan([]PlanStep{{Description: "step 1", Status: StepPending}})
-		before := time.Now()
+		before := time.Now().UnixMilli()
 
 		_ = p.UpdateStepStatus(0, StepDone)
 
 		step := p.GetPlan()[0]
-		if step.CompletedAt.Before(before) {
+		if step.CompletedAt < before {
 			t.Error("CompletedAt should be set")
 		}
 	})
@@ -300,12 +300,12 @@ func TestPinnedInstructions_UpdateStepStatus(t *testing.T) {
 	t.Run("sets CompletedAt on Skipped", func(t *testing.T) {
 		p := NewPinnedInstructions()
 		_ = p.SetPlan([]PlanStep{{Description: "step 1", Status: StepPending}})
-		before := time.Now()
+		before := time.Now().UnixMilli()
 
 		_ = p.UpdateStepStatus(0, StepSkipped)
 
 		step := p.GetPlan()[0]
-		if step.CompletedAt.Before(before) {
+		if step.CompletedAt < before {
 			t.Error("CompletedAt should be set on skip")
 		}
 	})
@@ -379,19 +379,19 @@ func TestPinnedInstructions_AddFinding(t *testing.T) {
 
 		_ = p.AddFinding(context.Background(), finding)
 
-		if p.GetFindings()[0].Timestamp.IsZero() {
+		if p.GetFindings()[0].Timestamp == 0 {
 			t.Error("timestamp should be set")
 		}
 	})
 
 	t.Run("preserves provided timestamp", func(t *testing.T) {
 		p := NewPinnedInstructions()
-		ts := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+		ts := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
 		finding := Finding{Summary: "test", Timestamp: ts}
 
 		_ = p.AddFinding(context.Background(), finding)
 
-		if !p.GetFindings()[0].Timestamp.Equal(ts) {
+		if p.GetFindings()[0].Timestamp != ts {
 			t.Error("provided timestamp should be preserved")
 		}
 	})

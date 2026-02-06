@@ -255,7 +255,7 @@ func (a *EnhancedAnalyzer) Analyze(
 		BlastRadius:     *baseResult,
 		ChangeImpacts:   make([]ChangeImpact, 0),
 		EnricherResults: make([]EnricherResult, 0, len(a.registry.All())),
-		AnalyzedAt:      time.Now(),
+		AnalyzedAt:      time.Now().UnixMilli(),
 		GraphGeneration: graphGen,
 	}
 

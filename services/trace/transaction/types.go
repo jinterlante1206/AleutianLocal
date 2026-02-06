@@ -185,11 +185,11 @@ type Transaction struct {
 	// SessionID links the transaction to an agent session.
 	SessionID string `json:"session_id"`
 
-	// StartedAt is when the transaction began.
-	StartedAt time.Time `json:"started_at"`
+	// StartedAt is when the transaction began (Unix milliseconds UTC).
+	StartedAt int64 `json:"started_at"`
 
-	// ExpiresAt is when the transaction will auto-rollback if not completed.
-	ExpiresAt time.Time `json:"expires_at"`
+	// ExpiresAt is when the transaction will auto-rollback if not completed (Unix milliseconds UTC).
+	ExpiresAt int64 `json:"expires_at"`
 
 	// CheckpointRef is the git ref (commit SHA) to restore on rollback.
 	CheckpointRef string `json:"checkpoint_ref"`
@@ -225,12 +225,12 @@ type Transaction struct {
 
 // IsExpired returns true if the transaction has exceeded its TTL.
 func (t *Transaction) IsExpired() bool {
-	return time.Now().After(t.ExpiresAt)
+	return time.Now().UnixMilli() > t.ExpiresAt
 }
 
 // Duration returns how long the transaction has been active.
 func (t *Transaction) Duration() time.Duration {
-	return time.Since(t.StartedAt)
+	return time.Duration(time.Now().UnixMilli()-t.StartedAt) * time.Millisecond
 }
 
 // FileCount returns the number of files modified in this transaction.

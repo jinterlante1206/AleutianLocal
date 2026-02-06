@@ -24,8 +24,8 @@ func TestSummaryCache_GetSet(t *testing.T) {
 		Level:     1,
 		Content:   "Auth package handles authentication",
 		Keywords:  []string{"auth", "jwt"},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: time.Now().UnixMilli(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	// Set
@@ -62,7 +62,7 @@ func TestSummaryCache_Invalidate(t *testing.T) {
 		ID:        "pkg/auth",
 		Level:     1,
 		Content:   "Auth package",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	cache.Set(summary)
@@ -93,7 +93,7 @@ func TestSummaryCache_GetStale(t *testing.T) {
 		ID:        "pkg/auth",
 		Level:     1,
 		Content:   "Auth package",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	cache.Set(summary)
@@ -128,7 +128,7 @@ func TestSummaryCache_InvalidateIfStale(t *testing.T) {
 		Level:     1,
 		Content:   "Auth package",
 		Hash:      "hash1",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	cache.Set(summary)
@@ -154,7 +154,7 @@ func TestSummaryCache_SetIfUnchanged(t *testing.T) {
 		Level:     1,
 		Content:   "Auth package v1",
 		Version:   1,
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	// Initial set should succeed
@@ -172,7 +172,7 @@ func TestSummaryCache_SetIfUnchanged(t *testing.T) {
 		Level:     1,
 		Content:   "Auth package v2",
 		Version:   2,
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 	ok, err = cache.SetIfUnchanged(summary2, 1)
 	if err != nil {
@@ -188,7 +188,7 @@ func TestSummaryCache_SetIfUnchanged(t *testing.T) {
 		Level:     1,
 		Content:   "Auth package v3",
 		Version:   3,
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 	_, err = cache.SetIfUnchanged(summary3, 1) // Wrong version
 	if err != ErrCacheVersionConflict {
@@ -200,13 +200,13 @@ func TestSummaryCache_ApplyBatch(t *testing.T) {
 	cache := NewSummaryCache(DefaultCacheConfig())
 
 	// Add initial entries
-	cache.Set(&Summary{ID: "pkg/old", Level: 1, Content: "Old package", UpdatedAt: time.Now()})
+	cache.Set(&Summary{ID: "pkg/old", Level: 1, Content: "Old package", UpdatedAt: time.Now().UnixMilli()})
 
 	batch := &SummaryBatch{
 		Version: 1,
 		Summaries: []Summary{
-			{ID: "pkg/auth", Level: 1, Content: "Auth package", UpdatedAt: time.Now()},
-			{ID: "pkg/db", Level: 1, Content: "DB package", UpdatedAt: time.Now()},
+			{ID: "pkg/auth", Level: 1, Content: "Auth package", UpdatedAt: time.Now().UnixMilli()},
+			{ID: "pkg/db", Level: 1, Content: "DB package", UpdatedAt: time.Now().UnixMilli()},
 		},
 		DeleteIDs: []string{"pkg/old"},
 	}
@@ -237,7 +237,7 @@ func TestSummaryCache_ApplyBatch_InvalidChecksum(t *testing.T) {
 	batch := &SummaryBatch{
 		Version: 1,
 		Summaries: []Summary{
-			{ID: "pkg/auth", Level: 1, Content: "Auth package", UpdatedAt: time.Now()},
+			{ID: "pkg/auth", Level: 1, Content: "Auth package", UpdatedAt: time.Now().UnixMilli()},
 		},
 		Checksum: "invalid",
 	}
@@ -251,7 +251,7 @@ func TestSummaryCache_ApplyBatch_InvalidChecksum(t *testing.T) {
 func TestSummaryCache_GetByLevel(t *testing.T) {
 	cache := NewSummaryCache(DefaultCacheConfig())
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: now})
 	cache.Set(&Summary{ID: "pkg/db", Level: 1, Content: "DB", UpdatedAt: now})
 	cache.Set(&Summary{ID: "pkg/auth/validator.go", Level: 2, Content: "Validator", UpdatedAt: now})
@@ -278,7 +278,7 @@ func TestSummaryCache_GetByLevel(t *testing.T) {
 func TestSummaryCache_GetChildren(t *testing.T) {
 	cache := NewSummaryCache(DefaultCacheConfig())
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: now})
 	cache.Set(&Summary{ID: "pkg/auth/validator.go", Level: 2, ParentID: "pkg/auth", Content: "Validator", UpdatedAt: now})
 	cache.Set(&Summary{ID: "pkg/auth/handler.go", Level: 2, ParentID: "pkg/auth", Content: "Handler", UpdatedAt: now})
@@ -293,7 +293,7 @@ func TestSummaryCache_GetChildren(t *testing.T) {
 func TestSummaryCache_Delete(t *testing.T) {
 	cache := NewSummaryCache(DefaultCacheConfig())
 
-	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: time.Now()})
+	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: time.Now().UnixMilli()})
 
 	if !cache.Has("pkg/auth") {
 		t.Fatal("Entry not found after Set")
@@ -309,8 +309,8 @@ func TestSummaryCache_Delete(t *testing.T) {
 func TestSummaryCache_Clear(t *testing.T) {
 	cache := NewSummaryCache(DefaultCacheConfig())
 
-	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: time.Now()})
-	cache.Set(&Summary{ID: "pkg/db", Level: 1, Content: "DB", UpdatedAt: time.Now()})
+	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: time.Now().UnixMilli()})
+	cache.Set(&Summary{ID: "pkg/db", Level: 1, Content: "DB", UpdatedAt: time.Now().UnixMilli()})
 
 	if cache.Count() != 2 {
 		t.Fatalf("expected 2 entries, got %d", cache.Count())
@@ -326,7 +326,7 @@ func TestSummaryCache_Clear(t *testing.T) {
 func TestSummaryCache_Stats(t *testing.T) {
 	cache := NewSummaryCache(DefaultCacheConfig())
 
-	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: time.Now()})
+	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth", UpdatedAt: time.Now().UnixMilli()})
 
 	// Hit
 	cache.Get("pkg/auth")
@@ -355,7 +355,7 @@ func TestSummaryCache_Eviction(t *testing.T) {
 	}
 	cache := NewSummaryCache(config)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add 3 entries (exceeds max)
 	cache.Set(&Summary{ID: "pkg/a", Level: 1, Content: "A", UpdatedAt: now})
@@ -398,7 +398,7 @@ func TestSummaryCache_ConcurrentAccess(t *testing.T) {
 				ID:        "pkg/auth",
 				Level:     1,
 				Content:   "Auth",
-				UpdatedAt: time.Now(),
+				UpdatedAt: time.Now().UnixMilli(),
 			})
 		}
 	}()

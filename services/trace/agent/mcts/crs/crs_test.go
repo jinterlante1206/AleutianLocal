@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 )
 
 func TestNew(t *testing.T) {
@@ -60,13 +62,13 @@ func TestCRS_Snapshot(t *testing.T) {
 	})
 
 	t.Run("snapshot has creation time", func(t *testing.T) {
-		before := time.Now()
+		beforeMillis := time.Now().UnixMilli()
 		c := New(nil)
 		snap := c.Snapshot()
-		after := time.Now()
+		afterMillis := time.Now().UnixMilli()
 
-		if snap.CreatedAt().Before(before) || snap.CreatedAt().After(after) {
-			t.Errorf("creation time %v not between %v and %v", snap.CreatedAt(), before, after)
+		if snap.CreatedAt() < beforeMillis || snap.CreatedAt() > afterMillis {
+			t.Errorf("creation time %v not between %v and %v", snap.CreatedAt(), beforeMillis, afterMillis)
 		}
 	})
 
@@ -185,8 +187,11 @@ func TestCRS_Apply(t *testing.T) {
 		if metrics.EntriesModified != 2 {
 			t.Errorf("EntriesModified = %d, want 2", metrics.EntriesModified)
 		}
-		if len(metrics.IndexesUpdated) == 0 {
+		if metrics.IndexesUpdated == 0 {
 			t.Error("IndexesUpdated is empty")
+		}
+		if !metrics.IndexesUpdated.Has(IndexProof) {
+			t.Error("IndexesUpdated should include proof index")
 		}
 		if metrics.ApplyDuration <= 0 {
 			t.Error("ApplyDuration should be positive")
@@ -533,7 +538,7 @@ func TestCRS_RecordStep(t *testing.T) {
 		c := New(nil)
 		ctx := context.Background()
 
-		before := time.Now()
+		beforeMillis := time.Now().UnixMilli()
 		step := StepRecord{
 			SessionID:  "session-1",
 			StepNumber: 1,
@@ -546,10 +551,10 @@ func TestCRS_RecordStep(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RecordStep failed: %v", err)
 		}
-		after := time.Now()
+		afterMillis := time.Now().UnixMilli()
 
 		history := c.GetStepHistory("session-1")
-		if history[0].Timestamp.Before(before) || history[0].Timestamp.After(after) {
+		if history[0].Timestamp < beforeMillis || history[0].Timestamp > afterMillis {
 			t.Error("timestamp not in expected range")
 		}
 	})
@@ -1279,17 +1284,16 @@ func TestCRS_PropagateDisproof(t *testing.T) {
 	t.Run("propagates to parents via dependency index", func(t *testing.T) {
 		c := New(nil)
 
-		// Set up dependency: parent -> child
+		// Set up dependency: parent -> child (GR-32: use graph-backed index)
 		parentID := "parent-node"
 		childID := "child-node"
 
-		// Add dependency using delta
-		delta := NewDependencyDelta(SignalSourceHard)
-		delta.AddEdges = append(delta.AddEdges, [2]string{parentID, childID})
-		_, err := c.Apply(ctx, delta)
-		if err != nil {
-			t.Fatalf("failed to add dependency: %v", err)
-		}
+		// Set up mock graph with dependency relationship
+		mock := newMockGraphQuery()
+		mock.callees[parentID] = []*ast.Symbol{{ID: childID}}
+		mock.callers[childID] = []*ast.Symbol{{ID: parentID}}
+		mock.callEdgeCount = 1
+		c.SetGraphProvider(mock)
 
 		// Propagate disproof from child
 		affected := c.PropagateDisproof(ctx, childID)

@@ -25,7 +25,7 @@ import (
 // Thread Safety: Safe for concurrent use (immutable after creation).
 type snapshot struct {
 	generation int64
-	createdAt  time.Time
+	createdAt  int64 // Unix milliseconds UTC
 
 	// Index data - all maps are copied on snapshot creation for immutability
 	proofData      map[string]ProofNumber
@@ -35,6 +35,12 @@ type snapshot struct {
 	historyData    []HistoryEntry
 	streamingData  *streamingStats
 	clauseData     map[string]*Clause // CRS-04: learned clauses
+
+	// GR-28: Graph query interface for activities
+	graphQuery GraphQuery
+
+	// GR-32: Graph-backed dependency index (preferred over dependencyData)
+	graphBackedDepIndex *GraphBackedDependencyIndex
 }
 
 // newSnapshot creates a new immutable snapshot from current state.
@@ -71,7 +77,8 @@ func newSnapshot(
 ) *snapshot {
 	s := &snapshot{
 		generation: generation,
-		createdAt:  time.Now(),
+		createdAt:  time.Now().UnixMilli(),
+		graphQuery: nil, // Set via setGraphQuery after creation
 	}
 
 	// Deep copy proof data
@@ -150,8 +157,8 @@ func (s *snapshot) Generation() int64 {
 	return s.generation
 }
 
-// CreatedAt returns when this snapshot was created.
-func (s *snapshot) CreatedAt() time.Time {
+// CreatedAt returns when this snapshot was created (Unix milliseconds UTC).
+func (s *snapshot) CreatedAt() int64 {
 	return s.createdAt
 }
 
@@ -171,7 +178,19 @@ func (s *snapshot) SimilarityIndex() SimilarityIndexView {
 }
 
 // DependencyIndex returns the dependency index view.
+//
+// Description:
+//
+//	Returns the graph-backed dependency index if available (GR-32), otherwise
+//	falls back to the legacy dependencyGraph wrapper for backwards compatibility.
+//
+// Thread Safety: Safe for concurrent use (snapshot is immutable).
 func (s *snapshot) DependencyIndex() DependencyIndexView {
+	// GR-32: Prefer graph-backed index if available
+	if s.graphBackedDepIndex != nil {
+		return s.graphBackedDepIndex
+	}
+	// Fallback to legacy wrapper
 	return &dependencyIndexView{graph: s.dependencyData}
 }
 
@@ -183,6 +202,34 @@ func (s *snapshot) HistoryIndex() HistoryIndexView {
 // StreamingIndex returns the streaming statistics index view.
 func (s *snapshot) StreamingIndex() StreamingIndexView {
 	return &streamingIndexView{stats: s.streamingData}
+}
+
+// GraphQuery returns read-only access to the code graph.
+//
+// Description:
+//
+//	Returns the graph query interface for activities to query the actual
+//	code graph. Returns nil if graph is not available (e.g., during
+//	initialization or if SetGraphProvider has not been called).
+//
+// Outputs:
+//   - GraphQuery: The graph query interface, or nil if unavailable.
+//
+// Thread Safety: Safe for concurrent use (snapshot is immutable).
+func (s *snapshot) GraphQuery() GraphQuery {
+	return s.graphQuery
+}
+
+// setGraphQuery sets the graph query interface for this snapshot.
+// Used internally by CRS when creating snapshots.
+func (s *snapshot) setGraphQuery(gq GraphQuery) {
+	s.graphQuery = gq
+}
+
+// setGraphBackedDepIndex sets the graph-backed dependency index for this snapshot.
+// Used internally by CRS when creating snapshots (GR-32).
+func (s *snapshot) setGraphBackedDepIndex(idx *GraphBackedDependencyIndex) {
+	s.graphBackedDepIndex = idx
 }
 
 // -----------------------------------------------------------------------------

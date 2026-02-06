@@ -1043,15 +1043,15 @@ func TestManager_Close(t *testing.T) {
 
 func TestTransaction_IsExpired(t *testing.T) {
 	tx := &Transaction{
-		StartedAt: time.Now().Add(-1 * time.Hour),
-		ExpiresAt: time.Now().Add(-30 * time.Minute),
+		StartedAt: time.Now().Add(-1 * time.Hour).UnixMilli(),
+		ExpiresAt: time.Now().Add(-30 * time.Minute).UnixMilli(),
 	}
 
 	if !tx.IsExpired() {
 		t.Error("expected transaction to be expired")
 	}
 
-	tx.ExpiresAt = time.Now().Add(30 * time.Minute)
+	tx.ExpiresAt = time.Now().Add(30 * time.Minute).UnixMilli()
 	if tx.IsExpired() {
 		t.Error("expected transaction not to be expired")
 	}
@@ -1059,7 +1059,7 @@ func TestTransaction_IsExpired(t *testing.T) {
 
 func TestTransaction_Duration(t *testing.T) {
 	tx := &Transaction{
-		StartedAt: time.Now().Add(-5 * time.Second),
+		StartedAt: time.Now().Add(-5 * time.Second).UnixMilli(),
 	}
 
 	duration := tx.Duration()

@@ -193,8 +193,8 @@ type HistoryEntry struct {
 	// DurationMs is how long this step took in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
 
-	// Timestamp is when this step occurred.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when this step occurred (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Error contains any error message from this step.
 	Error string `json:"error,omitempty"`
@@ -647,11 +647,11 @@ type SessionState struct {
 	// TokensUsed is the total tokens consumed.
 	TokensUsed int `json:"tokens_used"`
 
-	// CreatedAt is when the session started.
-	CreatedAt time.Time `json:"created_at"`
+	// CreatedAt is when the session started (Unix milliseconds UTC).
+	CreatedAt int64 `json:"created_at"`
 
-	// LastActiveAt is when the session was last active.
-	LastActiveAt time.Time `json:"last_active_at"`
+	// LastActiveAt is when the session was last active (Unix milliseconds UTC).
+	LastActiveAt int64 `json:"last_active_at"`
 
 	// DegradedMode indicates if running with limited tools.
 	DegradedMode bool `json:"degraded_mode"`
@@ -806,6 +806,6 @@ type ManagedModelInfo struct {
 	Name      string        `json:"name"`
 	IsLoaded  bool          `json:"is_loaded"`
 	KeepAlive string        `json:"keep_alive"`
-	LastUsed  time.Time     `json:"last_used"`
+	LastUsed  int64         `json:"last_used"` // Unix milliseconds UTC
 	LoadTime  time.Duration `json:"load_time"`
 }

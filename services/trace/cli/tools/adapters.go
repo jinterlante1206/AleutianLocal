@@ -56,6 +56,16 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	registry.Register(NewBuildMinimalContextTool(g, idx))
 	registry.Register(NewFindSimilarCodeTool(g, idx))
 	registry.Register(NewFindConfigUsageTool(g, idx))
+
+	// Level 4: Graph query tools (CB-30c Phase 4)
+	// These expose graph query functions directly to the agent for answering
+	// questions like "Find all functions that call X" without using Grep.
+	registry.Register(NewFindCallersTool(g, idx))
+	registry.Register(NewFindCalleesTool(g, idx))
+	registry.Register(NewFindImplementationsTool(g, idx))
+	registry.Register(NewFindSymbolTool(g, idx))
+	registry.Register(NewGetCallChainTool(g, idx))
+	registry.Register(NewFindReferencesTool(g, idx))
 }
 
 // ============================================================================

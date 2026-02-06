@@ -697,13 +697,13 @@ func (m *LifecycleManager) parseResults(result *models.GraphQLResponse) ([]CodeM
 
 		if createdStr := getString(m, "createdAt"); createdStr != "" {
 			if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
-				memory.CreatedAt = t
+				memory.CreatedAt = t.UnixMilli()
 			}
 		}
 
 		if lastUsedStr := getString(m, "lastUsed"); lastUsedStr != "" {
 			if t, err := time.Parse(time.RFC3339, lastUsedStr); err == nil {
-				memory.LastUsed = t
+				memory.LastUsed = t.UnixMilli()
 			}
 		}
 

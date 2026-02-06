@@ -461,7 +461,7 @@ func TestExecutor_Resume_NilContext(t *testing.T) {
 
 	checkpoint := &Checkpoint{
 		State:     NewState("test"),
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Version:   CheckpointVersion,
 		DAGName:   "test",
 	}
@@ -533,7 +533,7 @@ func TestExecutor_Resume_CorruptCheckpoint(t *testing.T) {
 	// Create a checkpoint with invalid checksum
 	checkpoint := &Checkpoint{
 		State:     NewState("test"),
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Version:   CheckpointVersion,
 		Checksum:  "invalid-checksum",
 		DAGName:   "test",

@@ -12,12 +12,14 @@ package code_buddy
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	agentcontext "github.com/AleutianAI/AleutianFOSS/services/trace/agent/context"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/activities"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
@@ -25,6 +27,41 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools/file"
 )
+
+// coordinatorRegistry tracks coordinators by session ID for cleanup.
+// CR-2 fix: Prevent memory leaks by enabling session-based cleanup.
+var coordinatorRegistry = struct {
+	mu           sync.RWMutex
+	coordinators map[string]*integration.Coordinator
+}{
+	coordinators: make(map[string]*integration.Coordinator),
+}
+
+// registerCoordinator stores a coordinator for later cleanup.
+func registerCoordinator(sessionID string, coord *integration.Coordinator) {
+	coordinatorRegistry.mu.Lock()
+	defer coordinatorRegistry.mu.Unlock()
+	coordinatorRegistry.coordinators[sessionID] = coord
+}
+
+// cleanupCoordinator removes and closes the coordinator for a session.
+func cleanupCoordinator(sessionID string) {
+	coordinatorRegistry.mu.Lock()
+	defer coordinatorRegistry.mu.Unlock()
+
+	if coord, ok := coordinatorRegistry.coordinators[sessionID]; ok {
+		_ = coord.Close()
+		delete(coordinatorRegistry.coordinators, sessionID)
+		slog.Debug("CRS-06: Coordinator cleaned up",
+			slog.String("session_id", sessionID),
+		)
+	}
+}
+
+// init registers the coordinator cleanup hook.
+func init() {
+	agent.RegisterSessionCleanupHook("coordinator", cleanupCoordinator)
+}
 
 // DefaultDependenciesFactory creates phase Dependencies for agent sessions.
 //
@@ -290,10 +327,24 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 
 		coordinator := integration.NewCoordinator(bridge, coordConfig)
 
+		// CR-1 fix: Register all 8 MCTS activities with the Coordinator
+		coordinator.Register(activities.NewSearchActivity(nil))
+		coordinator.Register(activities.NewLearningActivity(nil))
+		coordinator.Register(activities.NewConstraintActivity(nil))
+		coordinator.Register(activities.NewPlanningActivity(nil))
+		coordinator.Register(activities.NewAwarenessActivity(nil))
+		coordinator.Register(activities.NewSimilarityActivity(nil))
+		coordinator.Register(activities.NewStreamingActivity(nil))
+		coordinator.Register(activities.NewMemoryActivity(nil))
+
+		// CR-2 fix: Register for cleanup to prevent memory leaks
+		registerCoordinator(session.ID, coordinator)
+
 		deps.Coordinator = coordinator
 
 		slog.Info("Coordinator created for session",
 			slog.String("session_id", session.ID),
+			slog.Int("activity_count", 8),
 		)
 	}
 

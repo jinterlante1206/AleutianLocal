@@ -467,8 +467,8 @@ func (h *AgentHandlers) HandleAgentState(c *gin.Context) {
 		State:        string(state.State),
 		StepCount:    state.StepCount,
 		TokensUsed:   state.TokensUsed,
-		CreatedAt:    state.CreatedAt.Unix(),
-		LastActiveAt: state.LastActiveAt.Unix(),
+		CreatedAt:    state.CreatedAt / 1000,    // Convert millis to seconds
+		LastActiveAt: state.LastActiveAt / 1000, // Convert millis to seconds
 		DegradedMode: state.DegradedMode,
 	})
 }

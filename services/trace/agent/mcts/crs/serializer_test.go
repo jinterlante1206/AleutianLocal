@@ -161,7 +161,7 @@ func (m *mockStreamingIndexView) Size() int {
 // mockSnapshot implements Snapshot for testing.
 type mockSnapshot struct {
 	generation int64
-	createdAt  time.Time
+	createdAt  int64 // Unix milliseconds UTC
 	proof      ProofIndexView
 	constraint ConstraintIndexView
 	similarity SimilarityIndexView
@@ -171,7 +171,7 @@ type mockSnapshot struct {
 }
 
 func (m *mockSnapshot) Generation() int64                    { return m.generation }
-func (m *mockSnapshot) CreatedAt() time.Time                 { return m.createdAt }
+func (m *mockSnapshot) CreatedAt() int64                     { return m.createdAt }
 func (m *mockSnapshot) ProofIndex() ProofIndexView           { return m.proof }
 func (m *mockSnapshot) ConstraintIndex() ConstraintIndexView { return m.constraint }
 func (m *mockSnapshot) SimilarityIndex() SimilarityIndexView { return m.similarity }
@@ -179,6 +179,7 @@ func (m *mockSnapshot) DependencyIndex() DependencyIndexView { return m.dependen
 func (m *mockSnapshot) HistoryIndex() HistoryIndexView       { return m.history }
 func (m *mockSnapshot) StreamingIndex() StreamingIndexView   { return m.streaming }
 func (m *mockSnapshot) Query() QueryAPI                      { return nil }
+func (m *mockSnapshot) GraphQuery() GraphQuery               { return nil }
 
 func TestNewSerializer(t *testing.T) {
 	t.Run("creates serializer with nil logger", func(t *testing.T) {
@@ -214,28 +215,28 @@ func TestSerializer_Export_NilSnapshot(t *testing.T) {
 func TestSerializer_Export_WithData(t *testing.T) {
 	s := NewSerializer(nil)
 
-	now := time.Now()
+	nowMillis := time.Now().UnixMilli()
 	snapshot := &mockSnapshot{
 		generation: 42,
-		createdAt:  now,
+		createdAt:  nowMillis,
 		proof: &mockProofIndexView{
 			data: map[string]ProofNumber{
-				"node1": {Proof: 0, Disproof: 1000, Status: ProofStatusProven, Source: SignalSourceHard, UpdatedAt: now},
-				"node2": {Proof: 1000, Disproof: 0, Status: ProofStatusDisproven, Source: SignalSourceSoft, UpdatedAt: now},
-				"node3": {Proof: 100, Disproof: 100, Status: ProofStatusUnknown, Source: SignalSourceUnknown, UpdatedAt: now},
+				"node1": {Proof: 0, Disproof: 1000, Status: ProofStatusProven, Source: SignalSourceHard, UpdatedAt: nowMillis},
+				"node2": {Proof: 1000, Disproof: 0, Status: ProofStatusDisproven, Source: SignalSourceSoft, UpdatedAt: nowMillis},
+				"node3": {Proof: 100, Disproof: 100, Status: ProofStatusUnknown, Source: SignalSourceUnknown, UpdatedAt: nowMillis},
 			},
 		},
 		constraint: &mockConstraintIndexView{
 			data: map[string]Constraint{
-				"c1": {ID: "c1", Type: ConstraintTypeMutualExclusion, Nodes: []string{"node1", "node2"}, Active: true, Source: SignalSourceHard, CreatedAt: now},
+				"c1": {ID: "c1", Type: ConstraintTypeMutualExclusion, Nodes: []string{"node1", "node2"}, Active: true, Source: SignalSourceHard, CreatedAt: nowMillis},
 			},
 		},
 		similarity: &mockSimilarityIndexView{pairCount: 5},
 		dependency: &mockDependencyIndexView{edgeCount: 10},
 		history: &mockHistoryIndexView{
 			entries: []HistoryEntry{
-				{ID: "h1", NodeID: "node1", Action: "explore", Result: "success", Source: SignalSourceHard, Timestamp: now, Metadata: map[string]string{"key": "value"}},
-				{ID: "h2", NodeID: "node2", Action: "analyze", Result: "found_issue", Source: SignalSourceSoft, Timestamp: now},
+				{ID: "h1", NodeID: "node1", Action: "explore", Result: "success", Source: SignalSourceHard, Timestamp: nowMillis, Metadata: map[string]string{"key": "value"}},
+				{ID: "h2", NodeID: "node2", Action: "analyze", Result: "found_issue", Source: SignalSourceSoft, Timestamp: nowMillis},
 			},
 		},
 		streaming: &mockStreamingIndexView{cardinality: 100, size: 1024},
@@ -379,23 +380,23 @@ func TestSerializer_ExportSummaryOnly(t *testing.T) {
 func TestSerializer_Export_JSONSerializable(t *testing.T) {
 	s := NewSerializer(nil)
 
-	now := time.Now()
+	nowMillis := time.Now().UnixMilli()
 	snapshot := &mockSnapshot{
 		generation: 1,
 		proof: &mockProofIndexView{
 			data: map[string]ProofNumber{
-				"node1": {Proof: 0, Disproof: 1000, Status: ProofStatusProven, Source: SignalSourceHard, UpdatedAt: now},
+				"node1": {Proof: 0, Disproof: 1000, Status: ProofStatusProven, Source: SignalSourceHard, UpdatedAt: nowMillis},
 			},
 		},
 		constraint: &mockConstraintIndexView{
 			data: map[string]Constraint{
-				"c1": {ID: "c1", Type: ConstraintTypeImplication, Nodes: []string{"a", "b"}, Active: true, Source: SignalSourceSoft, CreatedAt: now},
+				"c1": {ID: "c1", Type: ConstraintTypeImplication, Nodes: []string{"a", "b"}, Active: true, Source: SignalSourceSoft, CreatedAt: nowMillis},
 			},
 		},
 		similarity: &mockSimilarityIndexView{pairCount: 1},
 		dependency: &mockDependencyIndexView{edgeCount: 1},
 		history: &mockHistoryIndexView{
-			entries: []HistoryEntry{{ID: "h1", NodeID: "node1", Action: "test", Timestamp: now}},
+			entries: []HistoryEntry{{ID: "h1", NodeID: "node1", Action: "test", Timestamp: nowMillis}},
 		},
 		streaming: &mockStreamingIndexView{cardinality: 1, size: 100},
 	}

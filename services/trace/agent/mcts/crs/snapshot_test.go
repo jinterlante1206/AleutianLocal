@@ -14,6 +14,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 )
 
 func TestSnapshot_Immutability(t *testing.T) {
@@ -253,16 +255,21 @@ func TestSimilarityIndexView(t *testing.T) {
 }
 
 func TestDependencyIndexView(t *testing.T) {
-	c := New(nil)
-	ctx := context.Background()
+	// GR-32: Test with graph-backed dependency index
+	// Set up mock graph with call relationships:
+	//   a -> b, a -> c, b -> d
+	// Uses mockGraphQuery from graph_dependency_index_test.go
+	mock := newMockGraphQuery()
+	mock.callees["a"] = []*ast.Symbol{{ID: "b"}, {ID: "c"}}
+	mock.callees["b"] = []*ast.Symbol{{ID: "d"}}
+	mock.callers["b"] = []*ast.Symbol{{ID: "a"}}
+	mock.callers["c"] = []*ast.Symbol{{ID: "a"}}
+	mock.callers["d"] = []*ast.Symbol{{ID: "b"}}
+	mock.hasCycle["a"] = false
+	mock.callEdgeCount = 3
 
-	delta := NewDependencyDelta(SignalSourceHard)
-	delta.AddEdges = [][2]string{
-		{"a", "b"}, // a depends on b
-		{"a", "c"}, // a depends on c
-		{"b", "d"}, // b depends on d
-	}
-	_, _ = c.Apply(ctx, delta)
+	c := New(nil)
+	c.SetGraphProvider(mock)
 
 	snap := c.Snapshot()
 	dv := snap.DependencyIndex()
@@ -279,7 +286,7 @@ func TestDependencyIndexView(t *testing.T) {
 		if len(deps) != 1 {
 			t.Errorf("b depended by %d nodes, want 1", len(deps))
 		}
-		if deps[0] != "a" {
+		if len(deps) > 0 && deps[0] != "a" {
 			t.Errorf("b depended by %s, want a", deps[0])
 		}
 	})
@@ -303,9 +310,9 @@ func TestHistoryIndexView(t *testing.T) {
 
 	now := time.Now()
 	delta := NewHistoryDelta(SignalSourceHard, []HistoryEntry{
-		{ID: "e1", NodeID: "node1", Action: "expand", Timestamp: now.Add(-2 * time.Hour)},
-		{ID: "e2", NodeID: "node2", Action: "select", Timestamp: now.Add(-1 * time.Hour)},
-		{ID: "e3", NodeID: "node1", Action: "backprop", Timestamp: now},
+		{ID: "e1", NodeID: "node1", Action: "expand", Timestamp: now.Add(-2 * time.Hour).UnixMilli()},
+		{ID: "e2", NodeID: "node2", Action: "select", Timestamp: now.Add(-1 * time.Hour).UnixMilli()},
+		{ID: "e3", NodeID: "node1", Action: "backprop", Timestamp: now.UnixMilli()},
 	})
 	_, _ = c.Apply(ctx, delta)
 

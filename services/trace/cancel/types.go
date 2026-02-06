@@ -330,8 +330,8 @@ type CancelReason struct {
 	// Component identifies which component triggered the cancellation.
 	Component string
 
-	// Timestamp is when the cancellation was triggered.
-	Timestamp time.Time
+	// Timestamp is when the cancellation was triggered (Unix milliseconds UTC).
+	Timestamp int64
 }
 
 // Status provides the current status of a cancellable context.
@@ -348,11 +348,11 @@ type Status struct {
 	// CancelReason is set if State is Cancelling or Cancelled.
 	CancelReason *CancelReason
 
-	// StartTime is when this context was created.
-	StartTime time.Time
+	// StartTime is when this context was created (Unix milliseconds UTC).
+	StartTime int64
 
-	// LastProgress is the last time progress was reported.
-	LastProgress time.Time
+	// LastProgress is the last time progress was reported (Unix milliseconds UTC).
+	LastProgress int64
 
 	// Duration is how long this context has been running.
 	Duration time.Duration

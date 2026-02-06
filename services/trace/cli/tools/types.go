@@ -245,11 +245,11 @@ type Invocation struct {
 	// StepNumber is the agent step when this was invoked.
 	StepNumber int `json:"step_number"`
 
-	// StartedAt is when execution started.
-	StartedAt time.Time `json:"started_at,omitempty"`
+	// StartedAt is when execution started (Unix milliseconds UTC).
+	StartedAt int64 `json:"started_at,omitempty"`
 
-	// CompletedAt is when execution completed.
-	CompletedAt time.Time `json:"completed_at,omitempty"`
+	// CompletedAt is when execution completed (Unix milliseconds UTC).
+	CompletedAt int64 `json:"completed_at,omitempty"`
 
 	// Result contains the execution result (after completion).
 	Result *Result `json:"result,omitempty"`

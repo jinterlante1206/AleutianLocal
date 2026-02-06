@@ -21,7 +21,7 @@ func TestIntegrityChecker_Validate_Valid(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add a valid hierarchy: project -> package -> file
 	cache.Set(&Summary{ID: "", Level: 0, Content: "Project", UpdatedAt: now, Children: []string{"pkg/auth"}})
@@ -48,7 +48,7 @@ func TestIntegrityChecker_Validate_OrphanedChild(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add child without parent
 	cache.Set(&Summary{ID: "pkg/auth/handler.go", Level: 2, Content: "Handler file", ParentID: "pkg/auth", UpdatedAt: now})
@@ -76,7 +76,7 @@ func TestIntegrityChecker_Validate_MissingChild(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add parent referencing non-existent child
 	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth package", ParentID: "", UpdatedAt: now, Children: []string{"pkg/auth/nonexistent.go"}})
@@ -106,7 +106,7 @@ func TestIntegrityChecker_Validate_LevelMismatch(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add summary with wrong level
 	cache.Set(&Summary{ID: "pkg/auth/handler.go", Level: 1, Content: "Handler file", ParentID: "", UpdatedAt: now}) // Should be level 2
@@ -136,7 +136,7 @@ func TestIntegrityChecker_ValidateWithHashes_StaleEntry(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth package", Hash: "oldhash", ParentID: "", UpdatedAt: now})
 
@@ -169,7 +169,7 @@ func TestIntegrityChecker_Validate_ContextCancellation(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add many entries
 	for i := 0; i < 100; i++ {
@@ -191,7 +191,7 @@ func TestIntegrityChecker_Repair_OrphansRemoved(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add orphaned child
 	cache.Set(&Summary{ID: "pkg/auth/handler.go", Level: 2, Content: "Handler file", ParentID: "pkg/auth", UpdatedAt: now})
@@ -219,7 +219,7 @@ func TestIntegrityChecker_Repair_StaleInvalidated(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	cache.Set(&Summary{ID: "pkg/auth", Level: 1, Content: "Auth package", Hash: "oldhash", ParentID: "", UpdatedAt: now})
 
@@ -251,7 +251,7 @@ func TestIntegrityChecker_Repair_LevelsFixed(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add summary with wrong level
 	cache.Set(&Summary{ID: "pkg/auth/handler.go", Level: 1, Content: "Handler file", ParentID: "", UpdatedAt: now})
@@ -309,7 +309,7 @@ func TestIntegrityChecker_Repair_ContextCancellation(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Add orphaned children
 	for i := 0; i < 10; i++ {
@@ -334,7 +334,7 @@ func TestIntegrityChecker_ProjectRootNoParent(t *testing.T) {
 	h := &GoHierarchy{}
 	checker := NewIntegrityChecker(cache, h)
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	// Project root (level 0) doesn't need a parent
 	cache.Set(&Summary{ID: "", Level: 0, Content: "Project root", ParentID: "", UpdatedAt: now})
