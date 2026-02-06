@@ -304,12 +304,12 @@ func (m *Manager) Begin(ctx context.Context, sessionID string) (tx *Transaction,
 	}
 
 	// Create transaction
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	tx = &Transaction{
 		ID:             uuid.New().String(),
 		SessionID:      sessionID,
 		StartedAt:      now,
-		ExpiresAt:      now.Add(m.config.TransactionTTL),
+		ExpiresAt:      now + m.config.TransactionTTL.Milliseconds(),
 		CheckpointRef:  checkpointRef,
 		OriginalBranch: currentBranch,
 		ModifiedFiles:  make(map[string]struct{}),
@@ -348,7 +348,7 @@ func (m *Manager) Begin(ctx context.Context, sessionID string) (tx *Transaction,
 		"session_id", sessionID,
 		"strategy", m.config.Strategy,
 		"checkpoint", checkpointRef,
-		"expires_at", tx.ExpiresAt.Format(time.RFC3339))
+		"expires_at", time.UnixMilli(tx.ExpiresAt).Format(time.RFC3339))
 
 	return tx, nil
 }
@@ -405,14 +405,14 @@ func (m *Manager) Commit(ctx context.Context, message string) (result *Result, e
 	}()
 
 	// Record state transition
-	m.tracer.RecordStateTransition(ctx, tx.ID, tx.Status, StatusCommitting, time.Since(tx.StartedAt))
+	m.tracer.RecordStateTransition(ctx, tx.ID, tx.Status, StatusCommitting, time.Duration(time.Now().UnixMilli()-tx.StartedAt)*time.Millisecond)
 	tx.Status = StatusCommitting
 
 	// Check for expiration
 	if tx.IsExpired() {
 		logger.Warn("transaction expired, rolling back",
 			"tx_id", tx.ID,
-			"started_at", tx.StartedAt.Format(time.RFC3339))
+			"started_at", time.UnixMilli(tx.StartedAt).Format(time.RFC3339))
 		m.tracer.RecordExpiration(ctx, tx.ID)
 		recordExpired(ctx)
 		// Use background context for rollback to ensure it completes
@@ -548,7 +548,7 @@ func (m *Manager) rollbackInternal(ctx context.Context, tx *Transaction, reason 
 	tx.RollbackReason = reason
 
 	// Record state transition (if tracer is available and we have a valid span context)
-	m.tracer.RecordStateTransition(ctx, tx.ID, prevStatus, StatusRollingBack, time.Since(tx.StartedAt))
+	m.tracer.RecordStateTransition(ctx, tx.ID, prevStatus, StatusRollingBack, time.Duration(time.Now().UnixMilli()-tx.StartedAt)*time.Millisecond)
 
 	logger.Warn("rolling back transaction",
 		"tx_id", tx.ID,
@@ -1250,7 +1250,7 @@ func (m *Manager) cleanupStale(ctx context.Context) error {
 
 		m.logger.Info("found stale transaction, cleaning up",
 			"tx_id", tx.ID,
-			"started_at", tx.StartedAt.Format(time.RFC3339),
+			"started_at", time.UnixMilli(tx.StartedAt).Format(time.RFC3339),
 			"strategy", tx.Strategy)
 
 		// Try to rollback the stale transaction

@@ -986,9 +986,9 @@ func TestReadParams_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "relative path",
+			name:    "relative path (allowed, tool resolves against working dir)",
 			params:  ReadParams{FilePath: "relative/path.txt"},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name:    "path with ..",

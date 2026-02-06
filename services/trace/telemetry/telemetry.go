@@ -13,6 +13,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	promexporter "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -56,6 +58,18 @@ type Config struct {
 
 	// PrometheusPort is the port for the /metrics endpoint (default: 9090).
 	PrometheusPort int `json:"prometheus_port"`
+
+	// SampleRate is the percentage of traces to sample (0.0-1.0).
+	// Default: 1.0 (100%) for development, recommend 0.1 (10%) for production.
+	// When set to 1.0, AlwaysSample() is used.
+	// When set to 0.0, NeverSample() is used.
+	// Otherwise, TraceIDRatioBased() is used.
+	SampleRate float64 `json:"sample_rate"`
+
+	// AllowDegraded allows the service to start even if telemetry backends are unavailable.
+	// When true, Init() logs a warning but returns success with noop providers.
+	// Default: false (strict mode for catching configuration errors in development).
+	AllowDegraded bool `json:"allow_degraded"`
 }
 
 // DefaultConfig returns opinionated defaults for development.
@@ -75,6 +89,8 @@ func DefaultConfig() Config {
 		OTLPEndpoint:   getEnvOr("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 		OTLPInsecure:   true,
 		PrometheusPort: 9090,
+		SampleRate:     1.0, // 100% sampling for development
+		AllowDegraded:  false,
 	}
 }
 
@@ -134,6 +150,12 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		attribute.String("deployment.environment", cfg.Environment),
 	)
 
+	// Set up W3C TraceContext propagator for distributed tracing
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
 	// --- TRACES ---
 	if cfg.TraceExporter != "none" {
 		tp, err := initTracer(ctx, cfg, res)
@@ -172,26 +194,52 @@ func initTracer(ctx context.Context, cfg Config, res *resource.Resource) (*trace
 			opts = append(opts, otlptracegrpc.WithInsecure())
 		}
 		exporter, err = otlptracegrpc.New(ctx, opts...)
+		if err != nil {
+			if cfg.AllowDegraded {
+				slog.Warn("trace exporter unavailable, using noop provider",
+					slog.String("endpoint", cfg.OTLPEndpoint),
+					slog.String("error", err.Error()))
+				return trace.NewTracerProvider(trace.WithResource(res)), nil
+			}
+			return nil, fmt.Errorf("create OTLP exporter: %w", err)
+		}
 
 	case "stdout":
 		exporter, err = stdouttrace.New(stdouttrace.WithPrettyPrint())
+		if err != nil {
+			return nil, fmt.Errorf("create stdout exporter: %w", err)
+		}
 
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownExporter, cfg.TraceExporter)
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("create exporter: %w", err)
-	}
+	// Select sampler based on SampleRate configuration
+	sampler := getSampler(cfg.SampleRate)
 
 	// Create TracerProvider with batcher (batches spans before export)
 	tp := trace.NewTracerProvider(
 		trace.WithBatcher(exporter),
 		trace.WithResource(res),
-		trace.WithSampler(trace.AlwaysSample()), // Sample 100% in dev
+		trace.WithSampler(sampler),
 	)
 
 	return tp, nil
+}
+
+// getSampler returns the appropriate sampler based on the sample rate.
+//
+// - SampleRate >= 1.0: AlwaysSample (100% sampling)
+// - SampleRate <= 0.0: NeverSample (0% sampling)
+// - Otherwise: TraceIDRatioBased (percentage sampling)
+func getSampler(rate float64) trace.Sampler {
+	if rate >= 1.0 {
+		return trace.AlwaysSample()
+	}
+	if rate <= 0.0 {
+		return trace.NeverSample()
+	}
+	return trace.TraceIDRatioBased(rate)
 }
 
 // getEnvOr returns the environment variable value or the fallback.

@@ -262,8 +262,8 @@ func TestFileLockManager_CleanupStaleLocks(t *testing.T) {
 		FilePath:  "/nonexistent/file.txt",
 		PID:       999999, // Non-existent PID
 		SessionID: "old-session",
-		LockedAt:  time.Now().Add(-2 * time.Hour),
-		ExpiresAt: time.Now().Add(-1 * time.Hour), // Expired
+		LockedAt:  time.Now().Add(-2 * time.Hour).UnixMilli(),
+		ExpiresAt: time.Now().Add(-1 * time.Hour).UnixMilli(), // Expired
 		Reason:    "old lock",
 	}
 
@@ -417,7 +417,7 @@ func TestFileLockManager_WatchFile(t *testing.T) {
 func TestLockInfo_IsExpired(t *testing.T) {
 	t.Run("not expired", func(t *testing.T) {
 		info := LockInfo{
-			ExpiresAt: time.Now().Add(1 * time.Hour),
+			ExpiresAt: time.Now().Add(1 * time.Hour).UnixMilli(),
 		}
 		if info.IsExpired() {
 			t.Error("Expected not expired")
@@ -426,7 +426,7 @@ func TestLockInfo_IsExpired(t *testing.T) {
 
 	t.Run("expired", func(t *testing.T) {
 		info := LockInfo{
-			ExpiresAt: time.Now().Add(-1 * time.Hour),
+			ExpiresAt: time.Now().Add(-1 * time.Hour).UnixMilli(),
 		}
 		if !info.IsExpired() {
 			t.Error("Expected expired")

@@ -237,7 +237,7 @@ func (a *MemoryActivity) record(input *MemoryInput) (crs.Delta, error) {
 		Action:    input.Action,
 		Result:    input.Result,
 		Source:    input.Source(),
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Metadata:  input.Metadata,
 	}
 

@@ -484,12 +484,17 @@ func (p *ReflectPhase) emitStateTransition(deps *Dependencies, from, to agent.Ag
 //	deps - Phase dependencies.
 //	reason - The reason for completion.
 func (p *ReflectPhase) synthesizeResponse(ctx context.Context, deps *Dependencies, reason string) {
-	// Check if we already have a response
+	// Check if we already have a real response (not a tool call placeholder)
 	if deps.Context != nil {
 		for i := len(deps.Context.ConversationHistory) - 1; i >= 0; i-- {
 			msg := deps.Context.ConversationHistory[i]
 			if msg.Role == "assistant" && msg.Content != "" {
-				// Already have a response, no need to synthesize
+				// cb_30b fix: Skip tool call placeholder messages
+				// These are internal bookkeeping "[Tool calls: X, Y, Z]" not real responses
+				if strings.HasPrefix(msg.Content, "[Tool calls:") {
+					continue
+				}
+				// Already have a real response, no need to synthesize
 				slog.Debug("Skipping synthesis - response already exists",
 					slog.String("session_id", deps.Session.ID),
 				)

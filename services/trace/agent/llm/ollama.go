@@ -129,14 +129,30 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 		return nil, err
 	}
 
+	duration := time.Since(startTime)
+
 	slog.Info("OllamaAdapter received response",
 		slog.Int("content_len", len(content)),
 		slog.String("content_preview", truncate(content, 200)),
-		slog.Duration("duration", time.Since(startTime)),
+		slog.Duration("duration", duration),
 	)
 
+	// Handle empty response - this indicates a problem with the model or context
+	// Previously empty responses passed through silently, causing downstream issues.
+	// Fixed in cb_30a.
+	if len(strings.TrimSpace(content)) == 0 {
+		slog.Warn("OllamaAdapter received empty response",
+			slog.Duration("duration", duration),
+			slog.Int("message_count", len(messages)),
+		)
+		return nil, &EmptyResponseError{
+			Duration:     duration,
+			MessageCount: len(messages),
+			Model:        a.model,
+		}
+	}
+
 	// Build response
-	duration := time.Since(startTime)
 	return &Response{
 		Content:      content,
 		StopReason:   "end",
@@ -196,6 +212,22 @@ func (a *OllamaAdapter) completeWithTools(
 		slog.String("stop_reason", result.StopReason),
 		slog.Duration("duration", time.Since(startTime)),
 	)
+
+	// Handle empty response with no tool calls - this indicates a model/context problem.
+	// Empty responses should not silently pass through as they cause downstream issues.
+	// Fixed in cb_30a.
+	if len(strings.TrimSpace(result.Content)) == 0 && len(result.ToolCalls) == 0 {
+		duration := time.Since(startTime)
+		slog.Warn("OllamaAdapter received empty response with no tool calls",
+			slog.Duration("duration", duration),
+			slog.Int("message_count", len(messages)),
+		)
+		return nil, &EmptyResponseError{
+			Duration:     duration,
+			MessageCount: len(messages),
+			Model:        a.model,
+		}
+	}
 
 	// Convert Ollama tool calls to agent format
 	var agentToolCalls []ToolCall
@@ -381,7 +413,52 @@ func (a *OllamaAdapter) buildParams(request *Request) llm.GenerationParams {
 		params.KeepAlive = request.KeepAlive
 	}
 
+	// Set context window size for main agent (64K for analysis tasks).
+	// This MUST be passed on every request to prevent Ollama from
+	// resetting to default 4096 context window.
+	numCtx := 65536 // 64K tokens for main agent
+	params.NumCtx = &numCtx
+
+	// Set keep_alive to prevent Ollama from unloading the model between requests.
+	// This is critical for multi-model operation to prevent thrashing.
+	if params.KeepAlive == "" {
+		params.KeepAlive = "24h"
+	}
+
+	// Pass through tool_choice for API-level tool forcing (cb_30a fix).
+	// This enables the CB-28d-6 escalation logic (auto → any → tool) to work.
+	if request.ToolChoice != nil {
+		params.ToolChoice = convertAgentToolChoice(request.ToolChoice)
+	}
+
 	return params
+}
+
+// convertAgentToolChoice converts agent ToolChoice to shared llm.ToolChoice.
+//
+// Description:
+//
+//	Maps the agent's ToolChoice type to the shared llm.ToolChoice format
+//	so it can be passed through to the Ollama client.
+//
+// Inputs:
+//
+//	tc - The agent ToolChoice to convert.
+//
+// Outputs:
+//
+//	*llm.ToolChoice - The converted format.
+//
+// Thread Safety: This function is safe for concurrent use.
+func convertAgentToolChoice(tc *ToolChoice) *llm.ToolChoice {
+	if tc == nil {
+		return nil
+	}
+
+	return &llm.ToolChoice{
+		Type: tc.Type,
+		Name: tc.Name,
+	}
 }
 
 // estimateTokens provides a rough token estimate.

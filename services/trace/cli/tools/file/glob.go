@@ -259,7 +259,7 @@ func (t *GlobTool) globFiles(ctx context.Context, root, pattern string, limit in
 			Path:    path,
 			RelPath: relPath,
 			Size:    info.Size(),
-			ModTime: info.ModTime(),
+			ModTime: info.ModTime().UnixMilli(),
 		})
 
 		return nil
@@ -271,7 +271,7 @@ func (t *GlobTool) globFiles(ctx context.Context, root, pattern string, limit in
 
 	// Sort by modification time (most recent first)
 	sort.Slice(files, func(i, j int) bool {
-		return files[i].ModTime.After(files[j].ModTime)
+		return files[i].ModTime > files[j].ModTime
 	})
 
 	// Apply limit

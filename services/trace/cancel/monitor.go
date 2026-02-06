@@ -100,7 +100,7 @@ func (d *DeadlockDetector) checkAllContexts() {
 	}
 	d.controller.contextsMu.RUnlock()
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 
 	for _, ctx := range contexts {
 		// Skip terminal states
@@ -113,7 +113,7 @@ func (d *DeadlockDetector) checkAllContexts() {
 		threshold := time.Duration(d.multiplier) * progressInterval
 
 		// Check last progress
-		var lastProgress time.Time
+		var lastProgress int64
 		switch v := ctx.(type) {
 		case *SessionContext:
 			lastProgress = v.LastProgress()
@@ -125,7 +125,7 @@ func (d *DeadlockDetector) checkAllContexts() {
 			continue
 		}
 
-		elapsed := now.Sub(lastProgress)
+		elapsed := time.Duration(now-lastProgress) * time.Millisecond
 		if elapsed > threshold {
 			d.logger.Warn("deadlock detected",
 				slog.String("id", ctx.ID()),
@@ -241,7 +241,7 @@ func (m *ResourceMonitor) MonitorSession(session *SessionContext, stopCh <-chan 
 					Message:   violation.message,
 					Threshold: violation.limit,
 					Component: session.ID(),
-					Timestamp: time.Now(),
+					Timestamp: time.Now().UnixMilli(),
 				}
 
 				session.Cancel(reason)
@@ -429,7 +429,7 @@ func (t *TimeoutEnforcer) EnforceTimeout(ctx *AlgorithmContext, timeout time.Dur
 			Message:   "Algorithm timeout exceeded",
 			Threshold: timeout.String(),
 			Component: ctx.ID(),
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 		}
 		ctx.Cancel(reason)
 

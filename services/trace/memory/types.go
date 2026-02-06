@@ -63,6 +63,10 @@ type MemoryStatus string
 const (
 	StatusActive   MemoryStatus = "active"
 	StatusArchived MemoryStatus = "archived"
+	// StatusOrphaned indicates a memory's scope no longer matches any files.
+	// This happens when files are deleted or refactored and the memory's
+	// file glob pattern no longer matches any existing files.
+	StatusOrphaned MemoryStatus = "orphaned"
 )
 
 // Sentinel errors for memory operations.
@@ -96,11 +100,11 @@ type CodeMemory struct {
 	// Source indicates how this memory was learned.
 	Source MemorySource `json:"source"`
 
-	// CreatedAt is when the memory was first stored.
-	CreatedAt time.Time `json:"created_at"`
+	// CreatedAt is when the memory was first stored (Unix milliseconds UTC).
+	CreatedAt int64 `json:"created_at"`
 
-	// LastUsed is when the memory was last retrieved.
-	LastUsed time.Time `json:"last_used"`
+	// LastUsed is when the memory was last retrieved (Unix milliseconds UTC).
+	LastUsed int64 `json:"last_used"`
 
 	// UseCount tracks how many times this memory has been retrieved.
 	UseCount int `json:"use_count"`

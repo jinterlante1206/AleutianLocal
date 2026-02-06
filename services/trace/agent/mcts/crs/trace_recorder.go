@@ -11,6 +11,7 @@
 package crs
 
 import (
+	"regexp"
 	"sync"
 	"time"
 )
@@ -63,41 +64,8 @@ type TraceStep struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
-// ProofUpdate represents a proof status change.
-type ProofUpdate struct {
-	// NodeID is the node whose proof status changed.
-	NodeID string `json:"node_id"`
-
-	// Status is the new status: "proven", "disproven", "expanded", "unknown".
-	Status string `json:"status"`
-
-	// Reason explains why the status changed.
-	Reason string `json:"reason,omitempty"`
-
-	// Source indicates signal source: "hard", "soft".
-	Source string `json:"source,omitempty"`
-}
-
-// ConstraintUpdate represents a constraint being added.
-type ConstraintUpdate struct {
-	// ID is the constraint ID.
-	ID string `json:"id"`
-
-	// Type is the constraint type.
-	Type string `json:"type"`
-
-	// Nodes are the affected nodes.
-	Nodes []string `json:"nodes"`
-}
-
-// DependencyEdge represents a dependency relationship.
-type DependencyEdge struct {
-	// From is the dependent node.
-	From string `json:"from"`
-
-	// To is the dependency target.
-	To string `json:"to"`
-}
+// NOTE: ProofUpdate, ConstraintUpdate, and DependencyEdge are now defined in types.go
+// with typed fields instead of string fields. This change is part of CRS-02.
 
 // ReasoningTrace is the exportable trace format.
 type ReasoningTrace struct {
@@ -138,6 +106,11 @@ type TraceConfig struct {
 	// RecordMetadata enables recording of step metadata.
 	// Default: true.
 	RecordMetadata bool
+
+	// Sanitizer sanitizes trace data before recording.
+	// If nil, no sanitization is performed.
+	// SECURITY: Should be set to prevent secrets from leaking into traces.
+	Sanitizer Sanitizer
 }
 
 // DefaultTraceConfig returns sensible defaults.
@@ -146,7 +119,231 @@ func DefaultTraceConfig() TraceConfig {
 		MaxSteps:       1000,
 		RecordSymbols:  true,
 		RecordMetadata: true,
+		Sanitizer:      nil, // Must be explicitly set for security
 	}
+}
+
+// SecureTraceConfig returns config with secret sanitization enabled.
+//
+// Description:
+//
+//	Returns a TraceConfig with the default SecretSanitizer configured.
+//	Use this configuration to prevent secrets from leaking into audit trails.
+//
+// Outputs:
+//
+//	TraceConfig - Configuration with sanitization enabled.
+func SecureTraceConfig() TraceConfig {
+	return TraceConfig{
+		MaxSteps:       1000,
+		RecordSymbols:  true,
+		RecordMetadata: true,
+		Sanitizer:      NewSecretSanitizer(),
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Sanitizer Interface
+// -----------------------------------------------------------------------------
+
+// Sanitizer sanitizes sensitive data before recording.
+//
+// Description:
+//
+//	Implementations should redact secrets, PII, and other sensitive data
+//	to prevent leakage into audit trails.
+//
+// Thread Safety:
+//
+//	Implementations must be safe for concurrent use.
+type Sanitizer interface {
+	// Sanitize redacts sensitive data from a string.
+	//
+	// Inputs:
+	//   s - The string to sanitize.
+	//
+	// Outputs:
+	//   string - The sanitized string with secrets replaced by [REDACTED].
+	Sanitize(s string) string
+}
+
+// -----------------------------------------------------------------------------
+// SecretSanitizer Implementation
+// -----------------------------------------------------------------------------
+
+// SecretSanitizer detects and redacts secrets from strings.
+//
+// Description:
+//
+//	SecretSanitizer uses regex patterns to detect common secret formats
+//	including API keys, tokens, passwords, and private keys. Detected
+//	secrets are replaced with [REDACTED].
+//
+// Thread Safety:
+//
+//	SecretSanitizer is safe for concurrent use after initialization.
+type SecretSanitizer struct {
+	patterns []*secretPattern
+}
+
+// secretPattern is a compiled secret detection pattern.
+type secretPattern struct {
+	name    string
+	pattern *regexp.Regexp
+}
+
+// NewSecretSanitizer creates a new secret sanitizer with default patterns.
+//
+// Description:
+//
+//	Creates a sanitizer that detects common secret patterns including:
+//	- AWS keys (AKIA*, ASIA*, etc.)
+//	- Google Cloud API keys (AIza*)
+//	- GitHub tokens (ghp_*, gho_*, etc.)
+//	- Slack tokens (xox*)
+//	- Private keys (-----BEGIN * PRIVATE KEY-----)
+//	- Generic API keys and passwords
+//	- Database connection strings with credentials
+//	- JWT secrets
+//
+// Outputs:
+//
+//	*SecretSanitizer - The configured sanitizer.
+func NewSecretSanitizer() *SecretSanitizer {
+	patterns := []struct {
+		name    string
+		pattern string
+	}{
+		// AWS Keys
+		{"aws_access_key", `(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}`},
+		{"aws_secret_key", `(?i)(?:aws)?[_-]?secret[_-]?(?:access)?[_-]?key\s*[=:]\s*["']?([a-zA-Z0-9/+=]{40})["']?`},
+
+		// Google Cloud
+		{"gcp_api_key", `AIza[0-9A-Za-z_-]{35}`},
+
+		// GitHub
+		{"github_token", `(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}`},
+		{"github_pat", `github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}`},
+
+		// Slack
+		{"slack_token", `xox[baprs]-[0-9a-zA-Z-]{10,}`},
+		{"slack_webhook", `https://hooks\.slack\.com/services/T[0-9A-Z]+/B[0-9A-Z]+/[a-zA-Z0-9]+`},
+
+		// Stripe
+		{"stripe_key", `(?:sk|pk)_(?:live|test)_[0-9a-zA-Z]{24,}`},
+
+		// Private Keys
+		{"private_key", `-----BEGIN (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----`},
+		{"private_key_pkcs8", `-----BEGIN PRIVATE KEY-----`},
+
+		// Generic API Keys
+		{"api_key", `(?i)(?:api[_-]?key|apikey)\s*[=:]\s*["']?([a-zA-Z0-9_\-]{20,})["']?`},
+
+		// Passwords
+		{"password", `(?i)(?:password|passwd|pwd)\s*[=:]\s*["']([^"']{8,})["']`},
+
+		// Database Connection Strings
+		{"database_url", `(?i)(?:postgres|mysql|mongodb|redis)://[^:]+:[^@]+@[^\s"']+`},
+
+		// JWT Secrets
+		{"jwt_secret", `(?i)(?:jwt[_-]?secret|signing[_-]?key)\s*[=:]\s*["']?([a-zA-Z0-9_\-]{20,})["']?`},
+
+		// Generic Secrets and Tokens
+		{"generic_secret", `(?i)(?:secret|token|credential)\s*[=:]\s*["']([a-zA-Z0-9_\-]{20,})["']`},
+
+		// SendGrid
+		{"sendgrid_key", `SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}`},
+
+		// Twilio
+		{"twilio_key", `SK[a-f0-9]{32}`},
+
+		// NPM Token
+		{"npm_token", `npm_[a-zA-Z0-9]{36}`},
+
+		// PyPI Token
+		{"pypi_token", `pypi-AgEIcHlwaS5vcmc[a-zA-Z0-9_-]+`},
+
+		// Discord
+		{"discord_token", `[MN][A-Za-z\d]{23,}\.[\w-]{6}\.[\w-]{27}`},
+
+		// Heroku
+		{"heroku_key", `(?i)heroku[_-]?(?:api)?[_-]?key\s*[=:]\s*["']?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})["']?`},
+	}
+
+	sanitizer := &SecretSanitizer{
+		patterns: make([]*secretPattern, 0, len(patterns)),
+	}
+
+	for _, p := range patterns {
+		compiled := regexp.MustCompile(p.pattern)
+		sanitizer.patterns = append(sanitizer.patterns, &secretPattern{
+			name:    p.name,
+			pattern: compiled,
+		})
+	}
+
+	return sanitizer
+}
+
+// Sanitize replaces detected secrets with [REDACTED].
+//
+// Description:
+//
+//	Scans the input string for known secret patterns and replaces
+//	any matches with [REDACTED]. Multiple secrets in the same string
+//	are all replaced.
+//
+// Inputs:
+//
+//	s - The string to sanitize.
+//
+// Outputs:
+//
+//	string - The sanitized string with secrets replaced.
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (ss *SecretSanitizer) Sanitize(s string) string {
+	if s == "" {
+		return s
+	}
+
+	result := s
+	for _, p := range ss.patterns {
+		result = p.pattern.ReplaceAllString(result, "[REDACTED]")
+	}
+
+	return result
+}
+
+// SanitizeMap sanitizes all values in a string map.
+//
+// Description:
+//
+//	Creates a new map with all values sanitized. Keys are preserved.
+//
+// Inputs:
+//
+//	m - The map to sanitize.
+//
+// Outputs:
+//
+//	map[string]string - New map with sanitized values.
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (ss *SecretSanitizer) SanitizeMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+
+	result := make(map[string]string, len(m))
+	for k, v := range m {
+		result[k] = ss.Sanitize(v)
+	}
+	return result
 }
 
 // -----------------------------------------------------------------------------
@@ -196,6 +393,12 @@ func NewTraceRecorder(config TraceConfig) *TraceRecorder {
 //	what was found, and how CRS was updated. Automatically assigns
 //	step numbers and timestamps.
 //
+//	SECURITY: If a Sanitizer is configured, all string fields are
+//	sanitized before storage to prevent secrets from leaking into
+//	audit trails. This is critical because safety scanners may block
+//	actions that contain secrets, but the attempted action (including
+//	the secret) would otherwise be recorded in the trace.
+//
 // Inputs:
 //
 //	step - The trace step to record. Step number and timestamp
@@ -228,7 +431,104 @@ func (r *TraceRecorder) RecordStep(step TraceStep) {
 		step.Metadata = nil
 	}
 
+	// SECURITY: Sanitize before storing to prevent secret leakage
+	if r.config.Sanitizer != nil {
+		step = r.sanitizeStep(step)
+	}
+
 	r.steps = append(r.steps, step)
+}
+
+// sanitizeStep removes secrets from all string fields in a TraceStep.
+//
+// Description:
+//
+//	Creates a sanitized copy of the step with secrets replaced by [REDACTED].
+//	This prevents secrets from persisting in audit trails even when the
+//	safety scanner blocks the original action.
+//
+// Inputs:
+//
+//	step - The step to sanitize.
+//
+// Outputs:
+//
+//	TraceStep - A sanitized copy of the step.
+func (r *TraceRecorder) sanitizeStep(step TraceStep) TraceStep {
+	sanitizer := r.config.Sanitizer
+
+	// Sanitize direct string fields
+	step.Action = sanitizer.Sanitize(step.Action)
+	step.Target = sanitizer.Sanitize(step.Target)
+	step.Tool = sanitizer.Sanitize(step.Tool)
+	step.Error = sanitizer.Sanitize(step.Error)
+
+	// Sanitize symbols found
+	if len(step.SymbolsFound) > 0 {
+		sanitizedSymbols := make([]string, len(step.SymbolsFound))
+		for i, s := range step.SymbolsFound {
+			sanitizedSymbols[i] = sanitizer.Sanitize(s)
+		}
+		step.SymbolsFound = sanitizedSymbols
+	}
+
+	// Sanitize proof updates
+	if len(step.ProofUpdates) > 0 {
+		sanitizedUpdates := make([]ProofUpdate, len(step.ProofUpdates))
+		for i, pu := range step.ProofUpdates {
+			sanitizedUpdates[i] = ProofUpdate{
+				NodeID: sanitizer.Sanitize(pu.NodeID),
+				Type:   pu.Type,  // Type is enum, no secrets
+				Delta:  pu.Delta, // Delta is numeric, no secrets
+				Reason: sanitizer.Sanitize(pu.Reason),
+				Source: pu.Source, // Source is enum, no secrets
+				Status: pu.Status, // Status string for backwards compat
+			}
+		}
+		step.ProofUpdates = sanitizedUpdates
+	}
+
+	// Sanitize constraints added
+	if len(step.ConstraintsAdded) > 0 {
+		sanitizedConstraints := make([]ConstraintUpdate, len(step.ConstraintsAdded))
+		for i, cu := range step.ConstraintsAdded {
+			sanitizedNodes := make([]string, len(cu.Nodes))
+			for j, n := range cu.Nodes {
+				sanitizedNodes[j] = sanitizer.Sanitize(n)
+			}
+			sanitizedConstraints[i] = ConstraintUpdate{
+				ID:     sanitizer.Sanitize(cu.ID),
+				Type:   cu.Type, // Type is enum, no secrets
+				Nodes:  sanitizedNodes,
+				Source: cu.Source, // Source is enum, no secrets
+			}
+		}
+		step.ConstraintsAdded = sanitizedConstraints
+	}
+
+	// Sanitize dependencies found
+	if len(step.DependenciesFound) > 0 {
+		sanitizedDeps := make([]DependencyEdge, len(step.DependenciesFound))
+		for i, d := range step.DependenciesFound {
+			sanitizedDeps[i] = DependencyEdge{
+				From:   sanitizer.Sanitize(d.From),
+				To:     sanitizer.Sanitize(d.To),
+				Source: d.Source, // Source is enum, no secrets
+			}
+		}
+		step.DependenciesFound = sanitizedDeps
+	}
+
+	// Sanitize metadata
+	if len(step.Metadata) > 0 {
+		sanitizedMeta := make(map[string]string, len(step.Metadata))
+		for k, v := range step.Metadata {
+			sanitizedMeta[k] = sanitizer.Sanitize(v)
+		}
+		step.Metadata = sanitizedMeta
+	}
+
+	return step
 }
 
 // GetSteps returns a copy of all recorded steps.
@@ -368,10 +668,35 @@ func (b *TraceStepBuilder) WithSymbolsFound(symbols []string) *TraceStepBuilder 
 }
 
 // WithProofUpdate adds a proof update.
+//
+// Parameters accept string values for backwards compatibility:
+//   - status: "proven", "disproven", "expanded", "unknown", "increment", "decrement"
+//   - source: "hard", "soft", "safety"
 func (b *TraceStepBuilder) WithProofUpdate(nodeID, status, reason, source string) *TraceStepBuilder {
+	// Convert string status to ProofUpdateType
+	updateType := stringToProofUpdateType(status)
+
+	// Convert string source to SignalSource
+	signalSource := stringToSignalSource(source)
+
 	b.step.ProofUpdates = append(b.step.ProofUpdates, ProofUpdate{
 		NodeID: nodeID,
-		Status: status,
+		Type:   updateType,
+		Delta:  1, // Default delta for status-based updates
+		Reason: reason,
+		Source: signalSource,
+		Status: status, // Keep original string for JSON serialization compatibility
+	})
+	return b
+}
+
+// WithProofUpdateTyped adds a proof update with typed parameters.
+// Prefer this over WithProofUpdate for new code.
+func (b *TraceStepBuilder) WithProofUpdateTyped(nodeID string, updateType ProofUpdateType, delta uint64, reason string, source SignalSource) *TraceStepBuilder {
+	b.step.ProofUpdates = append(b.step.ProofUpdates, ProofUpdate{
+		NodeID: nodeID,
+		Type:   updateType,
+		Delta:  delta,
 		Reason: reason,
 		Source: source,
 	})
@@ -380,10 +705,14 @@ func (b *TraceStepBuilder) WithProofUpdate(nodeID, status, reason, source string
 
 // WithConstraint adds a constraint update.
 func (b *TraceStepBuilder) WithConstraint(id, constraintType string, nodes []string) *TraceStepBuilder {
+	// Convert string type to ConstraintType
+	cType := stringToConstraintType(constraintType)
+
 	b.step.ConstraintsAdded = append(b.step.ConstraintsAdded, ConstraintUpdate{
-		ID:    id,
-		Type:  constraintType,
-		Nodes: nodes,
+		ID:     id,
+		Type:   cType,
+		Nodes:  nodes,
+		Source: SignalSourceUnknown, // Default source
 	})
 	return b
 }
@@ -391,10 +720,61 @@ func (b *TraceStepBuilder) WithConstraint(id, constraintType string, nodes []str
 // WithDependency adds a dependency edge.
 func (b *TraceStepBuilder) WithDependency(from, to string) *TraceStepBuilder {
 	b.step.DependenciesFound = append(b.step.DependenciesFound, DependencyEdge{
-		From: from,
-		To:   to,
+		From:   from,
+		To:     to,
+		Source: SignalSourceUnknown, // Default source
 	})
 	return b
+}
+
+// stringToProofUpdateType converts a string status to ProofUpdateType.
+func stringToProofUpdateType(status string) ProofUpdateType {
+	switch status {
+	case "proven":
+		return ProofUpdateTypeProven
+	case "disproven":
+		return ProofUpdateTypeDisproven
+	case "expanded", "unknown":
+		return ProofUpdateTypeIncrement // Expanded/unknown map to increment
+	case "increment":
+		return ProofUpdateTypeIncrement
+	case "decrement":
+		return ProofUpdateTypeDecrement
+	case "reset":
+		return ProofUpdateTypeReset
+	default:
+		return ProofUpdateTypeUnknown
+	}
+}
+
+// stringToSignalSource converts a string source to SignalSource.
+func stringToSignalSource(source string) SignalSource {
+	switch source {
+	case "hard":
+		return SignalSourceHard
+	case "soft":
+		return SignalSourceSoft
+	case "safety":
+		return SignalSourceSafety
+	default:
+		return SignalSourceUnknown
+	}
+}
+
+// stringToConstraintType converts a string type to ConstraintType.
+func stringToConstraintType(constraintType string) ConstraintType {
+	switch constraintType {
+	case "mutual_exclusion":
+		return ConstraintTypeMutualExclusion
+	case "implication":
+		return ConstraintTypeImplication
+	case "ordering":
+		return ConstraintTypeOrdering
+	case "resource":
+		return ConstraintTypeResource
+	default:
+		return ConstraintTypeUnknown
+	}
 }
 
 // WithError sets the error.

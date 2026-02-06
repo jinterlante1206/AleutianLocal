@@ -344,3 +344,122 @@ func TestManager_Configs_Registration(t *testing.T) {
 		t.Errorf("Command = %q, want custom-lsp", config.Command)
 	}
 }
+
+// =============================================================================
+// ReleaseFile/ReopenFile Tests (Windows atomic write compatibility)
+// =============================================================================
+
+func TestManager_ReleaseFile_RequiresContext(t *testing.T) {
+	mgr := NewManager("/tmp/test", DefaultManagerConfig())
+	defer mgr.ShutdownAll(context.Background())
+
+	err := mgr.ReleaseFile(nil, "/tmp/test.go") //nolint:staticcheck
+	if err == nil {
+		t.Error("expected error for nil context")
+	}
+}
+
+func TestManager_ReopenFile_RequiresContext(t *testing.T) {
+	mgr := NewManager("/tmp/test", DefaultManagerConfig())
+	defer mgr.ShutdownAll(context.Background())
+
+	err := mgr.ReopenFile(nil, "/tmp/test.go", "package main", "go") //nolint:staticcheck
+	if err == nil {
+		t.Error("expected error for nil context")
+	}
+}
+
+func TestManager_ReleaseFile_NoServers(t *testing.T) {
+	mgr := NewManager("/tmp/test", DefaultManagerConfig())
+	defer mgr.ShutdownAll(context.Background())
+
+	ctx := context.Background()
+	err := mgr.ReleaseFile(ctx, "/tmp/test.go")
+
+	// Should succeed even with no servers running
+	if err != nil {
+		t.Errorf("ReleaseFile should succeed with no servers, got %v", err)
+	}
+}
+
+func TestManager_ReopenFile_NoServers(t *testing.T) {
+	mgr := NewManager("/tmp/test", DefaultManagerConfig())
+	defer mgr.ShutdownAll(context.Background())
+
+	ctx := context.Background()
+	err := mgr.ReopenFile(ctx, "/tmp/test.go", "package main", "go")
+
+	// Should succeed even with no servers running
+	if err != nil {
+		t.Errorf("ReopenFile should succeed with no servers, got %v", err)
+	}
+}
+
+func TestManager_ReleaseFile_AfterShutdown(t *testing.T) {
+	mgr := NewManager("/tmp/test", DefaultManagerConfig())
+
+	// Shutdown first
+	ctx := context.Background()
+	_ = mgr.ShutdownAll(ctx)
+
+	// Should still succeed (no-op after shutdown)
+	err := mgr.ReleaseFile(ctx, "/tmp/test.go")
+	if err != nil {
+		t.Errorf("ReleaseFile should succeed after shutdown, got %v", err)
+	}
+}
+
+func TestManager_ReopenFile_AfterShutdown(t *testing.T) {
+	mgr := NewManager("/tmp/test", DefaultManagerConfig())
+
+	// Shutdown first
+	ctx := context.Background()
+	_ = mgr.ShutdownAll(ctx)
+
+	// Should still succeed (no-op after shutdown)
+	err := mgr.ReopenFile(ctx, "/tmp/test.go", "package main", "go")
+	if err != nil {
+		t.Errorf("ReopenFile should succeed after shutdown, got %v", err)
+	}
+}
+
+func TestManager_ReleaseFile_Integration(t *testing.T) {
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Skip("gopls not installed")
+	}
+
+	// Create temporary Go project
+	dir := t.TempDir()
+	mainFile := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(mainFile, []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+
+	mgr := NewManager(dir, DefaultManagerConfig())
+	defer mgr.ShutdownAll(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Start the server
+	_, err := mgr.GetOrSpawn(ctx, "go")
+	if err != nil {
+		t.Fatalf("GetOrSpawn: %v", err)
+	}
+
+	// Release the file (should not error)
+	err = mgr.ReleaseFile(ctx, mainFile)
+	if err != nil {
+		t.Errorf("ReleaseFile: %v", err)
+	}
+
+	// Reopen the file with new content
+	newContent := "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n"
+	err = mgr.ReopenFile(ctx, mainFile, newContent, "go")
+	if err != nil {
+		t.Errorf("ReopenFile: %v", err)
+	}
+}

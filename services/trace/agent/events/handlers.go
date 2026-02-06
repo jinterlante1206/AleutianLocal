@@ -33,7 +33,7 @@ func LoggingHandler(logger *slog.Logger, level slog.Level) Handler {
 			slog.String("event_type", string(event.Type)),
 			slog.String("session_id", event.SessionID),
 			slog.Int("step", event.Step),
-			slog.Time("timestamp", event.Timestamp),
+			slog.Time("timestamp", time.UnixMilli(event.Timestamp)),
 		}
 
 		// Add type-specific attributes

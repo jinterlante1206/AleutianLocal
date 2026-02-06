@@ -175,23 +175,23 @@ func (t *TrendingAnalyzer) AnalyzeSymbol(ctx context.Context, symbolID string, o
 
 	// Sort by timestamp
 	sort.Slice(events, func(i, j int) bool {
-		return events[i].Timestamp.Before(events[j].Timestamp)
+		return events[i].Timestamp < events[j].Timestamp
 	})
 
 	trend := &SymbolTrend{
 		SymbolID:   symbolID,
 		DataPoints: len(events),
-		FirstSeen:  events[0].Timestamp,
-		LastSeen:   events[len(events)-1].Timestamp,
+		FirstSeen:  time.UnixMilli(events[0].Timestamp),
+		LastSeen:   time.UnixMilli(events[len(events)-1].Timestamp),
 	}
 
 	// Get current (most recent) caller count
 	trend.CurrentCallers = events[len(events)-1].DirectCallers
 
 	// Find comparison point (from comparison period ago)
-	comparisonCutoff := now.Add(-opts.ComparisonPeriod)
+	comparisonCutoffMillis := now.Add(-opts.ComparisonPeriod).UnixMilli()
 	for _, e := range events {
-		if e.Timestamp.Before(comparisonCutoff) {
+		if e.Timestamp < comparisonCutoffMillis {
 			trend.PreviousCallers = e.DirectCallers
 		} else {
 			break
@@ -398,13 +398,14 @@ func (t *TrendingAnalyzer) GetSymbolTimeline(ctx context.Context, symbolID strin
 
 	// Sort by timestamp
 	sort.Slice(events, func(i, j int) bool {
-		return events[i].Timestamp.Before(events[j].Timestamp)
+		return events[i].Timestamp < events[j].Timestamp
 	})
 
 	// Bucket events
 	buckets := make(map[int64][]HistoryEvent)
+	bucketSizeMillis := bucketSize.Milliseconds()
 	for _, e := range events {
-		bucket := e.Timestamp.UnixMilli() / bucketSize.Milliseconds() * bucketSize.Milliseconds()
+		bucket := e.Timestamp / bucketSizeMillis * bucketSizeMillis
 		buckets[bucket] = append(buckets[bucket], e)
 	}
 

@@ -21,10 +21,6 @@
 // All types in this package are safe for concurrent use after initialization.
 package coordinate
 
-import (
-	"time"
-)
-
 // ChangeType categorizes the kind of change being made.
 type ChangeType string
 
@@ -180,8 +176,8 @@ type ChangePlan struct {
 	// Limitations lists what we couldn't analyze.
 	Limitations []string `json:"limitations,omitempty"`
 
-	// CreatedAt is when the plan was created.
-	CreatedAt time.Time `json:"created_at"`
+	// CreatedAt is when the plan was created (Unix milliseconds UTC).
+	CreatedAt int64 `json:"created_at"`
 }
 
 // GetID returns the plan's unique identifier.

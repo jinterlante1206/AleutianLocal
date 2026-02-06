@@ -177,6 +177,67 @@ func (n *LSPSpawnNode) extractInputs(inputs map[string]any) ([]string, error) {
 	return nil, fmt.Errorf("%w: languages must be []string", ErrInvalidInputType)
 }
 
+// OnResume restores LSP servers after checkpoint load.
+//
+// Description:
+//
+//	Called when resuming from a checkpoint where LSP_SPAWN was marked complete.
+//	Checks if the LSP servers from the checkpoint are still alive, and respawns
+//	them if necessary. This prevents the "zombie checkpoint" problem where
+//	downstream nodes (TYPE_CHECK) try to use dead LSP processes.
+//
+// The Problem This Solves:
+//
+//  1. Agent runs LSP_SPAWN, servers start
+//  2. DAG saves checkpoint - LSP_SPAWN = Complete
+//  3. System crashes
+//  4. System loads checkpoint
+//  5. Without OnResume: TYPE_CHECK calls dead LSP → PANIC
+//  6. With OnResume: LSP servers are respawned → TYPE_CHECK works
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	output - The node's output (*LSPSpawnOutput) from the checkpoint.
+//
+// Outputs:
+//
+//	error - Non-nil if respawn fails. Causes node to be re-executed.
+//
+// Thread Safety:
+//
+//	Safe for concurrent use via LSP Manager's internal locking.
+func (n *LSPSpawnNode) OnResume(ctx context.Context, output any) error {
+	if n.manager == nil {
+		return fmt.Errorf("%w: LSP manager is nil", dag.ErrRehydrationFailed)
+	}
+
+	// Extract the languages that were spawned from the checkpoint output
+	spawnOutput, ok := output.(*LSPSpawnOutput)
+	if !ok {
+		// Output is nil or wrong type - trigger re-execution
+		return fmt.Errorf("%w: invalid checkpoint output type", dag.ErrRehydrationFailed)
+	}
+
+	// Check each spawned language server and respawn if dead
+	for _, lang := range spawnOutput.Spawned {
+		server := n.manager.Get(lang)
+		if server == nil || server.State() != lsp.ServerStateReady {
+			// Server died - respawn it
+			_, err := n.manager.GetOrSpawn(ctx, lang)
+			if err != nil {
+				return fmt.Errorf("respawning %s LSP server: %w", lang, err)
+			}
+		}
+	}
+
+	// Update the manager reference in the output for downstream nodes
+	spawnOutput.Manager = n.manager
+	spawnOutput.Operations = lsp.NewOperations(n.manager)
+
+	return nil
+}
+
 // LSPTypeCheckNode performs type checking using LSP hover.
 //
 // Description:

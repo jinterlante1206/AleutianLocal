@@ -98,10 +98,10 @@ func (s *MemoryStore) Store(ctx context.Context, memory CodeMemory) (*CodeMemory
 	if memory.Confidence == 0 {
 		memory.Confidence = s.config.DefaultConfidence
 	}
-	if memory.CreatedAt.IsZero() {
-		memory.CreatedAt = time.Now().UTC()
+	if memory.CreatedAt == 0 {
+		memory.CreatedAt = time.Now().UnixMilli()
 	}
-	if memory.LastUsed.IsZero() {
+	if memory.LastUsed == 0 {
 		memory.LastUsed = memory.CreatedAt
 	}
 	if memory.Status == "" {
@@ -126,8 +126,8 @@ func (s *MemoryStore) Store(ctx context.Context, memory CodeMemory) (*CodeMemory
 			"scope":      memory.Scope,
 			"confidence": memory.Confidence,
 			"source":     string(memory.Source),
-			"createdAt":  memory.CreatedAt.Format(time.RFC3339),
-			"lastUsed":   memory.LastUsed.Format(time.RFC3339),
+			"createdAt":  time.UnixMilli(memory.CreatedAt).Format(time.RFC3339),
+			"lastUsed":   time.UnixMilli(memory.LastUsed).Format(time.RFC3339),
 			"useCount":   memory.UseCount,
 			"dataSpace":  memory.DataSpace,
 			"status":     string(memory.Status),
@@ -352,7 +352,7 @@ func (s *MemoryStore) MarkUsed(ctx context.Context, memoryID string) error {
 		WithClassName(CodeMemoryClassName).
 		WithID(weaviateID).
 		WithProperties(map[string]interface{}{
-			"lastUsed": time.Now().UTC().Format(time.RFC3339),
+			"lastUsed": time.UnixMilli(time.Now().UnixMilli()).UTC().Format(time.RFC3339),
 			"useCount": memory.UseCount + 1,
 		}).
 		WithMerge().
@@ -544,13 +544,13 @@ func (s *MemoryStore) parseResults(result *models.GraphQLResponse) ([]CodeMemory
 
 		if createdStr := getString(m, "createdAt"); createdStr != "" {
 			if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
-				memory.CreatedAt = t
+				memory.CreatedAt = t.UnixMilli()
 			}
 		}
 
 		if lastUsedStr := getString(m, "lastUsed"); lastUsedStr != "" {
 			if t, err := time.Parse(time.RFC3339, lastUsedStr); err == nil {
-				memory.LastUsed = t
+				memory.LastUsed = t.UnixMilli()
 			}
 		}
 

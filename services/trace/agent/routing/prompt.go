@@ -12,6 +12,8 @@ package routing
 
 import (
 	"bytes"
+	"fmt"
+	"log/slog"
 	"strings"
 	"text/template"
 )
@@ -48,7 +50,12 @@ type PromptData struct {
 }
 
 // systemPromptTemplate is the template for the routing system prompt.
-const systemPromptTemplate = `You are a tool router for a code assistant. Your job is to select the SINGLE BEST tool for the user's query.
+//
+// History-Aware Routing: This prompt is designed to leverage Mamba2's
+// O(n) linear complexity and 1M token context window. By including full
+// tool history with summaries, the router can make informed decisions
+// about what information is still missing.
+const systemPromptTemplate = `You are a tool router for a code assistant. Your job is to select the SINGLE BEST NEXT tool for the user's query.
 
 ## Available Tools
 {{range .Tools}}
@@ -80,15 +87,53 @@ Category: {{.Category}}
 {{- if .Context.CurrentFile}}
 - Current file: {{.Context.CurrentFile}}
 {{- end}}
-{{- if .Context.RecentTools}}
-- Recent tools used: {{join .Context.RecentTools ", "}}
+{{- if gt .Context.StepNumber 0}}
+- Current step: {{.Context.StepNumber}}
+{{- end}}
+{{- if .Context.Progress}}
+- Progress so far: {{.Context.Progress}}
+{{- end}}
+{{- if .Context.ToolHistory}}
+
+[!] CRITICAL CONSTRAINT: Tool History (DO NOT REPEAT) [!]
+═══════════════════════════════════════════════════════════════════
+The following tools have ALREADY been executed in this session.
+You MUST NOT suggest these tools again:
+
+{{range .Context.ToolHistory}}
+{{if .Success}}[OK] Step {{.StepNumber}}: {{.Tool}} → SUCCESS
+    Result: {{.Summary}}
+{{else}}[FAIL] Step {{.StepNumber}}: {{.Tool}} → FAILED
+    Error: {{.Summary}}
+{{end}}
+{{- end}}
+
+FORBIDDEN TOOLS (DO NOT suggest these):
+{{- range .Context.ToolHistory}}
+{{- if .Success}}
+  - {{.Tool}} (already succeeded)
+{{- else}}
+  - {{.Tool}} (already failed)
+{{- end}}
+{{- end}}
+
+NEXT STEP LOGIC:
+1. Review what information was successfully gathered above
+2. Identify what is STILL MISSING to answer the user's query
+3. Select a DIFFERENT tool NOT in the forbidden list
+4. If enough information gathered → select "answer" to synthesize response
+
+What critical information is MISSING that requires a NEW tool?
+{{- else if .Context.RecentTools}}
+Recent tools used: {{join .Context.RecentTools ", "}}
+Prefer DIFFERENT tools unless absolutely necessary.
 {{- end}}
 {{- if .Context.PreviousErrors}}
 
-## IMPORTANT: Failed Tools
-The following tools recently failed. DO NOT suggest them again unless you can solve the error:
+[!] FAILED TOOLS - AVOID THESE [!]
+The following tools recently failed. DO NOT suggest them again:
 {{range .Context.PreviousErrors}}
-- {{.Tool}}: {{.Error}}
+  - {{.Tool}}: {{.Error}}
 {{- end}}
 Choose a DIFFERENT tool that can accomplish the same goal.
 {{- end}}
@@ -96,21 +141,38 @@ Choose a DIFFERENT tool that can accomplish the same goal.
 - No additional context provided
 {{- end}}
 
-## Instructions
-1. Analyze the user's query
-2. Select the SINGLE most appropriate tool
-3. Be decisive - pick one tool even if multiple might work
-4. Consider the context when making your selection
-5. AVOID tools that recently failed (see Failed Tools section if present)
+## DECISION PROTOCOL (FOLLOW STRICTLY)
+
+STEP 1: Check Tool History
+  - Have we already gathered sufficient information?
+  - If YES → select "answer" (do not call more tools unnecessarily)
+  - If NO → proceed to STEP 2
+
+STEP 2: Identify Missing Information
+  - What SPECIFIC information is STILL needed?
+  - Be precise about what gap exists
+
+STEP 3: Select NEXT Tool
+  - Choose ONE tool NOT in the forbidden list above
+  - The tool must gather NEW information we don't have yet
+  - DO NOT repeat successful tools (check [OK] entries above)
+  - DO NOT retry failed tools (check [FAIL] entries above)
+
+STEP 4: Validate Your Selection
+  - Is this tool in the forbidden list? → If YES, STOP and choose different tool
+  - Will this tool add NEW information? → If NO, select "answer" instead
+  - Have we tried this tool before? → If YES, STOP and choose different tool
+
+CRITICAL: If unsure whether to continue or answer, choose "answer"
 
 ## Output Format
 Respond with ONLY a JSON object. No explanation, no markdown, just JSON:
-{"tool": "<tool_name>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}
+{"tool": "<tool_name>", "confidence": <0.0-1.0>, "reasoning": "<what we still need to know>"}
 
 Example outputs:
-{"tool": "find_symbol_usages", "confidence": 0.95, "reasoning": "Query asks about function callers"}
-{"tool": "read_file", "confidence": 0.8, "reasoning": "User wants to see file contents"}
-{"tool": "grep_codebase", "confidence": 0.7, "reasoning": "Searching for text pattern"}`
+{"tool": "find_symbol_usages", "confidence": 0.95, "reasoning": "Need to find callers after locating the function"}
+{"tool": "read_file", "confidence": 0.8, "reasoning": "Found the file, need to see its contents"}
+{"tool": "answer", "confidence": 0.9, "reasoning": "Have entry points and implementation details, ready to answer"}`
 
 // userPromptTemplate is the template for the user message.
 const userPromptTemplate = `User query: {{.Query}}
@@ -124,15 +186,24 @@ Select the best tool and respond with JSON only.`
 //   - *PromptBuilder: Configured builder.
 //   - error: Non-nil if template parsing fails.
 func NewPromptBuilder() (*PromptBuilder, error) {
+	slog.Debug("NewPromptBuilder: Creating prompt builder")
+
 	funcMap := template.FuncMap{
 		"join": strings.Join,
 	}
 
+	slog.Debug("NewPromptBuilder: Parsing system prompt template",
+		"template_length", len(systemPromptTemplate))
+
 	tmpl, err := template.New("system").Funcs(funcMap).Parse(systemPromptTemplate)
 	if err != nil {
+		slog.Error("NewPromptBuilder: Template parsing failed",
+			"error", err,
+			"error_type", fmt.Sprintf("%T", err))
 		return nil, err
 	}
 
+	slog.Debug("NewPromptBuilder: Prompt builder created successfully")
 	return &PromptBuilder{
 		tmpl: tmpl,
 	}, nil

@@ -182,7 +182,7 @@ func (p *PNMCTS) Process(ctx context.Context, snapshot crs.Snapshot, input any) 
 				Disproof:  1,
 				Status:    crs.ProofStatusUnknown,
 				Source:    crs.SignalSourceUnknown,
-				UpdatedAt: time.Now(),
+				UpdatedAt: time.Now().UnixMilli(),
 			}
 		}
 	}
@@ -204,7 +204,7 @@ func (p *PNMCTS) Process(ctx context.Context, snapshot crs.Snapshot, input any) 
 		}
 
 		// Select most proving node (MPN)
-		mpn := p.selectMPN(in.RootNodeID, proofNumbers, depIndex)
+		mpn := p.selectMPN(in.RootNodeID, proofNumbers, depIndex, proofIndex)
 		if mpn == "" {
 			output.Converged = true
 			break
@@ -232,7 +232,24 @@ func (p *PNMCTS) Process(ctx context.Context, snapshot crs.Snapshot, input any) 
 }
 
 // selectMPN finds the most proving node.
-func (p *PNMCTS) selectMPN(rootID string, proofs map[string]crs.ProofNumber, deps crs.DependencyIndexView) string {
+//
+// Description:
+//
+//	Traverses from root following the path of minimum proof numbers.
+//	Uses both the local proofs map (for updated values during search)
+//	and the proofIndex parameter (for initial values from CRS snapshot).
+//
+// Inputs:
+//
+//	rootID - Starting node for traversal.
+//	proofs - Local proof number cache (updated during search).
+//	deps - Dependency index for traversing edges.
+//	proofIndex - Snapshot's proof index for looking up initial values.
+//
+// Outputs:
+//
+//	string - The most proving node ID, or empty if cycle detected or all solved.
+func (p *PNMCTS) selectMPN(rootID string, proofs map[string]crs.ProofNumber, deps crs.DependencyIndexView, proofIndex crs.ProofIndexView) string {
 	current := rootID
 	visited := make(map[string]bool)
 
@@ -252,7 +269,13 @@ func (p *PNMCTS) selectMPN(rootID string, proofs map[string]crs.ProofNumber, dep
 		var minProof uint64 = p.config.InfinityThreshold
 
 		for _, child := range children {
-			if pn, exists := proofs[child]; exists {
+			// Check local cache first, then snapshot's proof index
+			pn, exists := proofs[child]
+			if !exists {
+				pn, exists = proofIndex.Get(child)
+			}
+
+			if exists {
 				if pn.Status == crs.ProofStatusProven || pn.Status == crs.ProofStatusDisproven {
 					continue // Skip solved nodes
 				}
@@ -261,7 +284,7 @@ func (p *PNMCTS) selectMPN(rootID string, proofs map[string]crs.ProofNumber, dep
 					minChild = child
 				}
 			} else {
-				// Unvisited node has proof = 1
+				// Truly unvisited node has proof = 1
 				if 1 < minProof {
 					minProof = 1
 					minChild = child
@@ -349,7 +372,7 @@ func (p *PNMCTS) updateProofNumbers(path []string, proofs map[string]crs.ProofNu
 		pn := proofs[nodeID]
 		pn.Proof = sumProof
 		pn.Disproof = minDisproof
-		pn.UpdatedAt = time.Now()
+		pn.UpdatedAt = time.Now().UnixMilli()
 		proofs[nodeID] = pn
 	}
 }

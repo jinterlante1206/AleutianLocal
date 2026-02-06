@@ -73,14 +73,26 @@ type Granite4Router struct {
 //	config := routing.DefaultRouterConfig()
 //	router, err := routing.NewGranite4Router(mgr, config)
 func NewGranite4Router(modelManager *llm.MultiModelManager, config RouterConfig) (*Granite4Router, error) {
+	slog.Info("NewGranite4Router: Creating router",
+		"model", config.Model,
+		"endpoint", config.OllamaEndpoint,
+		"has_model_manager", modelManager != nil)
+
 	if modelManager == nil {
+		slog.Error("NewGranite4Router: modelManager is nil")
 		return nil, fmt.Errorf("modelManager must not be nil")
 	}
 
+	slog.Info("NewGranite4Router: Creating prompt builder")
 	promptBuilder, err := NewPromptBuilder()
 	if err != nil {
+		slog.Error("NewGranite4Router: Failed to create prompt builder",
+			"error", err)
 		return nil, fmt.Errorf("creating prompt builder: %w", err)
 	}
+
+	slog.Info("NewGranite4Router: Router created successfully",
+		"model", config.Model)
 
 	return &Granite4Router{
 		modelManager:  modelManager,
@@ -133,6 +145,14 @@ func NewGranite4RouterWithDefaults(ollamaEndpoint string) (*Granite4Router, erro
 //   - *ToolSelection: The selected tool with confidence.
 //   - error: Non-nil if routing fails.
 func (r *Granite4Router) SelectTool(ctx context.Context, query string, availableTools []ToolSpec, codeContext *CodeContext) (*ToolSelection, error) {
+	slog.Info("CB-31d Granite4Router.SelectTool CALLED",
+		slog.String("model", r.config.Model),
+		slog.Int("num_tools", len(availableTools)),
+		slog.Int("num_ctx", r.config.NumCtx),
+		slog.String("keep_alive", r.config.KeepAlive),
+		slog.Duration("timeout", r.config.Timeout),
+	)
+
 	ctx, span := tracer.Start(ctx, "Granite4Router.SelectTool")
 	defer span.End()
 
@@ -178,15 +198,30 @@ func (r *Granite4Router) SelectTool(ctx context.Context, query string, available
 
 	temp := float32(r.config.Temperature)
 	maxTokens := r.config.MaxTokens
+	numCtx := r.config.NumCtx
 	params := llm.GenerationParams{
 		Temperature:   &temp,
 		MaxTokens:     &maxTokens,
+		NumCtx:        &numCtx,
 		KeepAlive:     r.config.KeepAlive,
 		ModelOverride: r.config.Model,
 	}
 
+	slog.Info("CB-31d Granite4Router calling modelManager.Chat",
+		slog.String("model", r.config.Model),
+		slog.Int("num_messages", len(messages)),
+		slog.Int("system_prompt_len", len(systemPrompt)),
+		slog.Int("user_prompt_len", len(userPrompt)),
+		slog.Int("num_ctx", numCtx),
+	)
+
 	response, err := r.modelManager.Chat(ctx, r.config.Model, messages, params)
 	if err != nil {
+		slog.Error("CB-31d Granite4Router.Chat FAILED",
+			slog.String("model", r.config.Model),
+			slog.String("error", err.Error()),
+			slog.Duration("elapsed", time.Since(startTime)),
+		)
 		duration := time.Since(startTime)
 		if ctx.Err() == context.DeadlineExceeded {
 			span.SetStatus(codes.Error, "timeout")
@@ -200,6 +235,13 @@ func (r *Granite4Router) SelectTool(ctx context.Context, query string, available
 		RecordRoutingError(r.config.Model, "chat_failed")
 		return nil, fmt.Errorf("router chat failed: %w", err)
 	}
+
+	slog.Info("CB-31d Granite4Router.Chat SUCCEEDED",
+		slog.String("model", r.config.Model),
+		slog.Int("response_len", len(response)),
+		slog.String("response_preview", truncate(response, 200)),
+		slog.Duration("elapsed", time.Since(startTime)),
+	)
 
 	// Parse the response
 	selection, err := r.parseResponse(response, availableTools)
@@ -401,10 +443,27 @@ func (r *Granite4Router) Close() error {
 //
 //   - error: Non-nil if warmup fails.
 func (r *Granite4Router) WarmRouter(ctx context.Context) error {
-	r.logger.Info("Warming router model", slog.String("model", r.config.Model))
+	r.logger.Info("WarmRouter: Starting model warmup",
+		"model", r.config.Model,
+		"keep_alive", r.config.KeepAlive,
+		"has_model_manager", r.modelManager != nil)
+
 	startTime := time.Now()
-	err := r.modelManager.WarmModel(ctx, r.config.Model, r.config.KeepAlive)
+	err := r.modelManager.WarmModel(ctx, r.config.Model, r.config.KeepAlive, r.config.NumCtx)
 	duration := time.Since(startTime)
+
+	if err != nil {
+		r.logger.Error("WarmRouter: Model warmup failed",
+			"model", r.config.Model,
+			"duration", duration,
+			"error", err,
+			"error_type", fmt.Sprintf("%T", err))
+	} else {
+		r.logger.Info("WarmRouter: Model warmup succeeded",
+			"model", r.config.Model,
+			"duration", duration)
+	}
+
 	RecordModelWarmup(r.config.Model, duration.Seconds(), err == nil)
 	return err
 }

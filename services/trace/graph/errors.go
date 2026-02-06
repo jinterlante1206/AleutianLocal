@@ -77,4 +77,12 @@ var (
 	// ErrInvalidEdgeType is returned when an edge type is not valid for the
 	// given source and target node kinds.
 	ErrInvalidEdgeType = errors.New("invalid edge type for node kinds")
+
+	// ErrNilGraph is returned when attempting to wrap a nil graph.
+	ErrNilGraph = errors.New("graph must not be nil")
+
+	// ErrGraphNotFrozen is returned when attempting to wrap a graph that
+	// has not been frozen yet. The graph must be frozen (read-only) before
+	// wrapping with HierarchicalGraph.
+	ErrGraphNotFrozen = errors.New("graph must be frozen before wrapping")
 )

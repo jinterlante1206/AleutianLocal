@@ -482,6 +482,18 @@ func (b *Bridge) Snapshot() crs.Snapshot {
 	return b.crs.Snapshot()
 }
 
+// CRS returns the underlying CRS instance.
+//
+// Description:
+//
+//	Provides direct access to the CRS for operations not covered by the
+//	Bridge interface, such as cache invalidation (GR-29).
+//
+// Thread Safety: Safe for concurrent calls. The returned CRS is thread-safe.
+func (b *Bridge) CRS() crs.CRS {
+	return b.crs
+}
+
 // Apply applies a delta to CRS.
 //
 // Description:

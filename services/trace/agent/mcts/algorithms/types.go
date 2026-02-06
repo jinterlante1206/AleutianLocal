@@ -144,11 +144,11 @@ type Result struct {
 	// Duration is how long the algorithm ran.
 	Duration time.Duration
 
-	// StartTime is when the algorithm started.
-	StartTime time.Time
+	// StartTime is when the algorithm started (Unix milliseconds UTC).
+	StartTime int64
 
-	// EndTime is when the algorithm finished.
-	EndTime time.Time
+	// EndTime is when the algorithm finished (Unix milliseconds UTC).
+	EndTime int64
 
 	// Cancelled is true if the algorithm was cancelled.
 	Cancelled bool

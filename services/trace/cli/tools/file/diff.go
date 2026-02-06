@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,12 +51,12 @@ func (t *DiffTool) Definition() tools.ToolDefinition {
 		Parameters: map[string]tools.ParamDef{
 			"file_a": {
 				Type:        tools.ParamTypeString,
-				Description: "Absolute path to the first file",
+				Description: "Path to the first file. Can be absolute or relative to the project root.",
 				Required:    true,
 			},
 			"file_b": {
 				Type:        tools.ParamTypeString,
-				Description: "Absolute path to the second file",
+				Description: "Path to the second file. Can be absolute or relative to the project root.",
 				Required:    true,
 			},
 			"context_lines": {
@@ -100,6 +101,14 @@ func (t *DiffTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	// Set defaults
 	if p.ContextLines == 0 {
 		p.ContextLines = 3
+	}
+
+	// Resolve relative paths to absolute using working directory
+	if p.FileA != "" && !filepath.IsAbs(p.FileA) {
+		p.FileA = filepath.Join(t.config.WorkingDir, p.FileA)
+	}
+	if p.FileB != "" && !filepath.IsAbs(p.FileB) {
+		p.FileB = filepath.Join(t.config.WorkingDir, p.FileB)
 	}
 
 	// Validate

@@ -12,17 +12,56 @@ package code_buddy
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	agentcontext "github.com/AleutianAI/AleutianFOSS/services/trace/agent/context"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/activities"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools/file"
 )
+
+// coordinatorRegistry tracks coordinators by session ID for cleanup.
+// CR-2 fix: Prevent memory leaks by enabling session-based cleanup.
+var coordinatorRegistry = struct {
+	mu           sync.RWMutex
+	coordinators map[string]*integration.Coordinator
+}{
+	coordinators: make(map[string]*integration.Coordinator),
+}
+
+// registerCoordinator stores a coordinator for later cleanup.
+func registerCoordinator(sessionID string, coord *integration.Coordinator) {
+	coordinatorRegistry.mu.Lock()
+	defer coordinatorRegistry.mu.Unlock()
+	coordinatorRegistry.coordinators[sessionID] = coord
+}
+
+// cleanupCoordinator removes and closes the coordinator for a session.
+func cleanupCoordinator(sessionID string) {
+	coordinatorRegistry.mu.Lock()
+	defer coordinatorRegistry.mu.Unlock()
+
+	if coord, ok := coordinatorRegistry.coordinators[sessionID]; ok {
+		_ = coord.Close()
+		delete(coordinatorRegistry.coordinators, sessionID)
+		slog.Debug("CRS-06: Coordinator cleaned up",
+			slog.String("session_id", sessionID),
+		)
+	}
+}
+
+// init registers the coordinator cleanup hook.
+func init() {
+	agent.RegisterSessionCleanupHook("coordinator", cleanupCoordinator)
+}
 
 // DefaultDependenciesFactory creates phase Dependencies for agent sessions.
 //
@@ -51,6 +90,9 @@ type DefaultDependenciesFactory struct {
 
 	// enableTools enables ToolRegistry creation when graph is available
 	enableTools bool
+
+	// enableCoordinator enables MCTS activity coordination
+	enableCoordinator bool
 }
 
 // DependenciesFactoryOption configures a DefaultDependenciesFactory.
@@ -150,6 +192,27 @@ func WithResponseGrounder(grounder grounding.Grounder) DependenciesFactoryOption
 	}
 }
 
+// WithCoordinatorEnabled enables MCTS activity coordination.
+//
+// Description:
+//
+//	When enabled, Creates a Coordinator for each session that orchestrates
+//	MCTS activities (Search, Learning, Constraint, Planning, Awareness,
+//	Similarity, Streaming, Memory) in response to agent events.
+//
+// Inputs:
+//
+//	enabled - Whether to enable the coordinator.
+//
+// Outputs:
+//
+//	DependenciesFactoryOption - The configuration function.
+func WithCoordinatorEnabled(enabled bool) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.enableCoordinator = enabled
+	}
+}
+
 // Create implements agent.DependenciesFactory.
 //
 // Description:
@@ -218,14 +281,9 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 				if f.enableTools && cached.Graph != nil && cached.Index != nil {
 					registry := tools.NewRegistry()
 
-					// Register all CB-20 exploration tools (graph-based)
-					registry.Register(tools.NewFindEntryPointsTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewTraceDataFlowTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewTraceErrorFlowTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewBuildMinimalContextTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewFindSimilarCodeTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewSummarizeFileTool(cached.Graph, cached.Index))
-					registry.Register(tools.NewFindConfigUsageTool(cached.Graph, cached.Index))
+					// Register all CB-20/CB-31b exploration tools (graph-based)
+					// Use the centralized registration function
+					tools.RegisterExploreTools(registry, cached.Graph, cached.Index)
 
 					// Register CB-30 file operation tools (Read, Write, Edit, Glob, Grep, Diff, Tree, JSON)
 					projectRoot := session.GetProjectRoot()
@@ -251,6 +309,43 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 				}
 			}
 		}
+	}
+
+	// Create Coordinator if enabled
+	if f.enableCoordinator {
+		// Create CRS for this session
+		sessionCRS := crs.New(nil)
+
+		// Create Bridge connecting activities to CRS
+		bridge := integration.NewBridge(sessionCRS, nil)
+
+		// Create Coordinator with default configuration
+		coordConfig := integration.DefaultCoordinatorConfig()
+		coordConfig.EnableTracing = true
+		coordConfig.EnableMetrics = true
+		coordConfig.ActivityConfigs = integration.DefaultActivityConfigs()
+
+		coordinator := integration.NewCoordinator(bridge, coordConfig)
+
+		// CR-1 fix: Register all 8 MCTS activities with the Coordinator
+		coordinator.Register(activities.NewSearchActivity(nil))
+		coordinator.Register(activities.NewLearningActivity(nil))
+		coordinator.Register(activities.NewConstraintActivity(nil))
+		coordinator.Register(activities.NewPlanningActivity(nil))
+		coordinator.Register(activities.NewAwarenessActivity(nil))
+		coordinator.Register(activities.NewSimilarityActivity(nil))
+		coordinator.Register(activities.NewStreamingActivity(nil))
+		coordinator.Register(activities.NewMemoryActivity(nil))
+
+		// CR-2 fix: Register for cleanup to prevent memory leaks
+		registerCoordinator(session.ID, coordinator)
+
+		deps.Coordinator = coordinator
+
+		slog.Info("Coordinator created for session",
+			slog.String("session_id", session.ID),
+			slog.Int("activity_count", 8),
+		)
 	}
 
 	return deps, nil

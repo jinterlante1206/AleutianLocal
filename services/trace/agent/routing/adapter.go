@@ -12,6 +12,7 @@ package routing
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 )
@@ -49,6 +50,13 @@ func NewRouterAdapter(router *Granite4Router) agent.ToolRouter {
 // Converts agent types to routing types, calls the underlying router,
 // and converts the result back to agent types.
 func (a *RouterAdapter) SelectTool(ctx context.Context, query string, availableTools []agent.ToolRouterSpec, codeContext *agent.ToolRouterCodeContext) (*agent.ToolRouterSelection, error) {
+	slog.Info("CB-31d RouterAdapter.SelectTool CALLED",
+		slog.Int("num_tools", len(availableTools)),
+		slog.String("query_preview", truncateForLog(query, 100)),
+		slog.Bool("has_code_context", codeContext != nil),
+		slog.String("router_model", a.router.Model()),
+	)
+
 	// Convert agent.ToolRouterSpec to routing.ToolSpec
 	routingSpecs := make([]ToolSpec, len(availableTools))
 	for i, spec := range availableTools {
@@ -70,6 +78,8 @@ func (a *RouterAdapter) SelectTool(ctx context.Context, query string, availableT
 			Symbols:     codeContext.Symbols,
 			CurrentFile: codeContext.CurrentFile,
 			RecentTools: codeContext.RecentTools,
+			Progress:    codeContext.Progress,
+			StepNumber:  codeContext.StepNumber,
 		}
 
 		// Convert PreviousErrors if present
@@ -83,13 +93,39 @@ func (a *RouterAdapter) SelectTool(ctx context.Context, query string, availableT
 				}
 			}
 		}
+
+		// Convert ToolHistory for history-aware routing
+		if len(codeContext.ToolHistory) > 0 {
+			routingContext.ToolHistory = make([]ToolHistoryEntry, len(codeContext.ToolHistory))
+			for i, entry := range codeContext.ToolHistory {
+				routingContext.ToolHistory[i] = ToolHistoryEntry{
+					Tool:       entry.Tool,
+					Summary:    entry.Summary,
+					Success:    entry.Success,
+					StepNumber: entry.StepNumber,
+				}
+			}
+		}
 	}
 
 	// Call the underlying router
+	slog.Info("CB-31d RouterAdapter calling Granite4Router.SelectTool",
+		slog.Int("num_specs", len(routingSpecs)),
+	)
+
 	selection, err := a.router.SelectTool(ctx, query, routingSpecs, routingContext)
 	if err != nil {
+		slog.Error("CB-31d RouterAdapter.SelectTool FAILED",
+			slog.String("error", err.Error()),
+		)
 		return nil, err
 	}
+
+	slog.Info("CB-31d RouterAdapter.SelectTool SUCCEEDED",
+		slog.String("selected_tool", selection.Tool),
+		slog.Float64("confidence", selection.Confidence),
+		slog.Duration("duration", selection.Duration),
+	)
 
 	// Convert routing.ToolSelection to agent.ToolRouterSelection
 	return &agent.ToolRouterSelection{
@@ -119,4 +155,12 @@ func (a *RouterAdapter) Close() error {
 // agent.ToolRouter interface but is useful during initialization.
 func (a *RouterAdapter) WarmRouter(ctx context.Context) error {
 	return a.router.WarmRouter(ctx)
+}
+
+// truncateForLog truncates a string for logging purposes.
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

@@ -202,7 +202,7 @@ func (e *Emitter) EmitWithMetadata(eventType Type, data any, metadata *EventMeta
 		ID:        uuid.NewString(),
 		Type:      eventType,
 		SessionID: sessionID,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Step:      step,
 		Data:      data,
 		Metadata:  metadata,
@@ -296,6 +296,13 @@ func (e *Emitter) IncrementStep() int {
 	return e.currentStep
 }
 
+// CurrentStep returns the current step number without incrementing.
+func (e *Emitter) CurrentStep() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.currentStep
+}
+
 // GetBuffer returns a copy of buffered events.
 func (e *Emitter) GetBuffer() []Event {
 	e.mu.RLock()
@@ -313,7 +320,7 @@ func (e *Emitter) GetBufferSince(since time.Time) []Event {
 
 	var events []Event
 	for _, event := range e.buffer {
-		if event.Timestamp.After(since) {
+		if time.UnixMilli(event.Timestamp).After(since) {
 			events = append(events, event)
 		}
 	}
@@ -384,7 +391,7 @@ func (m *MockEmitter) EmitWithMetadata(eventType Type, data any, metadata *Event
 	m.Events = append(m.Events, Event{
 		ID:        uuid.NewString(),
 		Type:      eventType,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Data:      data,
 		Metadata:  metadata,
 	})

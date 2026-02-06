@@ -47,7 +47,7 @@ func createTestResult() *Result {
 		},
 		Errors:    5,
 		ErrorRate: 0.05,
-		Timestamp: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		Timestamp: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
 	}
 }
 

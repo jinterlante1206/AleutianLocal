@@ -27,6 +27,13 @@ import (
 // workers. After simulation, the virtual loss is removed and the real score
 // is backpropagated.
 //
+// Write Serialization:
+// Actions with side effects (edit, create, delete) modify the filesystem.
+// Running these in parallel causes data corruption where one worker's writes
+// overwrite another's, leading to incorrect test results. Write operations
+// are serialized using a mutex while read-only operations (run_test) can
+// parallelize freely.
+//
 // Thread Safety: Safe for concurrent use.
 type ParallelMCTSEngine struct {
 	// Core MCTS engine (used for single-threaded operations)
@@ -37,6 +44,12 @@ type ParallelMCTSEngine struct {
 
 	// Virtual loss tracking
 	virtualLossValue float64
+
+	// writeMu serializes filesystem write operations to prevent corruption.
+	// Multiple MCTS workers exploring different fix options could otherwise
+	// overwrite each other's changes, leading to false test results.
+	// See: arch_review_03 Issue #5 (Parallel MCTS vs Single Filesystem)
+	writeMu sync.Mutex
 
 	// Logging
 	logger *slog.Logger
@@ -199,6 +212,12 @@ func (p *ParallelMCTSEngine) worker(
 }
 
 // runIterationWithVirtualLoss performs one MCTS iteration with virtual loss.
+//
+// Write Serialization:
+//
+//	If the selected node has an action with side effects (edit, create, delete),
+//	this method acquires writeMu before simulation and releases it after.
+//	This prevents data corruption when multiple workers try to modify files.
 func (p *ParallelMCTSEngine) runIterationWithVirtualLoss(
 	ctx context.Context,
 	tree *PlanTree,
@@ -240,8 +259,34 @@ func (p *ParallelMCTSEngine) runIterationWithVirtualLoss(
 		}
 	}
 
-	// 3. SIMULATE
+	// 3. SIMULATE (with write serialization if action has side effects)
+	//
+	// Actions that modify the filesystem (edit, create, delete) must be
+	// serialized to prevent corruption. Without this, Worker A could write
+	// "Fix X" to main.go, then Worker B overwrites with "Fix Y", and
+	// Worker A's subsequent test would run B's code instead of A's code,
+	// producing incorrect results.
+	//
+	// Read-only actions (run_test) can proceed in parallel since they
+	// don't modify state.
+	action := leaf.Action()
+	needsWriteLock := action != nil && action.HasSideEffects()
+
+	if needsWriteLock {
+		p.writeMu.Lock()
+		p.logger.Debug("acquired write lock for side-effect action",
+			slog.Int("worker", workerID),
+			slog.String("action_type", string(action.Type)))
+	}
+
 	score, err := p.engine.simulate(ctx, leaf)
+
+	if needsWriteLock {
+		p.writeMu.Unlock()
+		p.logger.Debug("released write lock",
+			slog.Int("worker", workerID))
+	}
+
 	if err != nil {
 		return fmt.Errorf("simulation: %w", err)
 	}
@@ -303,11 +348,19 @@ func (p *ParallelMCTSEngine) RunMCTS(ctx context.Context, task string, budget *T
 // In leaf parallelization, multiple simulations are run in parallel on the same leaf node.
 // This can be more efficient when simulations are expensive but tree traversal is cheap.
 //
+// Write Serialization:
+// Similar to ParallelMCTSEngine, actions with side effects are serialized.
+// However, leaf parallelization runs multiple simulations on the SAME leaf,
+// so write conflicts are handled at simulation level.
+//
 // Thread Safety: Safe for concurrent use.
 type LeafParallelMCTSEngine struct {
 	engine *MCTSEngine
 	config LeafParallelConfig
 	logger *slog.Logger
+
+	// writeMu serializes filesystem write operations.
+	writeMu sync.Mutex
 }
 
 // LeafParallelConfig configures leaf parallelization.
@@ -377,6 +430,12 @@ func (l *LeafParallelMCTSEngine) Run(ctx context.Context, task string, budget *T
 }
 
 // runIterationLeafParallel runs parallel simulations on a selected leaf.
+//
+// Write Serialization:
+//
+//	If the leaf action has side effects (edit, create, delete), simulations
+//	are run SEQUENTIALLY instead of in parallel to prevent filesystem corruption.
+//	This is necessary because all simulations target the same file(s).
 func (l *LeafParallelMCTSEngine) runIterationLeafParallel(
 	ctx context.Context,
 	tree *PlanTree,
@@ -401,24 +460,46 @@ func (l *LeafParallelMCTSEngine) runIterationLeafParallel(
 		}
 	}
 
-	// 3. PARALLEL SIMULATE
-	scores := make([]float64, l.config.SimulationsPerLeaf)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	// 3. SIMULATE (parallel for read-only, sequential for write operations)
+	//
+	// If the action has side effects, we cannot run parallel simulations
+	// because they would all try to modify the same files. Instead, we
+	// run them sequentially. For read-only actions, parallel is safe.
+	action := leaf.Action()
+	needsSequential := action != nil && action.HasSideEffects()
 
-	for i := 0; i < l.config.SimulationsPerLeaf; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+	scores := make([]float64, l.config.SimulationsPerLeaf)
+
+	if needsSequential {
+		// Sequential execution for write operations
+		l.logger.Debug("using sequential simulation for side-effect action",
+			slog.String("action_type", string(action.Type)))
+
+		for i := 0; i < l.config.SimulationsPerLeaf; i++ {
 			score, err := l.engine.simulate(ctx, leaf)
 			if err == nil {
-				mu.Lock()
-				scores[idx] = score
-				mu.Unlock()
+				scores[i] = score
 			}
-		}(i)
+		}
+	} else {
+		// Parallel execution for read-only operations
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+
+		for i := 0; i < l.config.SimulationsPerLeaf; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				score, err := l.engine.simulate(ctx, leaf)
+				if err == nil {
+					mu.Lock()
+					scores[idx] = score
+					mu.Unlock()
+				}
+			}(i)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 
 	// 4. AGGREGATE scores
 	score := l.aggregateScores(scores)

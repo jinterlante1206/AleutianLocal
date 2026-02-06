@@ -434,7 +434,7 @@ func (r *JSONReporter) convertResult(result *Result) jsonResult {
 			BytesPerSecond: result.Throughput.BytesPerSecond,
 			ItemsPerSecond: result.Throughput.ItemsPerSecond,
 		},
-		Timestamp: result.Timestamp,
+		Timestamp: time.UnixMilli(result.Timestamp),
 	}
 
 	if result.Memory != nil {

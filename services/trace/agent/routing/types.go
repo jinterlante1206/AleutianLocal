@@ -163,6 +163,13 @@ type ToolSpec struct {
 //
 // Gives the router additional context to make better decisions.
 // For example, knowing the primary language helps select language-specific tools.
+//
+// # History-Aware Routing
+//
+// This struct is designed to leverage Mamba2's O(n) linear complexity and
+// 1M token context window. By including tool history with summaries, the
+// router can make informed decisions about what information is still needed
+// rather than suggesting the same tools repeatedly.
 type CodeContext struct {
 	// Language is the primary programming language (e.g., "go", "python").
 	Language string `json:"language,omitempty"`
@@ -177,11 +184,46 @@ type CodeContext struct {
 	CurrentFile string `json:"current_file,omitempty"`
 
 	// RecentTools lists recently used tools (for context awareness).
+	// DEPRECATED: Use ToolHistory instead for richer context.
 	RecentTools []string `json:"recent_tools,omitempty"`
 
 	// PreviousErrors contains tools that failed in this session.
 	// The router should avoid suggesting these unless it can fix the issue.
 	PreviousErrors []ToolError `json:"previous_errors,omitempty"`
+
+	// ToolHistory contains the sequence of tools used with their results.
+	// This enables history-aware routing where the router can see what
+	// was already tried and what was learned from each tool.
+	ToolHistory []ToolHistoryEntry `json:"tool_history,omitempty"`
+
+	// Progress describes the current state of information gathering.
+	// Example: "Found 3 entry points, read 2 files, identified main handler"
+	Progress string `json:"progress,omitempty"`
+
+	// StepNumber is the current execution step (1-indexed).
+	StepNumber int `json:"step_number,omitempty"`
+}
+
+// ToolHistoryEntry captures a tool execution with its outcome.
+//
+// # Description
+//
+// Records what tool was called, what it found, and whether it succeeded.
+// This gives the router context about what information is already available,
+// enabling it to suggest the NEXT logical tool rather than repeating.
+type ToolHistoryEntry struct {
+	// Tool is the tool name that was called.
+	Tool string `json:"tool"`
+
+	// Summary is a brief description of what was found/returned.
+	// Example: "Found 5 callers of parseConfig in pkg/config/"
+	Summary string `json:"summary"`
+
+	// Success indicates whether the tool call succeeded.
+	Success bool `json:"success"`
+
+	// StepNumber when this tool was called.
+	StepNumber int `json:"step_number,omitempty"`
 }
 
 // ToolError captures a failed tool attempt for router feedback.
@@ -238,6 +280,12 @@ type RouterConfig struct {
 	// Should be small since we only need JSON output.
 	// Recommended: 256.
 	MaxTokens int `json:"max_tokens"`
+
+	// NumCtx sets the context window size for the router model.
+	// Router only needs to see current query, available tools, and recent history.
+	// Recommended: 16384 (16K tokens) to minimize VRAM usage and allow main agent larger context.
+	// Note: On systems with limited VRAM (32GB), keeping router context low allows main agent 64K+ context.
+	NumCtx int `json:"num_ctx"`
 }
 
 // DefaultRouterConfig returns sensible defaults for the router.
@@ -254,6 +302,7 @@ func DefaultRouterConfig() RouterConfig {
 		ConfidenceThreshold: 0.7,
 		KeepAlive:           "24h",
 		MaxTokens:           256,
+		NumCtx:              16384, // 16K context window (router doesn't need huge context)
 	}
 }
 

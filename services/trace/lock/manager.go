@@ -210,8 +210,8 @@ func (m *FileLockManager) AcquireLock(filePath, reason string) error {
 		FilePath:  absPath,
 		PID:       os.Getpid(),
 		SessionID: m.sessionID,
-		LockedAt:  now,
-		ExpiresAt: now.Add(m.defaultTTL),
+		LockedAt:  now.UnixMilli(),
+		ExpiresAt: now.Add(m.defaultTTL).UnixMilli(),
 		Reason:    reason,
 	}
 
@@ -236,7 +236,7 @@ func (m *FileLockManager) AcquireLock(filePath, reason string) error {
 	slog.Debug("Acquired lock",
 		"path", absPath,
 		"reason", reason,
-		"expires_at", info.ExpiresAt.Format(time.RFC3339))
+		"expires_at", time.UnixMilli(info.ExpiresAt).Format(time.RFC3339))
 
 	return nil
 }

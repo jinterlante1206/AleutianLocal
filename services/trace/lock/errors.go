@@ -13,6 +13,7 @@ package lock
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Sentinel errors for lock operations.
@@ -56,7 +57,7 @@ func (e *FileLockError) Error() string {
 	if e.Holder != nil {
 		return fmt.Sprintf("file %s is locked by PID %d (session %s) since %s: %v",
 			e.Path, e.Holder.PID, e.Holder.SessionID,
-			e.Holder.LockedAt.Format("15:04:05"), e.Err)
+			time.UnixMilli(e.Holder.LockedAt).Format("15:04:05"), e.Err)
 	}
 	return fmt.Sprintf("file %s is locked: %v", e.Path, e.Err)
 }

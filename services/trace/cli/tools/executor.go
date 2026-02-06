@@ -251,11 +251,11 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 	}
 
 	// Execute the tool
-	invocation.StartedAt = time.Now()
+	invocation.StartedAt = time.Now().UnixMilli()
 	logger.Debug("Executing tool")
 
 	result, err := tool.Execute(ctx, invocation.Parameters)
-	invocation.CompletedAt = time.Now()
+	invocation.CompletedAt = time.Now().UnixMilli()
 
 	// Handle transaction commit/rollback
 	if txActive && e.transactionManager != nil {
@@ -301,7 +301,7 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 	}
 
 	// Set duration
-	result.Duration = invocation.CompletedAt.Sub(invocation.StartedAt)
+	result.Duration = time.Duration(invocation.CompletedAt-invocation.StartedAt) * time.Millisecond
 
 	// Truncate if needed
 	if result.TokensUsed > e.options.MaxOutputTokens {

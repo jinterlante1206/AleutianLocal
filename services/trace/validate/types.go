@@ -10,8 +10,6 @@
 
 package validate
 
-import "time"
-
 // ErrorType represents the type of validation error.
 type ErrorType string
 
@@ -69,8 +67,8 @@ type ValidationResult struct {
 	// PatternVersion is the version of the pattern database used.
 	PatternVersion string `json:"pattern_version"`
 
-	// ValidatedAt is when validation occurred.
-	ValidatedAt time.Time `json:"validated_at"`
+	// ValidatedAt is when validation occurred (Unix milliseconds UTC).
+	ValidatedAt int64 `json:"validated_at"`
 }
 
 // ValidationError represents a blocking validation error.

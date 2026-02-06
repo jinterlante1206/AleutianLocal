@@ -48,8 +48,8 @@ type HistoryStore struct {
 
 // HistoryEvent represents a blast radius event to track.
 type HistoryEvent struct {
-	// Timestamp is when this event occurred.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when this event occurred (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// SymbolID is the symbol that was analyzed.
 	SymbolID string `json:"symbol_id"`
@@ -182,8 +182,8 @@ func (s *HistoryStore) Record(event HistoryEvent) {
 	defer s.mu.Unlock()
 
 	// Ensure timestamp is set
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now()
+	if event.Timestamp == 0 {
+		event.Timestamp = time.Now().UnixMilli()
 	}
 
 	// If ring is full, flush oldest to cold before adding new
@@ -237,13 +237,16 @@ func (s *HistoryStore) Query(symbolID string, since, until time.Time) ([]History
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	sinceMillis := since.UnixMilli()
+	untilMillis := until.UnixMilli()
+
 	var events []HistoryEvent
 
 	// Search cold storage
 	for _, e := range s.cold {
 		if e.SymbolID == symbolID &&
-			!e.Timestamp.Before(since) &&
-			!e.Timestamp.After(until) {
+			e.Timestamp >= sinceMillis &&
+			e.Timestamp <= untilMillis {
 			events = append(events, e)
 		}
 	}
@@ -251,8 +254,8 @@ func (s *HistoryStore) Query(symbolID string, since, until time.Time) ([]History
 	// Search ring buffer
 	s.ring.ForEach(func(e HistoryEvent) bool {
 		if e.SymbolID == symbolID &&
-			!e.Timestamp.Before(since) &&
-			!e.Timestamp.After(until) {
+			e.Timestamp >= sinceMillis &&
+			e.Timestamp <= untilMillis {
 			events = append(events, e)
 		}
 		return true
@@ -260,7 +263,7 @@ func (s *HistoryStore) Query(symbolID string, since, until time.Time) ([]History
 
 	// Sort by timestamp
 	sort.Slice(events, func(i, j int) bool {
-		return events[i].Timestamp.Before(events[j].Timestamp)
+		return events[i].Timestamp < events[j].Timestamp
 	})
 
 	return events, nil
@@ -289,9 +292,9 @@ func (s *HistoryStore) QueryRecent(limit int) ([]HistoryEvent, error) {
 		return true
 	})
 
-	// Sort by timestamp descending
+	// Sort by timestamp descending (larger = more recent)
 	sort.Slice(all, func(i, j int) bool {
-		return all[i].Timestamp.After(all[j].Timestamp)
+		return all[i].Timestamp > all[j].Timestamp
 	})
 
 	// Limit
@@ -328,9 +331,9 @@ func (s *HistoryStore) GetRecentForSymbol(symbolID string, limit int) ([]History
 		return true
 	})
 
-	// Sort by timestamp descending
+	// Sort by timestamp descending (larger = more recent)
 	sort.Slice(events, func(i, j int) bool {
-		return events[i].Timestamp.After(events[j].Timestamp)
+		return events[i].Timestamp > events[j].Timestamp
 	})
 
 	// Limit
@@ -346,12 +349,12 @@ func (s *HistoryStore) Vacuum() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cutoff := time.Now().Add(-time.Duration(s.retentionDays) * 24 * time.Hour)
+	cutoffMillis := time.Now().Add(-time.Duration(s.retentionDays) * 24 * time.Hour).UnixMilli()
 
 	// Filter cold storage
 	filtered := make([]HistoryEvent, 0, len(s.cold))
 	for _, e := range s.cold {
-		if e.Timestamp.After(cutoff) {
+		if e.Timestamp > cutoffMillis {
 			filtered = append(filtered, e)
 		}
 	}
@@ -381,32 +384,32 @@ func (s *HistoryStore) Stats() StoreStats {
 	}
 
 	// Find oldest and newest
-	var oldest, newest time.Time
+	var oldest, newest int64 // Unix milliseconds; 0 means unset
 
 	for _, e := range s.cold {
-		if oldest.IsZero() || e.Timestamp.Before(oldest) {
+		if oldest == 0 || e.Timestamp < oldest {
 			oldest = e.Timestamp
 		}
-		if newest.IsZero() || e.Timestamp.After(newest) {
+		if newest == 0 || e.Timestamp > newest {
 			newest = e.Timestamp
 		}
 	}
 
 	s.ring.ForEach(func(e HistoryEvent) bool {
-		if oldest.IsZero() || e.Timestamp.Before(oldest) {
+		if oldest == 0 || e.Timestamp < oldest {
 			oldest = e.Timestamp
 		}
-		if newest.IsZero() || e.Timestamp.After(newest) {
+		if newest == 0 || e.Timestamp > newest {
 			newest = e.Timestamp
 		}
 		return true
 	})
 
-	if !oldest.IsZero() {
-		stats.OldestEvent = oldest.UnixMilli()
+	if oldest != 0 {
+		stats.OldestEvent = oldest
 	}
-	if !newest.IsZero() {
-		stats.NewestEvent = newest.UnixMilli()
+	if newest != 0 {
+		stats.NewestEvent = newest
 	}
 
 	return stats

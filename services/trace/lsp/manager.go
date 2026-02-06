@@ -391,6 +391,146 @@ func (m *Manager) Configs() *ConfigRegistry {
 }
 
 // =============================================================================
+// FILE RELEASE/REOPEN FOR ATOMIC WRITES (Windows compatibility)
+// =============================================================================
+
+// ReleaseFile notifies all running LSP servers to close a file.
+//
+// Description:
+//
+//	Sends textDocument/didClose notifications to all running LSP servers
+//	for the given file path. This is needed on Windows before atomic
+//	file writes (os.Rename) because LSP servers may hold file handles open,
+//	blocking the rename operation.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout
+//	filePath - Absolute path to the file to release
+//
+// Outputs:
+//
+//	error - Non-nil if any server notification failed (best-effort)
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (m *Manager) ReleaseFile(ctx context.Context, filePath string) error {
+	if ctx == nil {
+		return fmt.Errorf("ctx must not be nil")
+	}
+
+	// Check if manager is stopped
+	select {
+	case <-m.stopped:
+		return nil // Manager stopped, nothing to release
+	default:
+	}
+
+	uri := "file://" + filePath
+	params := DidCloseTextDocumentParams{
+		TextDocument: TextDocumentIdentifier{
+			URI: uri,
+		},
+	}
+
+	// Get all running servers
+	m.serversMu.RLock()
+	servers := make([]*Server, 0, len(m.servers))
+	for _, srv := range m.servers {
+		if srv.State() == ServerStateReady {
+			servers = append(servers, srv)
+		}
+	}
+	m.serversMu.RUnlock()
+
+	// Send didClose to all servers (best-effort)
+	var lastErr error
+	for _, srv := range servers {
+		if err := srv.Notify("textDocument/didClose", params); err != nil {
+			slog.Warn("Failed to send didClose to LSP server",
+				slog.String("language", srv.Language()),
+				slog.String("file", filePath),
+				slog.String("error", err.Error()),
+			)
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
+// ReopenFile notifies all running LSP servers to reopen a file.
+//
+// Description:
+//
+//	Sends textDocument/didOpen notifications to all running LSP servers
+//	for the given file path with the new content. This is called after
+//	atomic file writes on Windows to restore LSP server awareness of the file.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation and timeout
+//	filePath - Absolute path to the file to reopen
+//	content - The new file content to send to servers
+//	languageID - The language identifier (e.g., "go", "python")
+//
+// Outputs:
+//
+//	error - Non-nil if any server notification failed (best-effort)
+//
+// Thread Safety:
+//
+//	Safe for concurrent use.
+func (m *Manager) ReopenFile(ctx context.Context, filePath string, content string, languageID string) error {
+	if ctx == nil {
+		return fmt.Errorf("ctx must not be nil")
+	}
+
+	// Check if manager is stopped
+	select {
+	case <-m.stopped:
+		return nil // Manager stopped, nothing to reopen
+	default:
+	}
+
+	uri := "file://" + filePath
+	params := DidOpenTextDocumentParams{
+		TextDocument: TextDocumentItem{
+			URI:        uri,
+			LanguageID: languageID,
+			Version:    1,
+			Text:       content,
+		},
+	}
+
+	// Get all running servers
+	m.serversMu.RLock()
+	servers := make([]*Server, 0, len(m.servers))
+	for _, srv := range m.servers {
+		if srv.State() == ServerStateReady {
+			servers = append(servers, srv)
+		}
+	}
+	m.serversMu.RUnlock()
+
+	// Send didOpen to all servers (best-effort)
+	var lastErr error
+	for _, srv := range servers {
+		if err := srv.Notify("textDocument/didOpen", params); err != nil {
+			slog.Warn("Failed to send didOpen to LSP server",
+				slog.String("language", srv.Language()),
+				slog.String("file", filePath),
+				slog.String("error", err.Error()),
+			)
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
+// =============================================================================
 // IDLE MONITOR
 // =============================================================================
 

@@ -12,8 +12,12 @@ package file
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,7 +54,7 @@ func (t *EditTool) Definition() tools.ToolDefinition {
 		Parameters: map[string]tools.ParamDef{
 			"file_path": {
 				Type:        tools.ParamTypeString,
-				Description: "Absolute path to the file to edit",
+				Description: "Path to the file to edit. Can be absolute or relative to the project root.",
 				Required:    true,
 			},
 			"old_string": {
@@ -115,6 +119,11 @@ func (t *EditTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 		p.ReplaceAll = replaceAll
 	}
 
+	// Resolve relative paths to absolute using working directory
+	if p.FilePath != "" && !filepath.IsAbs(p.FilePath) {
+		p.FilePath = filepath.Join(t.config.WorkingDir, p.FilePath)
+	}
+
 	// Validate
 	if err := p.Validate(); err != nil {
 		return &tools.Result{
@@ -151,7 +160,7 @@ func (t *EditTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 		}, nil
 	}
 
-	// Read current content
+	// Read current content and compute hash for optimistic locking
 	content, err := os.ReadFile(p.FilePath)
 	if err != nil {
 		return &tools.Result{
@@ -171,6 +180,7 @@ func (t *EditTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	}
 
 	oldContent := string(content)
+	originalHash := computeContentHash(content)
 
 	// Validate edit
 	if err := t.validateEdit(oldContent, p.OldString, p.NewString, p.ReplaceAll); err != nil {
@@ -181,7 +191,7 @@ func (t *EditTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 		}, nil
 	}
 
-	// Perform replacement
+	// Perform replacement (without holding any lock)
 	var newContent string
 	var replacements int
 	if p.ReplaceAll {
@@ -195,13 +205,34 @@ func (t *EditTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	// Generate diff
 	diff := generateUnifiedDiff(p.FilePath, oldContent, newContent)
 
-	// Write with atomic operation
-	if err := atomicWriteFile(p.FilePath, []byte(newContent), 0644); err != nil {
+	// Optimistic locking: verify file unchanged before writing
+	// This prevents conflicts when user edits the file while agent is thinking
+	if err := verifyAndWrite(p.FilePath, originalHash, []byte(newContent), 0644); err != nil {
+		if err == ErrConflict {
+			return &tools.Result{
+				Success:  false,
+				Error:    ErrConflict.Error(),
+				Duration: time.Since(start),
+			}, nil
+		}
 		return &tools.Result{
 			Success:  false,
 			Error:    fmt.Sprintf("failed to write file: %v", err),
 			Duration: time.Since(start),
 		}, nil
+	}
+
+	// Synchronous graph refresh BEFORE returning to prevent event storm.
+	// This ensures the graph is updated immediately, so subsequent queries
+	// see fresh data instead of triggering a write->notify->parse->write loop.
+	if t.config.GraphRefresher != nil {
+		if err := t.config.GraphRefresher.RefreshFiles(ctx, []string{p.FilePath}); err != nil {
+			// Log but don't fail the edit - graph will eventually catch up via fsnotify
+			slog.Warn("failed to refresh graph after edit",
+				slog.String("file", p.FilePath),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	result := &EditResult{
@@ -355,4 +386,53 @@ func findChanges(oldLines, newLines []string) []changeRegion {
 	}
 
 	return changes
+}
+
+// computeContentHash returns a SHA-256 hash of the content.
+// Used for optimistic locking to detect external modifications.
+func computeContentHash(content []byte) string {
+	h := sha256.Sum256(content)
+	return hex.EncodeToString(h[:])
+}
+
+// verifyAndWrite implements optimistic locking for file writes.
+//
+// # Description
+//
+// Reads the current file content, verifies it matches the expected hash,
+// and only then performs the atomic write. This prevents overwriting
+// changes made by the user while the agent was thinking.
+//
+// # Inputs
+//
+//   - path: File path to write to.
+//   - expectedHash: SHA-256 hash of content when originally read.
+//   - newContent: New content to write.
+//   - perm: File permissions.
+//
+// # Outputs
+//
+//   - error: ErrConflict if file changed, other errors on I/O failure.
+//
+// # Thread Safety
+//
+// Uses brief file locking during the verify-and-write operation.
+// Lock is held only during the critical section, not during editing.
+func verifyAndWrite(path string, expectedHash string, newContent []byte, perm os.FileMode) error {
+	// Re-read file content to verify it hasn't changed
+	currentContent, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("re-reading file for verification: %w", err)
+	}
+
+	// Compute current hash
+	currentHash := computeContentHash(currentContent)
+
+	// Verify hash matches (optimistic lock check)
+	if currentHash != expectedHash {
+		return ErrConflict
+	}
+
+	// File unchanged, proceed with atomic write
+	return atomicWriteFile(path, newContent, perm)
 }

@@ -25,7 +25,7 @@ func TestSummaryValidator_Validate_ValidSummary(t *testing.T) {
 		Content:   "This package handles authentication and authorization for the application.",
 		Keywords:  []string{"authentication", "jwt", "handler"},
 		ParentID:  "pkg",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	source := &SourceInfo{
@@ -49,7 +49,7 @@ func TestSummaryValidator_Validate_ContentTooShort(t *testing.T) {
 		ID:        "pkg/auth",
 		Level:     1,
 		Content:   "Short", // Too short
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	result := v.Validate(summary, nil)
@@ -87,7 +87,7 @@ func TestSummaryValidator_Validate_ErrorMessage(t *testing.T) {
 			ID:        "pkg/auth",
 			Level:     1,
 			Content:   msg + " - some additional text to make it long enough",
-			UpdatedAt: time.Now(),
+			UpdatedAt: time.Now().UnixMilli(),
 		}
 
 		result := v.Validate(summary, nil)
@@ -108,7 +108,7 @@ func TestSummaryValidator_Validate_InvalidKeyword(t *testing.T) {
 		Content:   "This package handles authentication for the application.",
 		Keywords:  []string{"NonexistentSymbol123"},
 		ParentID:  "pkg",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	source := &SourceInfo{
@@ -145,7 +145,7 @@ func TestSummaryValidator_Validate_CommonKeywordsAllowed(t *testing.T) {
 		Content:   "This package handles authentication for the application.",
 		Keywords:  []string{"function", "interface", "authentication", "handler"},
 		ParentID:  "pkg",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	source := &SourceInfo{
@@ -176,7 +176,7 @@ func TestSummaryValidator_Validate_LevelMismatch(t *testing.T) {
 		ID:        "pkg/auth/handler.go",
 		Level:     1, // Should be 2 for file
 		Content:   "This file contains the authentication handler.",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	result := v.Validate(summary, nil)
@@ -207,7 +207,7 @@ func TestSummaryValidator_Validate_InvalidChild(t *testing.T) {
 		Content:   "This package handles authentication for the application.",
 		Children:  []string{"pkg/auth/nonexistent.go"},
 		ParentID:  "pkg",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	source := &SourceInfo{
@@ -243,7 +243,7 @@ func TestSummaryValidator_Validate_MissingParent(t *testing.T) {
 		Level:     1,
 		Content:   "This package handles authentication for the application.",
 		ParentID:  "", // Missing parent for non-root
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	source := &SourceInfo{
@@ -277,7 +277,7 @@ func TestSummaryValidator_Validate_ParentMismatch(t *testing.T) {
 		Level:     1,
 		Content:   "This package handles authentication for the application.",
 		ParentID:  "wrong_parent",
-		UpdatedAt: time.Now(),
+		UpdatedAt: time.Now().UnixMilli(),
 	}
 
 	source := &SourceInfo{

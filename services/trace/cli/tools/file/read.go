@@ -56,7 +56,7 @@ func (t *ReadTool) Definition() tools.ToolDefinition {
 		Parameters: map[string]tools.ParamDef{
 			"file_path": {
 				Type:        tools.ParamTypeString,
-				Description: "Absolute path to the file to read",
+				Description: "Path to the file to read. Can be absolute or relative to the project root.",
 				Required:    true,
 			},
 			"offset": {
@@ -78,15 +78,15 @@ func (t *ReadTool) Definition() tools.ToolDefinition {
 		Timeout:     30 * time.Second,
 		Examples: []tools.ToolExample{
 			{
-				Description: "Read entire file",
+				Description: "Read file using relative path",
 				Parameters: map[string]any{
-					"file_path": "/path/to/file.go",
+					"file_path": "main/main.go",
 				},
 			},
 			{
 				Description: "Read specific line range",
 				Parameters: map[string]any{
-					"file_path": "/path/to/file.go",
+					"file_path": "pkg/handlers/handler.go",
 					"offset":    100,
 					"limit":     50,
 				},
@@ -114,6 +114,11 @@ func (t *ReadTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	// Set defaults
 	if p.Limit == 0 {
 		p.Limit = DefaultReadLimit
+	}
+
+	// Resolve relative paths to absolute using working directory
+	if p.FilePath != "" && !filepath.IsAbs(p.FilePath) {
+		p.FilePath = filepath.Join(t.config.WorkingDir, p.FilePath)
 	}
 
 	// Validate

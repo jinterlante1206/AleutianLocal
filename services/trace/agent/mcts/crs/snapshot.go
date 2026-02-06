@@ -25,7 +25,7 @@ import (
 // Thread Safety: Safe for concurrent use (immutable after creation).
 type snapshot struct {
 	generation int64
-	createdAt  time.Time
+	createdAt  int64 // Unix milliseconds UTC
 
 	// Index data - all maps are copied on snapshot creation for immutability
 	proofData      map[string]ProofNumber
@@ -34,6 +34,13 @@ type snapshot struct {
 	dependencyData *dependencyGraph
 	historyData    []HistoryEntry
 	streamingData  *streamingStats
+	clauseData     map[string]*Clause // CRS-04: learned clauses
+
+	// GR-28: Graph query interface for activities
+	graphQuery GraphQuery
+
+	// GR-32: Graph-backed dependency index (preferred over dependencyData)
+	graphBackedDepIndex *GraphBackedDependencyIndex
 }
 
 // newSnapshot creates a new immutable snapshot from current state.
@@ -52,6 +59,7 @@ type snapshot struct {
 //   - deps: Dependency graph to copy.
 //   - history: History entries to copy.
 //   - streaming: Streaming stats to copy.
+//   - clauses: Learned clause data to copy. (CRS-04)
 //
 // Outputs:
 //   - *snapshot: The new immutable snapshot.
@@ -65,10 +73,12 @@ func newSnapshot(
 	deps *dependencyGraph,
 	history []HistoryEntry,
 	streaming *streamingStats,
+	clauses map[string]*Clause,
 ) *snapshot {
 	s := &snapshot{
 		generation: generation,
-		createdAt:  time.Now(),
+		createdAt:  time.Now().UnixMilli(),
+		graphQuery: nil, // Set via setGraphQuery after creation
 	}
 
 	// Deep copy proof data
@@ -122,6 +132,23 @@ func newSnapshot(
 		s.streamingData = newStreamingStats()
 	}
 
+	// Deep copy clause data (CRS-04)
+	if clauses != nil {
+		s.clauseData = make(map[string]*Clause, len(clauses))
+		for k, v := range clauses {
+			// Deep copy the clause struct
+			clauseCopy := *v
+			// Deep copy literals slice
+			if v.Literals != nil {
+				clauseCopy.Literals = make([]Literal, len(v.Literals))
+				copy(clauseCopy.Literals, v.Literals)
+			}
+			s.clauseData[k] = &clauseCopy
+		}
+	} else {
+		s.clauseData = make(map[string]*Clause)
+	}
+
 	return s
 }
 
@@ -130,8 +157,8 @@ func (s *snapshot) Generation() int64 {
 	return s.generation
 }
 
-// CreatedAt returns when this snapshot was created.
-func (s *snapshot) CreatedAt() time.Time {
+// CreatedAt returns when this snapshot was created (Unix milliseconds UTC).
+func (s *snapshot) CreatedAt() int64 {
 	return s.createdAt
 }
 
@@ -142,7 +169,7 @@ func (s *snapshot) ProofIndex() ProofIndexView {
 
 // ConstraintIndex returns the constraint index view.
 func (s *snapshot) ConstraintIndex() ConstraintIndexView {
-	return &constraintIndexView{data: s.constraintData}
+	return &constraintIndexView{data: s.constraintData, clauses: s.clauseData}
 }
 
 // SimilarityIndex returns the similarity index view.
@@ -151,7 +178,19 @@ func (s *snapshot) SimilarityIndex() SimilarityIndexView {
 }
 
 // DependencyIndex returns the dependency index view.
+//
+// Description:
+//
+//	Returns the graph-backed dependency index if available (GR-32), otherwise
+//	falls back to the legacy dependencyGraph wrapper for backwards compatibility.
+//
+// Thread Safety: Safe for concurrent use (snapshot is immutable).
 func (s *snapshot) DependencyIndex() DependencyIndexView {
+	// GR-32: Prefer graph-backed index if available
+	if s.graphBackedDepIndex != nil {
+		return s.graphBackedDepIndex
+	}
+	// Fallback to legacy wrapper
 	return &dependencyIndexView{graph: s.dependencyData}
 }
 
@@ -163,6 +202,34 @@ func (s *snapshot) HistoryIndex() HistoryIndexView {
 // StreamingIndex returns the streaming statistics index view.
 func (s *snapshot) StreamingIndex() StreamingIndexView {
 	return &streamingIndexView{stats: s.streamingData}
+}
+
+// GraphQuery returns read-only access to the code graph.
+//
+// Description:
+//
+//	Returns the graph query interface for activities to query the actual
+//	code graph. Returns nil if graph is not available (e.g., during
+//	initialization or if SetGraphProvider has not been called).
+//
+// Outputs:
+//   - GraphQuery: The graph query interface, or nil if unavailable.
+//
+// Thread Safety: Safe for concurrent use (snapshot is immutable).
+func (s *snapshot) GraphQuery() GraphQuery {
+	return s.graphQuery
+}
+
+// setGraphQuery sets the graph query interface for this snapshot.
+// Used internally by CRS when creating snapshots.
+func (s *snapshot) setGraphQuery(gq GraphQuery) {
+	s.graphQuery = gq
+}
+
+// setGraphBackedDepIndex sets the graph-backed dependency index for this snapshot.
+// Used internally by CRS when creating snapshots (GR-32).
+func (s *snapshot) setGraphBackedDepIndex(idx *GraphBackedDependencyIndex) {
+	s.graphBackedDepIndex = idx
 }
 
 // -----------------------------------------------------------------------------
@@ -192,7 +259,8 @@ func (v *proofIndexView) Size() int {
 // -----------------------------------------------------------------------------
 
 type constraintIndexView struct {
-	data map[string]Constraint
+	data    map[string]Constraint
+	clauses map[string]*Clause // CRS-04: learned clauses
 }
 
 func (v *constraintIndexView) Get(constraintID string) (Constraint, bool) {
@@ -229,6 +297,59 @@ func (v *constraintIndexView) All() map[string]Constraint {
 
 func (v *constraintIndexView) Size() int {
 	return len(v.data)
+}
+
+// --- Clause Methods (CRS-04) ---
+
+// GetClause returns a learned clause by ID.
+func (v *constraintIndexView) GetClause(clauseID string) (*Clause, bool) {
+	clause, ok := v.clauses[clauseID]
+	if !ok {
+		return nil, false
+	}
+	// Return a copy to maintain immutability
+	clauseCopy := *clause
+	if clause.Literals != nil {
+		clauseCopy.Literals = make([]Literal, len(clause.Literals))
+		copy(clauseCopy.Literals, clause.Literals)
+	}
+	return &clauseCopy, true
+}
+
+// AllClauses returns all learned clauses.
+func (v *constraintIndexView) AllClauses() map[string]*Clause {
+	// Return a copy to maintain immutability
+	result := make(map[string]*Clause, len(v.clauses))
+	for k, clause := range v.clauses {
+		clauseCopy := *clause
+		if clause.Literals != nil {
+			clauseCopy.Literals = make([]Literal, len(clause.Literals))
+			copy(clauseCopy.Literals, clause.Literals)
+		}
+		result[k] = &clauseCopy
+	}
+	return result
+}
+
+// ClauseCount returns the number of learned clauses.
+func (v *constraintIndexView) ClauseCount() int {
+	return len(v.clauses)
+}
+
+// CheckAssignment checks if an assignment violates any learned clauses.
+func (v *constraintIndexView) CheckAssignment(assignment map[string]bool) ClauseCheckResult {
+	for _, clause := range v.clauses {
+		if clause.IsViolated(assignment) {
+			return ClauseCheckResult{
+				Conflict:       true,
+				ViolatedClause: clause,
+				Reason:         "assignment violates learned clause: " + clause.String(),
+			}
+		}
+	}
+	return ClauseCheckResult{
+		Conflict: false,
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -310,6 +431,89 @@ func (v *similarityIndexView) Size() int {
 		count += len(inner)
 	}
 	return count
+}
+
+// AllPairs returns all similarity pairs for export.
+//
+// Description:
+//
+//	Returns a deep copy of the similarity matrix. The returned map
+//	is safe to modify without affecting the snapshot.
+//
+// Outputs:
+//   - map[string]map[string]float64: Deep copy of all pairs. Never nil.
+//
+// Thread Safety: Returns deep copy; safe for concurrent use.
+func (v *similarityIndexView) AllPairs() map[string]map[string]float64 {
+	result := make(map[string]map[string]float64, len(v.data))
+	for fromID, inner := range v.data {
+		result[fromID] = make(map[string]float64, len(inner))
+		for toID, similarity := range inner {
+			result[fromID][toID] = similarity
+		}
+	}
+	return result
+}
+
+// AllPairsFiltered returns similarity pairs in one direction only for efficient export.
+//
+// Description:
+//
+//	Returns pairs where fromID < toID to avoid duplicates. More memory-efficient
+//	than AllPairs() since similarity is symmetric and export only needs one direction.
+//
+// Inputs:
+//   - maxPairs: Maximum pairs to return. -1 for unlimited.
+//
+// Outputs:
+//   - []SimilarityPairData: Pairs in one direction. Never nil.
+//   - bool: True if truncated due to limit.
+//
+// Thread Safety: Safe for concurrent use.
+func (v *similarityIndexView) AllPairsFiltered(maxPairs int) ([]SimilarityPairData, bool) {
+	// Pre-count for allocation (only one direction)
+	count := 0
+	for fromID, inner := range v.data {
+		for toID := range inner {
+			if fromID < toID {
+				count++
+			}
+		}
+	}
+
+	// Apply limit to allocation
+	allocSize := count
+	if maxPairs > 0 && allocSize > maxPairs {
+		allocSize = maxPairs
+	}
+
+	result := make([]SimilarityPairData, 0, allocSize)
+	truncated := false
+	pairCount := 0
+
+	for fromID, inner := range v.data {
+		for toID, similarity := range inner {
+			if fromID < toID {
+				// Check truncation limit
+				if maxPairs > 0 && pairCount >= maxPairs {
+					truncated = true
+					break
+				}
+
+				result = append(result, SimilarityPairData{
+					FromID:     fromID,
+					ToID:       toID,
+					Similarity: similarity,
+				})
+				pairCount++
+			}
+		}
+		if truncated {
+			break
+		}
+	}
+
+	return result, truncated
 }
 
 // -----------------------------------------------------------------------------
@@ -440,6 +644,34 @@ func (v *dependencyIndexView) HasCycle(nodeID string) bool {
 
 func (v *dependencyIndexView) Size() int {
 	return v.graph.edgeCount()
+}
+
+// AllEdges returns all dependency edges for export.
+//
+// Description:
+//
+//	Returns a deep copy of the forward edge map. The returned map
+//	is safe to modify without affecting the snapshot.
+//
+// Outputs:
+//   - map[string][]string: Deep copy of forward edges. Never nil.
+//
+// Thread Safety: Returns deep copy; safe for concurrent use.
+func (v *dependencyIndexView) AllEdges() map[string][]string {
+	result := make(map[string][]string, len(v.graph.forward))
+	for fromID, toSet := range v.graph.forward {
+		toIDs := make([]string, 0, len(toSet))
+		for toID := range toSet {
+			toIDs = append(toIDs, toID)
+		}
+		result[fromID] = toIDs
+	}
+	return result
+}
+
+// IsGraphBacked returns false for the legacy dependency graph implementation.
+func (v *dependencyIndexView) IsGraphBacked() bool {
+	return false
 }
 
 // -----------------------------------------------------------------------------

@@ -32,12 +32,12 @@ func TestProofDelta(t *testing.T) {
 	})
 
 	t.Run("timestamp", func(t *testing.T) {
-		before := time.Now()
+		beforeMillis := time.Now().UnixMilli()
 		d := NewProofDelta(SignalSourceHard, nil)
-		after := time.Now()
+		afterMillis := time.Now().UnixMilli()
 
-		if d.Timestamp().Before(before) || d.Timestamp().After(after) {
-			t.Errorf("Timestamp %v not between %v and %v", d.Timestamp(), before, after)
+		if d.Timestamp() < beforeMillis || d.Timestamp() > afterMillis {
+			t.Errorf("Timestamp %v not between %v and %v", d.Timestamp(), beforeMillis, afterMillis)
 		}
 	})
 
@@ -78,10 +78,10 @@ func TestProofDelta(t *testing.T) {
 
 	t.Run("merge same type", func(t *testing.T) {
 		d1 := NewProofDelta(SignalSourceSoft, map[string]ProofNumber{
-			"node1": {Proof: 1, Disproof: 1, UpdatedAt: time.Now().Add(-time.Hour)},
+			"node1": {Proof: 1, Disproof: 1, UpdatedAt: time.Now().Add(-time.Hour).UnixMilli()},
 		})
 		d2 := NewProofDelta(SignalSourceHard, map[string]ProofNumber{
-			"node1": {Proof: 2, Disproof: 2, UpdatedAt: time.Now()},
+			"node1": {Proof: 2, Disproof: 2, UpdatedAt: time.Now().UnixMilli()},
 			"node2": {Proof: 3, Disproof: 3},
 		})
 

@@ -100,6 +100,18 @@ type CoordinatorConfig struct {
 
 	// EnableTracing enables OpenTelemetry tracing.
 	EnableTracing bool
+
+	// ActivityConfigs provides per-activity configuration for event handling.
+	// If nil, DefaultActivityConfigs() is used.
+	ActivityConfigs map[ActivityName]*ActivityConfig
+
+	// Filters are applied to activity lists during HandleEvent.
+	// Filters run in order, each receiving the output of the previous.
+	Filters []ActivityFilter
+
+	// EventContext provides context for dynamic filtering.
+	// If nil, filters that require context are skipped.
+	EventContext *EventContext
 }
 
 // DefaultCoordinatorConfig returns the default coordinator configuration.
@@ -446,6 +458,290 @@ func (c *Coordinator) Close() error {
 
 	c.closed = true
 	return nil
+}
+
+// =============================================================================
+// Event-Driven Execution (CRS-06)
+// =============================================================================
+
+// HandleEvent handles an agent event by running the appropriate activities.
+//
+// Description:
+//
+//	This is the primary entry point for event-driven activity coordination.
+//	Based on the event type, determines which activities to run, filters
+//	them based on configuration and context, then executes them in priority
+//	order respecting dependencies.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//   - event: The agent event that occurred.
+//   - data: Data associated with the event.
+//
+// Outputs:
+//   - []activities.ActivityResult: Results from executed activities.
+//   - error: Non-nil if a required activity failed.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *Coordinator) HandleEvent(
+	ctx context.Context,
+	event AgentEvent,
+	data *EventData,
+) ([]activities.ActivityResult, error) {
+	c.mu.RLock()
+	if c.closed {
+		c.mu.RUnlock()
+		return nil, &CoordinatorError{Operation: "HandleEvent", Err: ErrCoordinatorClosed}
+	}
+	c.mu.RUnlock()
+
+	// Start trace
+	var span trace.Span
+	if c.config.EnableTracing {
+		ctx, span = otel.Tracer("integration").Start(ctx, "coordinator.HandleEvent",
+			trace.WithAttributes(
+				attribute.String("event", string(event)),
+				attribute.String("session_id", data.SessionID),
+			),
+		)
+		defer span.End()
+	}
+
+	c.logger.Debug("handling event",
+		slog.String("event", string(event)),
+		slog.String("session_id", data.SessionID),
+	)
+
+	// GR-29: Invalidate graph cache on refresh event
+	if event == EventGraphRefreshed && c.bridge != nil && c.bridge.CRS() != nil {
+		c.bridge.CRS().InvalidateGraphCache()
+		c.logger.Debug("invalidated graph cache after refresh",
+			slog.String("session_id", data.SessionID),
+		)
+	}
+
+	// Get activities for this event
+	activityNames, ok := EventActivityMapping[event]
+	if !ok || len(activityNames) == 0 {
+		c.logger.Debug("no activities mapped for event",
+			slog.String("event", string(event)),
+		)
+		return nil, nil
+	}
+
+	// Apply filters if configured
+	if c.config.EventContext != nil {
+		for _, filter := range c.config.Filters {
+			activityNames = filter.Filter(event, activityNames, c.config.EventContext)
+		}
+	}
+
+	// Filter to only registered and enabled activities
+	configs := c.config.ActivityConfigs
+	if configs == nil {
+		configs = DefaultActivityConfigs()
+	}
+
+	var toRun []scheduledActivity
+	for _, name := range activityNames {
+		activity, registered := c.Get(string(name))
+		if !registered {
+			c.logger.Debug("activity not registered, skipping",
+				slog.String("activity", string(name)),
+			)
+			continue
+		}
+
+		config, hasConfig := configs[name]
+		if hasConfig && !config.Enabled {
+			c.logger.Debug("activity disabled, skipping",
+				slog.String("activity", string(name)),
+			)
+			continue
+		}
+
+		priority := activities.Priority(50) // default
+		if hasConfig {
+			priority = activities.Priority(config.Priority)
+		}
+
+		toRun = append(toRun, scheduledActivity{
+			activity: activity,
+			priority: priority,
+		})
+	}
+
+	if len(toRun) == 0 {
+		c.logger.Debug("no activities to run after filtering",
+			slog.String("event", string(event)),
+		)
+		return nil, nil
+	}
+
+	// Sort by priority
+	sort.Slice(toRun, func(i, j int) bool {
+		return toRun[i].priority > toRun[j].priority
+	})
+
+	c.mu.Lock()
+	c.scheduledTotal += int64(len(toRun))
+	c.mu.Unlock()
+
+	// Execute activities
+	// For simplicity, run sequentially respecting priority/dependency order.
+	// Parallel groups can be added later for optimization.
+	var results []activities.ActivityResult
+	completedActivities := make(map[string]bool)
+
+	for _, sa := range toRun {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			c.logger.Debug("event handling cancelled",
+				slog.String("event", string(event)),
+			)
+			return results, ctx.Err()
+		default:
+		}
+
+		activityName := ActivityName(sa.activity.Name())
+		config := configs[activityName]
+
+		// CR-5 fix: Check dependencies with better distinction between missing and not-run
+		if config != nil && len(config.DependsOn) > 0 {
+			allDepsComplete := true
+			for _, dep := range config.DependsOn {
+				depRegistered := false
+				// Check if dependency is registered (in the toRun list or already completed)
+				for _, scheduled := range toRun {
+					if ActivityName(scheduled.activity.Name()) == dep {
+						depRegistered = true
+						break
+					}
+				}
+				if !depRegistered && !completedActivities[string(dep)] {
+					// Dependency is neither scheduled nor completed - it's missing
+					c.logger.Warn("dependency activity not registered, skipping dependent",
+						slog.String("activity", string(activityName)),
+						slog.String("missing_dependency", string(dep)),
+					)
+					allDepsComplete = false
+					break
+				}
+				if !completedActivities[string(dep)] {
+					// Dependency is registered but not yet complete
+					c.logger.Debug("dependency not complete yet, skipping for now",
+						slog.String("activity", string(activityName)),
+						slog.String("dependency", string(dep)),
+					)
+					allDepsComplete = false
+					break
+				}
+			}
+			if !allDepsComplete {
+				continue
+			}
+		}
+
+		// Create input from event data
+		input := c.createInputFromEvent(sa.activity, event, data)
+
+		// Run activity
+		result, err := c.bridge.RunActivity(ctx, sa.activity, input)
+		if err != nil {
+			c.mu.Lock()
+			c.failedTotal++
+			c.mu.Unlock()
+
+			isOptional := config != nil && config.Optional
+			if isOptional {
+				c.logger.Warn("optional activity failed",
+					slog.String("activity", sa.activity.Name()),
+					slog.String("error", err.Error()),
+				)
+				// Continue with other activities
+			} else {
+				c.logger.Error("required activity failed",
+					slog.String("activity", sa.activity.Name()),
+					slog.String("error", err.Error()),
+				)
+				return results, &CoordinatorError{
+					Operation: "HandleEvent." + sa.activity.Name(),
+					Err:       err,
+				}
+			}
+		} else {
+			results = append(results, result)
+			completedActivities[sa.activity.Name()] = true
+
+			c.mu.Lock()
+			c.executedTotal++
+			c.mu.Unlock()
+		}
+	}
+
+	if span != nil {
+		span.SetAttributes(
+			attribute.Int("activities_scheduled", len(toRun)),
+			attribute.Int("activities_executed", len(results)),
+		)
+	}
+
+	c.logger.Debug("event handled",
+		slog.String("event", string(event)),
+		slog.Int("activities_run", len(results)),
+	)
+
+	return results, nil
+}
+
+// createInputFromEvent creates an activity input from event data.
+func (c *Coordinator) createInputFromEvent(
+	activity activities.Activity,
+	event AgentEvent,
+	data *EventData,
+) activities.ActivityInput {
+	source := crs.SignalSourceHard // Events from agent are authoritative
+
+	switch activity.Name() {
+	case "search":
+		return activities.NewSearchInput(data.SessionID, "", source)
+	case "learning":
+		conflictNode := ""
+		if data.Tool != "" {
+			conflictNode = "tool:" + data.Tool
+		}
+		// CR-10 fix: Include error message in learning input for better clause generation
+		input := activities.NewLearningInput(data.SessionID, conflictNode, source)
+		if data.Error != "" {
+			input.SetErrorInfo(data.Error, data.ErrorCategory)
+		}
+		return input
+	case "constraint":
+		operation := "propagate"
+		if event == EventCircuitBreaker {
+			operation = "restrict"
+		}
+		return activities.NewConstraintInput(data.SessionID, operation, source)
+	case "planning":
+		return activities.NewPlanningInput(data.SessionID, "", source)
+	case "awareness":
+		return activities.NewAwarenessInput(data.SessionID, source)
+	case "similarity":
+		return activities.NewSimilarityInput(data.SessionID, source)
+	case "streaming":
+		return activities.NewStreamingInput(data.SessionID, source)
+	case "memory":
+		operation := "record"
+		if event == EventQueryReceived {
+			operation = "query"
+		} else if event == EventSessionEnd {
+			operation = "persist"
+		}
+		return activities.NewMemoryInput(data.SessionID, operation, source)
+	default:
+		return activities.BaseInput{}
+	}
 }
 
 // Stats returns coordinator statistics.

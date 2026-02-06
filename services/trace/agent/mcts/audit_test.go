@@ -39,9 +39,9 @@ func TestAuditAction_String(t *testing.T) {
 }
 
 func TestNewAuditEntry(t *testing.T) {
-	before := time.Now()
+	before := time.Now().UnixMilli()
 	entry := NewAuditEntry(AuditActionExpand, "node-1")
-	after := time.Now()
+	after := time.Now().UnixMilli()
 
 	if entry.Action != AuditActionExpand {
 		t.Errorf("Action = %v, want expand", entry.Action)
@@ -49,7 +49,7 @@ func TestNewAuditEntry(t *testing.T) {
 	if entry.NodeID != "node-1" {
 		t.Errorf("NodeID = %v, want node-1", entry.NodeID)
 	}
-	if entry.Timestamp.Before(before) || entry.Timestamp.After(after) {
+	if entry.Timestamp < before || entry.Timestamp > after {
 		t.Errorf("Timestamp not in expected range")
 	}
 }
@@ -267,10 +267,10 @@ func TestAuditLog_Summary(t *testing.T) {
 	if summary.ActionCounts[AuditActionBackprop] != 1 {
 		t.Errorf("ActionCounts[backprop] = %d, want 1", summary.ActionCounts[AuditActionBackprop])
 	}
-	if summary.FirstEntry.IsZero() {
+	if summary.FirstEntry == 0 {
 		t.Error("FirstEntry should be set")
 	}
-	if summary.LastEntry.IsZero() {
+	if summary.LastEntry == 0 {
 		t.Error("LastEntry should be set")
 	}
 }
@@ -283,7 +283,7 @@ func TestAuditLog_Summary_Empty(t *testing.T) {
 	if summary.TotalEntries != 0 {
 		t.Errorf("TotalEntries = %d, want 0", summary.TotalEntries)
 	}
-	if !summary.FirstEntry.IsZero() {
+	if summary.FirstEntry != 0 {
 		t.Error("FirstEntry should be zero for empty log")
 	}
 }
@@ -326,7 +326,7 @@ func TestAuditLog_Record_SetsTimestamp(t *testing.T) {
 	log.Record(entry)
 
 	entries := log.Entries()
-	if entries[0].Timestamp.IsZero() {
+	if entries[0].Timestamp == 0 {
 		t.Error("Record should set timestamp if zero")
 	}
 }

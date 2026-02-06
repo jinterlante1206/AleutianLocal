@@ -48,6 +48,16 @@ const (
 
 	// CharsPerToken approximates characters per token.
 	CharsPerToken = 4.0
+
+	// DefaultMaxToolResultLength is the maximum length for tool result output.
+	// Results longer than this are summarized/truncated.
+	// Fixed in cb_30a after trace_logs_18 showed 16000+ char results causing context overflow.
+	DefaultMaxToolResultLength = 4000
+
+	// DefaultMaxToolResults is the maximum number of tool results to keep in context.
+	// Older results are summarized when this limit is exceeded.
+	// Fixed in cb_30a after trace_logs_18 showed 23 messages overwhelming the model.
+	DefaultMaxToolResults = 10
 )
 
 // ManagerConfig configures the context manager.
@@ -67,15 +77,27 @@ type ManagerConfig struct {
 
 	// SystemPrompt is the base system prompt.
 	SystemPrompt string
+
+	// MaxToolResultLength is the maximum length for individual tool result output.
+	// Results longer than this are truncated with an ellipsis indicator.
+	// Fixed in cb_30a after trace_logs_18 showed 16000+ char results.
+	MaxToolResultLength int
+
+	// MaxToolResults is the maximum number of tool results to keep in context.
+	// Older results are summarized/pruned when this limit is exceeded.
+	// Fixed in cb_30a after trace_logs_18 showed 23 messages overwhelming the model.
+	MaxToolResults int
 }
 
 // DefaultManagerConfig returns sensible defaults.
 func DefaultManagerConfig() ManagerConfig {
 	return ManagerConfig{
-		InitialBudget:  DefaultInitialBudget,
-		MaxContextSize: DefaultMaxContextSize,
-		EvictionTarget: DefaultEvictionTarget,
-		EvictionPolicy: "hybrid",
+		InitialBudget:       DefaultInitialBudget,
+		MaxContextSize:      DefaultMaxContextSize,
+		EvictionTarget:      DefaultEvictionTarget,
+		EvictionPolicy:      "hybrid",
+		MaxToolResultLength: DefaultMaxToolResultLength,
+		MaxToolResults:      DefaultMaxToolResults,
 		SystemPrompt: `## MANDATORY: TOOL-FIRST RESPONSE
 
 **Your response to any analytical question MUST start with a tool call.**
@@ -549,6 +571,8 @@ func (m *Manager) InjectToolsIntoPrompt(ctx *agent.AssembledContext, toolDefs []
 //
 //	Integrates tool results into the current context, potentially
 //	adding new code entries or updating relevance scores.
+//	Tool results are truncated if they exceed MaxToolResultLength.
+//	Older results are summarized if MaxToolResults is exceeded.
 //
 // Inputs:
 //
@@ -575,19 +599,34 @@ func (m *Manager) Update(ctx context.Context, current *agent.AssembledContext, r
 	// Create a copy to avoid mutation
 	updated := m.copyContext(current)
 
+	// Truncate tool result output if it exceeds the limit (cb_30a fix).
+	// trace_logs_18 showed 16000+ char results causing context overflow and empty LLM responses.
+	outputText := result.OutputText
+	truncated := result.Truncated
+	if m.config.MaxToolResultLength > 0 && len(outputText) > m.config.MaxToolResultLength {
+		outputText = m.truncateToolResult(outputText, m.config.MaxToolResultLength)
+		truncated = true
+	}
+
 	// Add tool result to history
 	agentResult := agent.ToolResult{
 		InvocationID: uuid.NewString(),
 		Success:      result.Success,
-		Output:       result.OutputText,
+		Output:       outputText,
 		Error:        result.Error,
 		Duration:     result.Duration,
-		TokensUsed:   result.TokensUsed,
+		TokensUsed:   estimateTokens(outputText), // Recalculate based on truncated output
 		Cached:       result.Cached,
-		Truncated:    result.Truncated,
+		Truncated:    truncated,
 	}
 	updated.ToolResults = append(updated.ToolResults, agentResult)
-	updated.TotalTokens += result.TokensUsed
+	updated.TotalTokens += agentResult.TokensUsed
+
+	// Prune old tool results if we exceed the limit (cb_30a fix).
+	// trace_logs_18 showed 23 messages overwhelming the model with context.
+	if m.config.MaxToolResults > 0 && len(updated.ToolResults) > m.config.MaxToolResults {
+		updated = m.pruneOldToolResults(updated)
+	}
 
 	// Extract any new code entries from the result
 	newEntries := m.extractEntriesFromResult(result)
@@ -644,6 +683,114 @@ func (m *Manager) extractEntriesFromResult(result *tools.Result) []agent.CodeEnt
 	}
 
 	return entries
+}
+
+// truncateToolResult truncates a tool result to the specified max length.
+//
+// Description:
+//
+//	Truncates the output while preserving structure. For structured output
+//	(like lists or tables), it tries to truncate at natural boundaries.
+//	Adds an ellipsis indicator showing how much was truncated.
+//
+// Inputs:
+//
+//	output - The tool result output text.
+//	maxLen - Maximum allowed length.
+//
+// Outputs:
+//
+//	string - Truncated output with ellipsis indicator.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (m *Manager) truncateToolResult(output string, maxLen int) string {
+	if len(output) <= maxLen {
+		return output
+	}
+
+	// Reserve space for the truncation indicator
+	truncationIndicator := fmt.Sprintf("\n\n[...truncated %d chars]", len(output)-maxLen+50)
+	effectiveMax := maxLen - len(truncationIndicator)
+
+	if effectiveMax < 100 {
+		// If we can't even fit 100 chars plus indicator, just hard truncate
+		return output[:maxLen-20] + "\n\n[...truncated]"
+	}
+
+	// Try to truncate at a natural boundary (newline)
+	truncated := output[:effectiveMax]
+	lastNewline := strings.LastIndex(truncated, "\n")
+	if lastNewline > effectiveMax/2 {
+		// Found a reasonable newline boundary in the second half
+		truncated = truncated[:lastNewline]
+	}
+
+	return truncated + truncationIndicator
+}
+
+// pruneOldToolResults summarizes/removes old tool results to stay under the limit.
+//
+// Description:
+//
+//	When the number of tool results exceeds MaxToolResults, this method
+//	summarizes older results into a single "summary" entry. The most recent
+//	results are kept intact for the LLM to reference accurately.
+//
+// Inputs:
+//
+//	current - The context with tool results to prune.
+//
+// Outputs:
+//
+//	*agent.AssembledContext - Context with pruned tool results.
+//
+// Thread Safety: Caller must hold the Manager's write lock.
+func (m *Manager) pruneOldToolResults(current *agent.AssembledContext) *agent.AssembledContext {
+	if m.config.MaxToolResults <= 0 || len(current.ToolResults) <= m.config.MaxToolResults {
+		return current
+	}
+
+	// Keep the most recent MaxToolResults-1 results, summarize the rest
+	numToSummarize := len(current.ToolResults) - (m.config.MaxToolResults - 1)
+	oldResults := current.ToolResults[:numToSummarize]
+	recentResults := current.ToolResults[numToSummarize:]
+
+	// Create a summary of old results
+	var summaryBuilder strings.Builder
+	summaryBuilder.WriteString(fmt.Sprintf("[Summary of %d previous tool calls]\n", numToSummarize))
+
+	tokensFreed := 0
+	for i, result := range oldResults {
+		tokensFreed += result.TokensUsed
+		status := "success"
+		if !result.Success {
+			status = "failed"
+		}
+		// Include just a brief note about each call
+		outputPreview := result.Output
+		if len(outputPreview) > 100 {
+			outputPreview = outputPreview[:100] + "..."
+		}
+		summaryBuilder.WriteString(fmt.Sprintf("  %d. [%s] %s\n", i+1, status, outputPreview))
+	}
+
+	summaryText := summaryBuilder.String()
+	summaryTokens := estimateTokens(summaryText)
+
+	// Create summary entry
+	summaryResult := agent.ToolResult{
+		InvocationID: uuid.NewString(),
+		Success:      true,
+		Output:       summaryText,
+		TokensUsed:   summaryTokens,
+		Truncated:    true, // Mark as truncated/summarized
+	}
+
+	// Replace old results with summary + recent results
+	current.ToolResults = append([]agent.ToolResult{summaryResult}, recentResults...)
+	current.TotalTokens -= tokensFreed - summaryTokens
+
+	return current
 }
 
 // Evict removes entries to free tokens from context.

@@ -99,6 +99,20 @@ var (
 	// Phantom package metrics (CB-28d-8)
 	phantomPackagesTotal metric.Int64Counter
 
+	// Router metrics (CB-31d)
+	routerHardForcedTotal   metric.Int64Counter
+	routerFallbackTotal     metric.Int64Counter
+	routerHardForcedLatency metric.Float64Histogram
+
+	// Semantic repetition metrics (CB-30c)
+	semanticRepetitionTotal     metric.Int64Counter
+	semanticSimilarityHistogram metric.Float64Histogram
+
+	// CB-30c Phase 3: Reliability component metrics
+	tokenBudgetUsageGauge         metric.Float64Gauge
+	semanticCircuitBreakerTotal   metric.Int64Counter
+	repetitionDetectorSuggestions metric.Int64Counter
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -393,6 +407,84 @@ func initMetrics() error {
 		phantomPackagesTotal, err = meter.Int64Counter(
 			"grounding_phantom_packages_total",
 			metric.WithDescription("Phantom package path references detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Router metrics (CB-31d)
+		routerHardForcedTotal, err = meter.Int64Counter(
+			"router_hard_forced_total",
+			metric.WithDescription("Total router hard-forced tool executions by tool and outcome"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		routerFallbackTotal, err = meter.Int64Counter(
+			"router_fallback_total",
+			metric.WithDescription("Total router fallbacks to Main LLM by tool and reason"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		routerHardForcedLatency, err = meter.Float64Histogram(
+			"router_hard_forced_latency_seconds",
+			metric.WithDescription("Latency for router hard-forced tool executions"),
+			metric.WithUnit("s"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// Semantic repetition metrics (CB-30c)
+		semanticRepetitionTotal, err = meter.Int64Counter(
+			"semantic_repetition_total",
+			metric.WithDescription("Total semantic repetitions detected by tool"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		semanticSimilarityHistogram, err = meter.Float64Histogram(
+			"semantic_similarity_score",
+			metric.WithDescription("Distribution of semantic similarity scores between tool calls"),
+			metric.WithUnit("1"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// CB-30c Phase 3: Reliability component metrics
+		tokenBudgetUsageGauge, err = meter.Float64Gauge(
+			"token_budget_usage_percent",
+			metric.WithDescription("Token budget usage percentage (0.0-1.0)"),
+			metric.WithUnit("1"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		semanticCircuitBreakerTotal, err = meter.Int64Counter(
+			"semantic_circuit_breaker_total",
+			metric.WithDescription("Total semantic circuit breaker triggers by tool"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		repetitionDetectorSuggestions, err = meter.Int64Counter(
+			"repetition_detector_suggestions_total",
+			metric.WithDescription("Total alternative tool suggestions from repetition detector"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -1094,4 +1186,179 @@ func RecordPhantomPackage(ctx context.Context, packagePath string) {
 	)
 
 	phantomPackagesTotal.Add(ctx, 1, attrs)
+}
+
+// RecordRouterHardForced records a router hard-forced tool execution.
+//
+// # Description
+//
+// This metric tracks when the router selects a tool and the Execute phase
+// bypasses the Main LLM entirely, executing the tool directly. This is the
+// "hard forcing" mechanism introduced in CB-31d to prevent Split-Brain failures.
+//
+// # Inputs
+//
+//   - toolName: Name of the tool that was hard-forced (e.g., "list_packages").
+//   - success: Whether the direct execution succeeded or required fallback.
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func RecordRouterHardForced(toolName string, success bool) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	outcome := "success"
+	if !success {
+		outcome = "fallback"
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("outcome", outcome),
+	)
+
+	routerHardForcedTotal.Add(context.Background(), 1, attrs)
+}
+
+// RecordRouterFallback records when router hard-forcing falls back to Main LLM.
+//
+// # Description
+//
+// This metric tracks when the router selects a tool for hard forcing, but
+// the direct execution fails (either parameter extraction or tool execution),
+// requiring fallback to the Main LLM. High rates indicate parameter extraction
+// or tool execution issues that need investigation.
+//
+// # Inputs
+//
+//   - toolName: Name of the tool that failed hard forcing (e.g., "explore_package").
+//   - reason: Reason for fallback (e.g., "param_extraction_failed", "execution_failed").
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func RecordRouterFallback(toolName, reason string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("reason", reason),
+	)
+
+	routerFallbackTotal.Add(context.Background(), 1, attrs)
+}
+
+// RecordSemanticRepetition records when a semantic repetition is detected.
+//
+// Description:
+//
+//	This metric tracks when the agent detects that a proposed tool call is
+//	semantically similar to a recent tool call, indicating potential repetitive
+//	reasoning. CB-30c: Prevents repeated similar queries like Grep("parseConfig")
+//	followed by Grep("parse_config").
+//
+// Inputs:
+//
+//	toolName - Name of the tool that triggered semantic repetition.
+//	similarity - The Jaccard similarity score that triggered detection (0.0-1.0).
+//	comparedTo - The tool name from history that was similar.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordSemanticRepetition(toolName string, similarity float64, comparedTo string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("compared_to", comparedTo),
+	)
+
+	semanticRepetitionTotal.Add(context.Background(), 1, attrs)
+	semanticSimilarityHistogram.Record(context.Background(), similarity, attrs)
+}
+
+// =============================================================================
+// CB-30c Phase 3: Reliability Component Metrics
+// =============================================================================
+
+// RecordTokenBudgetUsage records the current token budget usage.
+//
+// Description:
+//
+//	Tracks what percentage of the token budget has been used. Useful for
+//	monitoring sessions approaching their limits and triggering synthesis.
+//
+// Inputs:
+//
+//	sessionID - Session identifier for labeling.
+//	usagePercent - Usage as a fraction (0.0-1.0).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordTokenBudgetUsage(sessionID string, usagePercent float64) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("session_id", sessionID),
+	)
+
+	tokenBudgetUsageGauge.Record(context.Background(), usagePercent, attrs)
+}
+
+// RecordSemanticCircuitBreakerTrigger records when the semantic circuit breaker fires.
+//
+// Description:
+//
+//	Tracks when the circuit breaker blocks a tool call due to semantic grouping
+//	(semantically similar queries exceeding threshold).
+//
+// Inputs:
+//
+//	toolName - The tool that was blocked.
+//	reason - The reason for blocking (tool_limit or semantic_group).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordSemanticCircuitBreakerTrigger(toolName, reason string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("reason", reason),
+	)
+
+	semanticCircuitBreakerTotal.Add(context.Background(), 1, attrs)
+}
+
+// RecordRepetitionDetectorSuggestion records when the detector suggests an alternative.
+//
+// Description:
+//
+//	Tracks when the RepetitionDetector suggests an alternative approach,
+//	e.g., using find_callers instead of repeated Grep calls.
+//
+// Inputs:
+//
+//	currentTool - The tool that was being considered.
+//	suggestion - The suggestion provided.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordRepetitionDetectorSuggestion(currentTool, suggestion string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", currentTool),
+		attribute.String("suggestion", suggestion),
+	)
+
+	repetitionDetectorSuggestions.Add(context.Background(), 1, attrs)
 }

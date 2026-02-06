@@ -12,6 +12,7 @@ package crs
 
 import (
 	"sort"
+	"time"
 )
 
 // -----------------------------------------------------------------------------
@@ -528,7 +529,7 @@ func (q *queryImpl) NodeStats(nodeID string) *NodeStats {
 	if len(trace) > 0 {
 		lastEntry := trace[len(trace)-1]
 		stats.LastAction = lastEntry.Action
-		stats.LastActionTime = lastEntry.Timestamp.Format("2006-01-02T15:04:05Z")
+		stats.LastActionTime = time.UnixMilli(lastEntry.Timestamp).UTC().Format("2006-01-02T15:04:05Z")
 	}
 
 	// Streaming information

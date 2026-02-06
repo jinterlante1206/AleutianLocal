@@ -194,8 +194,8 @@ type Context struct {
 	// LastError is the last error encountered.
 	LastError error
 
-	// StartTime is when the TDG session started.
-	StartTime time.Time
+	// StartTime is when the TDG session started (Unix milliseconds UTC).
+	StartTime int64
 
 	// Metrics tracks execution metrics.
 	Metrics *Metrics
@@ -208,13 +208,13 @@ func NewContext(sessionID string, req *Request) *Context {
 		State:     StateIdle,
 		Request:   req,
 		Metrics:   &Metrics{},
-		StartTime: time.Now(),
+		StartTime: time.Now().UnixMilli(),
 	}
 }
 
 // Elapsed returns the time since the session started.
 func (c *Context) Elapsed() time.Duration {
-	return time.Since(c.StartTime)
+	return time.Duration(time.Now().UnixMilli()-c.StartTime) * time.Millisecond
 }
 
 // =============================================================================
@@ -345,8 +345,8 @@ type Metrics struct {
 
 // HistoryEntry records a step in the TDG session.
 type HistoryEntry struct {
-	// Timestamp is when this entry was recorded.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when this entry was recorded (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// State is the TDG state at this step.
 	State State `json:"state"`

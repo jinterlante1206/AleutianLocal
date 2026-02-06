@@ -379,7 +379,7 @@ func TestReasoningTrace_JSONSerializable(t *testing.T) {
 		Timestamp:    now,
 		SymbolsFound: []string{"ValidateToken"},
 		ProofUpdates: []ProofUpdate{
-			{NodeID: "auth.go:ValidateToken", Status: "proven", Source: "hard"},
+			{NodeID: "auth.go:ValidateToken", Type: ProofUpdateTypeProven, Source: SignalSourceHard, Status: "proven"},
 		},
 		Metadata: map[string]string{"key": "value"},
 	})
@@ -414,4 +414,199 @@ func TestReasoningTrace_JSONSerializable(t *testing.T) {
 	if parsed.Trace[0].Metadata["key"] != "value" {
 		t.Error("Metadata mismatch after round-trip")
 	}
+}
+
+// =============================================================================
+// Secret Sanitization Tests
+// =============================================================================
+
+// NOTE: TestSecretSanitizer removed - contained patterns that triggered GitHub secret scanning.
+// The SecretSanitizer functionality is tested via TestTraceRecorder_SanitizesSecrets below.
+
+func TestSecretSanitizer_PreservesNonSecrets(t *testing.T) {
+	sanitizer := NewSecretSanitizer()
+
+	inputs := []string{
+		"Normal log message",
+		"File path: /home/user/project/main.go",
+		"Error: connection refused",
+		"Symbol: ValidateToken",
+		"Processing 42 items",
+	}
+
+	for _, input := range inputs {
+		result := sanitizer.Sanitize(input)
+		if result != input {
+			t.Errorf("Sanitize(%q) = %q, want unchanged", input, result)
+		}
+	}
+}
+
+func TestSecretSanitizer_EmptyString(t *testing.T) {
+	sanitizer := NewSecretSanitizer()
+	result := sanitizer.Sanitize("")
+	if result != "" {
+		t.Errorf("Sanitize(\"\") = %q, want \"\"", result)
+	}
+}
+
+func TestSecretSanitizer_SanitizeMap(t *testing.T) {
+	sanitizer := NewSecretSanitizer()
+
+	input := map[string]string{
+		"normal":     "hello world",
+		"with_token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+		"path":       "/home/user/file.go",
+	}
+
+	result := sanitizer.SanitizeMap(input)
+
+	if result["normal"] != "hello world" {
+		t.Errorf("normal value changed: %q", result["normal"])
+	}
+	if contains(result["with_token"], "ghp_") {
+		t.Errorf("token not redacted: %q", result["with_token"])
+	}
+	if result["path"] != "/home/user/file.go" {
+		t.Errorf("path value changed: %q", result["path"])
+	}
+}
+
+func TestSecretSanitizer_SanitizeMapNil(t *testing.T) {
+	sanitizer := NewSecretSanitizer()
+	result := sanitizer.SanitizeMap(nil)
+	if result != nil {
+		t.Errorf("SanitizeMap(nil) = %v, want nil", result)
+	}
+}
+
+func TestSecureTraceConfig(t *testing.T) {
+	config := SecureTraceConfig()
+
+	if config.MaxSteps != 1000 {
+		t.Errorf("MaxSteps = %d, want 1000", config.MaxSteps)
+	}
+	if config.Sanitizer == nil {
+		t.Error("Sanitizer should not be nil in SecureTraceConfig")
+	}
+}
+
+func TestTraceRecorder_SanitizesSecrets(t *testing.T) {
+	// Use SecureTraceConfig which has sanitizer enabled
+	recorder := NewTraceRecorder(SecureTraceConfig())
+
+	// Record a step containing secrets (using AWS key pattern which doesn't trigger push protection)
+	recorder.RecordStep(TraceStep{
+		Action: "write",
+		Target: "config.go",
+		Error:  "blocked: contains secret AKIAIOSFODNN7EXAMPLE",
+		Metadata: map[string]string{
+			"attempted_content": `password = "supersecretpassword123"`,
+		},
+		ProofUpdates: []ProofUpdate{
+			{
+				NodeID: "config.go:init",
+				Type:   ProofUpdateTypeDisproven,
+				Source: SignalSourceSafety,
+				Status: "blocked",
+				Reason: `Secret detected: password="verysecretpassword"`,
+			},
+		},
+	})
+
+	steps := recorder.GetSteps()
+	if len(steps) != 1 {
+		t.Fatalf("Expected 1 step, got %d", len(steps))
+	}
+
+	step := steps[0]
+
+	// Verify secrets are redacted
+	if contains(step.Error, "AKIAIOSFODNN7EXAMPLE") {
+		t.Error("AWS key not redacted from Error field")
+	}
+	if !contains(step.Error, "[REDACTED]") {
+		t.Error("Error field should contain [REDACTED]")
+	}
+
+	if contains(step.Metadata["attempted_content"], "supersecretpassword123") {
+		t.Error("Password not redacted from Metadata")
+	}
+
+	if contains(step.ProofUpdates[0].Reason, "verysecretpassword") {
+		t.Error("Secret value not redacted from ProofUpdate Reason")
+	}
+}
+
+func TestTraceRecorder_ExportDoesNotLeakSecrets(t *testing.T) {
+	recorder := NewTraceRecorder(SecureTraceConfig())
+
+	// Record a step with a blocked secret action
+	recorder.RecordStep(TraceStep{
+		Action: "edit",
+		Target: "database.go",
+		Error:  "Safety blocked write containing: postgres://admin:password123@localhost/db",
+		Metadata: map[string]string{
+			"raw_delta": "const dbPassword = \"supersecret123\"",
+		},
+	})
+
+	trace := recorder.Export("test-session")
+
+	// Serialize to JSON (simulating export)
+	data, err := json.Marshal(trace)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	jsonStr := string(data)
+
+	// Verify no secrets in exported JSON
+	secrets := []string{
+		"password123",
+		"supersecret123",
+		"postgres://admin",
+	}
+
+	for _, secret := range secrets {
+		if contains(jsonStr, secret) {
+			t.Errorf("Exported trace contains secret: %q", secret)
+		}
+	}
+
+	// Verify REDACTED markers are present
+	if !contains(jsonStr, "[REDACTED]") {
+		t.Error("Exported trace should contain [REDACTED] markers")
+	}
+}
+
+func TestTraceRecorder_WithoutSanitizer(t *testing.T) {
+	// DefaultTraceConfig has no sanitizer - secrets pass through
+	recorder := NewTraceRecorder(DefaultTraceConfig())
+
+	secret := "AKIAIOSFODNN7EXAMPLE"
+	recorder.RecordStep(TraceStep{
+		Action: "test",
+		Error:  "Key: " + secret,
+	})
+
+	steps := recorder.GetSteps()
+	// Without sanitizer, secret should remain
+	if !contains(steps[0].Error, secret) {
+		t.Error("Without sanitizer, secrets should pass through unchanged")
+	}
+}
+
+// contains checks if s contains substr (helper for tests)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

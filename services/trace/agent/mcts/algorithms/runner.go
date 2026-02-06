@@ -112,7 +112,7 @@ func (r *Runner) runAlgorithm(ctx context.Context, algo Algorithm, snapshot crs.
 
 	result := &Result{
 		Name:      name,
-		StartTime: startTime,
+		StartTime: startTime.UnixMilli(),
 		Metrics:   make(map[string]float64),
 	}
 
@@ -120,8 +120,9 @@ func (r *Runner) runAlgorithm(ctx context.Context, algo Algorithm, snapshot crs.
 	output, delta, err := algo.Process(ctx, snapshot, input)
 
 	// Record completion
-	result.EndTime = time.Now()
-	result.Duration = result.EndTime.Sub(startTime)
+	endTime := time.Now()
+	result.EndTime = endTime.UnixMilli()
+	result.Duration = endTime.Sub(startTime)
 	result.Output = output
 	result.Delta = delta
 	result.Err = err

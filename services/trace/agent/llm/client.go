@@ -20,6 +20,8 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -157,6 +159,32 @@ type ToolCallResult struct {
 
 	// IsError indicates if this is an error result.
 	IsError bool `json:"is_error,omitempty"`
+}
+
+// EmptyResponseError indicates the LLM returned an empty response.
+//
+// This typically indicates a problem with the model, context, or request.
+// Empty responses should not silently pass through as they cause downstream
+// issues in the agent loop.
+//
+// Fixed in cb_30a.
+type EmptyResponseError struct {
+	// Duration is how long the request took before returning empty.
+	Duration time.Duration
+
+	// MessageCount is the number of input messages sent.
+	MessageCount int
+
+	// Model is the model that returned the empty response.
+	Model string
+}
+
+// Error implements the error interface.
+func (e *EmptyResponseError) Error() string {
+	return fmt.Sprintf(
+		"LLM returned empty response after %v (model: %s, messages: %d)",
+		e.Duration, e.Model, e.MessageCount,
+	)
 }
 
 // Response represents an LLM response.
@@ -385,13 +413,19 @@ func ParseToolCallsWithReAct(response *Response) ([]agent.ToolInvocation, bool) 
 
 // parseArguments parses JSON arguments string into ToolParameters.
 //
+// Description:
+//
+//	Parses a JSON string of tool arguments into typed parameter maps.
+//	Supports string, int, float, and bool parameters. The raw JSON is
+//	also stored for tools that need custom parsing.
+//
 // Inputs:
 //
-//	argsJSON - Raw JSON string of arguments
+//	argsJSON - Raw JSON string of arguments (e.g., '{"file_path": "/foo", "depth": 3}')
 //
 // Outputs:
 //
-//	*agent.ToolParameters - Parsed parameters
+//	*agent.ToolParameters - Parsed parameters with typed maps populated
 func parseArguments(argsJSON string) *agent.ToolParameters {
 	params := &agent.ToolParameters{
 		StringParams: make(map[string]string),
@@ -399,12 +433,51 @@ func parseArguments(argsJSON string) *agent.ToolParameters {
 		BoolParams:   make(map[string]bool),
 	}
 
-	if argsJSON == "" {
+	if argsJSON == "" || argsJSON == "{}" {
 		return params
 	}
 
 	// Store raw JSON for flexible parsing by tool implementations
 	params.RawJSON = []byte(argsJSON)
+
+	// Parse JSON into a generic map
+	var rawMap map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &rawMap); err != nil {
+		// Log parse error but return params with just RawJSON set
+		// Tools can still try to parse RawJSON directly
+		return params
+	}
+
+	// Populate typed maps based on actual JSON types
+	for key, value := range rawMap {
+		if value == nil {
+			continue
+		}
+
+		switch v := value.(type) {
+		case string:
+			params.StringParams[key] = v
+		case bool:
+			params.BoolParams[key] = v
+		case float64:
+			// JSON numbers are float64 - check if it's actually an int
+			if v == float64(int(v)) {
+				params.IntParams[key] = int(v)
+			} else {
+				// Store floats as strings for now (tools can parse RawJSON if needed)
+				params.StringParams[key] = fmt.Sprintf("%v", v)
+			}
+		case int:
+			params.IntParams[key] = v
+		case int64:
+			params.IntParams[key] = int(v)
+		default:
+			// For arrays, objects, etc. - store as JSON string
+			if bytes, err := json.Marshal(v); err == nil {
+				params.StringParams[key] = string(bytes)
+			}
+		}
+	}
 
 	return params
 }

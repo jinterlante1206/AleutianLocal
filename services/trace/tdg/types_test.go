@@ -342,7 +342,7 @@ func TestNewContext(t *testing.T) {
 	if ctx.Metrics == nil {
 		t.Errorf("Metrics should be initialized")
 	}
-	if ctx.StartTime.IsZero() {
+	if ctx.StartTime == 0 {
 		t.Errorf("StartTime should be set")
 	}
 }

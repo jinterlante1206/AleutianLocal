@@ -25,8 +25,8 @@ import (
 // Thread Safety: Safe for concurrent use.
 type PlanTree struct {
 	// Task description (immutable after creation)
-	Task      string    `json:"task"`
-	CreatedAt time.Time `json:"created_at"`
+	Task      string `json:"task"`
+	CreatedAt int64  `json:"created_at"` // Unix milliseconds UTC
 
 	// Root node
 	root *PlanNode
@@ -58,7 +58,7 @@ func NewPlanTree(task string, budget *TreeBudget) *PlanTree {
 
 	return &PlanTree{
 		Task:       task,
-		CreatedAt:  time.Now(),
+		CreatedAt:  time.Now().UnixMilli(),
 		root:       root,
 		totalNodes: 1,
 		budget:     budget,
@@ -382,7 +382,7 @@ func (t *PlanTree) MarshalJSON() ([]byte, error) {
 
 	return json.Marshal(&treeJSON{
 		Task:       t.Task,
-		CreatedAt:  t.CreatedAt,
+		CreatedAt:  time.UnixMilli(t.CreatedAt),
 		TotalNodes: t.TotalNodes(),
 		MaxDepth:   t.MaxDepth(),
 		BestScore:  t.BestScore(),

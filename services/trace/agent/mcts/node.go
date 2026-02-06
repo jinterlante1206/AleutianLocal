@@ -46,11 +46,11 @@ func (s NodeState) IsTerminal() bool {
 // updates and mutex for structural modifications (children).
 type PlanNode struct {
 	// Immutable after creation
-	ID          string    `json:"id"`
-	Description string    `json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	Depth       int       `json:"depth"`
-	ContentHash string    `json:"content_hash"` // SHA256 of description+action
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	CreatedAt   int64  `json:"created_at"` // Unix milliseconds UTC
+	Depth       int    `json:"depth"`
+	ContentHash string `json:"content_hash"` // SHA256 of description+action
 
 	// Parent pointer (not serialized to avoid cycles)
 	parent *PlanNode
@@ -120,7 +120,7 @@ func NewPlanNode(id, description string, opts ...PlanNodeOption) *PlanNode {
 	n := &PlanNode{
 		ID:          id,
 		Description: description,
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Now().UnixMilli(),
 		state:       NodeUnexplored,
 		children:    make([]*PlanNode, 0),
 	}
@@ -363,6 +363,6 @@ func (n *PlanNode) MarshalJSON() ([]byte, error) {
 		Children:    n.children,
 		Simulated:   n.simulated,
 		SimResult:   n.simResult,
-		CreatedAt:   n.CreatedAt,
+		CreatedAt:   time.UnixMilli(n.CreatedAt),
 	})
 }

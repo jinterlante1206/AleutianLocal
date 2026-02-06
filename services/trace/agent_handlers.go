@@ -13,12 +13,14 @@ package code_buddy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
@@ -134,14 +136,68 @@ func (h *AgentHandlers) HandleAgentRun(c *gin.Context) {
 		return
 	}
 
+	logger.Info("Session created",
+		"session_id", session.ID,
+		"state", session.State,
+		"tool_router_enabled", session.Config.ToolRouterEnabled,
+		"tool_router_model", session.Config.ToolRouterModel)
+
 	// Initialize tool router if enabled
 	if session.Config.ToolRouterEnabled {
+		// PRE-FLIGHT CHECK: Verify router model is available
+		logger.Info("=== PRE-FLIGHT CHECK: Verifying router model ===",
+			"session_id", session.ID,
+			"router_model", session.Config.ToolRouterModel,
+			"ollama_endpoint", h.getOllamaEndpoint(),
+			"has_model_manager", h.modelManager != nil)
+
+		if preflightErr := h.verifyRouterModelAvailable(c.Request.Context(), session.Config.ToolRouterModel, logger); preflightErr != nil {
+			logger.Error("⚠️  PRE-FLIGHT CHECK FAILED",
+				"session_id", session.ID,
+				"router_model", session.Config.ToolRouterModel,
+				"error", preflightErr,
+				"error_type", fmt.Sprintf("%T", preflightErr))
+		} else {
+			logger.Info("✓ PRE-FLIGHT CHECK PASSED",
+				"session_id", session.ID,
+				"router_model", session.Config.ToolRouterModel)
+		}
+
+		logger.Info("Tool router initialization starting",
+			"session_id", session.ID,
+			"model", session.Config.ToolRouterModel,
+			"timeout", session.Config.ToolRouterTimeout,
+			"confidence_threshold", session.Config.ToolRouterConfidence,
+			"has_model_manager", h.modelManager != nil,
+			"ollama_endpoint", h.getOllamaEndpoint())
+
 		if err := h.initializeToolRouter(c.Request.Context(), session, logger); err != nil {
 			// Log warning but don't fail - tool routing is optional
 			logger.Warn("Failed to initialize tool router, continuing without it",
+				"session_id", session.ID,
 				"error", err,
-				"model", session.Config.ToolRouterModel)
+				"model", session.Config.ToolRouterModel,
+				"error_type", fmt.Sprintf("%T", err))
+
+			// Also log if router is actually nil after failure
+			if session.GetToolRouter() == nil {
+				logger.Warn("Router is nil after initialization failure",
+					"session_id", session.ID)
+			}
+		} else {
+			// Verify router was actually set
+			if session.GetToolRouter() != nil {
+				logger.Info("Tool router initialization successful",
+					"session_id", session.ID,
+					"router_enabled", session.IsToolRouterEnabled())
+			} else {
+				logger.Error("Router initialization succeeded but router is nil",
+					"session_id", session.ID)
+			}
 		}
+	} else {
+		logger.Info("Tool router disabled in config",
+			"session_id", session.ID)
 	}
 
 	// Run the agent loop
@@ -411,8 +467,8 @@ func (h *AgentHandlers) HandleAgentState(c *gin.Context) {
 		State:        string(state.State),
 		StepCount:    state.StepCount,
 		TokensUsed:   state.TokensUsed,
-		CreatedAt:    state.CreatedAt.Unix(),
-		LastActiveAt: state.LastActiveAt.Unix(),
+		CreatedAt:    state.CreatedAt / 1000,    // Convert millis to seconds
+		LastActiveAt: state.LastActiveAt / 1000, // Convert millis to seconds
 		DegradedMode: state.DegradedMode,
 	})
 }
@@ -577,6 +633,10 @@ func (h *AgentHandlers) HandleGetCRSExport(c *gin.Context) {
 //
 // Thread Safety: This method is safe for concurrent use.
 func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent.Session, logger *slog.Logger) error {
+	logger.Info("initializeToolRouter: Entering function",
+		"session_id", session.ID,
+		"has_model_manager", h.modelManager != nil)
+
 	// Build router config from session config
 	routerConfig := routing.RouterConfig{
 		Model:               session.Config.ToolRouterModel,
@@ -586,13 +646,38 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		Temperature:         0.1, // Low temperature for consistent routing
 		MaxTokens:           256,
 		KeepAlive:           "24h", // Keep model loaded (24 hours)
+		NumCtx:              16384, // 16K context window (router doesn't need huge context)
+	}
+
+	logger.Info("initializeToolRouter: Config built",
+		"model", routerConfig.Model,
+		"endpoint", routerConfig.OllamaEndpoint,
+		"timeout", routerConfig.Timeout)
+
+	// Check prerequisites
+	if h.modelManager == nil {
+		logger.Error("initializeToolRouter: modelManager is nil",
+			"session_id", session.ID)
+		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "model_manager_nil")
+		return fmt.Errorf("modelManager is nil, cannot initialize router")
 	}
 
 	// Create the Granite4 router
+	logger.Info("initializeToolRouter: Creating Granite4Router",
+		"session_id", session.ID)
+
 	router, err := routing.NewGranite4Router(h.modelManager, routerConfig)
 	if err != nil {
-		return err
+		logger.Error("initializeToolRouter: NewGranite4Router failed",
+			"session_id", session.ID,
+			"error", err,
+			"error_type", fmt.Sprintf("%T", err))
+		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "router_creation_failed")
+		return fmt.Errorf("failed to create router: %w", err)
 	}
+
+	logger.Info("initializeToolRouter: Router created successfully",
+		"session_id", session.ID)
 
 	// Wrap with adapter to implement agent.ToolRouter interface
 	adapter := routing.NewRouterAdapter(router)
@@ -600,10 +685,9 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 	// Set router on session
 	session.SetToolRouter(adapter)
 
-	logger.Info("Tool router initialized",
-		"model", routerConfig.Model,
-		"timeout", routerConfig.Timeout,
-		"confidence_threshold", routerConfig.ConfidenceThreshold)
+	logger.Info("initializeToolRouter: Router set on session",
+		"session_id", session.ID,
+		"router_enabled_check", session.IsToolRouterEnabled())
 
 	// Warm the router model SYNCHRONOUSLY with background context.
 	// We use context.Background() with timeout instead of request context
@@ -612,14 +696,27 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 	warmupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	logger.Info("Warming router model (blocking)", "model", routerConfig.Model)
+	logger.Info("initializeToolRouter: Starting model warmup",
+		"model", routerConfig.Model,
+		"timeout", "60s")
+
 	if warmErr := router.WarmRouter(warmupCtx); warmErr != nil {
-		logger.Error("Failed to warm router model",
+		logger.Error("initializeToolRouter: Model warmup failed",
+			"session_id", session.ID,
 			"error", warmErr,
-			"model", routerConfig.Model)
-		return warmErr
+			"model", routerConfig.Model,
+			"error_type", fmt.Sprintf("%T", warmErr))
+		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "warmup_failed")
+		return fmt.Errorf("failed to warm router: %w", warmErr)
 	}
-	logger.Info("Router model warmed successfully", "model", routerConfig.Model)
+
+	logger.Info("initializeToolRouter: Complete - Router fully initialized",
+		"session_id", session.ID,
+		"model", routerConfig.Model,
+		"router_enabled", session.IsToolRouterEnabled())
+
+	// Record successful initialization
+	routing.RecordRouterInit(session.Config.ToolRouterModel, true, "")
 
 	return nil
 }
@@ -631,6 +728,79 @@ func (h *AgentHandlers) getOllamaEndpoint() string {
 		endpoint = "http://localhost:11434"
 	}
 	return endpoint
+}
+
+// verifyRouterModelAvailable performs a pre-flight check to ensure the router model
+// is available and responding on Ollama before attempting to initialize the router.
+//
+// # Description
+//
+// Sends a test request to the router model to verify it's loaded and accessible.
+// This helps diagnose issues where router initialization fails silently due to
+// model unavailability.
+//
+// # Inputs
+//
+//	ctx - Context for the request.
+//	routerModel - The router model name to test (e.g., "granite4:micro-h").
+//	logger - Logger for diagnostic output.
+//
+// # Outputs
+//
+//	error - Non-nil if model is not available or fails to respond.
+func (h *AgentHandlers) verifyRouterModelAvailable(ctx context.Context, routerModel string, logger *slog.Logger) error {
+	logger.Info("verifyRouterModelAvailable: Testing router model connectivity",
+		"model", routerModel,
+		"endpoint", h.getOllamaEndpoint())
+
+	if h.modelManager == nil {
+		logger.Error("verifyRouterModelAvailable: modelManager is nil")
+		return fmt.Errorf("modelManager is nil")
+	}
+
+	// Create test messages
+	messages := []datatypes.Message{
+		{Role: "user", Content: "test"},
+	}
+
+	// Create minimal params with short timeout
+	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	temp := float32(0.1)
+	maxTokens := 10
+	numCtx := 16384
+	params := llm.GenerationParams{
+		Temperature:   &temp,
+		MaxTokens:     &maxTokens,
+		NumCtx:        &numCtx,
+		ModelOverride: routerModel,
+	}
+
+	logger.Info("verifyRouterModelAvailable: Sending test request",
+		"model", routerModel,
+		"timeout", "10s")
+
+	response, err := h.modelManager.Chat(testCtx, routerModel, messages, params)
+	if err != nil {
+		logger.Error("verifyRouterModelAvailable: Test request failed",
+			"model", routerModel,
+			"error", err,
+			"error_type", fmt.Sprintf("%T", err))
+		return fmt.Errorf("router model test failed: %w", err)
+	}
+
+	if response == "" {
+		logger.Warn("verifyRouterModelAvailable: Model returned empty response",
+			"model", routerModel)
+		return fmt.Errorf("router model returned empty response")
+	}
+
+	logger.Info("verifyRouterModelAvailable: Router model is available and responding",
+		"model", routerModel,
+		"response_length", len(response))
+
+	return nil
 }
 
 // agentErrorToString converts an AgentError to a string, returning empty string for nil.
@@ -697,9 +867,9 @@ func convertReasoningTrace(trace *crs.ReasoningTrace, summary *agent.ReasoningSu
 		for _, update := range step.ProofUpdates {
 			respStep.ProofUpdates = append(respStep.ProofUpdates, ProofUpdateResponse{
 				NodeID: update.NodeID,
-				Status: update.Status,
+				Status: update.Status, // Status string kept for backwards compat
 				Reason: update.Reason,
-				Source: update.Source,
+				Source: update.Source.String(), // Convert SignalSource to string
 			})
 		}
 

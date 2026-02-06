@@ -51,8 +51,8 @@ func (a AuditAction) String() string {
 // Each entry is immutable once created. The hash chain ensures
 // the integrity of the audit log can be verified.
 type AuditEntry struct {
-	// Timestamp when this entry was created.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp when this entry was created (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Action is the type of operation performed.
 	Action AuditAction `json:"action"`
@@ -89,7 +89,7 @@ type AuditEntry struct {
 //   - *AuditEntry: A new entry with timestamp set.
 func NewAuditEntry(action AuditAction, nodeID string) *AuditEntry {
 	return &AuditEntry{
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Action:    action,
 		NodeID:    nodeID,
 	}
@@ -168,8 +168,8 @@ func (l *AuditLog) Record(entry AuditEntry) {
 	defer l.mu.Unlock()
 
 	// Ensure timestamp is set
-	if entry.Timestamp.IsZero() {
-		entry.Timestamp = time.Now()
+	if entry.Timestamp == 0 {
+		entry.Timestamp = time.Now().UnixMilli()
 	}
 
 	// Compute chain hash
@@ -265,9 +265,10 @@ func (l *AuditLog) EntriesAfter(after time.Time) []AuditEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
+	afterMillis := after.UnixMilli()
 	result := make([]AuditEntry, 0)
 	for _, entry := range l.entries {
-		if entry.Timestamp.After(after) {
+		if entry.Timestamp > afterMillis {
 			result = append(result, entry)
 		}
 	}
@@ -348,7 +349,7 @@ func (l *AuditLog) Summary() AuditSummary {
 // AuditSummary contains summary statistics for the audit log.
 type AuditSummary struct {
 	TotalEntries int                 `json:"total_entries"`
-	FirstEntry   time.Time           `json:"first_entry,omitempty"`
-	LastEntry    time.Time           `json:"last_entry,omitempty"`
+	FirstEntry   int64               `json:"first_entry,omitempty"` // Unix milliseconds UTC
+	LastEntry    int64               `json:"last_entry,omitempty"`  // Unix milliseconds UTC
 	ActionCounts map[AuditAction]int `json:"action_counts"`
 }

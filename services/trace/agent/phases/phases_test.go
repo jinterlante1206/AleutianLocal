@@ -809,3 +809,93 @@ func containsHelper(s, substr string) bool {
 	}
 	return false
 }
+
+// =============================================================================
+// Coordinator Event Tests (CR-8)
+// =============================================================================
+
+func TestExecutePhase_WithNilCoordinator_NoError(t *testing.T) {
+	// When Coordinator is nil, emitCoordinatorEvent should return early without error
+	phase := NewExecutePhase(WithReflectionThreshold(100))
+	deps := createTestDependencies()
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{},
+	}
+	deps.ToolRegistry = tools.NewRegistry()
+	deps.ToolExecutor = tools.NewExecutor(deps.ToolRegistry, nil)
+	deps.ContextManager = &agentcontext.Manager{}
+
+	// Explicitly set Coordinator to nil (it's already nil by default)
+	deps.Coordinator = nil
+
+	// Mock LLM that completes without tool calls
+	mockLLM := llm.NewMockClient()
+	mockLLM.QueueFinalResponse("Done")
+	deps.LLMClient = mockLLM
+
+	// Execute should complete without error despite nil Coordinator
+	nextState, err := phase.Execute(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("Execute failed with nil Coordinator: %v", err)
+	}
+	if nextState != agent.StateComplete {
+		t.Errorf("nextState = %s, want COMPLETE", nextState)
+	}
+}
+
+func TestExecutePhase_WithNilSession_CoordinatorEventSkipped(t *testing.T) {
+	// When Session is nil but Coordinator is set, emitCoordinatorEvent should not panic
+	phase := NewExecutePhase()
+	deps := &Dependencies{
+		Session: nil, // Explicitly nil
+		Query:   "test",
+	}
+
+	// This should return error due to nil session, not panic from emitCoordinatorEvent
+	nextState, err := phase.Execute(context.Background(), deps)
+	if err == nil {
+		t.Error("Expected error for nil session")
+	}
+	if nextState != agent.StateError {
+		t.Errorf("nextState = %s, want ERROR", nextState)
+	}
+}
+
+func TestExecutePhase_ToolFailed_WithNilCoordinator_NoError(t *testing.T) {
+	// Tool failure should be handled even when Coordinator is nil
+	phase := NewExecutePhase(WithReflectionThreshold(100))
+	deps := createTestDependencies()
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{},
+	}
+	deps.ToolRegistry = tools.NewRegistry()
+	deps.SafetyGate = safety.NewMockGate()
+	deps.Coordinator = nil
+
+	// Register a tool that fails
+	failingTool := tools.NewMockTool("failing_tool", tools.CategoryExploration)
+	failingTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*tools.Result, error) {
+		return &tools.Result{
+			Success: false,
+			Error:   "tool failed deliberately",
+		}, nil
+	}
+	deps.ToolRegistry.Register(failingTool)
+	deps.ToolExecutor = tools.NewExecutor(deps.ToolRegistry, nil)
+
+	// Mock LLM that requests the failing tool
+	mockLLM := llm.NewMockClient()
+	mockLLM.QueueToolCall("failing_tool", map[string]any{"param": "value"})
+	deps.LLMClient = mockLLM
+	deps.ContextManager = &agentcontext.Manager{}
+
+	// Execute should handle tool failure without Coordinator error
+	nextState, err := phase.Execute(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	// Should continue execution after tool failure
+	if nextState != agent.StateExecute {
+		t.Errorf("nextState = %s, want EXECUTE", nextState)
+	}
+}

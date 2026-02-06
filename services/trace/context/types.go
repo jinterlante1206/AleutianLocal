@@ -51,6 +51,21 @@ const (
 	// CharsPerToken is the approximation ratio for token counting.
 	// Conservative estimate: most tokenizers produce ~1 token per 3-4 chars for code.
 	CharsPerToken = 3.5
+
+	// MinCodeBudget is the minimum number of tokens reserved for source code context.
+	//
+	// This constant addresses the "Pinned Budget Context Squeeze" problem:
+	// As a session progresses, PinnedInstructions (plan, findings) grows,
+	// and without enforcement the code budget can be squeezed to zero.
+	//
+	// The agent has perfect memory of WHAT it wants to do but can't see
+	// the actual code. MinCodeBudget ensures this never happens.
+	//
+	// The value of 4096 tokens allows approximately:
+	//   - 15,000 characters of code (at 3.5 chars/token)
+	//   - ~500 lines of typical code
+	//   - Enough for a focused function + dependencies
+	MinCodeBudget = 4096
 )
 
 // BudgetAllocation defines how the token budget is split across content types.

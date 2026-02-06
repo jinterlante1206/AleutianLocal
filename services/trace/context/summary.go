@@ -37,11 +37,11 @@ type Summary struct {
 	// ParentID is the parent summary ID (empty for project root).
 	ParentID string `json:"parent_id"`
 
-	// CreatedAt is when this summary was created.
-	CreatedAt time.Time `json:"created_at"`
+	// CreatedAt is when this summary was created (Unix milliseconds UTC).
+	CreatedAt int64 `json:"created_at"`
 
-	// UpdatedAt is when this summary was last updated.
-	UpdatedAt time.Time `json:"updated_at"`
+	// UpdatedAt is when this summary was last updated (Unix milliseconds UTC).
+	UpdatedAt int64 `json:"updated_at"`
 
 	// Hash is a hash of the source content for invalidation.
 	Hash string `json:"hash"`
@@ -66,7 +66,7 @@ func (s *Summary) IsStale(currentHash string) bool {
 
 // IsFresh returns true if the summary was created/updated recently.
 func (s *Summary) IsFresh(maxAge time.Duration) bool {
-	return time.Since(s.UpdatedAt) < maxAge
+	return time.Duration(time.Now().UnixMilli()-s.UpdatedAt)*time.Millisecond < maxAge
 }
 
 // HierarchyLevel returns the hierarchy level as the enum type.

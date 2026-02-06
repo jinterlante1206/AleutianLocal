@@ -328,7 +328,7 @@ func (r *Registry) HealthCheckAll(ctx context.Context, concurrency int) []Health
 					Component: name,
 					Status:    HealthUnknown,
 					Message:   "context cancelled",
-					Timestamp: time.Now(),
+					Timestamp: time.Now().UnixMilli(),
 				}
 				return
 			}
@@ -341,7 +341,7 @@ func (r *Registry) HealthCheckAll(ctx context.Context, concurrency int) []Health
 			result := HealthResult{
 				Component: name,
 				Duration:  duration,
-				Timestamp: time.Now(),
+				Timestamp: time.Now().UnixMilli(),
 			}
 
 			if err != nil {

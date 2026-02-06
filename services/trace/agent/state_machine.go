@@ -32,6 +32,7 @@ import (
 //	EXECUTE → EXECUTE            : Tool call completed, continue
 //	EXECUTE → REFLECT            : Hit step limit or confidence threshold
 //	EXECUTE → COMPLETE           : Direct answer, no reflection needed
+//	EXECUTE → CLARIFY            : Unable to proceed without user input
 //	EXECUTE → ERROR              : Execution failed
 //	REFLECT → EXECUTE            : Self-correction, try different approach
 //	REFLECT → COMPLETE           : Answer satisfactory
@@ -84,6 +85,7 @@ func NewStateMachine() *StateMachine {
 	sm.addTransition(StateExecute, StateExecute)
 	sm.addTransition(StateExecute, StateReflect)
 	sm.addTransition(StateExecute, StateComplete)
+	sm.addTransition(StateExecute, StateClarify) // cb_30a: Allow execute to request clarification
 	sm.addTransition(StateExecute, StateError)
 
 	sm.addTransition(StateReflect, StateExecute)
@@ -218,6 +220,7 @@ func (sm *StateMachine) TransitionReason(from, to AgentState) string {
 		"EXECUTE->EXECUTE":  "Tool call completed, continue",
 		"EXECUTE->REFLECT":  "Hit step limit or confidence threshold",
 		"EXECUTE->COMPLETE": "Direct answer, no reflection needed",
+		"EXECUTE->CLARIFY":  "Unable to proceed without user input",
 		"EXECUTE->ERROR":    "Execution failed unrecoverably",
 		"REFLECT->EXECUTE":  "Self-correction, try different approach",
 		"REFLECT->COMPLETE": "Answer satisfactory",

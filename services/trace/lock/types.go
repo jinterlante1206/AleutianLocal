@@ -41,12 +41,12 @@ import (
 //   - ExpiresAt: When the lock expires (for stale detection).
 //   - Reason: Human-readable reason for the lock.
 type LockInfo struct {
-	FilePath  string    `json:"file_path"`
-	PID       int       `json:"pid"`
-	SessionID string    `json:"session_id"`
-	LockedAt  time.Time `json:"locked_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Reason    string    `json:"reason"`
+	FilePath  string `json:"file_path"`
+	PID       int    `json:"pid"`
+	SessionID string `json:"session_id"`
+	LockedAt  int64  `json:"locked_at"`  // Unix milliseconds UTC
+	ExpiresAt int64  `json:"expires_at"` // Unix milliseconds UTC
+	Reason    string `json:"reason"`
 }
 
 // IsExpired checks if the lock has passed its TTL.
@@ -60,7 +60,7 @@ type LockInfo struct {
 //
 //   - bool: True if the lock has expired.
 func (l *LockInfo) IsExpired() bool {
-	return time.Now().After(l.ExpiresAt)
+	return time.Now().UnixMilli() > l.ExpiresAt
 }
 
 // lockEntry represents an active lock held by this process.

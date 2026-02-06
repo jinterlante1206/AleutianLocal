@@ -37,7 +37,7 @@ const CheckpointVersion = "1.0.0"
 // This avoids issues with sync.RWMutex not being serializable.
 type checkpointState struct {
 	SessionID      string                `json:"session_id"`
-	StartedAt      time.Time             `json:"started_at"`
+	StartedAt      int64                 `json:"started_at"` // Unix milliseconds UTC
 	CompletedNodes map[string]bool       `json:"completed_nodes"`
 	NodeOutputs    map[string]any        `json:"node_outputs"`
 	NodeStatuses   map[string]NodeStatus `json:"node_statuses"`
@@ -286,7 +286,7 @@ func LoadCheckpoint(path string) (*Checkpoint, error) {
 	// Convert to Checkpoint with State
 	return &Checkpoint{
 		State:     sc.State.toState(),
-		Timestamp: sc.Timestamp,
+		Timestamp: sc.Timestamp.UnixMilli(),
 		Version:   sc.Version,
 		Checksum:  sc.Checksum,
 		DAGName:   sc.DAGName,
@@ -309,7 +309,7 @@ func (c *Checkpoint) Verify() bool {
 	}
 
 	cs := c.State.toCheckpointState()
-	expectedChecksum, err := computeChecksum(cs, c.DAGName, c.Timestamp)
+	expectedChecksum, err := computeChecksum(cs, c.DAGName, time.UnixMilli(c.Timestamp))
 	if err != nil {
 		return false
 	}
@@ -370,7 +370,7 @@ func (e *Executor) Resume(ctx context.Context, checkpoint *Checkpoint) (*Result,
 	e.logger.Info("resuming from checkpoint",
 		slog.String("session_id", checkpoint.State.SessionID),
 		slog.Int("completed_nodes", len(checkpoint.State.CompletedNodes)),
-		slog.Time("checkpoint_time", checkpoint.Timestamp),
+		slog.Time("checkpoint_time", time.UnixMilli(checkpoint.Timestamp)),
 	)
 
 	// Delegate to RunFromState

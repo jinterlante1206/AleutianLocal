@@ -241,8 +241,8 @@ func (c *CancellationController) Cancel(id string, reason CancelReason) error {
 	}
 
 	// Set timestamp if not provided
-	if reason.Timestamp.IsZero() {
-		reason.Timestamp = time.Now()
+	if reason.Timestamp == 0 {
+		reason.Timestamp = time.Now().UnixMilli()
 	}
 
 	c.logger.Info("cancelling context",
@@ -283,8 +283,8 @@ func (c *CancellationController) CancelAll(reason CancelReason) {
 	}
 	c.closedMu.RUnlock()
 
-	if reason.Timestamp.IsZero() {
-		reason.Timestamp = time.Now()
+	if reason.Timestamp == 0 {
+		reason.Timestamp = time.Now().UnixMilli()
 	}
 
 	c.logger.Warn("cancelling all contexts",
@@ -389,7 +389,7 @@ func (c *CancellationController) Shutdown(ctx context.Context) (*ShutdownResult,
 	c.CancelAll(CancelReason{
 		Type:      CancelShutdown,
 		Message:   "Controller shutdown",
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 	})
 
 	// Wait for graceful shutdown
@@ -469,7 +469,7 @@ func (c *CancellationController) forceKillRemaining() {
 			ctx.Cancel(CancelReason{
 				Type:      CancelShutdown,
 				Message:   "Force killed during shutdown",
-				Timestamp: time.Now(),
+				Timestamp: time.Now().UnixMilli(),
 			})
 			if c.metrics != nil {
 				c.metrics.ForceKilledTotal.Inc()

@@ -153,6 +153,12 @@ type GateConfig struct {
 
 	// MaxFileSize is the maximum allowed file size for writes.
 	MaxFileSize int64
+
+	// AllowPackageInstall permits package installation commands when true.
+	// When false (default), commands like "npm install", "pip install",
+	// "cargo install", etc. are blocked to prevent supply chain attacks.
+	// Set to true only when explicitly requested by user (e.g., --allow-install flag).
+	AllowPackageInstall bool
 }
 
 // DefaultGateConfig returns sensible defaults.
@@ -270,6 +276,7 @@ func NewDefaultGate(config *GateConfig) *DefaultGate {
 	gate.RegisterChecker(&PathChecker{config: cfg})
 	gate.RegisterChecker(&CommandChecker{config: cfg})
 	gate.RegisterChecker(&FileSizeChecker{config: cfg})
+	gate.RegisterChecker(&SupplyChainChecker{config: cfg})
 
 	return gate
 }
@@ -507,6 +514,220 @@ func (c *FileSizeChecker) Check(ctx context.Context, change *ProposedChange) []I
 	return issues
 }
 
+// SupplyChainChecker validates shell commands against supply chain attack patterns.
+//
+// Description:
+//
+//	Blocks package manager installation commands that could introduce malicious
+//	dependencies. Commands like "npm install", "pip install", "cargo install"
+//	are blocked by default because postinstall scripts can execute arbitrary code.
+//	Safe subcommands (test, build, run) are always allowed.
+//
+// Thread Safety:
+//
+//	SupplyChainChecker is safe for concurrent use as it only reads config.
+type SupplyChainChecker struct {
+	config GateConfig
+}
+
+// Name implements Checker.
+func (c *SupplyChainChecker) Name() string {
+	return "supply_chain_checker"
+}
+
+// supplyChainRule defines a package manager and its allowed/blocked subcommands.
+type supplyChainRule struct {
+	// command is the package manager command (e.g., "npm", "pip")
+	command string
+	// blockedSubcommands are subcommands that perform installation
+	blockedSubcommands []string
+	// safeSubcommands are explicitly allowed (take precedence over blocked)
+	safeSubcommands []string
+}
+
+// supplyChainRules defines the package managers and their dangerous subcommands.
+//
+// Order of evaluation:
+// 1. If subcommand matches safeSubcommands, ALLOW
+// 2. If subcommand matches blockedSubcommands, BLOCK (unless AllowPackageInstall)
+// 3. Otherwise, ALLOW
+var supplyChainRules = []supplyChainRule{
+	{
+		command:            "npm",
+		blockedSubcommands: []string{"install", "i", "add", "ci"},
+		safeSubcommands:    []string{"run", "test", "start", "build", "lint", "audit", "outdated", "ls", "list", "view", "info", "version"},
+	},
+	{
+		command:            "yarn",
+		blockedSubcommands: []string{"add", "install"},
+		safeSubcommands:    []string{"run", "test", "start", "build", "lint", "audit", "outdated", "list", "info", "version"},
+	},
+	{
+		command:            "pnpm",
+		blockedSubcommands: []string{"add", "install", "i"},
+		safeSubcommands:    []string{"run", "test", "start", "build", "lint", "audit", "outdated", "list", "version"},
+	},
+	{
+		command:            "pip",
+		blockedSubcommands: []string{"install"},
+		safeSubcommands:    []string{"list", "show", "freeze", "check", "download", "search", "index", "version"},
+	},
+	{
+		command:            "pip3",
+		blockedSubcommands: []string{"install"},
+		safeSubcommands:    []string{"list", "show", "freeze", "check", "download", "search", "index", "version"},
+	},
+	{
+		command:            "pipx",
+		blockedSubcommands: []string{"install"},
+		safeSubcommands:    []string{"list", "run", "upgrade", "version"},
+	},
+	{
+		command:            "poetry",
+		blockedSubcommands: []string{"add", "install"},
+		safeSubcommands:    []string{"run", "build", "check", "show", "version", "env", "shell"},
+	},
+	{
+		command:            "cargo",
+		blockedSubcommands: []string{"install"},
+		safeSubcommands:    []string{"build", "test", "run", "check", "bench", "doc", "clean", "fmt", "clippy", "version", "tree"},
+	},
+	{
+		command:            "go",
+		blockedSubcommands: []string{"get", "install"},
+		safeSubcommands:    []string{"build", "test", "run", "fmt", "vet", "mod", "generate", "clean", "env", "version", "list", "doc"},
+	},
+	{
+		command:            "gem",
+		blockedSubcommands: []string{"install"},
+		safeSubcommands:    []string{"list", "search", "info", "build", "version", "environment"},
+	},
+	{
+		command:            "bundle",
+		blockedSubcommands: []string{"install", "add"},
+		safeSubcommands:    []string{"exec", "list", "show", "check", "outdated", "version"},
+	},
+	{
+		command:            "composer",
+		blockedSubcommands: []string{"install", "require", "update"},
+		safeSubcommands:    []string{"run", "test", "show", "check", "validate", "dump-autoload", "version", "list"},
+	},
+	{
+		command:            "dotnet",
+		blockedSubcommands: []string{"add"},
+		safeSubcommands:    []string{"build", "test", "run", "clean", "restore", "publish", "pack", "list", "version"},
+	},
+	{
+		command:            "nuget",
+		blockedSubcommands: []string{"install"},
+		safeSubcommands:    []string{"list", "config", "sources", "version"},
+	},
+	{
+		command:            "apt",
+		blockedSubcommands: []string{"install", "upgrade", "dist-upgrade"},
+		safeSubcommands:    []string{"list", "search", "show", "version"},
+	},
+	{
+		command:            "apt-get",
+		blockedSubcommands: []string{"install", "upgrade", "dist-upgrade"},
+		safeSubcommands:    []string{"--version"},
+	},
+	{
+		command:            "brew",
+		blockedSubcommands: []string{"install", "upgrade"},
+		safeSubcommands:    []string{"list", "search", "info", "doctor", "config", "version"},
+	},
+	{
+		command:            "yum",
+		blockedSubcommands: []string{"install", "update", "upgrade"},
+		safeSubcommands:    []string{"list", "search", "info", "check-update", "version"},
+	},
+	{
+		command:            "dnf",
+		blockedSubcommands: []string{"install", "update", "upgrade"},
+		safeSubcommands:    []string{"list", "search", "info", "check-update", "version"},
+	},
+	{
+		command:            "pacman",
+		blockedSubcommands: []string{"-S", "-Sy", "-Syu", "-U"},
+		safeSubcommands:    []string{"-Q", "-Qs", "-Qi", "-Ql", "-V"},
+	},
+}
+
+// Check implements Checker.
+//
+// Description:
+//
+//	Validates shell commands against supply chain attack patterns.
+//	Blocks package installation commands unless AllowPackageInstall is set.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation (unused but required by interface).
+//	change - The proposed change to validate.
+//
+// Outputs:
+//
+//	[]Issue - List of issues found. Empty if command is allowed.
+func (c *SupplyChainChecker) Check(ctx context.Context, change *ProposedChange) []Issue {
+	if change.Type != "shell_command" {
+		return nil
+	}
+
+	// If package installation is explicitly allowed, skip this check
+	if c.config.AllowPackageInstall {
+		return nil
+	}
+
+	cmd := strings.TrimSpace(change.Target)
+	if cmd == "" {
+		return nil
+	}
+
+	// Parse command into parts
+	parts := strings.Fields(cmd)
+	if len(parts) < 2 {
+		return nil // Need at least command + subcommand
+	}
+
+	// Extract the base command (handle paths like /usr/bin/npm)
+	baseCmd := parts[0]
+	if idx := strings.LastIndex(baseCmd, "/"); idx >= 0 {
+		baseCmd = baseCmd[idx+1:]
+	}
+
+	subCmd := parts[1]
+
+	// Check against supply chain rules
+	for _, rule := range supplyChainRules {
+		if baseCmd != rule.command {
+			continue
+		}
+
+		// Check if subcommand is explicitly safe
+		for _, safe := range rule.safeSubcommands {
+			if subCmd == safe {
+				return nil // Explicitly allowed
+			}
+		}
+
+		// Check if subcommand is blocked
+		for _, blocked := range rule.blockedSubcommands {
+			if subCmd == blocked {
+				return []Issue{{
+					Severity: SeverityCritical,
+					Code:     "SUPPLY_CHAIN_INSTALL",
+					Message: fmt.Sprintf("Package installation blocked: '%s %s' could execute malicious postinstall scripts",
+						rule.command, blocked),
+					Suggestion: "Use --allow-install flag to explicitly permit package installation, or add dependencies manually after review.",
+				}}
+			}
+		}
+	}
+
+	return nil
+}
+
 // containsPath checks if a path contains a blocked pattern.
 //
 // Description:
@@ -618,4 +839,142 @@ func (m *MockGate) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Calls = make([][]ProposedChange, 0)
+}
+
+// -----------------------------------------------------------------------------
+// Safety-CDCL Integration (Issue #6: Safety Blocking Learning Signal)
+// -----------------------------------------------------------------------------
+
+// SafetyBlockedError is the error string prefix for safety-blocked operations.
+const SafetyBlockedError = "blocked by safety check"
+
+// IsSafetyError returns true if the error message indicates a safety violation.
+//
+// Description:
+//
+//	Detects if an error was caused by the safety gate blocking an operation.
+//	This allows the CDCL algorithm to classify safety violations as hard
+//	signals and learn to avoid patterns that trigger safety blocks.
+//
+// Inputs:
+//
+//	errMsg - The error message to check.
+//
+// Outputs:
+//
+//	bool - True if this is a safety violation error.
+func IsSafetyError(errMsg string) bool {
+	return strings.HasPrefix(errMsg, SafetyBlockedError) ||
+		strings.Contains(errMsg, "safety check") ||
+		strings.Contains(errMsg, "SUPPLY_CHAIN_INSTALL") ||
+		strings.Contains(errMsg, "PATH_BLOCKED") ||
+		strings.Contains(errMsg, "COMMAND_BLOCKED")
+}
+
+// SafetyConstraint represents a constraint derived from a safety violation.
+//
+// This is used to feed safety violations to CDCL as learning signals.
+// When the safety gate blocks an action, the constraint encodes what
+// pattern should be avoided.
+type SafetyConstraint struct {
+	// IssueCode is the safety issue code (e.g., "SUPPLY_CHAIN_INSTALL").
+	IssueCode string
+
+	// Pattern describes what triggered the violation.
+	Pattern string
+
+	// ConflictingNodes are the MCTS nodes involved in the violation.
+	ConflictingNodes []string
+
+	// Reason explains why this is blocked.
+	Reason string
+}
+
+// ExtractConstraints extracts learning constraints from safety issues.
+//
+// Description:
+//
+//	Converts safety issues into constraints that CDCL can learn from.
+//	Each constraint encodes a pattern that should be avoided in future
+//	search iterations.
+//
+// Inputs:
+//
+//	result - The safety check result containing issues.
+//	nodeID - The MCTS node ID that triggered the check.
+//
+// Outputs:
+//
+//	[]SafetyConstraint - Constraints derived from the issues.
+func ExtractConstraints(result *Result, nodeID string) []SafetyConstraint {
+	if result == nil || len(result.Issues) == 0 {
+		return nil
+	}
+
+	constraints := make([]SafetyConstraint, 0, len(result.Issues))
+	for _, issue := range result.Issues {
+		// Only extract constraints from blocking issues
+		if issue.Severity != SeverityCritical {
+			continue
+		}
+
+		constraint := SafetyConstraint{
+			IssueCode:        issue.Code,
+			Reason:           issue.Message,
+			ConflictingNodes: []string{nodeID},
+		}
+
+		// Extract pattern from the change that triggered this issue
+		if issue.Change != nil {
+			switch issue.Change.Type {
+			case "shell_command":
+				constraint.Pattern = fmt.Sprintf("command:%s", issue.Change.Target)
+			case "file_write", "file_create":
+				constraint.Pattern = fmt.Sprintf("path:%s", issue.Change.Target)
+			case "file_delete":
+				constraint.Pattern = fmt.Sprintf("delete:%s", issue.Change.Target)
+			default:
+				constraint.Pattern = fmt.Sprintf("%s:%s", issue.Change.Type, issue.Change.Target)
+			}
+		}
+
+		constraints = append(constraints, constraint)
+	}
+
+	return constraints
+}
+
+// ToErrorMessage converts a Result to an error message for learning.
+//
+// Description:
+//
+//	Creates a detailed error message from safety issues that can be used
+//	by CDCL for conflict analysis. The message includes issue codes for
+//	pattern matching.
+//
+// Inputs:
+//
+//	result - The safety check result.
+//
+// Outputs:
+//
+//	string - The error message for learning.
+func (r *Result) ToErrorMessage() string {
+	if r == nil || len(r.Issues) == 0 {
+		return SafetyBlockedError
+	}
+
+	var b strings.Builder
+	b.WriteString(SafetyBlockedError)
+	b.WriteString(": ")
+
+	codes := make([]string, 0, len(r.Issues))
+	for _, issue := range r.Issues {
+		if issue.Severity == SeverityCritical {
+			codes = append(codes, issue.Code)
+		}
+	}
+
+	b.WriteString(strings.Join(codes, ", "))
+	return b.String()
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/grounding"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
@@ -144,6 +145,11 @@ type Dependencies struct {
 	// GraphRefresher handles incremental graph updates.
 	// Optional - if nil, graph refresh is disabled.
 	GraphRefresher *graph.Refresher
+
+	// Coordinator orchestrates MCTS activities in response to agent events.
+	// Optional - if nil, MCTS activity coordination is disabled.
+	// Use HandleEvent to emit events and trigger appropriate activities.
+	Coordinator *integration.Coordinator
 }
 
 // GraphProvider initializes and provides access to the code graph.

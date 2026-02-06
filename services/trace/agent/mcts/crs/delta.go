@@ -17,19 +17,34 @@ import (
 )
 
 // -----------------------------------------------------------------------------
+// Package-level Index Slices (GR-37: Zero-allocation optimization)
+// -----------------------------------------------------------------------------
+//
+// These slices are returned by IndexesAffected() methods to avoid allocating
+// a new []string on every call. They are READ-ONLY - callers must not modify.
+var (
+	indexesProof      = []string{"proof"}
+	indexesConstraint = []string{"constraint"}
+	indexesSimilarity = []string{"similarity"}
+	indexesDependency = []string{"dependency"}
+	indexesHistory    = []string{"history"}
+	indexesStreaming  = []string{"streaming"}
+)
+
+// -----------------------------------------------------------------------------
 // Base Delta Implementation
 // -----------------------------------------------------------------------------
 
 // baseDelta provides common delta functionality.
 type baseDelta struct {
 	source    SignalSource
-	timestamp time.Time
+	timestamp int64 // Unix milliseconds UTC
 }
 
 func newBaseDelta(source SignalSource) baseDelta {
 	return baseDelta{
 		source:    source,
-		timestamp: time.Now(),
+		timestamp: time.Now().UnixMilli(),
 	}
 }
 
@@ -37,7 +52,7 @@ func (d *baseDelta) Source() SignalSource {
 	return d.source
 }
 
-func (d *baseDelta) Timestamp() time.Time {
+func (d *baseDelta) Timestamp() int64 {
 	return d.timestamp
 }
 
@@ -112,8 +127,8 @@ func (d *ProofDelta) Merge(other Delta) (Delta, error) {
 	// Merge from other, later timestamp wins
 	for k, v := range otherProof.Updates {
 		if existing, ok := merged.Updates[k]; ok {
-			// Conflict - later timestamp wins
-			if v.UpdatedAt.After(existing.UpdatedAt) {
+			// Conflict - later timestamp wins (higher Unix millis = more recent)
+			if v.UpdatedAt > existing.UpdatedAt {
 				merged.Updates[k] = v
 			}
 		} else {
@@ -145,8 +160,10 @@ func (d *ProofDelta) ConflictsWith(other Delta) bool {
 }
 
 // IndexesAffected returns which indexes this delta will modify.
+//
+// Thread Safety: Returns a shared slice. Callers must not modify.
 func (d *ProofDelta) IndexesAffected() []string {
-	return []string{"proof"}
+	return indexesProof
 }
 
 // -----------------------------------------------------------------------------
@@ -299,8 +316,10 @@ func (d *ConstraintDelta) ConflictsWith(other Delta) bool {
 }
 
 // IndexesAffected returns which indexes this delta will modify.
+//
+// Thread Safety: Returns a shared slice. Callers must not modify.
 func (d *ConstraintDelta) IndexesAffected() []string {
-	return []string{"constraint"}
+	return indexesConstraint
 }
 
 // -----------------------------------------------------------------------------
@@ -425,8 +444,10 @@ func (d *DependencyDelta) ConflictsWith(other Delta) bool {
 }
 
 // IndexesAffected returns which indexes this delta will modify.
+//
+// Thread Safety: Returns a shared slice. Callers must not modify.
 func (d *DependencyDelta) IndexesAffected() []string {
-	return []string{"dependency"}
+	return indexesDependency
 }
 
 // -----------------------------------------------------------------------------
@@ -505,8 +526,10 @@ func (d *HistoryDelta) ConflictsWith(_ Delta) bool {
 }
 
 // IndexesAffected returns which indexes this delta will modify.
+//
+// Thread Safety: Returns a shared slice. Callers must not modify.
 func (d *HistoryDelta) IndexesAffected() []string {
-	return []string{"history"}
+	return indexesHistory
 }
 
 // -----------------------------------------------------------------------------
@@ -583,8 +606,10 @@ func (d *StreamingDelta) ConflictsWith(_ Delta) bool {
 }
 
 // IndexesAffected returns which indexes this delta will modify.
+//
+// Thread Safety: Returns a shared slice. Callers must not modify.
 func (d *StreamingDelta) IndexesAffected() []string {
-	return []string{"streaming"}
+	return indexesStreaming
 }
 
 // -----------------------------------------------------------------------------
@@ -672,8 +697,10 @@ func (d *SimilarityDelta) ConflictsWith(other Delta) bool {
 }
 
 // IndexesAffected returns which indexes this delta will modify.
+//
+// Thread Safety: Returns a shared slice. Callers must not modify.
 func (d *SimilarityDelta) IndexesAffected() []string {
-	return []string{"similarity"}
+	return indexesSimilarity
 }
 
 // -----------------------------------------------------------------------------
