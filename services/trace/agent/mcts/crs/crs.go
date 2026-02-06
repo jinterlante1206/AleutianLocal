@@ -456,6 +456,28 @@ func (c *crsImpl) SetGraphProvider(provider GraphQuery) {
 	}
 }
 
+// InvalidateGraphCache invalidates graph-backed dependency index caches.
+//
+// Description:
+//
+//	Called after the graph is refreshed (GR-29). Invalidates the Size() cache
+//	in GraphBackedDependencyIndex, which in turn invalidates the CRSGraphAdapter
+//	analytics cache (PageRank, communities, edge count).
+//
+//	This is a no-op if graphBackedDepIndex is nil (legacy mode).
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) InvalidateGraphCache() {
+	c.mu.RLock()
+	depIndex := c.graphBackedDepIndex
+	c.mu.RUnlock()
+
+	if depIndex != nil {
+		depIndex.InvalidateCache()
+		c.logger.Debug("graph cache invalidated")
+	}
+}
+
 // Checkpoint creates a restorable checkpoint.
 func (c *crsImpl) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	if ctx == nil {

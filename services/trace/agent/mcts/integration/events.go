@@ -61,6 +61,11 @@ const (
 	// CB-30c: Added to prevent repeated similar queries.
 	EventSemanticRepetition AgentEvent = "semantic_repetition"
 
+	// EventGraphRefreshed is emitted after the code graph is refreshed.
+	// Triggers: Awareness (recompute graph analytics), Search (update heuristics)
+	// GR-29: Added for cache invalidation coordination.
+	EventGraphRefreshed AgentEvent = "graph_refreshed"
+
 	// EventSynthesisStart is emitted when answer synthesis begins.
 	// Triggers: Similarity (find similar syntheses), Memory (get relevant history)
 	EventSynthesisStart AgentEvent = "synthesis_start"
@@ -169,6 +174,10 @@ var EventActivityMapping = map[AgentEvent][]ActivityName{
 	EventSemanticRepetition: {
 		ActivityLearning,   // Learn from semantic repetition (CB-30c)
 		ActivityConstraint, // Add blocking constraint
+	},
+	EventGraphRefreshed: {
+		ActivityAwareness, // Recompute graph analytics (PageRank, communities)
+		ActivitySearch,    // Update search heuristics based on new structure
 	},
 	EventSynthesisStart: {
 		ActivitySimilarity, // Find similar successful syntheses

@@ -512,6 +512,14 @@ func (c *Coordinator) HandleEvent(
 		slog.String("session_id", data.SessionID),
 	)
 
+	// GR-29: Invalidate graph cache on refresh event
+	if event == EventGraphRefreshed && c.bridge != nil && c.bridge.CRS() != nil {
+		c.bridge.CRS().InvalidateGraphCache()
+		c.logger.Debug("invalidated graph cache after refresh",
+			slog.String("session_id", data.SessionID),
+		)
+	}
+
 	// Get activities for this event
 	activityNames, ok := EventActivityMapping[event]
 	if !ok || len(activityNames) == 0 {

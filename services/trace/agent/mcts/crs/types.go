@@ -457,6 +457,20 @@ type CRS interface {
 	//
 	// Thread Safety: Safe for concurrent use.
 	SetGraphProvider(provider GraphQuery)
+
+	// InvalidateGraphCache invalidates graph-backed dependency index caches.
+	//
+	// Description:
+	//
+	//   Called after the graph is refreshed (GR-29) to ensure subsequent queries
+	//   see fresh data. Invalidates the Size() cache in GraphBackedDependencyIndex,
+	//   which in turn invalidates the CRSGraphAdapter analytics cache (PageRank,
+	//   communities, edge count).
+	//
+	//   This is a no-op if graph-backed index is not in use (legacy mode).
+	//
+	// Thread Safety: Safe for concurrent use.
+	InvalidateGraphCache()
 }
 
 // -----------------------------------------------------------------------------
