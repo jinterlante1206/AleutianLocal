@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
@@ -117,6 +118,265 @@ const semanticRepetitionThreshold = 0.7
 // Only check the last N steps for performance.
 const maxSemanticHistorySteps = 5
 
+// defaultMinHashThreshold is the term count above which we switch to MinHash.
+// Below this, simple Jaccard is faster.
+const defaultMinHashThreshold = 50
+
+// =============================================================================
+// RepetitionDetector - CB-30c Phase 3
+// =============================================================================
+
+// RepetitionDetector detects semantically repetitive tool calls.
+//
+// Description:
+//
+//	Encapsulates semantic repetition detection with configurable options.
+//	Uses simple Jaccard similarity for small term sets, and can optionally
+//	use MinHash for larger sets (though this is rarely needed for queries).
+//
+//	Key Features:
+//	- Configurable similarity threshold
+//	- Configurable history depth
+//	- Tracks alternative suggestions based on what's been tried
+//	- OTel tracing built-in
+//
+// Thread Safety: Safe for concurrent use. All mutable state is protected by mu.
+type RepetitionDetector struct {
+	// mu protects all mutable state.
+	mu sync.Mutex
+
+	// threshold is the Jaccard similarity threshold (0.0-1.0).
+	threshold float64
+
+	// maxHistory is how many recent steps to check.
+	maxHistory int
+
+	// triedQueries tracks queries that have been tried per tool (for suggesting alternatives).
+	// Key: tool name, Value: list of query terms sets
+	triedQueries map[string][]map[string]bool
+
+	// minHashThreshold is the term count above which MinHash is used.
+	minHashThreshold int
+}
+
+// RepetitionDetectorOption configures a RepetitionDetector.
+type RepetitionDetectorOption func(*RepetitionDetector)
+
+// WithRepetitionThreshold sets the similarity threshold.
+func WithRepetitionThreshold(threshold float64) RepetitionDetectorOption {
+	return func(d *RepetitionDetector) {
+		if threshold >= 0 && threshold <= 1 {
+			d.threshold = threshold
+		}
+	}
+}
+
+// WithRepetitionHistory sets the history depth.
+func WithRepetitionHistory(maxHistory int) RepetitionDetectorOption {
+	return func(d *RepetitionDetector) {
+		if maxHistory > 0 {
+			d.maxHistory = maxHistory
+		}
+	}
+}
+
+// NewRepetitionDetector creates a new RepetitionDetector with options.
+//
+// Description:
+//
+//	Creates a detector with sensible defaults that can be overridden.
+//	Default threshold is 0.7 (70% similarity), history is 5 steps.
+//
+// Inputs:
+//
+//	opts - Optional configuration functions.
+//
+// Outputs:
+//
+//	*RepetitionDetector - The configured detector.
+func NewRepetitionDetector(opts ...RepetitionDetectorOption) *RepetitionDetector {
+	d := &RepetitionDetector{
+		threshold:        semanticRepetitionThreshold,
+		maxHistory:       maxSemanticHistorySteps,
+		triedQueries:     make(map[string][]map[string]bool),
+		minHashThreshold: defaultMinHashThreshold,
+	}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d
+}
+
+// IsSemanticallyRepetitive checks if a query is similar to recently tried queries.
+//
+// Description:
+//
+//	Compares the proposed query against recent queries for the same tool.
+//	Uses Jaccard similarity on extracted terms.
+//
+// Inputs:
+//
+//	ctx - Context for tracing.
+//	tool - The tool name.
+//	query - The query string to check.
+//	steps - Recent trace steps from session.
+//
+// Outputs:
+//
+//	isRepetitive - True if above threshold.
+//	similarity - The maximum similarity found.
+//	similarQuery - The most similar previous query.
+func (d *RepetitionDetector) IsSemanticallyRepetitive(
+	ctx context.Context,
+	tool string,
+	query string,
+	steps []crs.TraceStep,
+) (isRepetitive bool, similarity float64, similarQuery string) {
+	ctx, span := executePhaseTracer.Start(ctx, "RepetitionDetector.IsSemanticallyRepetitive",
+		trace.WithAttributes(
+			attribute.String("tool", tool),
+			attribute.String("query_preview", truncateQuery(query, 50)),
+			attribute.Float64("threshold", d.threshold),
+		),
+	)
+	defer span.End()
+
+	if query == "" || len(steps) == 0 {
+		return false, 0, ""
+	}
+
+	currentTerms := extractQueryTerms(query)
+	if len(currentTerms) == 0 {
+		return false, 0, ""
+	}
+
+	// Check last N steps
+	maxSim := 0.0
+	simQuery := ""
+	startIdx := len(steps) - d.maxHistory
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target", "function_name"}
+
+	for i := len(steps) - 1; i >= startIdx; i-- {
+		step := steps[i]
+		if step.Tool != tool {
+			continue
+		}
+
+		// Extract query from Metadata
+		prevQuery := ""
+		for _, paramName := range queryParamNames {
+			if val, ok := step.Metadata[paramName]; ok && val != "" {
+				prevQuery = val
+				break
+			}
+		}
+		if prevQuery == "" {
+			continue
+		}
+
+		prevTerms := extractQueryTerms(prevQuery)
+		if len(prevTerms) == 0 {
+			continue
+		}
+
+		sim := jaccardSimilarity(currentTerms, prevTerms)
+		if sim > maxSim {
+			maxSim = sim
+			simQuery = prevQuery
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Float64("max_similarity", maxSim),
+		attribute.Bool("is_repetitive", maxSim >= d.threshold),
+	)
+
+	if maxSim >= d.threshold {
+		span.AddEvent("repetition_detected",
+			trace.WithAttributes(attribute.String("similar_to", simQuery)),
+		)
+		return true, maxSim, simQuery
+	}
+
+	return false, maxSim, ""
+}
+
+// Record records a tool call for tracking tried queries.
+//
+// Description:
+//
+//	Tracks what queries have been tried for each tool, enabling
+//	the SuggestAlternative method to suggest different approaches.
+//
+// Inputs:
+//
+//	tool - The tool that was called.
+//	query - The query that was used.
+//
+// Thread Safety: Safe for concurrent use.
+func (d *RepetitionDetector) Record(tool, query string) {
+	terms := extractQueryTerms(query)
+	if len(terms) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.triedQueries[tool] = append(d.triedQueries[tool], terms)
+}
+
+// SuggestAlternative suggests a different tool or approach based on what's been tried.
+//
+// Description:
+//
+//	Analyzes tried queries and suggests alternatives. For example, if
+//	multiple Grep calls have been tried with similar patterns, might
+//	suggest using find_callers or find_symbol instead.
+//
+// Inputs:
+//
+//	currentTool - The tool being considered.
+//
+// Outputs:
+//
+//	string - A suggestion, or empty if no suggestion.
+//
+// Thread Safety: Safe for concurrent use.
+func (d *RepetitionDetector) SuggestAlternative(currentTool string) string {
+	d.mu.Lock()
+	tried := d.triedQueries[currentTool]
+	triedLen := len(tried)
+	d.mu.Unlock()
+
+	if triedLen < 2 {
+		return ""
+	}
+
+	// If Grep has been tried multiple times, suggest graph tools
+	if currentTool == "Grep" && triedLen >= 2 {
+		return "Consider using find_callers, find_callees, or find_symbol instead of text search"
+	}
+
+	// If find_symbol tried multiple times, suggest broader search
+	if currentTool == "find_symbol" && triedLen >= 2 {
+		return "Consider using explore_package or graph_overview for broader context"
+	}
+
+	return ""
+}
+
+// Reset clears the detector's state for a new session.
+//
+// Thread Safety: Safe for concurrent use.
+func (d *RepetitionDetector) Reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.triedQueries = make(map[string][]map[string]bool)
+}
+
 // checkSemanticRepetition checks if the proposed tool call is semantically similar
 // to recent tool calls with the same tool name.
 //
@@ -182,7 +442,7 @@ func (p *ExecutePhase) checkSemanticRepetition(
 	}
 
 	// Query param names to check in Metadata
-	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target"}
+	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target", "function_name"}
 
 	for i := len(steps) - 1; i >= startIdx; i-- {
 		step := steps[i]
@@ -406,6 +666,195 @@ func estimateToolResultTokens(result string) int {
 
 	// Default prose (~4 chars/token)
 	return len(result) / 4
+}
+
+// =============================================================================
+// TokenTracker - CB-30c Phase 3
+// =============================================================================
+
+// defaultTokenBudget is the default total token budget for a session.
+// This is a conservative default; can be overridden per session.
+const defaultTokenBudget = 100000
+
+// synthesisThreshold is the percentage of budget at which synthesis is recommended.
+const synthesisThreshold = 0.85
+
+// TokenTracker tracks token usage and budget for a session.
+//
+// Description:
+//
+//	Provides centralized token tracking with budget management.
+//	Tracks prompt, response, and tool result tokens separately.
+//	Can recommend synthesis when approaching budget limits.
+//
+// Thread Safety: Safe for concurrent use. All mutable state is protected by mu.
+type TokenTracker struct {
+	// mu protects all mutable state.
+	mu sync.RWMutex
+
+	// promptTokens is total prompt tokens sent to LLM.
+	promptTokens int
+
+	// responseTokens is total response tokens from LLM.
+	responseTokens int
+
+	// toolTokens is estimated tokens from tool results.
+	toolTokens int
+
+	// budget is the total token budget for this session.
+	budget int
+}
+
+// TokenTrackerOption configures a TokenTracker.
+type TokenTrackerOption func(*TokenTracker)
+
+// WithTokenBudget sets the token budget.
+func WithTokenBudget(budget int) TokenTrackerOption {
+	return func(t *TokenTracker) {
+		if budget > 0 {
+			t.budget = budget
+		}
+	}
+}
+
+// NewTokenTracker creates a new TokenTracker with options.
+//
+// Description:
+//
+//	Creates a tracker with default budget that can be overridden.
+//
+// Inputs:
+//
+//	opts - Optional configuration functions.
+//
+// Outputs:
+//
+//	*TokenTracker - The configured tracker.
+func NewTokenTracker(opts ...TokenTrackerOption) *TokenTracker {
+	t := &TokenTracker{
+		budget: defaultTokenBudget,
+	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
+// AddToolResult estimates and adds token count for a tool result.
+//
+// Description:
+//
+//	Uses tiered estimation based on content type.
+//
+// Inputs:
+//
+//	result - The tool output string.
+//
+// Outputs:
+//
+//	int - Estimated token count added.
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) AddToolResult(result string) int {
+	tokens := estimateToolResultTokens(result)
+	t.mu.Lock()
+	t.toolTokens += tokens
+	t.mu.Unlock()
+	return tokens
+}
+
+// AddLLMUsage records prompt and response tokens from an LLM call.
+//
+// Inputs:
+//
+//	promptTokens - Tokens in the prompt.
+//	responseTokens - Tokens in the response.
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) AddLLMUsage(promptTokens, responseTokens int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.promptTokens += promptTokens
+	t.responseTokens += responseTokens
+}
+
+// TotalUsed returns the total tokens used across all categories.
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) TotalUsed() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.promptTokens + t.responseTokens + t.toolTokens
+}
+
+// RemainingBudget returns the remaining token budget.
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) RemainingBudget() int {
+	t.mu.RLock()
+	total := t.promptTokens + t.responseTokens + t.toolTokens
+	budget := t.budget
+	t.mu.RUnlock()
+
+	remaining := budget - total
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+// UsagePercent returns the percentage of budget used (0.0-1.0).
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) UsagePercent() float64 {
+	t.mu.RLock()
+	budget := t.budget
+	total := t.promptTokens + t.responseTokens + t.toolTokens
+	t.mu.RUnlock()
+
+	if budget == 0 {
+		return 0
+	}
+	return float64(total) / float64(budget)
+}
+
+// ShouldSynthesize returns true if synthesis is recommended based on budget.
+//
+// Description:
+//
+//	Returns true when usage exceeds the synthesis threshold (default 85%).
+//	This signals that the agent should synthesize an answer rather than
+//	continue making tool calls.
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) ShouldSynthesize() bool {
+	return t.UsagePercent() >= synthesisThreshold
+}
+
+// GetBreakdown returns a breakdown of token usage by category.
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) GetBreakdown() map[string]int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return map[string]int{
+		"prompt":   t.promptTokens,
+		"response": t.responseTokens,
+		"tool":     t.toolTokens,
+		"total":    t.promptTokens + t.responseTokens + t.toolTokens,
+		"budget":   t.budget,
+	}
+}
+
+// Reset clears the tracker for a new session.
+//
+// Thread Safety: Safe for concurrent use.
+func (t *TokenTracker) Reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.promptTokens = 0
+	t.responseTokens = 0
+	t.toolTokens = 0
 }
 
 // -----------------------------------------------------------------------------

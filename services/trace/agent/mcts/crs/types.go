@@ -615,6 +615,44 @@ type SimilarityIndexView interface {
 
 	// Size returns the number of entries.
 	Size() int
+
+	// AllPairs returns all similarity pairs for export.
+	//
+	// Description:
+	//
+	//   Returns a deep copy of the similarity matrix for serialization.
+	//   Format: map[fromID]map[toID]similarity.
+	//
+	// Outputs:
+	//   - map[string]map[string]float64: Copy of all pairs. Never nil.
+	//
+	// Thread Safety: Returns deep copy; caller can modify without affecting source.
+	AllPairs() map[string]map[string]float64
+
+	// AllPairsFiltered returns similarity pairs in one direction only for efficient export.
+	//
+	// Description:
+	//
+	//   Returns pairs where fromID < toID to avoid duplicates. This is more
+	//   memory-efficient than AllPairs() for export since similarity is symmetric.
+	//   Respects maxPairs limit and returns truncated flag.
+	//
+	// Inputs:
+	//   - maxPairs: Maximum pairs to return. -1 for unlimited.
+	//
+	// Outputs:
+	//   - []SimilarityPairData: Pairs in one direction. Never nil.
+	//   - bool: True if truncated due to limit.
+	//
+	// Thread Safety: Safe for concurrent use.
+	AllPairsFiltered(maxPairs int) ([]SimilarityPairData, bool)
+}
+
+// SimilarityPairData holds a similarity pair for export.
+type SimilarityPairData struct {
+	FromID     string
+	ToID       string
+	Similarity float64
 }
 
 // DependencyIndexView provides read-only access to dependencies.
@@ -632,6 +670,33 @@ type DependencyIndexView interface {
 
 	// Size returns the number of dependency edges.
 	Size() int
+
+	// AllEdges returns all dependency edges for export.
+	//
+	// Description:
+	//
+	//   Returns a deep copy of all dependency edges for serialization.
+	//   Format: map[fromID][]toIDs.
+	//
+	//   For GraphBackedDependencyIndex (GR-32), returns nil since edges
+	//   live in the graph which has its own persistence mechanism.
+	//
+	// Outputs:
+	//   - map[string][]string: Copy of forward edges, or nil for graph-backed.
+	//
+	// Thread Safety: Returns deep copy; caller can modify without affecting source.
+	AllEdges() map[string][]string
+
+	// IsGraphBacked returns true if this index delegates to the graph.
+	//
+	// Description:
+	//
+	//   When true, AllEdges() returns nil and edge export should be skipped.
+	//   The graph has its own persistence; use graph backup instead.
+	//
+	// Outputs:
+	//   - bool: True if graph-backed (GR-32), false for legacy implementation.
+	IsGraphBacked() bool
 }
 
 // HistoryIndexView provides read-only access to decision history.

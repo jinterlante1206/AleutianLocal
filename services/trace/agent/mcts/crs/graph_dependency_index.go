@@ -478,6 +478,40 @@ func (d *GraphBackedDependencyIndex) Generation() int64 {
 	return d.adapter.Generation()
 }
 
+// AllEdges returns nil for graph-backed indexes.
+//
+// Description:
+//
+//	For GraphBackedDependencyIndex, edges live in the actual code graph
+//	which has its own persistence mechanism. Exporting edges from here
+//	would be expensive (requires querying all nodes) and redundant.
+//
+//	Use the graph's own backup/restore mechanism for edge persistence.
+//
+// Outputs:
+//   - nil: Always returns nil. Use graph persistence instead.
+//
+// Thread Safety: Safe for concurrent use.
+func (d *GraphBackedDependencyIndex) AllEdges() map[string][]string {
+	d.logger.Debug("AllEdges called on graph-backed index; returning nil (use graph persistence)")
+	return nil
+}
+
+// IsGraphBacked returns true for GraphBackedDependencyIndex.
+//
+// Description:
+//
+//	Indicates that this index delegates to the graph for dependency data.
+//	When true, AllEdges() returns nil and edge export should be skipped.
+//
+// Outputs:
+//   - true: Always returns true.
+//
+// Thread Safety: Safe for concurrent use.
+func (d *GraphBackedDependencyIndex) IsGraphBacked() bool {
+	return true
+}
+
 // -----------------------------------------------------------------------------
 // Compile-time Interface Check
 // -----------------------------------------------------------------------------

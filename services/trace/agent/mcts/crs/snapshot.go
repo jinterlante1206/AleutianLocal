@@ -433,6 +433,89 @@ func (v *similarityIndexView) Size() int {
 	return count
 }
 
+// AllPairs returns all similarity pairs for export.
+//
+// Description:
+//
+//	Returns a deep copy of the similarity matrix. The returned map
+//	is safe to modify without affecting the snapshot.
+//
+// Outputs:
+//   - map[string]map[string]float64: Deep copy of all pairs. Never nil.
+//
+// Thread Safety: Returns deep copy; safe for concurrent use.
+func (v *similarityIndexView) AllPairs() map[string]map[string]float64 {
+	result := make(map[string]map[string]float64, len(v.data))
+	for fromID, inner := range v.data {
+		result[fromID] = make(map[string]float64, len(inner))
+		for toID, similarity := range inner {
+			result[fromID][toID] = similarity
+		}
+	}
+	return result
+}
+
+// AllPairsFiltered returns similarity pairs in one direction only for efficient export.
+//
+// Description:
+//
+//	Returns pairs where fromID < toID to avoid duplicates. More memory-efficient
+//	than AllPairs() since similarity is symmetric and export only needs one direction.
+//
+// Inputs:
+//   - maxPairs: Maximum pairs to return. -1 for unlimited.
+//
+// Outputs:
+//   - []SimilarityPairData: Pairs in one direction. Never nil.
+//   - bool: True if truncated due to limit.
+//
+// Thread Safety: Safe for concurrent use.
+func (v *similarityIndexView) AllPairsFiltered(maxPairs int) ([]SimilarityPairData, bool) {
+	// Pre-count for allocation (only one direction)
+	count := 0
+	for fromID, inner := range v.data {
+		for toID := range inner {
+			if fromID < toID {
+				count++
+			}
+		}
+	}
+
+	// Apply limit to allocation
+	allocSize := count
+	if maxPairs > 0 && allocSize > maxPairs {
+		allocSize = maxPairs
+	}
+
+	result := make([]SimilarityPairData, 0, allocSize)
+	truncated := false
+	pairCount := 0
+
+	for fromID, inner := range v.data {
+		for toID, similarity := range inner {
+			if fromID < toID {
+				// Check truncation limit
+				if maxPairs > 0 && pairCount >= maxPairs {
+					truncated = true
+					break
+				}
+
+				result = append(result, SimilarityPairData{
+					FromID:     fromID,
+					ToID:       toID,
+					Similarity: similarity,
+				})
+				pairCount++
+			}
+		}
+		if truncated {
+			break
+		}
+	}
+
+	return result, truncated
+}
+
 // -----------------------------------------------------------------------------
 // Dependency Graph (Internal)
 // -----------------------------------------------------------------------------
@@ -561,6 +644,34 @@ func (v *dependencyIndexView) HasCycle(nodeID string) bool {
 
 func (v *dependencyIndexView) Size() int {
 	return v.graph.edgeCount()
+}
+
+// AllEdges returns all dependency edges for export.
+//
+// Description:
+//
+//	Returns a deep copy of the forward edge map. The returned map
+//	is safe to modify without affecting the snapshot.
+//
+// Outputs:
+//   - map[string][]string: Deep copy of forward edges. Never nil.
+//
+// Thread Safety: Returns deep copy; safe for concurrent use.
+func (v *dependencyIndexView) AllEdges() map[string][]string {
+	result := make(map[string][]string, len(v.graph.forward))
+	for fromID, toSet := range v.graph.forward {
+		toIDs := make([]string, 0, len(toSet))
+		for toID := range toSet {
+			toIDs = append(toIDs, toID)
+		}
+		result[fromID] = toIDs
+	}
+	return result
+}
+
+// IsGraphBacked returns false for the legacy dependency graph implementation.
+func (v *dependencyIndexView) IsGraphBacked() bool {
+	return false
 }
 
 // -----------------------------------------------------------------------------

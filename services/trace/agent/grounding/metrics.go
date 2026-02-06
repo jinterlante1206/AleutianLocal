@@ -108,6 +108,11 @@ var (
 	semanticRepetitionTotal     metric.Int64Counter
 	semanticSimilarityHistogram metric.Float64Histogram
 
+	// CB-30c Phase 3: Reliability component metrics
+	tokenBudgetUsageGauge         metric.Float64Gauge
+	semanticCircuitBreakerTotal   metric.Int64Counter
+	repetitionDetectorSuggestions metric.Int64Counter
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -451,6 +456,35 @@ func initMetrics() error {
 			"semantic_similarity_score",
 			metric.WithDescription("Distribution of semantic similarity scores between tool calls"),
 			metric.WithUnit("1"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// CB-30c Phase 3: Reliability component metrics
+		tokenBudgetUsageGauge, err = meter.Float64Gauge(
+			"token_budget_usage_percent",
+			metric.WithDescription("Token budget usage percentage (0.0-1.0)"),
+			metric.WithUnit("1"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		semanticCircuitBreakerTotal, err = meter.Int64Counter(
+			"semantic_circuit_breaker_total",
+			metric.WithDescription("Total semantic circuit breaker triggers by tool"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		repetitionDetectorSuggestions, err = meter.Int64Counter(
+			"repetition_detector_suggestions_total",
+			metric.WithDescription("Total alternative tool suggestions from repetition detector"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -1246,4 +1280,85 @@ func RecordSemanticRepetition(toolName string, similarity float64, comparedTo st
 
 	semanticRepetitionTotal.Add(context.Background(), 1, attrs)
 	semanticSimilarityHistogram.Record(context.Background(), similarity, attrs)
+}
+
+// =============================================================================
+// CB-30c Phase 3: Reliability Component Metrics
+// =============================================================================
+
+// RecordTokenBudgetUsage records the current token budget usage.
+//
+// Description:
+//
+//	Tracks what percentage of the token budget has been used. Useful for
+//	monitoring sessions approaching their limits and triggering synthesis.
+//
+// Inputs:
+//
+//	sessionID - Session identifier for labeling.
+//	usagePercent - Usage as a fraction (0.0-1.0).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordTokenBudgetUsage(sessionID string, usagePercent float64) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("session_id", sessionID),
+	)
+
+	tokenBudgetUsageGauge.Record(context.Background(), usagePercent, attrs)
+}
+
+// RecordSemanticCircuitBreakerTrigger records when the semantic circuit breaker fires.
+//
+// Description:
+//
+//	Tracks when the circuit breaker blocks a tool call due to semantic grouping
+//	(semantically similar queries exceeding threshold).
+//
+// Inputs:
+//
+//	toolName - The tool that was blocked.
+//	reason - The reason for blocking (tool_limit or semantic_group).
+//
+// Thread Safety: Safe for concurrent use.
+func RecordSemanticCircuitBreakerTrigger(toolName, reason string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("reason", reason),
+	)
+
+	semanticCircuitBreakerTotal.Add(context.Background(), 1, attrs)
+}
+
+// RecordRepetitionDetectorSuggestion records when the detector suggests an alternative.
+//
+// Description:
+//
+//	Tracks when the RepetitionDetector suggests an alternative approach,
+//	e.g., using find_callers instead of repeated Grep calls.
+//
+// Inputs:
+//
+//	currentTool - The tool that was being considered.
+//	suggestion - The suggestion provided.
+//
+// Thread Safety: Safe for concurrent use.
+func RecordRepetitionDetectorSuggestion(currentTool, suggestion string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", currentTool),
+		attribute.String("suggestion", suggestion),
+	)
+
+	repetitionDetectorSuggestions.Add(context.Background(), 1, attrs)
 }

@@ -524,6 +524,7 @@ func (m *mockCRSForCycleAnalysis) Close()                         {}
 
 // GR-28: Graph integration
 func (m *mockCRSForCycleAnalysis) SetGraphProvider(GraphQuery) {}
+func (m *mockCRSForCycleAnalysis) InvalidateGraphCache()       {}
 
 func TestAnalyzeSessionCycles_NilContext(t *testing.T) {
 	mock := newMockCRSForCycleAnalysis()
