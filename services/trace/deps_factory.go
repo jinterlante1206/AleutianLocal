@@ -164,7 +164,7 @@ type DefaultDependenciesFactory struct {
 	enableSessionRestore bool
 
 	// persistenceBaseDir is the base directory for CRS persistence
-	// GR-36: Defaults to ~/.claude/crs if not set
+	// GR-36: Defaults to ~/.aleutian/crs if not set
 	persistenceBaseDir string
 }
 
@@ -314,7 +314,7 @@ func WithSessionRestoreEnabled(enabled bool) DependenciesFactoryOption {
 // Description:
 //
 //	Sets the directory where CRS checkpoints and journals are stored.
-//	If not set, defaults to ~/.claude/crs.
+//	If not set, defaults to ~/.aleutian/crs.
 //
 // Inputs:
 //
@@ -511,7 +511,7 @@ func (f *DefaultDependenciesFactory) trySessionRestore(
 			)
 			return nil
 		}
-		baseDir = filepath.Join(homeDir, ".claude", "crs")
+		baseDir = filepath.Join(homeDir, ".aleutian", "crs")
 	}
 
 	// Create persistence manager

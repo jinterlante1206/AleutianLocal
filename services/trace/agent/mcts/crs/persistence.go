@@ -129,7 +129,7 @@ var persistenceTracer = otel.Tracer("crs.persistence")
 // PersistenceConfig configures the PersistenceManager.
 type PersistenceConfig struct {
 	// BaseDir is the root directory for all CRS persistence data.
-	// Default: ~/.claude/crs/
+	// Default: ~/.aleutian/crs/
 	BaseDir string
 
 	// CompressionLevel is the gzip compression level (1-9).
@@ -156,7 +156,7 @@ type PersistenceConfig struct {
 func DefaultPersistenceConfig() PersistenceConfig {
 	homeDir, _ := os.UserHomeDir()
 	return PersistenceConfig{
-		BaseDir:           filepath.Join(homeDir, ".claude", "crs"),
+		BaseDir:           filepath.Join(homeDir, ".aleutian", "crs"),
 		CompressionLevel:  6,
 		LockTimeoutSec:    30,
 		MaxBackupRetries:  3,

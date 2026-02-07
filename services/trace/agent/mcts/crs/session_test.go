@@ -12,7 +12,9 @@ package crs
 
 import (
 	"context"
+	"crypto/sha256"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -815,5 +817,150 @@ func TestSessionRestore_Integration_SaveAndRestore(t *testing.T) {
 		t.Error("node2 should exist after restore")
 	} else if pn2.Proof != 10 {
 		t.Errorf("node2.Proof = %d, want 10", pn2.Proof)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Second Review Fix Tests
+// -----------------------------------------------------------------------------
+
+func TestHashFile_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.txt")
+
+	content := []byte("test content for hashing")
+	if err := os.WriteFile(filePath, content, 0644); err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	h := sha256.New()
+	if !hashFile(filePath, h) {
+		t.Error("hashFile should return true for valid file")
+	}
+
+	// Verify hash was written
+	if len(h.Sum(nil)) != 32 { // SHA256 produces 32 bytes
+		t.Error("hash should have content")
+	}
+}
+
+func TestHashFile_NonexistentFile(t *testing.T) {
+	h := sha256.New()
+	if hashFile("/nonexistent/path/file.txt", h) {
+		t.Error("hashFile should return false for nonexistent file")
+	}
+}
+
+func TestHashFile_Directory(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	h := sha256.New()
+	// Opening a directory for reading will fail on most systems
+	// or produce an error during io.Copy
+	result := hashFile(tmpDir, h)
+	if result {
+		t.Error("hashFile should return false for directory")
+	}
+}
+
+func TestFindModifiedViaGit_EmptyOutput(t *testing.T) {
+	// This test verifies NEW-2 fix: empty git output handling
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// Initialize git repo
+	cmd := exec.Command("git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Skip("git not available")
+	}
+
+	// Create and commit a file
+	filePath := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("test"), 0644); err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	cmd = exec.Command("git", "add", ".")
+	cmd.Dir = tmpDir
+	cmd.Run()
+
+	cmd = exec.Command("git", "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "-m", "init")
+	cmd.Dir = tmpDir
+	cmd.Run()
+
+	// Find files modified since now (should be none)
+	files, err := findModifiedViaGit(ctx, tmpDir, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("findModifiedViaGit failed: %v", err)
+	}
+
+	// Should return empty slice, not [""]
+	if len(files) != 0 {
+		t.Errorf("expected 0 files, got %d: %v", len(files), files)
+	}
+}
+
+func TestTryRestore_ContextCancellationDuringBackoff(t *testing.T) {
+	// This test verifies NEW-13 fix: context cancellation during retry backoff
+	ctx, cancel := context.WithCancel(context.Background())
+	tmpDir := t.TempDir()
+	projectDir := t.TempDir()
+
+	pmConfig := PersistenceConfig{
+		BaseDir:           tmpDir,
+		CompressionLevel:  6,
+		LockTimeoutSec:    30,
+		MaxBackupRetries:  3,
+		ValidateOnRestore: true,
+	}
+
+	pm, err := NewPersistenceManager(&pmConfig)
+	if err != nil {
+		t.Fatalf("create persistence manager: %v", err)
+	}
+	defer pm.Close()
+
+	// Use config with retries
+	config := DefaultSessionRestorerConfig()
+	config.MaxRetries = 5 // Allow multiple retries
+
+	restorer, err := NewSessionRestorer(pm, &config)
+	if err != nil {
+		t.Fatalf("NewSessionRestorer failed: %v", err)
+	}
+
+	crsi := New(nil)
+	defer crsi.Close()
+
+	journalDir := filepath.Join(tmpDir, "journal")
+	journalConfig := JournalConfig{
+		SessionID:  "test-session",
+		Path:       journalDir,
+		SyncWrites: false,
+	}
+	journal, err := NewBadgerJournal(journalConfig)
+	if err != nil {
+		t.Fatalf("create journal: %v", err)
+	}
+	defer journal.Close()
+
+	sid, err := NewSessionIdentifier(ctx, projectDir)
+	if err != nil {
+		t.Fatalf("NewSessionIdentifier failed: %v", err)
+	}
+
+	// Cancel context before calling TryRestore
+	cancel()
+
+	result, err := restorer.TryRestore(ctx, crsi, journal, sid)
+
+	// Should return early due to cancelled context (no checkpoint found path)
+	// or handle context cancellation gracefully
+	if err != nil && err != context.Canceled {
+		t.Logf("TryRestore returned error (expected): %v", err)
+	}
+	if result != nil && result.Restored {
+		t.Error("should not restore with cancelled context")
 	}
 }

@@ -534,3 +534,93 @@ func TestDefaultAgentLoop_GetLastAssistantMessage_FindsLastNonEmpty(t *testing.T
 		t.Errorf("getLastAssistantMessage = %q, want %q", result, "First answer")
 	}
 }
+
+// =============================================================================
+// GR-38 Tests: Session Completion Tracing
+// =============================================================================
+
+func TestGR38_RecordSessionCompletion_NilSession(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+
+	// Should not panic with nil session
+	loop.recordSessionCompletion(context.Background(), nil, StateComplete)
+}
+
+func TestGR38_RecordSessionCompletion_TracesStep(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+
+	// TraceRecorder is created by default in NewSession
+	session, err := NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Record completion
+	loop.recordSessionCompletion(context.Background(), session, StateComplete)
+
+	// Get trace and verify session_complete step was recorded
+	trace := session.GetReasoningTrace()
+	if trace == nil {
+		t.Fatal("Trace should not be nil when recording is enabled")
+	}
+
+	// Check that session_complete action was recorded
+	found := false
+	for _, step := range trace.Trace {
+		if step.Action == "session_complete" {
+			found = true
+			if step.Target != string(StateComplete) {
+				t.Errorf("Target = %s, want %s", step.Target, string(StateComplete))
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("session_complete trace step should be recorded")
+	}
+}
+
+func TestGR38_TerminalStateRecordsCompletion(t *testing.T) {
+	registry := NewMockPhaseRegistry()
+
+	// Register mock phases that go straight to complete
+	registry.RegisterPhase(StateInit, &MockPhase{name: "init", nextState: StatePlan})
+	registry.RegisterPhase(StatePlan, &MockPhase{name: "plan", nextState: StateExecute})
+	registry.RegisterPhase(StateExecute, &MockPhase{name: "execute", nextState: StateComplete})
+
+	loop := NewDefaultAgentLoop(WithPhaseRegistry(registry))
+
+	// TraceRecorder is created by default in NewSession
+	session, err := NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	result, err := loop.Run(context.Background(), session, "test query")
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if result.State != StateComplete {
+		t.Errorf("State = %s, want COMPLETE", result.State)
+	}
+
+	// Verify session_complete was recorded
+	trace := session.GetReasoningTrace()
+	if trace == nil {
+		t.Fatal("Trace should not be nil")
+	}
+
+	found := false
+	for _, step := range trace.Trace {
+		if step.Action == "session_complete" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Error("GR-38: session_complete trace step should be recorded on terminal state")
+	}
+}

@@ -88,6 +88,9 @@ type crsImpl struct {
 
 	// GR-32 Code Review Fix: Rate-limit DependencyDelta deprecation warning
 	depDeltaWarnOnce sync.Once
+
+	// GR-31: Analytics history for tracking analytics queries
+	analyticsData *AnalyticsHistory
 }
 
 // sessionSteps holds step records for a single session.
@@ -133,6 +136,7 @@ func New(config *Config) CRS {
 		clauseConfig:   DefaultClauseConfig,
 		deltaHistory:   NewDeltaHistoryWorker(DefaultMaxDeltaRecords, logger),
 		stepData:       make(map[string]*sessionSteps),
+		analyticsData:  NewAnalyticsHistory(MaxAnalyticsHistoryRecords),
 	}
 }
 
@@ -163,6 +167,11 @@ func (c *crsImpl) Snapshot() Snapshot {
 
 	// GR-32: Include graph-backed dependency index in snapshot
 	snap.setGraphBackedDepIndex(c.graphBackedDepIndex)
+
+	// GR-31: Include analytics history in snapshot (cloned for immutability)
+	if c.analyticsData != nil {
+		snap.setAnalyticsHistory(c.analyticsData.clone())
+	}
 
 	return snap
 }
@@ -280,6 +289,8 @@ func (c *crsImpl) applyCore(ctx context.Context, delta Delta, spanName string) (
 		err = c.applyStreamingDelta(d, &metrics)
 	case *CompositeDelta:
 		err = c.applyCompositeDelta(ctx, d, &metrics)
+	case *AnalyticsDelta:
+		err = c.applyAnalyticsDelta(d, &metrics)
 	default:
 		err = fmt.Errorf("unknown delta type: %T", delta)
 	}
@@ -478,6 +489,43 @@ func (c *crsImpl) InvalidateGraphCache() {
 		depIndex.InvalidateCache()
 		c.logger.Debug("graph cache invalidated")
 	}
+}
+
+// -----------------------------------------------------------------------------
+// Analytics Methods (GR-31)
+// -----------------------------------------------------------------------------
+
+// GetAnalyticsHistory returns all analytics records.
+func (c *crsImpl) GetAnalyticsHistory() []*AnalyticsRecord {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.analyticsData == nil {
+		return nil
+	}
+	return c.analyticsData.All()
+}
+
+// GetLastAnalytics returns the most recent analytics of a given type.
+func (c *crsImpl) GetLastAnalytics(queryType AnalyticsQueryType) *AnalyticsRecord {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.analyticsData == nil {
+		return nil
+	}
+	return c.analyticsData.GetLast(queryType)
+}
+
+// HasRunAnalytics checks if a specific analytics type has been run.
+func (c *crsImpl) HasRunAnalytics(queryType AnalyticsQueryType) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.analyticsData == nil {
+		return false
+	}
+	return c.analyticsData.HasRun(queryType)
 }
 
 // Checkpoint creates a restorable checkpoint.
@@ -850,6 +898,81 @@ func (c *crsImpl) applyStreamingDelta(d *StreamingDelta, metrics *ApplyMetrics) 
 	return nil
 }
 
+// applyAnalyticsDelta records an analytics query in history and sets proof markers.
+//
+// Description:
+//
+//	Records the analytics query in history, sets proof markers for completion,
+//	and logs the operation for debugging.
+//
+// GR-31: Analytics CRS routing.
+// L-1/L-3 fix: Added structured logging.
+// C-2/L-4 fix: TODO - Emit coordinator event when CRS gains coordinator reference.
+func (c *crsImpl) applyAnalyticsDelta(d *AnalyticsDelta, metrics *ApplyMetrics) error {
+	if d.Record == nil {
+		c.logger.Debug("analytics delta has nil record, skipping")
+		return nil // Nothing to apply
+	}
+
+	// O-4 fix: Truncate large result sets before storing
+	d.Record.TruncateResults()
+
+	// Add to analytics history
+	if c.analyticsData != nil {
+		c.analyticsData.Add(d.Record)
+		metrics.EntriesModified++
+	}
+
+	// Set proof markers for analytics completion
+	now := time.Now().UnixMilli()
+
+	// Mark analytics as done
+	doneKey := d.Record.GetProofDoneKey()
+	c.proofData[doneKey] = ProofNumber{
+		Proof:     1,
+		Disproof:  0,
+		Status:    ProofStatusProven,
+		UpdatedAt: now,
+	}
+	metrics.EntriesModified++
+
+	// If results were found, mark as found
+	foundKey := ""
+	if d.Record.HasResults() {
+		foundKey = d.Record.GetProofFoundKey()
+		c.proofData[foundKey] = ProofNumber{
+			Proof:     1,
+			Disproof:  0,
+			Status:    ProofStatusProven,
+			UpdatedAt: now,
+		}
+		metrics.EntriesModified++
+	}
+
+	// L-1 fix: Log analytics application
+	c.logger.Debug("analytics delta applied",
+		slog.String("query_type", string(d.Record.QueryType)),
+		slog.Int("result_count", d.Record.ResultCount),
+		slog.Int64("execution_ms", d.Record.ExecutionMs),
+		slog.String("done_key", doneKey),
+		slog.String("found_key", foundKey),
+	)
+
+	// TODO(C-2/L-4): Emit EventAnalyticsRun to coordinator when CRS gains
+	// coordinator reference. This enables activities to react to analytics:
+	// if c.coordinator != nil {
+	//     c.coordinator.EmitEvent(integration.EventAnalyticsRun, &integration.EventData{
+	//         Metadata: map[string]any{
+	//             "query_type":   d.Record.QueryType,
+	//             "result_count": d.Record.ResultCount,
+	//         },
+	//     })
+	// }
+
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexProof)
+	return nil
+}
+
 func (c *crsImpl) applyCompositeDelta(ctx context.Context, d *CompositeDelta, metrics *ApplyMetrics) error {
 	// Apply each delta in sequence
 	for _, delta := range d.Deltas {
@@ -886,6 +1009,10 @@ func (c *crsImpl) applyCompositeDelta(ctx context.Context, d *CompositeDelta, me
 			}
 		case *CompositeDelta:
 			if err := c.applyCompositeDelta(ctx, dd, metrics); err != nil {
+				return err
+			}
+		case *AnalyticsDelta:
+			if err := c.applyAnalyticsDelta(dd, metrics); err != nil {
 				return err
 			}
 		}

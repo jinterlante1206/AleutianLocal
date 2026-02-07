@@ -317,6 +317,26 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 
 	// Check if hard forcing is enabled (router selected a real tool with high confidence)
 	if hardForcing != nil {
+		// GR-38 Fix: Check if tool was already called in this session before forcing.
+		// This prevents duplicate forced calls when the router suggests the same tool
+		// repeatedly before the circuit breaker has a chance to fire.
+		toolHistory := buildToolHistoryFromSession(deps.Session)
+		for _, entry := range toolHistory {
+			if entry.Tool == hardForcing.Tool {
+				slog.Info("GR-38: Skipping hard force, tool already called in session",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("tool", hardForcing.Tool),
+					slog.Int("previous_step", entry.StepNumber),
+				)
+				// Cancel hard forcing - fall through to normal LLM flow
+				hardForcing = nil
+				break
+			}
+		}
+	}
+
+	// Execute hard forcing if still enabled after duplicate check
+	if hardForcing != nil {
 		// TR-2 Fix: Execute tool directly with full observability
 		slog.Info("Router hard-forcing tool, attempting direct execution (CB-31d)",
 			slog.String("session_id", deps.Session.ID),

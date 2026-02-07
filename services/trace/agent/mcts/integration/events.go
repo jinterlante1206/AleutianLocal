@@ -78,6 +78,11 @@ const (
 	// EventSessionEnd is emitted when a session ends.
 	// Triggers: Streaming (finalize statistics), Memory (persist learned clauses)
 	EventSessionEnd AgentEvent = "session_end"
+
+	// EventAnalyticsRun is emitted after an analytics query completes.
+	// Triggers: Learning (learn from findings), Awareness (update graph understanding)
+	// GR-31: Added for analytics CRS integration.
+	EventAnalyticsRun AgentEvent = "analytics_run"
 )
 
 // EventData provides context for event handling.
@@ -129,6 +134,11 @@ type EventData struct {
 	// ModifiedFileCount is the number of files modified since checkpoint.
 	// GR-36: Used by EventSessionRestored.
 	ModifiedFileCount int
+
+	// Graph provides structured graph context for the event.
+	// Contains file, symbol, and graph state information.
+	// GR-30: Added for graph-aware activity coordination.
+	Graph *GraphContext
 }
 
 // =============================================================================
@@ -208,6 +218,10 @@ var EventActivityMapping = map[AgentEvent][]ActivityName{
 	EventSessionEnd: {
 		ActivityStreaming, // Finalize statistics
 		ActivityMemory,    // Persist learned clauses
+	},
+	EventAnalyticsRun: {
+		ActivityLearning,  // Learn from analytics findings (GR-31)
+		ActivityAwareness, // Update graph understanding based on results
 	},
 }
 

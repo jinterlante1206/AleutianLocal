@@ -52,7 +52,7 @@ CRS state can be persisted to disk and restored across sessions using the `Persi
 ### File Layout
 
 ```
-~/.claude/crs/
+~/.aleutian/crs/
 ├── {project_hash}/                     # Per-project isolation
 │   ├── badger/                         # Live BadgerDB directory
 │   │   ├── MANIFEST

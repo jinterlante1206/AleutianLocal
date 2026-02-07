@@ -299,17 +299,10 @@ func computeProjectHashStreaming(ctx context.Context, projectPath string) (strin
 		default:
 		}
 
-		file, err := os.Open(f)
-		if err != nil {
-			continue // Skip missing files
+		// NEW-1 Fix: Use helper function with defer to ensure file.Close() is always called
+		if hashFile(f, h) {
+			foundAny = true
 		}
-
-		_, err = io.Copy(h, file)
-		file.Close()
-		if err != nil {
-			continue // Skip files that can't be read
-		}
-		foundAny = true
 	}
 
 	if !foundAny {
@@ -319,12 +312,47 @@ func computeProjectHashStreaming(ctx context.Context, projectPath string) (strin
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// getGitCommitHash returns the current git commit hash if in a git repo.
+// hashFile hashes a single file into the provided hash.Hash.
+// Returns true if file was successfully hashed, false otherwise.
+// NEW-1 Fix: Uses defer to ensure file is closed even if io.Copy panics.
+func hashFile(path string, h io.Writer) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false // File doesn't exist or can't be opened
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(h, file); err != nil {
+		return false // File can't be read
+	}
+	return true
+}
+
+// getGitCommitHash returns the current git commit hash if in a git repository.
+//
+// Description:
+//
+//	Executes `git rev-parse HEAD` to get the current commit hash.
+//	Returns empty string if not in a git repo or git command fails.
+//
+// Inputs:
+//   - projectPath: Path to the project directory.
+//
+// Outputs:
+//   - string: 40-character hex commit hash, or empty string on failure.
+//
+// Thread Safety: Safe for concurrent use.
+//
+// NEW-8, NEW-14 Fix: Added GoDoc and debug logging.
 func getGitCommitHash(projectPath string) string {
 	cmd := exec.Command("git", "rev-parse", "HEAD")
 	cmd.Dir = projectPath
 	output, err := cmd.Output()
 	if err != nil {
+		slog.Debug("git commit hash unavailable",
+			slog.String("project_path", projectPath),
+			slog.String("error", err.Error()),
+		)
 		return ""
 	}
 	return strings.TrimSpace(string(output))
@@ -571,6 +599,7 @@ func (r *SessionRestorer) TryRestore(
 
 	// GR-36 Code Review Fix: R4 - Add retry logic
 	var lastErr error
+retryLoop:
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
 		result, err := r.tryRestoreOnce(ctx, crsi, journal, sessionID, logger, span)
 		if err == nil {
@@ -583,6 +612,8 @@ func (r *SessionRestorer) TryRestore(
 				sessionRestoreTotal.WithLabelValues("success").Inc()
 				sessionCheckpointAgeGauge.Set(result.CheckpointAge.Seconds())
 				sessionFilesModifiedGauge.Set(float64(result.ModifiedFileCount))
+				// NEW-9 Fix: Set span status to Ok on successful restore
+				span.SetStatus(codes.Ok, "restored")
 			}
 
 			return result, nil
@@ -597,7 +628,7 @@ func (r *SessionRestorer) TryRestore(
 			errors.Is(err, ErrBackupNotFound) ||
 			errors.Is(err, context.Canceled) ||
 			errors.Is(err, context.DeadlineExceeded) {
-			break
+			break retryLoop
 		}
 
 		if attempt < r.config.MaxRetries {
@@ -608,7 +639,13 @@ func (r *SessionRestorer) TryRestore(
 				slog.String("error", err.Error()),
 				slog.Duration("backoff", backoff),
 			)
-			time.Sleep(backoff)
+			// NEW-13 Fix: Respect context cancellation during backoff
+			select {
+			case <-ctx.Done():
+				lastErr = ctx.Err()
+				break retryLoop
+			case <-time.After(backoff):
+			}
 		}
 	}
 
@@ -697,6 +734,15 @@ func (r *SessionRestorer) tryRestoreOnce(
 			span.RecordError(err)
 			return nil, fmt.Errorf("apply delta %d: %w", i, err)
 		}
+	}
+
+	// NEW-12 Fix: Checkpoint journal after successful restore to prevent
+	// replaying the same deltas in subsequent sessions.
+	if err := journal.Checkpoint(ctx); err != nil {
+		// Log but don't fail - restore succeeded, checkpoint is optimization
+		logger.Warn("failed to checkpoint journal after restore",
+			slog.String("error", err.Error()),
+		)
 	}
 
 	// GR-36 Code Review Fix: I6 - Verify restored generation
@@ -854,10 +900,13 @@ func findModifiedViaGit(ctx context.Context, projectPath string, since time.Time
 		return nil, fmt.Errorf("git diff: %w", err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if lines[0] == "" {
+	// NEW-2 Fix: Handle empty output correctly
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
 		return []string{}, nil
 	}
+
+	lines := strings.Split(trimmed, "\n")
 
 	// GR-36 Code Review Fix: R7 - Check max files limit
 	if len(lines) > maxFiles {
@@ -896,17 +945,17 @@ func findModifiedViaMtime(ctx context.Context, projectPath string, since time.Ti
 
 		// Check if modified after since
 		if info.ModTime().Unix() > sinceUnix {
+			// NEW-6 Fix: Check max files limit BEFORE computing relPath
+			if len(files) >= maxFiles {
+				return fmt.Errorf("%w: found more than %d files",
+					ErrTooManyModifiedFiles, maxFiles)
+			}
+
 			relPath, err := filepath.Rel(projectPath, path)
 			if err != nil {
 				return nil
 			}
 			files = append(files, relPath)
-
-			// GR-36 Code Review Fix: R7 - Check max files limit
-			if len(files) > maxFiles {
-				return fmt.Errorf("%w: found more than %d files",
-					ErrTooManyModifiedFiles, maxFiles)
-			}
 		}
 
 		return nil

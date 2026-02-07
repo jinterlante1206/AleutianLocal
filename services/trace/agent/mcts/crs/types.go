@@ -471,6 +471,54 @@ type CRS interface {
 	//
 	// Thread Safety: Safe for concurrent use.
 	InvalidateGraphCache()
+
+	// -------------------------------------------------------------------------
+	// Analytics Methods (GR-31)
+	// -------------------------------------------------------------------------
+
+	// GetAnalyticsHistory returns all analytics records.
+	//
+	// Description:
+	//
+	//   Returns a copy of all analytics records in chronological order.
+	//
+	// Outputs:
+	//   - []*AnalyticsRecord: Copy of all records.
+	//
+	// Thread Safety: Safe for concurrent use.
+	GetAnalyticsHistory() []*AnalyticsRecord
+
+	// GetLastAnalytics returns the most recent analytics of a given type.
+	//
+	// Description:
+	//
+	//   Searches analytics history for the most recent record of the
+	//   specified query type.
+	//
+	// Inputs:
+	//   - queryType: The type of analytics query to find.
+	//
+	// Outputs:
+	//   - *AnalyticsRecord: The most recent matching record, or nil if not found.
+	//
+	// Thread Safety: Safe for concurrent use.
+	GetLastAnalytics(queryType AnalyticsQueryType) *AnalyticsRecord
+
+	// HasRunAnalytics checks if a specific analytics type has been run.
+	//
+	// Description:
+	//
+	//   Returns true if an analytics query of the given type has been
+	//   recorded in history.
+	//
+	// Inputs:
+	//   - queryType: The type of analytics query to check.
+	//
+	// Outputs:
+	//   - bool: True if the query type has been run.
+	//
+	// Thread Safety: Safe for concurrent use.
+	HasRunAnalytics(queryType AnalyticsQueryType) bool
 }
 
 // -----------------------------------------------------------------------------
@@ -536,6 +584,51 @@ type Snapshot interface {
 	//
 	// Thread Safety: Safe for concurrent use (snapshot is immutable).
 	GraphQuery() GraphQuery
+
+	// AnalyticsHistory returns recent analytics records (GR-31).
+	//
+	// Description:
+	//
+	//   Returns a copy of analytics records in chronological order.
+	//   Activities can use this to check what analytics have been run.
+	//
+	// Outputs:
+	//   - []*AnalyticsRecord: Copy of analytics records.
+	//
+	// Thread Safety: Safe for concurrent use (snapshot is immutable).
+	AnalyticsHistory() []*AnalyticsRecord
+
+	// LastAnalytics returns the most recent analytics of a given type (GR-31).
+	//
+	// Description:
+	//
+	//   Searches analytics history for the most recent record of the
+	//   specified query type.
+	//
+	// Inputs:
+	//   - queryType: The type of analytics query to find.
+	//
+	// Outputs:
+	//   - *AnalyticsRecord: The most recent matching record, or nil if not found.
+	//
+	// Thread Safety: Safe for concurrent use (snapshot is immutable).
+	LastAnalytics(queryType AnalyticsQueryType) *AnalyticsRecord
+
+	// HasRunAnalytics checks if a specific analytics type has been run (GR-31).
+	//
+	// Description:
+	//
+	//   Returns true if an analytics query of the given type has been
+	//   recorded in history.
+	//
+	// Inputs:
+	//   - queryType: The type of analytics query to check.
+	//
+	// Outputs:
+	//   - bool: True if the query type has been run.
+	//
+	// Thread Safety: Safe for concurrent use (snapshot is immutable).
+	HasRunAnalytics(queryType AnalyticsQueryType) bool
 }
 
 // -----------------------------------------------------------------------------
@@ -979,6 +1072,10 @@ const (
 
 	// DeltaTypeComposite contains multiple deltas.
 	DeltaTypeComposite
+
+	// DeltaTypeAnalytics records analytics queries.
+	// GR-31: Added for analytics CRS routing.
+	DeltaTypeAnalytics
 )
 
 // String returns the string representation of DeltaType.
@@ -1000,6 +1097,8 @@ func (t DeltaType) String() string {
 		return "streaming"
 	case DeltaTypeComposite:
 		return "composite"
+	case DeltaTypeAnalytics:
+		return "analytics"
 	default:
 		return fmt.Sprintf("DeltaType(%d)", t)
 	}

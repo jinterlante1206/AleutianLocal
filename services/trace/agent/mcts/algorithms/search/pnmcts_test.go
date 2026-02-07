@@ -92,6 +92,11 @@ func (m *mockSnapshot) StreamingIndex() crs.StreamingIndexView   { return nil }
 func (m *mockSnapshot) Query() crs.QueryAPI                      { return nil }
 func (m *mockSnapshot) GraphQuery() crs.GraphQuery               { return nil }
 
+// GR-31: Analytics methods (stub implementations for mock)
+func (m *mockSnapshot) AnalyticsHistory() []*crs.AnalyticsRecord                    { return nil }
+func (m *mockSnapshot) LastAnalytics(_ crs.AnalyticsQueryType) *crs.AnalyticsRecord { return nil }
+func (m *mockSnapshot) HasRunAnalytics(_ crs.AnalyticsQueryType) bool               { return false }
+
 func setupPNMCTSTestCRS(t *testing.T) crs.CRS {
 	t.Helper()
 	c := crs.New(nil)
