@@ -116,8 +116,8 @@ func TestDefaultPersistenceConfig(t *testing.T) {
 	if config.BaseDir == "" {
 		t.Error("BaseDir should not be empty")
 	}
-	if !strings.Contains(config.BaseDir, ".claude") {
-		t.Errorf("BaseDir = %q, want path containing .claude", config.BaseDir)
+	if !strings.Contains(config.BaseDir, ".aleutian") {
+		t.Errorf("BaseDir = %q, want path containing .aleutian", config.BaseDir)
 	}
 	if config.CompressionLevel < 1 || config.CompressionLevel > 9 {
 		t.Errorf("CompressionLevel = %d, want 1-9", config.CompressionLevel)

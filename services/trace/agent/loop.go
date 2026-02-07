@@ -819,7 +819,7 @@ func (l *DefaultAgentLoop) runLoop(ctx context.Context, session *Session) (*RunR
 		if currentState.IsTerminal() {
 			// GR-38 Fix: Record session completion trace step for observability.
 			// This ensures the CRS trace includes the session end event.
-			l.recordSessionCompletion(ctx, session, currentState)
+			l.recordSessionCompletion(ctx, session, currentState, startTime)
 			return l.buildResult(session, startTime), nil
 		}
 
@@ -986,21 +986,33 @@ func (l *DefaultAgentLoop) defaultPhaseExecution(session *Session) (AgentState, 
 //	ctx - Context for cancellation (unused but kept for future journal checkpoint).
 //	session - The session that completed.
 //	finalState - The terminal state reached.
+//	startTime - When the session started, for duration calculation.
 //
 // Thread Safety: Safe for concurrent use.
-func (l *DefaultAgentLoop) recordSessionCompletion(_ context.Context, session *Session, finalState AgentState) {
+func (l *DefaultAgentLoop) recordSessionCompletion(_ context.Context, session *Session, finalState AgentState, startTime time.Time) {
 	if session == nil {
 		return
 	}
+
+	// GR-38 Issue 15: Get trace step count before adding session_complete
+	// This helps clarify the difference between loop iterations (total_steps)
+	// and trace events (trace_step_count)
+	traceStepCount := len(session.GetTraceSteps())
+
+	// GR-38 Finding 11: Include duration in session_complete for consistency
+	duration := time.Since(startTime)
 
 	// Record session completion trace step
 	session.RecordTraceStep(crs.TraceStep{
 		Timestamp: time.Now(),
 		Action:    "session_complete",
 		Target:    string(finalState),
+		Duration:  duration,
 		Metadata: map[string]string{
-			"total_steps":  fmt.Sprintf("%d", session.Metrics.TotalSteps),
-			"total_tokens": fmt.Sprintf("%d", session.Metrics.TotalTokens),
+			"total_steps":      fmt.Sprintf("%d", session.Metrics.TotalSteps),
+			"total_tokens":     fmt.Sprintf("%d", session.Metrics.TotalTokens),
+			"trace_step_count": fmt.Sprintf("%d", traceStepCount),
+			"duration_ms":      fmt.Sprintf("%d", duration.Milliseconds()),
 		},
 	})
 
@@ -1008,6 +1020,8 @@ func (l *DefaultAgentLoop) recordSessionCompletion(_ context.Context, session *S
 		slog.String("session_id", session.ID),
 		slog.String("final_state", string(finalState)),
 		slog.Int("total_steps", session.Metrics.TotalSteps),
+		slog.Int("trace_step_count", traceStepCount),
+		slog.Duration("duration", duration),
 	)
 }
 

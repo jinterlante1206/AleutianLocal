@@ -16,6 +16,7 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 )
 
 // TestGR38_DuplicateToolCallPrevention tests that hard forcing is skipped
@@ -145,5 +146,232 @@ func TestGR38_ToolHistoryLimiting(t *testing.T) {
 
 	if len(history) > maxToolHistoryEntries {
 		t.Errorf("History should be limited to %d, got %d", maxToolHistoryEntries, len(history))
+	}
+}
+
+// =============================================================================
+// GR-38 Issue 17: Semantic Tool Call Tracking Tests
+// =============================================================================
+
+// TestGR38_SemanticToolHistoryFromSession tests that semantic history is built correctly.
+func TestGR38_SemanticToolHistoryFromSession(t *testing.T) {
+	t.Run("empty session returns empty history", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		history := buildSemanticToolHistoryFromSession(session)
+		if history.Len() != 0 {
+			t.Errorf("Expected empty history, got %d entries", history.Len())
+		}
+	})
+
+	t.Run("nil session returns empty history", func(t *testing.T) {
+		history := buildSemanticToolHistoryFromSession(nil)
+		if history.Len() != 0 {
+			t.Errorf("Expected empty history for nil session, got %d entries", history.Len())
+		}
+	})
+
+	t.Run("tool_routing steps are captured with query", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		// Record a tool_routing step with query in metadata
+		session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now(),
+			Action:    "tool_routing",
+			Target:    "Grep",
+			Metadata: map[string]string{
+				"query":      "Where is parseConfig defined?",
+				"confidence": "0.95",
+			},
+		})
+
+		history := buildSemanticToolHistoryFromSession(session)
+		if history.Len() != 1 {
+			t.Errorf("Expected 1 entry, got %d", history.Len())
+		}
+
+		// Verify the query was captured by checking similarity
+		status, similarity, _ := routing.CheckSemanticStatus(
+			history,
+			"Grep",
+			"Where is parseConfig defined?",
+		)
+		if status != "blocked" || similarity != 1.0 {
+			t.Errorf("Expected exact duplicate to be blocked with similarity 1.0, got status=%s similarity=%.2f",
+				status, similarity)
+		}
+	})
+
+	t.Run("tool_call steps are NOT captured (only tool_routing)", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		// Record a tool_call step (not tool_routing)
+		session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now(),
+			Action:    "tool_call",
+			Tool:      "Grep",
+		})
+
+		history := buildSemanticToolHistoryFromSession(session)
+		if history.Len() != 0 {
+			t.Errorf("Expected 0 entries for tool_call (not tool_routing), got %d", history.Len())
+		}
+	})
+}
+
+// TestGR38_SemanticSameToolDifferentParams tests that same tool with different params is allowed.
+func TestGR38_SemanticSameToolDifferentParams(t *testing.T) {
+	session, err := agent.NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Record a Grep call for "parseConfig"
+	session.RecordTraceStep(crs.TraceStep{
+		Timestamp: time.Now(),
+		Action:    "tool_routing",
+		Target:    "Grep",
+		Metadata: map[string]string{
+			"query": "Where is parseConfig defined?",
+		},
+	})
+
+	history := buildSemanticToolHistoryFromSession(session)
+
+	// A completely different Grep query should be ALLOWED
+	status, similarity, _ := routing.CheckSemanticStatus(
+		history,
+		"Grep",
+		"How does the HTTP server handle requests?",
+	)
+
+	if status == "blocked" {
+		t.Errorf("Different query should NOT be blocked: status=%s, similarity=%.2f", status, similarity)
+	}
+
+	// Verify similarity is low
+	if similarity > routing.SemanticPenaltyThreshold {
+		t.Errorf("Similarity should be low for completely different queries, got %.2f", similarity)
+	}
+}
+
+// TestGR38_SemanticSimilarQueriesBlocked tests that semantically similar queries are blocked.
+func TestGR38_SemanticSimilarQueriesBlocked(t *testing.T) {
+	session, err := agent.NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Record a Grep call for "parseConfig"
+	session.RecordTraceStep(crs.TraceStep{
+		Timestamp: time.Now(),
+		Action:    "tool_routing",
+		Target:    "Grep",
+		Metadata: map[string]string{
+			"query": "Find parseConfig function definition",
+		},
+	})
+
+	history := buildSemanticToolHistoryFromSession(session)
+
+	// A semantically similar query should be BLOCKED
+	// "parse_config" and "parseConfig" normalize to the same terms
+	status, similarity, _ := routing.CheckSemanticStatus(
+		history,
+		"Grep",
+		"Find parseConfig function definition", // Exact duplicate
+	)
+
+	if status != "blocked" {
+		t.Errorf("Exact duplicate query should be blocked: status=%s, similarity=%.2f", status, similarity)
+	}
+
+	// Test case-insensitive duplicate
+	status2, similarity2, _ := routing.CheckSemanticStatus(
+		history,
+		"Grep",
+		"find parseconfig function definition", // Case different
+	)
+
+	if status2 != "blocked" {
+		t.Errorf("Case-insensitive duplicate should be blocked: status=%s, similarity=%.2f", status2, similarity2)
+	}
+}
+
+// TestGR38_SemanticPenalizedButAllowed tests that similar but distinct queries are penalized.
+func TestGR38_SemanticPenalizedButAllowed(t *testing.T) {
+	session, err := agent.NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Record a Grep call for parsing config
+	session.RecordTraceStep(crs.TraceStep{
+		Timestamp: time.Now(),
+		Action:    "tool_routing",
+		Target:    "Grep",
+		Metadata: map[string]string{
+			"query": "Find parse config function",
+		},
+	})
+
+	history := buildSemanticToolHistoryFromSession(session)
+
+	// A related but distinct query should be penalized but allowed
+	// Shares some terms ("parse", "config") but adds new terms
+	status, similarity, _ := routing.CheckSemanticStatus(
+		history,
+		"Grep",
+		"Find parse config validation logic",
+	)
+
+	// Should be penalized (similarity between 0.3 and 0.8) but not blocked
+	if status == "blocked" {
+		t.Errorf("Related but distinct query should NOT be blocked: status=%s, similarity=%.2f", status, similarity)
+	}
+
+	if status == "allowed" && similarity >= routing.SemanticPenaltyThreshold {
+		t.Errorf("Similar query should be penalized, not allowed: status=%s, similarity=%.2f", status, similarity)
+	}
+}
+
+// TestGR38_SemanticDifferentToolSameQuery tests that different tools with same query are allowed.
+func TestGR38_SemanticDifferentToolSameQuery(t *testing.T) {
+	session, err := agent.NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Record a Grep call
+	session.RecordTraceStep(crs.TraceStep{
+		Timestamp: time.Now(),
+		Action:    "tool_routing",
+		Target:    "Grep",
+		Metadata: map[string]string{
+			"query": "Where is parseConfig defined?",
+		},
+	})
+
+	history := buildSemanticToolHistoryFromSession(session)
+
+	// Same query but different tool should be ALLOWED
+	status, similarity, _ := routing.CheckSemanticStatus(
+		history,
+		"find_symbol", // Different tool
+		"Where is parseConfig defined?",
+	)
+
+	if status != "allowed" || similarity != 0.0 {
+		t.Errorf("Different tool should be allowed with zero similarity: status=%s, similarity=%.2f",
+			status, similarity)
 	}
 }

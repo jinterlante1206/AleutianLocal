@@ -187,6 +187,18 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		}
 		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
+		// GR-38 Issue 16: Estimate and track tokens for tool results
+		// This ensures token metrics include tool output, not just LLM tokens.
+		// Previously only hard-forced tools counted tokens, causing low token counts
+		// for tool-heavy sessions.
+		if result != nil && result.Success && result.Output != nil {
+			outputStr := fmt.Sprintf("%v", result.Output)
+			estimatedTokens := estimateToolResultTokens(outputStr)
+			if estimatedTokens > 0 {
+				deps.Session.IncrementMetric(agent.MetricTokens, estimatedTokens)
+			}
+		}
+
 		// CRS-02: Update proof numbers based on tool execution outcome.
 		// Proof number represents COST TO PROVE (lower = better).
 		// Success decreases cost (path is viable), failure increases cost.

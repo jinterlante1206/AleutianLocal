@@ -24,9 +24,11 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // executePhaseTracer is the OpenTelemetry tracer for the execute phase.
@@ -317,21 +319,54 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 
 	// Check if hard forcing is enabled (router selected a real tool with high confidence)
 	if hardForcing != nil {
-		// GR-38 Fix: Check if tool was already called in this session before forcing.
-		// This prevents duplicate forced calls when the router suggests the same tool
-		// repeatedly before the circuit breaker has a chance to fire.
-		toolHistory := buildToolHistoryFromSession(deps.Session)
-		for _, entry := range toolHistory {
-			if entry.Tool == hardForcing.Tool {
-				slog.Info("GR-38: Skipping hard force, tool already called in session",
-					slog.String("session_id", deps.Session.ID),
-					slog.String("tool", hardForcing.Tool),
-					slog.Int("previous_step", entry.StepNumber),
+		// GR-38 Fix (Issue 17): Use semantic similarity to detect duplicates.
+		// This allows same tool with different params (e.g., Grep "parseConfig" vs Grep "buildRequest")
+		// while still blocking semantically equivalent calls (Grep "parseConfig" vs Grep "parse_config").
+
+		// O1.2 Fix: Add trace span for semantic check
+		_, semanticSpan := executePhaseTracer.Start(ctx, "semantic_duplicate_check",
+			trace.WithAttributes(
+				attribute.String("tool", hardForcing.Tool),
+				attribute.String("query_preview", truncateQuery(deps.Query, 100)),
+			),
+		)
+
+		semanticHistory := buildSemanticToolHistoryFromSession(deps.Session)
+		status, similarity, similarCall := routing.CheckSemanticStatus(
+			semanticHistory,
+			hardForcing.Tool,
+			deps.Query, // Use the user query for semantic comparison
+		)
+
+		// O1.2 Fix: Record span attributes
+		semanticSpan.SetAttributes(
+			attribute.String("status", status),
+			attribute.Float64("similarity", similarity),
+			attribute.Int("history_size", semanticHistory.Len()),
+		)
+		semanticSpan.End()
+
+		if status == "blocked" {
+			slog.Info("GR-38: Skipping hard force, semantically similar call already made",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("tool", hardForcing.Tool),
+				slog.Float64("similarity", similarity),
+				slog.String("status", status),
+			)
+			if similarCall != nil {
+				slog.Debug("GR-38: Similar previous call details",
+					slog.String("previous_query", similarCall.RawQuery),
+					slog.Int("previous_step", similarCall.StepNumber),
 				)
-				// Cancel hard forcing - fall through to normal LLM flow
-				hardForcing = nil
-				break
 			}
+			// Cancel hard forcing - fall through to normal LLM flow
+			hardForcing = nil
+		} else if status == "penalized" {
+			// Log but allow - the UCB1 scorer will apply a penalty if this continues
+			slog.Debug("GR-38: Similar but distinct call detected, allowing with penalty awareness",
+				slog.String("tool", hardForcing.Tool),
+				slog.Float64("similarity", similarity),
+			)
 		}
 	}
 

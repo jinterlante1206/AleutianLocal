@@ -22,6 +22,7 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -465,6 +466,18 @@ func (p *ExecutePhase) checkSemanticRepetition(
 			continue
 		}
 
+		// GR-38 Issue 14: Check for EXACT duplicate first (fast path)
+		// This catches cases like find_callees("main") called twice
+		if strings.EqualFold(query, prevQuery) {
+			span.AddEvent("exact_duplicate_detected",
+				trace.WithAttributes(
+					attribute.String("tool", tool),
+					attribute.String("query", query),
+				),
+			)
+			return true, 1.0, prevQuery
+		}
+
 		prevTerms := extractQueryTerms(prevQuery)
 		if len(prevTerms) == 0 {
 			continue
@@ -598,7 +611,8 @@ func extractToolQuery(inv *agent.ToolInvocation) string {
 	}
 
 	// Common query parameter names across tools
-	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target"}
+	// GR-38: Added function_name for find_callees/find_callers duplicate detection
+	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target", "function_name", "file_path"}
 
 	// Check StringParams first
 	if inv.Parameters.StringParams != nil {
@@ -1122,4 +1136,74 @@ func getRecentToolsFromSession(s *agent.Session) []string {
 		}
 	}
 	return recent
+}
+
+// -----------------------------------------------------------------------------
+// Semantic Tool History (GR-38 Issue 17)
+// -----------------------------------------------------------------------------
+
+// buildSemanticToolHistoryFromSession converts session trace steps to routing.ToolCallHistory.
+//
+// Description:
+//
+//	Extracts tool calls from session trace steps and builds a semantic history
+//	for duplicate detection. Uses the Metadata["query"] field from tool_routing
+//	steps as the raw query for semantic comparison.
+//
+// Inputs:
+//
+//	s - The session to extract history from.
+//
+// Outputs:
+//
+//	*routing.ToolCallHistory - Semantic history for CheckSemanticStatus.
+//
+// Thread Safety: Safe for concurrent use.
+func buildSemanticToolHistoryFromSession(s *agent.Session) *routing.ToolCallHistory {
+	history := routing.NewToolCallHistory()
+
+	if s == nil {
+		return history
+	}
+
+	traceSteps := s.GetTraceSteps()
+	if len(traceSteps) == 0 {
+		return history
+	}
+
+	stepNum := 0
+	for _, step := range traceSteps {
+		// Look at tool_routing steps which have the query in metadata
+		if step.Action != "tool_routing" {
+			continue
+		}
+
+		stepNum++
+
+		// Extract query from metadata
+		rawQuery := ""
+		if step.Metadata != nil {
+			rawQuery = step.Metadata["query"]
+		}
+
+		// Build signature
+		sig := routing.ToolCallSignature{
+			Tool:       step.Target, // tool_routing uses Target for tool name
+			QueryTerms: routing.ExtractQueryTerms(rawQuery),
+			RawQuery:   rawQuery,
+			StepNumber: stepNum,
+			Success:    step.Error == "",
+		}
+
+		history.Add(sig)
+	}
+
+	// R1.2 Fix: Trim history to maxToolHistoryEntries
+	// ToolCallHistory now has Add() auto-trimming, but we also trim explicitly
+	// in case session has many tool_routing steps.
+	if history.Len() > maxToolHistoryEntries {
+		history.Trim(maxToolHistoryEntries)
+	}
+
+	return history
 }

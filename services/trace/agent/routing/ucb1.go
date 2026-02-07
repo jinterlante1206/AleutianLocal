@@ -46,6 +46,11 @@ type ToolScore struct {
 	// Higher proof number = higher penalty = harder to prove = less preferred.
 	ProofPenalty float64 `json:"proof_penalty"`
 
+	// SemanticPenalty is the penalty for similar prior calls (0.0-1.0).
+	// Based on Jaccard similarity with previous calls of the same tool.
+	// GR-38 Issue 17: Prevents redundant tool calls with similar params.
+	SemanticPenalty float64 `json:"semantic_penalty"`
+
 	// ExplorationBonus is the UCB1 exploration term.
 	// Encourages trying less-used tools.
 	ExplorationBonus float64 `json:"exploration_bonus"`
@@ -62,6 +67,10 @@ type ToolScore struct {
 
 	// ProofStatus contains the proof index status if available.
 	ProofStatus *crs.ProofNumber `json:"proof_status,omitempty"`
+
+	// SimilarCall is the most similar prior call, if any.
+	// GR-38 Issue 17: For debugging and tracing.
+	SimilarCall *ToolCallSignature `json:"similar_call,omitempty"`
 }
 
 // UCB1Scorer scores tools using UCB1 formula with proof integration.
@@ -95,6 +104,17 @@ type UCB1Scorer struct {
 	// Default: 0.5 (proof penalty can reduce score by up to 50%).
 	proofWeight float64
 
+	// semanticWeight is the weight applied to semantic similarity penalty.
+	// Default: 0.5 (similar calls reduce score by up to 50%).
+	// GR-38 Issue 17.
+	semanticWeight float64
+
+	// semanticThreshold is the similarity threshold for blocking.
+	// Calls with similarity >= threshold are blocked as semantic duplicates.
+	// Default: 0.8.
+	// GR-38 Issue 17.
+	semanticThreshold float64
+
 	// maxUnexploredBonus is the bonus for never-selected tools.
 	// Default: 2.0 * explorationConst.
 	maxUnexploredBonus float64
@@ -117,6 +137,15 @@ type UCB1ScorerConfig struct {
 	// ProofWeight is the weight for proof penalty.
 	// Default: 0.5.
 	ProofWeight float64
+
+	// SemanticWeight is the weight for semantic similarity penalty.
+	// Default: 0.5. GR-38 Issue 17.
+	SemanticWeight float64
+
+	// SemanticThreshold is the similarity threshold for blocking.
+	// Calls with similarity >= threshold are blocked.
+	// Default: 0.8. GR-38 Issue 17.
+	SemanticThreshold float64
 
 	// MaxUnexploredBonus is the bonus for never-selected tools.
 	// Default: 2.0 * ExplorationConst.
@@ -148,8 +177,10 @@ func DefaultUCB1ScorerConfig() *UCB1ScorerConfig {
 	return &UCB1ScorerConfig{
 		ExplorationConst:   math.Sqrt(2), // 1.41421356...
 		ProofWeight:        0.5,
-		MaxUnexploredBonus: 0,                     // Will be set to 2.0 * ExplorationConst if 0
-		MaxProofNumber:     DefaultMaxProofNumber, // Default: 100
+		SemanticWeight:     DefaultSemanticPenaltyWeight, // 0.5 - GR-38 Issue 17
+		SemanticThreshold:  SemanticDuplicateThreshold,   // 0.8 - GR-38 Issue 17
+		MaxUnexploredBonus: 0,                            // Will be set to 2.0 * ExplorationConst if 0
+		MaxProofNumber:     DefaultMaxProofNumber,        // Default: 100
 		Logger:             nil,
 	}
 }
@@ -200,6 +231,23 @@ func NewUCB1ScorerWithConfig(config *UCB1ScorerConfig) *UCB1Scorer {
 		maxProofNumber = DefaultMaxProofNumber
 	}
 
+	// GR-38 Issue 17: Semantic similarity settings
+	semanticWeight := config.SemanticWeight
+	if semanticWeight < 0 {
+		semanticWeight = DefaultSemanticPenaltyWeight
+	}
+	if semanticWeight > 1.0 {
+		semanticWeight = 1.0
+	}
+
+	semanticThreshold := config.SemanticThreshold
+	if semanticThreshold <= 0 {
+		semanticThreshold = SemanticDuplicateThreshold
+	}
+	if semanticThreshold > 1.0 {
+		semanticThreshold = 1.0
+	}
+
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -208,6 +256,8 @@ func NewUCB1ScorerWithConfig(config *UCB1ScorerConfig) *UCB1Scorer {
 	return &UCB1Scorer{
 		explorationConst:   explorationConst,
 		proofWeight:        proofWeight,
+		semanticWeight:     semanticWeight,
+		semanticThreshold:  semanticThreshold,
 		maxUnexploredBonus: maxUnexploredBonus,
 		maxProofNumber:     maxProofNumber,
 		logger:             logger,
@@ -420,6 +470,114 @@ func (s *UCB1Scorer) SelectBest(scores []ToolScore) (string, ToolScore) {
 		}
 	}
 	return "", ToolScore{}
+}
+
+// ScoreToolsWithSemantic scores tools with semantic similarity awareness.
+//
+// Description:
+//
+//	Extends ScoreTools with semantic duplicate detection. If the proposed tool
+//	has similar prior calls in history, it gets penalized or blocked.
+//
+// GR-38 Issue 17: Semantic-aware tool routing.
+//
+// Inputs:
+//
+//	routerResults - Tool selections from router with confidence.
+//	proofIndex - Proof numbers for each tool (can be nil).
+//	selectionCounts - How many times each tool was selected.
+//	clauseChecker - Learned clauses for blocking (can be nil).
+//	currentAssignment - Current variable assignment for clause checking.
+//	toolHistory - History of prior tool calls with semantic signatures.
+//	proposedTool - The tool the router is suggesting.
+//	proposedQuery - The query/params for the proposed tool.
+//
+// Outputs:
+//
+//	[]ToolScore - Tools sorted by score (highest first, blocked last).
+//
+// Thread Safety: Safe for concurrent use.
+func (s *UCB1Scorer) ScoreToolsWithSemantic(
+	routerResults []RouterResult,
+	proofIndex crs.ProofIndexView,
+	selectionCounts map[string]int,
+	clauseChecker ClauseChecker,
+	currentAssignment map[string]bool,
+	toolHistory *ToolCallHistory,
+	proposedTool string,
+	proposedQuery string,
+) []ToolScore {
+	// First, get base scores without semantic penalty
+	scores := s.ScoreTools(routerResults, proofIndex, selectionCounts, clauseChecker, currentAssignment)
+
+	// If no history or no proposed tool, return base scores
+	if toolHistory == nil || proposedTool == "" {
+		return scores
+	}
+
+	// Check semantic status of the proposed tool
+	status, similarity, similarCall := CheckSemanticStatus(toolHistory, proposedTool, proposedQuery)
+
+	// Find and update the proposed tool's score
+	for i := range scores {
+		if scores[i].Tool != proposedTool {
+			continue
+		}
+
+		// Already blocked by clause? Skip semantic check
+		if scores[i].Blocked {
+			continue
+		}
+
+		switch status {
+		case "blocked":
+			// Semantic duplicate - block the tool
+			scores[i].Blocked = true
+			scores[i].BlockReason = fmt.Sprintf("semantic duplicate (%.0f%% similar to step %d)",
+				similarity*100, similarCall.StepNumber)
+			scores[i].FinalScore = -1.0
+			scores[i].SemanticPenalty = similarity * s.semanticWeight
+			scores[i].SimilarCall = similarCall
+
+			s.logger.Info("UCB1: tool blocked by semantic duplicate",
+				slog.String("tool", proposedTool),
+				slog.Float64("similarity", similarity),
+				slog.Int("similar_step", similarCall.StepNumber),
+			)
+
+		case "penalized":
+			// Similar but not duplicate - apply penalty
+			scores[i].SemanticPenalty = similarity * s.semanticWeight
+			scores[i].SimilarCall = similarCall
+
+			// Recalculate final score with semantic penalty
+			exploitation := scores[i].RouterConfidence - scores[i].ProofPenalty - scores[i].SemanticPenalty
+			scores[i].FinalScore = exploitation + scores[i].ExplorationBonus
+
+			s.logger.Debug("UCB1: tool penalized by semantic similarity",
+				slog.String("tool", proposedTool),
+				slog.Float64("similarity", similarity),
+				slog.Float64("penalty", scores[i].SemanticPenalty),
+				slog.Float64("new_score", scores[i].FinalScore),
+			)
+
+		case "allowed":
+			// No penalty needed
+			s.logger.Debug("UCB1: tool allowed (no semantic similarity)",
+				slog.String("tool", proposedTool),
+				slog.Float64("similarity", similarity),
+			)
+		}
+
+		break
+	}
+
+	// Re-sort after applying semantic penalty
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].FinalScore > scores[j].FinalScore
+	})
+
+	return scores
 }
 
 // copyAssignment creates a copy of a variable assignment.
