@@ -1938,6 +1938,10 @@ const (
 	// FailureTypeSemanticRepetition means a semantically similar tool call was detected.
 	// CB-30c: Added to prevent repeated similar queries (e.g., Grep("parseConfig") then Grep("parse_config")).
 	FailureTypeSemanticRepetition FailureType = "semantic_repetition"
+
+	// FailureTypeBatchFiltered means the router filtered out this tool call as redundant.
+	// GR-39a: Added for batch filter learning to inform CDCL clause generation.
+	FailureTypeBatchFiltered FailureType = "batch_filtered"
 )
 
 // String returns the string representation of FailureType.
@@ -1950,7 +1954,7 @@ func (f FailureType) IsValid() bool {
 	switch f {
 	case FailureTypeToolError, FailureTypeCycleDetected, FailureTypeCircuitBreaker,
 		FailureTypeTimeout, FailureTypeInvalidOutput, FailureTypeSafety,
-		FailureTypeSemanticRepetition:
+		FailureTypeSemanticRepetition, FailureTypeBatchFiltered:
 		return true
 	default:
 		return false

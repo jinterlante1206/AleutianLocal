@@ -58,6 +58,60 @@ import (
 //	[]*tools.Result - Results from tool execution.
 //	bool - True if any tool was blocked by safety.
 func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies, invocations []agent.ToolInvocation) ([]*tools.Result, bool) {
+	// GR-39a: Filter batch with router before execution to reduce redundant calls.
+	// Only applies to batches of 3+ tool calls from the main LLM.
+	// The filter uses the session's ToolRouter if it implements BatchFilterer.
+	batchSize := len(invocations)
+	if batchSize >= batchFilterMinSize && deps != nil && deps.Session != nil {
+		router := deps.Session.GetToolRouter()
+		if router != nil {
+			if bf, ok := router.(BatchFilterer); ok {
+				slog.Debug("GR-39a: Batch filter check triggered",
+					slog.String("session_id", deps.Session.ID),
+					slog.Int("batch_size", batchSize),
+					slog.Int("min_size", batchFilterMinSize),
+					slog.Bool("has_filterer", bf != nil),
+				)
+
+				filtered, err := p.filterBatchWithRouter(ctx, deps, invocations)
+				if err != nil {
+					slog.Warn("GR-39a: Batch filter error, using original batch",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("error", err.Error()),
+					)
+					// Continue with original batch on error
+				} else if len(filtered) < batchSize {
+					slog.Info("GR-39a: Batch filtered before execution",
+						slog.String("session_id", deps.Session.ID),
+						slog.Int("original", batchSize),
+						slog.Int("filtered", len(filtered)),
+						slog.Int("skipped", batchSize-len(filtered)),
+					)
+					invocations = filtered
+				} else {
+					slog.Debug("GR-39a: Batch filter kept all tools",
+						slog.String("session_id", deps.Session.ID),
+						slog.Int("batch_size", batchSize),
+					)
+				}
+			} else {
+				slog.Debug("GR-39a: Router does not implement BatchFilterer",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("router_type", fmt.Sprintf("%T", router)),
+				)
+			}
+		} else {
+			slog.Debug("GR-39a: No router available for batch filtering",
+				slog.String("session_id", deps.Session.ID),
+			)
+		}
+	} else if batchSize > 0 && batchSize < batchFilterMinSize {
+		slog.Debug("GR-39a: Batch too small for filtering",
+			slog.Int("batch_size", batchSize),
+			slog.Int("min_size", batchFilterMinSize),
+		)
+	}
+
 	results := make([]*tools.Result, 0, len(invocations))
 	blocked := false
 

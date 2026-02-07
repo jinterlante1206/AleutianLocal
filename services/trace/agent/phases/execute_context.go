@@ -442,9 +442,7 @@ func (p *ExecutePhase) checkSemanticRepetition(
 		return false, 0, ""
 	}
 
-	// Query param names to check in Metadata
-	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target", "function_name"}
-
+	// GR-39a: Use shared queryParamNames for consistent deduplication across all tools
 	for i := len(steps) - 1; i >= startIdx; i-- {
 		step := steps[i]
 
@@ -605,14 +603,25 @@ func jaccardSimilarity(a, b map[string]bool) float64 {
 // Outputs:
 //
 //	string - The query/pattern string, or empty if not found.
+//
+// queryParamNames contains parameter names used for semantic deduplication.
+// GR-39a: Consolidated list used by all 3 dedup layers (UCB1, CB-30c, GR-39a batch filter).
+// When adding a new tool, add its primary query parameter here.
+var queryParamNames = []string{
+	// Original params (GR-38)
+	"pattern", "query", "search", "symbol", "name", "path", "target", "function_name", "file_path",
+	// GR-39a: Added missing params from tool definitions
+	"package",        // explore_package
+	"symbol_name",    // symbol search tools
+	"interface_name", // find_implementers
+	"symbol_id",      // symbol lookup tools
+	"direction",      // analyze_data_flow
+}
+
 func extractToolQuery(inv *agent.ToolInvocation) string {
 	if inv == nil || inv.Parameters == nil {
 		return ""
 	}
-
-	// Common query parameter names across tools
-	// GR-38: Added function_name for find_callees/find_callers duplicate detection
-	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target", "function_name", "file_path"}
 
 	// Check StringParams first
 	if inv.Parameters.StringParams != nil {

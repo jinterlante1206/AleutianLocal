@@ -291,6 +291,87 @@ func (r *Granite4Router) SelectTool(ctx context.Context, query string, available
 	return selection, nil
 }
 
+// FilterBatch evaluates a batch of tool calls and returns filter decisions.
+//
+// # Description
+//
+// Uses the router model to decide which tool calls in a batch should be
+// executed (KEEP) vs skipped (SKIP). This helps reduce redundant tool calls
+// when the main LLM requests multiple similar operations.
+//
+// GR-39a: Implements the BatchFilterer interface for semantic deduplication.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation/timeout.
+//   - prompt: Filter prompt containing tool calls with similarity scores.
+//
+// # Outputs
+//
+//   - string: Response with KEEP/SKIP decisions (e.g., "1:KEEP 2:SKIP 3:KEEP").
+//   - error: Non-nil if the filter call fails.
+//
+// # Thread Safety
+//
+// This method is safe for concurrent use.
+func (r *Granite4Router) FilterBatch(ctx context.Context, prompt string) (string, error) {
+	ctx, span := tracer.Start(ctx, "Granite4Router.FilterBatch")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("model", r.config.Model),
+		attribute.Int("prompt_len", len(prompt)),
+	)
+
+	startTime := time.Now()
+
+	// Build messages for the model manager
+	systemPrompt := "You are a tool filter that decides which tool calls to KEEP or SKIP based on relevance and redundancy. Respond only with the format: 1:KEEP 2:SKIP 3:KEEP ..."
+	messages := []datatypes.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: prompt},
+	}
+
+	// Build generation params
+	temp := float32(r.config.Temperature)
+	maxTokens := 256 // Short response expected
+	numCtx := r.config.NumCtx
+	params := llm.GenerationParams{
+		Temperature:   &temp,
+		MaxTokens:     &maxTokens,
+		NumCtx:        &numCtx,
+		KeepAlive:     r.config.KeepAlive,
+		ModelOverride: r.config.Model,
+	}
+
+	// Use model manager for coordinated model access
+	response, err := r.modelManager.Chat(ctx, r.config.Model, messages, params)
+	if err != nil {
+		duration := time.Since(startTime)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "filter failed")
+		RecordRoutingLatency(r.config.Model, "filter_error", duration.Seconds())
+		RecordRoutingError(r.config.Model, "filter_failed")
+		return "", fmt.Errorf("batch filter failed: %w", err)
+	}
+
+	duration := time.Since(startTime)
+	span.SetAttributes(
+		attribute.Int("response_len", len(response)),
+		attribute.Int64("duration_ms", duration.Milliseconds()),
+	)
+
+	RecordRoutingLatency(r.config.Model, "filter_success", duration.Seconds())
+
+	r.logger.Debug("Batch filter completed",
+		slog.String("model", r.config.Model),
+		slog.Duration("duration", duration),
+		slog.Int("response_len", len(response)),
+	)
+
+	return response, nil
+}
+
 // parseResponse parses the JSON response from the router model.
 //
 // # Description

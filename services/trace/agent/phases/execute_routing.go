@@ -241,13 +241,22 @@ func (p *ExecutePhase) selectToolWithUCB1(
 		})
 	}
 
-	// Step 5: Score tools using UCB1
-	scores := ucb1Ctx.scorer.ScoreTools(
+	// Step 5: Score tools using UCB1 with semantic awareness (C1.2 Fix)
+	// Build semantic history from session for duplicate detection
+	var toolHistory *routing.ToolCallHistory
+	if deps.Session != nil {
+		toolHistory = buildSemanticToolHistoryFromSession(deps.Session)
+	}
+
+	scores := ucb1Ctx.scorer.ScoreToolsWithSemantic(
 		routerResults,
 		proofIndex,
 		ucb1Ctx.selectionCounts.AsMap(),
 		clauseChecker,
 		currentAssignment,
+		toolHistory,
+		routerSelection.Tool, // proposed tool
+		deps.Query,           // proposed query for semantic comparison
 	)
 
 	// Step 6: Select best non-blocked tool
@@ -266,10 +275,14 @@ func (p *ExecutePhase) selectToolWithUCB1(
 	// Record metrics for selected tool
 	routing.RecordUCB1Selection(bestTool, bestScore.FinalScore, bestScore.ProofPenalty, bestScore.ExplorationBonus)
 
-	// Record blocked tools
+	// Record blocked tools (C1.2 Fix: include semantic blocking)
 	for _, score := range scores {
 		if score.Blocked {
-			routing.RecordUCB1BlockedSelection(score.Tool, "clause_violation")
+			reason := "clause_violation"
+			if score.SimilarCall != nil {
+				reason = "semantic_duplicate"
+			}
+			routing.RecordUCB1BlockedSelection(score.Tool, reason)
 		}
 	}
 

@@ -33,8 +33,16 @@ import (
 // Standard Event Emission
 // -----------------------------------------------------------------------------
 
+// SemanticInfo holds semantic similarity information for trace step metadata.
+// O1.3 Fix: Track semantic similarity in trace steps.
+type SemanticInfo struct {
+	Similarity float64
+	Status     string // "allowed", "penalized", or "blocked"
+}
+
 // emitToolRouting emits a routing event and records a trace step.
-func (p *ExecutePhase) emitToolRouting(deps *Dependencies, selection *agent.ToolRouterSelection) {
+// O1.3 Fix: Accepts optional semantic info to include in trace step metadata.
+func (p *ExecutePhase) emitToolRouting(deps *Dependencies, selection *agent.ToolRouterSelection, semanticInfo ...SemanticInfo) {
 	if selection == nil {
 		return
 	}
@@ -63,6 +71,13 @@ func (p *ExecutePhase) emitToolRouting(deps *Dependencies, selection *agent.Tool
 				"query":      truncateQuery(deps.Query, 200),
 			},
 		}
+
+		// O1.3 Fix: Add semantic similarity to metadata if provided
+		if len(semanticInfo) > 0 {
+			traceStep.Metadata["semantic_similarity"] = fmt.Sprintf("%.3f", semanticInfo[0].Similarity)
+			traceStep.Metadata["semantic_status"] = semanticInfo[0].Status
+		}
+
 		deps.Session.RecordTraceStep(traceStep)
 	}
 }

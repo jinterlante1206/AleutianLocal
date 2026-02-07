@@ -14,15 +14,122 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // =============================================================================
 // Semantic Tool Call Tracking (GR-38 Issue 17)
 // =============================================================================
 
+// =============================================================================
+// Prometheus Metrics (O1.1 Fix)
+// =============================================================================
+
+var (
+	// semanticChecksTotal counts semantic duplicate checks by status.
+	semanticChecksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "trace_semantic_checks_total",
+		Help: "Total semantic duplicate checks by status",
+	}, []string{"status"})
+
+	// semanticSimilarityHistogram tracks similarity score distribution.
+	semanticSimilarityHistogram = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "trace_semantic_similarity",
+		Help:    "Distribution of semantic similarity scores",
+		Buckets: []float64{0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+	})
+
+	// semanticHistorySize tracks current history size.
+	semanticHistorySize = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "trace_semantic_history_size",
+		Help: "Current number of entries in semantic tool history",
+	})
+
+	// semanticCheckDuration tracks time spent on semantic checks.
+	semanticCheckDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "trace_semantic_check_duration_seconds",
+		Help:    "Time spent on semantic duplicate checks",
+		Buckets: prometheus.DefBuckets,
+	})
+)
+
+// =============================================================================
+// Configuration (S1.3 Fix)
+// =============================================================================
+
+// SemanticConfig holds configurable thresholds for semantic routing.
+//
+// Description:
+//
+//	Allows customization of semantic duplicate detection behavior.
+//	Use DefaultSemanticConfig() for production defaults.
+//
+// Thread Safety: Immutable after creation. Safe to share across goroutines.
+type SemanticConfig struct {
+	// DuplicateThreshold is the similarity threshold for blocking (default 0.8).
+	// Calls with similarity >= this are considered semantic duplicates.
+	DuplicateThreshold float64
+
+	// PenaltyThreshold is the similarity threshold for penalizing (default 0.3).
+	// Calls with similarity >= this (but < duplicate) get UCB1 penalty.
+	PenaltyThreshold float64
+
+	// PenaltyWeight is the UCB1 penalty multiplier (default 0.5).
+	// SemanticPenalty = similarity * PenaltyWeight.
+	PenaltyWeight float64
+
+	// MaxHistorySize is the maximum tool calls to retain (default 100).
+	MaxHistorySize int
+}
+
+// DefaultSemanticConfig returns production-ready default configuration.
+//
+// Outputs:
+//
+//	SemanticConfig - Configuration with default values.
+//
+// Thread Safety: Safe for concurrent use (returns value type).
+func DefaultSemanticConfig() SemanticConfig {
+	return SemanticConfig{
+		DuplicateThreshold: 0.8,
+		PenaltyThreshold:   0.3,
+		PenaltyWeight:      0.5,
+		MaxHistorySize:     100,
+	}
+}
+
+// Validate checks that configuration values are sensible.
+//
+// Outputs:
+//
+//	bool - True if configuration is valid.
+//
+// Thread Safety: Safe for concurrent use (read-only).
+func (c SemanticConfig) Validate() bool {
+	if c.DuplicateThreshold < 0 || c.DuplicateThreshold > 1 {
+		return false
+	}
+	if c.PenaltyThreshold < 0 || c.PenaltyThreshold > 1 {
+		return false
+	}
+	if c.PenaltyThreshold >= c.DuplicateThreshold {
+		return false
+	}
+	if c.PenaltyWeight < 0 {
+		return false
+	}
+	if c.MaxHistorySize <= 0 {
+		return false
+	}
+	return true
+}
+
 // MaxToolCallHistorySize is the maximum number of calls to retain in history.
 // Older calls are evicted when this limit is reached.
 // R1.1 Fix: Prevent unbounded memory growth.
+// Deprecated: Use SemanticConfig.MaxHistorySize instead.
 const MaxToolCallHistorySize = 100
 
 // noiseWords is the set of common words that don't add semantic value.
@@ -70,15 +177,18 @@ type ToolCallSignature struct {
 //	Maintains a history of tool calls for semantic duplicate detection.
 //	Provides methods to check if a proposed call is similar to prior calls.
 //	R1.1 Fix: History is limited to MaxToolCallHistorySize entries.
+//	P1.1 Fix: Tool-indexed map for O(1) tool lookup.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use. All public methods acquire locks.
 type ToolCallHistory struct {
-	mu      sync.RWMutex
-	calls   []ToolCallSignature
-	maxSize int
+	mu        sync.RWMutex
+	calls     []ToolCallSignature
+	toolIndex map[string][]int // P1.1 Fix: maps tool name -> indices in calls slice
+	maxSize   int
+	config    SemanticConfig
 }
 
-// NewToolCallHistory creates a new empty history with default max size.
+// NewToolCallHistory creates a new empty history with default configuration.
 //
 // Outputs:
 //
@@ -86,7 +196,7 @@ type ToolCallHistory struct {
 //
 // Thread Safety: The returned instance is safe for concurrent use.
 func NewToolCallHistory() *ToolCallHistory {
-	return NewToolCallHistoryWithSize(MaxToolCallHistorySize)
+	return NewToolCallHistoryWithConfig(DefaultSemanticConfig())
 }
 
 // NewToolCallHistoryWithSize creates a new empty history with specified max size.
@@ -100,13 +210,36 @@ func NewToolCallHistory() *ToolCallHistory {
 //	*ToolCallHistory - The history instance.
 //
 // Thread Safety: The returned instance is safe for concurrent use.
+//
+// Deprecated: Use NewToolCallHistoryWithConfig for full configuration.
 func NewToolCallHistoryWithSize(maxSize int) *ToolCallHistory {
-	if maxSize <= 0 {
-		maxSize = MaxToolCallHistorySize
+	config := DefaultSemanticConfig()
+	if maxSize > 0 {
+		config.MaxHistorySize = maxSize
+	}
+	return NewToolCallHistoryWithConfig(config)
+}
+
+// NewToolCallHistoryWithConfig creates a new empty history with full configuration.
+//
+// Inputs:
+//
+//	config - Semantic configuration. If invalid, uses defaults.
+//
+// Outputs:
+//
+//	*ToolCallHistory - The history instance.
+//
+// Thread Safety: The returned instance is safe for concurrent use.
+func NewToolCallHistoryWithConfig(config SemanticConfig) *ToolCallHistory {
+	if !config.Validate() {
+		config = DefaultSemanticConfig()
 	}
 	return &ToolCallHistory{
-		calls:   make([]ToolCallSignature, 0, min(maxSize, 100)),
-		maxSize: maxSize,
+		calls:     make([]ToolCallSignature, 0, min(config.MaxHistorySize, 100)),
+		toolIndex: make(map[string][]int),
+		maxSize:   config.MaxHistorySize,
+		config:    config,
 	}
 }
 
@@ -115,28 +248,49 @@ func NewToolCallHistoryWithSize(maxSize int) *ToolCallHistory {
 // Description:
 //
 //	Appends the signature to history. If history exceeds maxSize,
-//	older entries are evicted (sliding window).
+//	older entries are evicted (sliding window). Updates the tool index.
 //
 // Inputs:
 //
 //	sig - The tool call signature to record.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use. Acquires write lock.
 func (h *ToolCallHistory) Add(sig ToolCallSignature) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	idx := len(h.calls)
 	h.calls = append(h.calls, sig)
+
+	// P1.1 Fix: Update tool index
+	h.toolIndex[sig.Tool] = append(h.toolIndex[sig.Tool], idx)
 
 	// R1.1 Fix: Evict oldest entries if over limit
 	if len(h.calls) > h.maxSize {
-		// Keep the most recent maxSize entries
 		excess := len(h.calls) - h.maxSize
 		h.calls = h.calls[excess:]
+		// P1.1 Fix: Rebuild index after eviction
+		h.rebuildIndexLocked()
+	}
+
+	// O1.1 Fix: Update gauge metric
+	semanticHistorySize.Set(float64(len(h.calls)))
+}
+
+// rebuildIndexLocked rebuilds the tool index from scratch.
+// Must be called with write lock held.
+func (h *ToolCallHistory) rebuildIndexLocked() {
+	h.toolIndex = make(map[string][]int, len(h.toolIndex))
+	for i, call := range h.calls {
+		h.toolIndex[call.Tool] = append(h.toolIndex[call.Tool], i)
 	}
 }
 
 // GetCallsForTool returns all calls for a specific tool.
+//
+// Description:
+//
+//	P1.1 Fix: Uses tool index for O(1) lookup instead of O(n) scan.
 //
 // Inputs:
 //
@@ -144,18 +298,22 @@ func (h *ToolCallHistory) Add(sig ToolCallSignature) {
 //
 // Outputs:
 //
-//	[]ToolCallSignature - Calls matching the tool name.
+//	[]ToolCallSignature - Copies of calls matching the tool name.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use. Acquires read lock.
 func (h *ToolCallHistory) GetCallsForTool(tool string) []ToolCallSignature {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	var result []ToolCallSignature
-	for _, call := range h.calls {
-		if call.Tool == tool {
-			result = append(result, call)
-		}
+	// P1.1 Fix: Use tool index for O(1) lookup
+	indices := h.toolIndex[tool]
+	if len(indices) == 0 {
+		return nil
+	}
+
+	result := make([]ToolCallSignature, len(indices))
+	for i, idx := range indices {
+		result[i] = h.calls[idx]
 	}
 	return result
 }
@@ -167,6 +325,7 @@ func (h *ToolCallHistory) GetCallsForTool(tool string) []ToolCallSignature {
 //	Compares the proposed query terms against all prior calls of the same tool.
 //	Returns the maximum similarity found and a copy of the most similar call.
 //	I1.1 Fix: Returns copy instead of pointer to avoid data races.
+//	P1.1 Fix: Uses tool index to only check relevant calls.
 //
 // Inputs:
 //
@@ -178,23 +337,25 @@ func (h *ToolCallHistory) GetCallsForTool(tool string) []ToolCallSignature {
 //	maxSimilarity - Highest Jaccard similarity found (0.0-1.0).
 //	mostSimilar - Copy of the most similar prior call, or nil if none found.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use. Acquires read lock.
 func (h *ToolCallHistory) GetSimilarity(tool string, queryTerms map[string]bool) (float64, *ToolCallSignature) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	// P1.1 Fix: Use tool index to only iterate relevant calls
+	indices := h.toolIndex[tool]
+	if len(indices) == 0 {
+		return 0.0, nil
+	}
+
 	var maxSimilarity float64
 	var mostSimilarIdx int = -1
 
-	for i := range h.calls {
-		if h.calls[i].Tool != tool {
-			continue
-		}
-
-		similarity := JaccardSimilarity(queryTerms, h.calls[i].QueryTerms)
+	for _, idx := range indices {
+		similarity := JaccardSimilarity(queryTerms, h.calls[idx].QueryTerms)
 		if similarity > maxSimilarity {
 			maxSimilarity = similarity
-			mostSimilarIdx = i
+			mostSimilarIdx = idx
 		}
 	}
 
@@ -214,6 +375,7 @@ func (h *ToolCallHistory) GetSimilarity(tool string, queryTerms map[string]bool)
 //	An exact duplicate is same tool + same raw query (case-insensitive).
 //	P1.3 Fix: Uses EqualFold directly without redundant ToLower.
 //	I1.1 Fix: Returns copy instead of pointer to avoid data races.
+//	P1.1 Fix: Uses tool index to only check relevant calls.
 //
 // Inputs:
 //
@@ -225,22 +387,24 @@ func (h *ToolCallHistory) GetSimilarity(tool string, queryTerms map[string]bool)
 //	bool - True if an exact duplicate exists.
 //	*ToolCallSignature - Copy of the duplicate call, or nil if none.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use. Acquires read lock.
 func (h *ToolCallHistory) IsExactDuplicate(tool, rawQuery string) (bool, *ToolCallSignature) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	// P1.1 Fix: Use tool index to only iterate relevant calls
+	indices := h.toolIndex[tool]
+	if len(indices) == 0 {
+		return false, nil
+	}
+
 	// P1.3 Fix: TrimSpace once, use EqualFold for case-insensitive comparison
 	trimmedQuery := strings.TrimSpace(rawQuery)
 
-	for i := range h.calls {
-		if h.calls[i].Tool != tool {
-			continue
-		}
-
-		if strings.EqualFold(strings.TrimSpace(h.calls[i].RawQuery), trimmedQuery) {
+	for _, idx := range indices {
+		if strings.EqualFold(strings.TrimSpace(h.calls[idx].RawQuery), trimmedQuery) {
 			// I1.1 Fix: Return a copy
-			callCopy := h.calls[i]
+			callCopy := h.calls[idx]
 			return true, &callCopy
 		}
 	}
@@ -257,13 +421,15 @@ func (h *ToolCallHistory) Len() int {
 	return len(h.calls)
 }
 
-// Clear removes all recorded calls.
+// Clear removes all recorded calls and resets the tool index.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use. Acquires write lock.
 func (h *ToolCallHistory) Clear() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.calls = h.calls[:0]
+	h.toolIndex = make(map[string][]int)
+	semanticHistorySize.Set(0)
 }
 
 // Trim reduces the history to the specified size, keeping the most recent entries.
@@ -271,37 +437,56 @@ func (h *ToolCallHistory) Clear() {
 // Description:
 //
 //	R1.2 Fix: Allows external callers to trim history if needed.
+//	Rebuilds the tool index after trimming.
 //
 // Inputs:
 //
 //	size - Maximum number of entries to keep. If <= 0, clears all entries.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use. Acquires write lock.
 func (h *ToolCallHistory) Trim(size int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if size <= 0 {
 		h.calls = h.calls[:0]
+		h.toolIndex = make(map[string][]int)
+		semanticHistorySize.Set(0)
 		return
 	}
 
 	if len(h.calls) > size {
 		excess := len(h.calls) - size
 		h.calls = h.calls[excess:]
+		h.rebuildIndexLocked()
 	}
+	semanticHistorySize.Set(float64(len(h.calls)))
 }
 
 // MaxSize returns the maximum history size.
 //
-// Thread Safety: Safe for concurrent use.
+// Thread Safety: Safe for concurrent use (reads immutable field).
 func (h *ToolCallHistory) MaxSize() int {
 	return h.maxSize
+}
+
+// Config returns the semantic configuration.
+//
+// Thread Safety: Safe for concurrent use (returns copy of immutable config).
+func (h *ToolCallHistory) Config() SemanticConfig {
+	return h.config
 }
 
 // =============================================================================
 // Semantic Similarity Functions
 // =============================================================================
+
+// delimiterSet marks characters that should be treated as word delimiters.
+// P1.2 Fix: Package-level set avoids allocation per call.
+var delimiterSet = [256]bool{
+	'_': true, '-': true, '.': true, '/': true, '\\': true, ':': true,
+	' ': true, '\t': true, '\n': true, '\r': true,
+}
 
 // ExtractQueryTerms extracts terms from a query string for Jaccard comparison.
 //
@@ -310,6 +495,7 @@ func (h *ToolCallHistory) MaxSize() int {
 //	Tokenizes the query into lowercase terms, normalizing for comparison.
 //	Handles common delimiters like spaces, underscores, and camelCase.
 //	R1.4 Fix: Uses unicode.IsUpper for proper Unicode handling.
+//	P1.2 Fix: Single-pass algorithm reduces allocations.
 //
 // Inputs:
 //
@@ -319,7 +505,7 @@ func (h *ToolCallHistory) MaxSize() int {
 //
 //	map[string]bool - Set of unique lowercase terms.
 //
-// Thread Safety: Safe for concurrent use (no shared state).
+// Thread Safety: Safe for concurrent use (no shared state modified).
 func ExtractQueryTerms(query string) map[string]bool {
 	terms := make(map[string]bool)
 
@@ -327,40 +513,50 @@ func ExtractQueryTerms(query string) map[string]bool {
 		return terms
 	}
 
-	// Split camelCase FIRST (before lowercase): "parseConfig" -> "parse Config"
-	// R1.4 Fix: Use unicode.IsUpper for proper Unicode handling
-	var expanded strings.Builder
+	// P1.2 Fix: Single-pass extraction with camelCase splitting and delimiter handling
+	// Pre-allocate builder with estimated capacity
+	var wordBuilder strings.Builder
+	wordBuilder.Grow(32)
+
 	var prevWasUpper bool
-	for i, r := range query {
+	var prevWasDelim bool = true // Start as if after delimiter
+
+	flushWord := func() {
+		if wordBuilder.Len() >= 2 {
+			word := wordBuilder.String()
+			if !noiseWords[word] {
+				terms[word] = true
+			}
+		}
+		wordBuilder.Reset()
+	}
+
+	for _, r := range query {
+		// Check if this is a delimiter (ASCII only for delimiters)
+		isDelim := r < 256 && delimiterSet[byte(r)]
+		if isDelim {
+			flushWord()
+			prevWasDelim = true
+			prevWasUpper = false
+			continue
+		}
+
+		// R1.4 Fix: Use unicode.IsUpper for proper Unicode handling
 		isUpper := unicode.IsUpper(r)
-		if i > 0 && isUpper && !prevWasUpper {
-			expanded.WriteRune(' ')
+
+		// Split on camelCase boundary (lowercase -> uppercase transition)
+		if isUpper && !prevWasUpper && !prevWasDelim {
+			flushWord()
 		}
-		expanded.WriteRune(r)
+
+		// Write lowercase rune
+		wordBuilder.WriteRune(unicode.ToLower(r))
 		prevWasUpper = isUpper
+		prevWasDelim = false
 	}
-	query = expanded.String()
 
-	// Normalize to lowercase
-	query = strings.ToLower(query)
-
-	// Replace common delimiters with spaces
-	query = strings.ReplaceAll(query, "_", " ")
-	query = strings.ReplaceAll(query, "-", " ")
-	query = strings.ReplaceAll(query, ".", " ")
-	query = strings.ReplaceAll(query, "/", " ")
-	query = strings.ReplaceAll(query, "\\", " ")
-	query = strings.ReplaceAll(query, ":", " ")
-
-	// Extract words
-	words := strings.Fields(query)
-	for _, word := range words {
-		// Skip single characters and common noise words
-		// R1.3 Fix: Use package-level noiseWords map
-		if len(word) >= 2 && !noiseWords[word] {
-			terms[word] = true
-		}
-	}
+	// Flush final word
+	flushWord()
 
 	return terms
 }
@@ -506,9 +702,11 @@ const (
 // Description:
 //
 //	Returns the semantic status of a proposed tool call:
-//	- Blocked: Similarity >= 0.8 (semantic duplicate)
-//	- Penalized: Similarity >= 0.3 (similar but not duplicate)
-//	- Allowed: Similarity < 0.3 (sufficiently different)
+//	- Blocked: Similarity >= DuplicateThreshold (semantic duplicate)
+//	- Penalized: Similarity >= PenaltyThreshold (similar but not duplicate)
+//	- Allowed: Similarity < PenaltyThreshold (sufficiently different)
+//	S1.3 Fix: Uses configurable thresholds from history's config.
+//	O1.1 Fix: Records Prometheus metrics.
 //
 // Inputs:
 //
@@ -532,8 +730,17 @@ func CheckSemanticStatus(history *ToolCallHistory, tool, rawQuery string) (statu
 		return "allowed", 0.0, nil
 	}
 
+	// O1.1 Fix: Track check duration
+	timer := prometheus.NewTimer(semanticCheckDuration)
+	defer timer.ObserveDuration()
+
+	// S1.3 Fix: Use configurable thresholds
+	config := history.Config()
+
 	// Check for exact duplicate first (fast path)
 	if isDup, dupCall := history.IsExactDuplicate(tool, rawQuery); isDup {
+		semanticChecksTotal.WithLabelValues("blocked").Inc()
+		semanticSimilarityHistogram.Observe(1.0)
 		return "blocked", 1.0, dupCall
 	}
 
@@ -541,13 +748,19 @@ func CheckSemanticStatus(history *ToolCallHistory, tool, rawQuery string) (statu
 	queryTerms := ExtractQueryTerms(rawQuery)
 	similarity, similarCall = history.GetSimilarity(tool, queryTerms)
 
-	if similarity >= SemanticDuplicateThreshold {
+	// O1.1 Fix: Record similarity distribution
+	semanticSimilarityHistogram.Observe(similarity)
+
+	if similarity >= config.DuplicateThreshold {
+		semanticChecksTotal.WithLabelValues("blocked").Inc()
 		return "blocked", similarity, similarCall
 	}
 
-	if similarity >= SemanticPenaltyThreshold {
+	if similarity >= config.PenaltyThreshold {
+		semanticChecksTotal.WithLabelValues("penalized").Inc()
 		return "penalized", similarity, similarCall
 	}
 
+	semanticChecksTotal.WithLabelValues("allowed").Inc()
 	return "allowed", similarity, similarCall
 }

@@ -317,6 +317,9 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	// Build the LLM request
 	request, hardForcing := p.buildLLMRequest(deps)
 
+	// O1.3 Fix: Capture semantic info for trace step metadata
+	var lastSemanticInfo *SemanticInfo
+
 	// Check if hard forcing is enabled (router selected a real tool with high confidence)
 	if hardForcing != nil {
 		// GR-38 Fix (Issue 17): Use semantic similarity to detect duplicates.
@@ -337,6 +340,12 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			hardForcing.Tool,
 			deps.Query, // Use the user query for semantic comparison
 		)
+
+		// O1.3 Fix: Capture semantic info for later use
+		lastSemanticInfo = &SemanticInfo{
+			Similarity: similarity,
+			Status:     status,
+		}
 
 		// O1.2 Fix: Record span attributes
 		semanticSpan.SetAttributes(
@@ -409,7 +418,12 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			} else {
 				// Success! Tool executed directly - return early
 				grounding.RecordRouterHardForced(hardForcing.Tool, true)
-				p.emitToolRouting(deps, hardForcing)
+				// O1.3 Fix: Include semantic info in trace step
+				if lastSemanticInfo != nil {
+					p.emitToolRouting(deps, hardForcing, *lastSemanticInfo)
+				} else {
+					p.emitToolRouting(deps, hardForcing)
+				}
 
 				// Convert PhaseResult to state and return
 				return execResult.NextState, nil
@@ -1075,6 +1089,28 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		deps.Session.IncrementMetric(agent.MetricTokens, response.OutputTokens)
 	}
 	deps.Session.IncrementMetric(agent.MetricLLMCalls, 1)
+
+	// GR-39a Issue 1: Handle empty response by synthesizing from tool results
+	// This fixes cases where the LLM returns no content after tool calls
+	if strings.TrimSpace(response.Content) == "" {
+		slog.Warn("GR-39a: Empty response content detected, attempting synthesis",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("output_tokens", response.OutputTokens),
+		)
+
+		synthesized := p.synthesizeFromToolResults(deps)
+		if synthesized != "" {
+			slog.Info("GR-39a: Synthesized response from tool results",
+				slog.String("session_id", deps.Session.ID),
+				slog.Int("synthesized_len", len(synthesized)),
+			)
+			response.Content = synthesized
+		} else {
+			slog.Warn("GR-39a: No tool results available for synthesis, continuing with empty response",
+				slog.String("session_id", deps.Session.ID),
+			)
+		}
+	}
 
 	// Validate response for prohibited patterns (hybrid stack layer 4)
 	if p.responseValidator != nil {
