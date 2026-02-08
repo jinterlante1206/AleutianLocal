@@ -1524,3 +1524,70 @@ func TestQueryJSON(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// GR-38: Relative Path Normalization Tests
+// ============================================================================
+
+func TestGrepTool_Execute_RelativePath(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	// Create a subdirectory with a test file
+	subdir := filepath.Join(dir, "subdir")
+	os.MkdirAll(subdir, 0755)
+	createTestFile(t, subdir, "test.go", "func main() {\n\tfmt.Println(\"hello\")\n}\n")
+
+	tool := NewGrepTool(config)
+	ctx := context.Background()
+
+	// GR-38: Test with relative path - should normalize to absolute
+	result, err := tool.Execute(ctx, map[string]any{
+		"pattern": "main",
+		"path":    "subdir", // Relative path - should be joined with working dir
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success with relative path, got error: %s", result.Error)
+	}
+
+	grepResult := result.Output.(*GrepResult)
+	if grepResult.Count == 0 {
+		t.Error("expected matches when using relative path")
+	}
+}
+
+func TestGlobTool_Execute_RelativePath(t *testing.T) {
+	dir, config, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	// Create a subdirectory with test files
+	subdir := filepath.Join(dir, "src")
+	os.MkdirAll(subdir, 0755)
+	createTestFile(t, subdir, "main.go", "package main")
+	createTestFile(t, subdir, "util.go", "package main")
+
+	tool := NewGlobTool(config)
+	ctx := context.Background()
+
+	// GR-38: Test with relative path - should normalize to absolute
+	result, err := tool.Execute(ctx, map[string]any{
+		"pattern": "*.go",
+		"path":    "src", // Relative path - should be joined with working dir
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success with relative path, got error: %s", result.Error)
+	}
+
+	globResult := result.Output.(*GlobResult)
+	if globResult.Count != 2 {
+		t.Errorf("expected 2 files, got %d", globResult.Count)
+	}
+}

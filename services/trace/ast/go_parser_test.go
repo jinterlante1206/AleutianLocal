@@ -734,3 +734,682 @@ func filterByKind(symbols []*Symbol, kind SymbolKind) []*Symbol {
 	}
 	return result
 }
+
+// === GR-40: Go Interface Implementation Detection Tests ===
+
+// Test source for interface method collection.
+const testGoInterfaceWithMethods = `package example
+
+// Handler defines request handling operations.
+type Handler interface {
+	Handle(ctx context.Context, req *Request) (*Response, error)
+	Close() error
+}
+
+// EmptyInterface is an empty interface.
+type EmptyInterface interface{}
+
+// Reader defines read operations.
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+`
+
+// Test source for method-type association.
+const testGoTypeWithMethods = `package example
+
+type Handler struct {
+	name string
+}
+
+func (h *Handler) Handle(ctx context.Context, req *Request) (*Response, error) {
+	return nil, nil
+}
+
+func (h *Handler) Close() error {
+	return nil
+}
+
+func (h Handler) String() string {
+	return h.name
+}
+
+type Reader struct{}
+
+func (r *Reader) Read(p []byte) (n int, err error) {
+	return 0, nil
+}
+`
+
+func TestGoParser_InterfaceMethodCollection(t *testing.T) {
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(testGoInterfaceWithMethods), "interface.go")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	interfaces := filterByKind(result.Symbols, SymbolKindInterface)
+	if len(interfaces) != 3 {
+		t.Fatalf("expected 3 interfaces, got %d", len(interfaces))
+	}
+
+	t.Run("Handler interface has methods in Metadata", func(t *testing.T) {
+		var handler *Symbol
+		for _, iface := range interfaces {
+			if iface.Name == "Handler" {
+				handler = iface
+				break
+			}
+		}
+		if handler == nil {
+			t.Fatal("Handler interface not found")
+		}
+
+		if handler.Metadata == nil {
+			t.Fatal("Handler.Metadata is nil")
+		}
+
+		if len(handler.Metadata.Methods) != 2 {
+			t.Errorf("expected 2 methods in Handler.Metadata.Methods, got %d", len(handler.Metadata.Methods))
+		}
+
+		// Verify method names
+		methodNames := make(map[string]bool)
+		for _, m := range handler.Metadata.Methods {
+			methodNames[m.Name] = true
+		}
+		if !methodNames["Handle"] {
+			t.Error("expected Handle method in Handler interface")
+		}
+		if !methodNames["Close"] {
+			t.Error("expected Close method in Handler interface")
+		}
+	})
+
+	t.Run("Handle method has correct parameter count", func(t *testing.T) {
+		var handler *Symbol
+		for _, iface := range interfaces {
+			if iface.Name == "Handler" {
+				handler = iface
+				break
+			}
+		}
+		if handler == nil || handler.Metadata == nil {
+			t.Skip("Handler not found")
+		}
+
+		for _, m := range handler.Metadata.Methods {
+			if m.Name == "Handle" {
+				if m.ParamCount != 2 {
+					t.Errorf("expected Handle to have 2 params, got %d", m.ParamCount)
+				}
+				if m.ReturnCount != 2 {
+					t.Errorf("expected Handle to have 2 returns, got %d", m.ReturnCount)
+				}
+				return
+			}
+		}
+		t.Error("Handle method not found in Metadata.Methods")
+	})
+
+	t.Run("EmptyInterface has no methods", func(t *testing.T) {
+		var empty *Symbol
+		for _, iface := range interfaces {
+			if iface.Name == "EmptyInterface" {
+				empty = iface
+				break
+			}
+		}
+		if empty == nil {
+			t.Fatal("EmptyInterface not found")
+		}
+
+		// Empty interfaces should have nil Metadata or empty Methods
+		if empty.Metadata != nil && len(empty.Metadata.Methods) > 0 {
+			t.Errorf("expected EmptyInterface to have no methods, got %d", len(empty.Metadata.Methods))
+		}
+	})
+
+	t.Run("Reader interface has Read method", func(t *testing.T) {
+		var reader *Symbol
+		for _, iface := range interfaces {
+			if iface.Name == "Reader" {
+				reader = iface
+				break
+			}
+		}
+		if reader == nil {
+			t.Fatal("Reader interface not found")
+		}
+
+		if reader.Metadata == nil || len(reader.Metadata.Methods) != 1 {
+			t.Fatalf("expected 1 method in Reader.Metadata.Methods, got %v", reader.Metadata)
+		}
+
+		read := reader.Metadata.Methods[0]
+		if read.Name != "Read" {
+			t.Errorf("expected method name 'Read', got %q", read.Name)
+		}
+		if read.ParamCount != 1 {
+			t.Errorf("expected Read to have 1 param, got %d", read.ParamCount)
+		}
+		if read.ReturnCount != 2 {
+			t.Errorf("expected Read to have 2 returns, got %d", read.ReturnCount)
+		}
+	})
+}
+
+func TestGoParser_MethodTypeAssociation(t *testing.T) {
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(testGoTypeWithMethods), "methods.go")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	structs := filterByKind(result.Symbols, SymbolKindStruct)
+	if len(structs) != 2 {
+		t.Fatalf("expected 2 structs, got %d", len(structs))
+	}
+
+	t.Run("Handler struct has methods associated", func(t *testing.T) {
+		var handler *Symbol
+		for _, s := range structs {
+			if s.Name == "Handler" {
+				handler = s
+				break
+			}
+		}
+		if handler == nil {
+			t.Fatal("Handler struct not found")
+		}
+
+		if handler.Metadata == nil {
+			t.Fatal("Handler.Metadata is nil")
+		}
+
+		// Handler has 3 methods: Handle, Close, String
+		if len(handler.Metadata.Methods) != 3 {
+			t.Errorf("expected 3 methods in Handler.Metadata.Methods, got %d", len(handler.Metadata.Methods))
+		}
+
+		methodNames := make(map[string]bool)
+		for _, m := range handler.Metadata.Methods {
+			methodNames[m.Name] = true
+		}
+		if !methodNames["Handle"] {
+			t.Error("expected Handle method associated with Handler")
+		}
+		if !methodNames["Close"] {
+			t.Error("expected Close method associated with Handler")
+		}
+		if !methodNames["String"] {
+			t.Error("expected String method associated with Handler")
+		}
+	})
+
+	t.Run("Reader struct has Read method associated", func(t *testing.T) {
+		var reader *Symbol
+		for _, s := range structs {
+			if s.Name == "Reader" {
+				reader = s
+				break
+			}
+		}
+		if reader == nil {
+			t.Fatal("Reader struct not found")
+		}
+
+		if reader.Metadata == nil {
+			t.Fatal("Reader.Metadata is nil")
+		}
+
+		if len(reader.Metadata.Methods) != 1 {
+			t.Errorf("expected 1 method in Reader.Metadata.Methods, got %d", len(reader.Metadata.Methods))
+		}
+
+		if len(reader.Metadata.Methods) > 0 && reader.Metadata.Methods[0].Name != "Read" {
+			t.Errorf("expected method name 'Read', got %q", reader.Metadata.Methods[0].Name)
+		}
+	})
+}
+
+func TestGoParser_MethodReceiverField(t *testing.T) {
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(testGoTypeWithMethods), "methods.go")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	methods := filterByKind(result.Symbols, SymbolKindMethod)
+
+	t.Run("Method has Receiver field set", func(t *testing.T) {
+		var handleMethod *Symbol
+		for _, m := range methods {
+			if m.Name == "Handle" {
+				handleMethod = m
+				break
+			}
+		}
+		if handleMethod == nil {
+			t.Fatal("Handle method not found")
+		}
+
+		if handleMethod.Receiver != "Handler" {
+			t.Errorf("expected Receiver 'Handler', got %q", handleMethod.Receiver)
+		}
+	})
+
+	t.Run("All methods have Receiver field", func(t *testing.T) {
+		for _, m := range methods {
+			if m.Receiver == "" {
+				t.Errorf("method %q has empty Receiver field", m.Name)
+			}
+		}
+	})
+}
+
+func TestExtractReceiverTypeName(t *testing.T) {
+	tests := []struct {
+		name            string
+		signature       string
+		expectedType    string
+		expectedPointer bool
+	}{
+		{
+			name:            "pointer receiver",
+			signature:       "func (h *Handler) DoWork(ctx context.Context) error",
+			expectedType:    "Handler",
+			expectedPointer: true,
+		},
+		{
+			name:            "value receiver",
+			signature:       "func (h Handler) String() string",
+			expectedType:    "Handler",
+			expectedPointer: false,
+		},
+		{
+			name:            "single letter receiver",
+			signature:       "func (r *Reader) Read(p []byte) (int, error)",
+			expectedType:    "Reader",
+			expectedPointer: true,
+		},
+		{
+			name:            "no variable name",
+			signature:       "func (*Handler) Handle()",
+			expectedType:    "Handler",
+			expectedPointer: true,
+		},
+		{
+			name:            "empty signature",
+			signature:       "",
+			expectedType:    "",
+			expectedPointer: false,
+		},
+		{
+			name:            "function not method",
+			signature:       "func DoWork(ctx context.Context) error",
+			expectedType:    "",
+			expectedPointer: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			typeName, isPointer := extractReceiverTypeName(tc.signature)
+			if typeName != tc.expectedType {
+				t.Errorf("expected type %q, got %q", tc.expectedType, typeName)
+			}
+			if isPointer != tc.expectedPointer {
+				t.Errorf("expected isPointer=%v, got %v", tc.expectedPointer, isPointer)
+			}
+		})
+	}
+}
+
+func TestCountParamString(t *testing.T) {
+	tests := []struct {
+		name     string
+		params   string
+		expected int
+	}{
+		{"empty", "", 0},
+		{"single param", "ctx context.Context", 1},
+		{"two params", "a int, b int", 2},
+		{"two params combined type", "a, b int", 2},
+		{"three params", "ctx context.Context, req *Request, opts ...Option", 3},
+		{"nested func type", "handler func(int, int) error", 1},
+		{"nested map type", "m map[string]interface{}", 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := countParamString(tc.params)
+			if got != tc.expected {
+				t.Errorf("countParamString(%q) = %d, want %d", tc.params, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestCountReturnString(t *testing.T) {
+	tests := []struct {
+		name     string
+		returns  string
+		expected int
+	}{
+		{"empty", "", 0},
+		{"single type", "error", 1},
+		{"single pointer", "*Handler", 1},
+		{"two returns", "(int, error)", 2},
+		{"three returns", "(*Response, bool, error)", 3},
+		{"named returns", "(n int, err error)", 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := countReturnString(tc.returns)
+			if got != tc.expected {
+				t.Errorf("countReturnString(%q) = %d, want %d", tc.returns, got, tc.expected)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// GR-41: Call Extraction Tests
+// =============================================================================
+
+// testGoWithCalls is a test fixture for call extraction.
+const testGoWithCalls = `package main
+
+import (
+	"fmt"
+	"config"
+)
+
+func Setup() {
+	LoadConfig()
+	config.Initialize()
+	db.Connect()
+}
+
+func LoadConfig() {
+	fmt.Println("loading")
+}
+
+func ProcessData(data []byte) error {
+	result := transform(data)
+	err := validate(result)
+	if err != nil {
+		return logError(err)
+	}
+	return nil
+}
+
+type Server struct {
+	db Database
+}
+
+func (s *Server) Start() {
+	s.db.Connect()
+	s.listen()
+}
+
+func (s *Server) listen() {
+	fmt.Println("listening")
+}
+`
+
+func TestGoParser_ExtractCallSites_BasicFunction(t *testing.T) {
+	parser := NewGoParser()
+	result, err := parser.Parse(context.Background(), []byte(testGoWithCalls), "test.go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Find the Setup function
+	var setupSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Setup" && sym.Kind == SymbolKindFunction {
+			setupSym = sym
+			break
+		}
+	}
+
+	if setupSym == nil {
+		t.Fatal("Setup function not found")
+	}
+
+	if len(setupSym.Calls) == 0 {
+		t.Error("Setup should have call sites extracted")
+	}
+
+	// Check that we found the expected calls
+	callTargets := make(map[string]bool)
+	for _, call := range setupSym.Calls {
+		callTargets[call.Target] = true
+	}
+
+	expectedCalls := []string{"LoadConfig", "Initialize", "Connect"}
+	for _, expected := range expectedCalls {
+		if !callTargets[expected] {
+			t.Errorf("Expected call to %s not found in Setup", expected)
+		}
+	}
+}
+
+func TestGoParser_ExtractCallSites_MethodCall(t *testing.T) {
+	parser := NewGoParser()
+	result, err := parser.Parse(context.Background(), []byte(testGoWithCalls), "test.go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Find the Start method
+	var startSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Start" && sym.Kind == SymbolKindMethod {
+			startSym = sym
+			break
+		}
+	}
+
+	if startSym == nil {
+		t.Fatal("Start method not found")
+	}
+
+	if len(startSym.Calls) == 0 {
+		t.Error("Start method should have call sites extracted")
+	}
+
+	// Check that we found method calls with receivers
+	hasMethodCall := false
+	for _, call := range startSym.Calls {
+		if call.IsMethod && call.Receiver != "" {
+			hasMethodCall = true
+			break
+		}
+	}
+
+	if !hasMethodCall {
+		t.Error("Start method should have method calls with receivers")
+	}
+}
+
+func TestGoParser_ExtractCallSites_NestedCalls(t *testing.T) {
+	parser := NewGoParser()
+	result, err := parser.Parse(context.Background(), []byte(testGoWithCalls), "test.go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Find the ProcessData function
+	var processDataSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "ProcessData" && sym.Kind == SymbolKindFunction {
+			processDataSym = sym
+			break
+		}
+	}
+
+	if processDataSym == nil {
+		t.Fatal("ProcessData function not found")
+	}
+
+	// Should have calls to transform, validate, and logError
+	if len(processDataSym.Calls) < 3 {
+		t.Errorf("ProcessData should have at least 3 calls, got %d", len(processDataSym.Calls))
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range processDataSym.Calls {
+		callTargets[call.Target] = true
+	}
+
+	expectedCalls := []string{"transform", "validate", "logError"}
+	for _, expected := range expectedCalls {
+		if !callTargets[expected] {
+			t.Errorf("Expected call to %s not found in ProcessData", expected)
+		}
+	}
+}
+
+func TestGoParser_ExtractCallSites_ContextCancellation(t *testing.T) {
+	parser := NewGoParser()
+
+	// Create a cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Should still parse but may have fewer/no calls extracted
+	_, err := parser.Parse(ctx, []byte(testGoWithCalls), "test.go")
+	if err == nil {
+		// If it didn't error, that's ok - context cancellation is checked periodically
+		return
+	}
+
+	// Error should be context-related
+	if !strings.Contains(err.Error(), "cancel") {
+		t.Errorf("Expected context cancellation error, got: %v", err)
+	}
+}
+
+func TestGoParser_ExtractCallSites_EmptyFunction(t *testing.T) {
+	code := `package main
+
+func Empty() {
+}
+`
+	parser := NewGoParser()
+	result, err := parser.Parse(context.Background(), []byte(code), "test.go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	var emptySym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Empty" && sym.Kind == SymbolKindFunction {
+			emptySym = sym
+			break
+		}
+	}
+
+	if emptySym == nil {
+		t.Fatal("Empty function not found")
+	}
+
+	if len(emptySym.Calls) != 0 {
+		t.Errorf("Empty function should have no calls, got %d", len(emptySym.Calls))
+	}
+}
+
+func TestGoParser_ExtractCallSites_CallLocation(t *testing.T) {
+	code := `package main
+
+func Caller() {
+	Target()
+}
+`
+	parser := NewGoParser()
+	result, err := parser.Parse(context.Background(), []byte(code), "test.go")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	var callerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Caller" && sym.Kind == SymbolKindFunction {
+			callerSym = sym
+			break
+		}
+	}
+
+	if callerSym == nil {
+		t.Fatal("Caller function not found")
+	}
+
+	if len(callerSym.Calls) != 1 {
+		t.Fatalf("Expected 1 call, got %d", len(callerSym.Calls))
+	}
+
+	call := callerSym.Calls[0]
+	if call.Target != "Target" {
+		t.Errorf("Expected call to Target, got %s", call.Target)
+	}
+
+	// Verify location is set
+	if call.Location.StartLine <= 0 {
+		t.Error("Call location StartLine should be positive")
+	}
+	if call.Location.FilePath != "test.go" {
+		t.Errorf("Call location FilePath should be test.go, got %s", call.Location.FilePath)
+	}
+}
+
+func TestCallSite_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		call    CallSite
+		wantErr bool
+	}{
+		{
+			name: "valid call",
+			call: CallSite{
+				Target:   "DoWork",
+				Location: Location{FilePath: "test.go", StartLine: 10},
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty target",
+			call: CallSite{
+				Target:   "",
+				Location: Location{FilePath: "test.go", StartLine: 10},
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero line",
+			call: CallSite{
+				Target:   "DoWork",
+				Location: Location{FilePath: "test.go", StartLine: 0},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}

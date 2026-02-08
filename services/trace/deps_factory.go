@@ -11,7 +11,10 @@
 package code_buddy
 
 import (
+	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
@@ -37,11 +40,90 @@ var coordinatorRegistry = struct {
 	coordinators: make(map[string]*integration.Coordinator),
 }
 
+// persistenceRegistry tracks persistence components by session ID for cleanup.
+// GR-36: Prevent resource leaks by enabling session-based cleanup.
+var persistenceRegistry = struct {
+	mu       sync.RWMutex
+	managers map[string]*crs.PersistenceManager
+	journals map[string]*crs.BadgerJournal
+}{
+	managers: make(map[string]*crs.PersistenceManager),
+	journals: make(map[string]*crs.BadgerJournal),
+}
+
+// journalsByProject tracks journals by project key (checkpoint key).
+// GR-36: Ensures only one journal is open per project at a time.
+// This prevents BadgerDB lock conflicts when multiple sessions work on the same project.
+var journalsByProject = struct {
+	mu       sync.RWMutex
+	journals map[string]*crs.BadgerJournal // key is checkpoint key (project hash)
+	sessions map[string]string             // maps project key -> session ID that owns it
+}{
+	journals: make(map[string]*crs.BadgerJournal),
+	sessions: make(map[string]string),
+}
+
 // registerCoordinator stores a coordinator for later cleanup.
 func registerCoordinator(sessionID string, coord *integration.Coordinator) {
 	coordinatorRegistry.mu.Lock()
 	defer coordinatorRegistry.mu.Unlock()
 	coordinatorRegistry.coordinators[sessionID] = coord
+}
+
+// registerPersistence stores persistence components for later cleanup.
+// GR-36: Called when session restore infrastructure is created.
+func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal *crs.BadgerJournal) {
+	persistenceRegistry.mu.Lock()
+	defer persistenceRegistry.mu.Unlock()
+	if pm != nil {
+		persistenceRegistry.managers[sessionID] = pm
+	}
+	if journal != nil {
+		persistenceRegistry.journals[sessionID] = journal
+	}
+}
+
+// closeExistingJournalForProject closes any existing journal for a project.
+// GR-36: Called before creating a new journal to prevent BadgerDB lock conflicts.
+// Returns true if a journal was closed.
+func closeExistingJournalForProject(projectKey string) bool {
+	journalsByProject.mu.Lock()
+	defer journalsByProject.mu.Unlock()
+
+	if existingJournal, ok := journalsByProject.journals[projectKey]; ok {
+		oldSessionID := journalsByProject.sessions[projectKey]
+		slog.Debug("GR-36: Closing existing journal for project before opening new one",
+			slog.String("project_key", projectKey),
+			slog.String("old_session_id", oldSessionID),
+		)
+		if err := existingJournal.Close(); err != nil {
+			slog.Warn("GR-36: Failed to close existing journal for project",
+				slog.String("project_key", projectKey),
+				slog.String("error", err.Error()),
+			)
+		}
+		delete(journalsByProject.journals, projectKey)
+		delete(journalsByProject.sessions, projectKey)
+
+		// Also remove from session-based registry if it exists
+		persistenceRegistry.mu.Lock()
+		if oldSessionID != "" {
+			delete(persistenceRegistry.journals, oldSessionID)
+		}
+		persistenceRegistry.mu.Unlock()
+
+		return true
+	}
+	return false
+}
+
+// registerJournalForProject tracks a journal by its project key.
+// GR-36: Enables proper cleanup when multiple sessions work on the same project.
+func registerJournalForProject(projectKey, sessionID string, journal *crs.BadgerJournal) {
+	journalsByProject.mu.Lock()
+	defer journalsByProject.mu.Unlock()
+	journalsByProject.journals[projectKey] = journal
+	journalsByProject.sessions[projectKey] = sessionID
 }
 
 // cleanupCoordinator removes and closes the coordinator for a session.
@@ -58,9 +140,47 @@ func cleanupCoordinator(sessionID string) {
 	}
 }
 
-// init registers the coordinator cleanup hook.
+// cleanupPersistence removes and closes persistence components for a session.
+// GR-36: Called when session ends to save checkpoint and close resources.
+func cleanupPersistence(sessionID string) {
+	persistenceRegistry.mu.Lock()
+	defer persistenceRegistry.mu.Unlock()
+
+	// Close journal first (flushes pending writes)
+	if journal, ok := persistenceRegistry.journals[sessionID]; ok {
+		if err := journal.Close(); err != nil {
+			slog.Warn("GR-36: Failed to close journal",
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			slog.Debug("GR-36: Journal closed",
+				slog.String("session_id", sessionID),
+			)
+		}
+		delete(persistenceRegistry.journals, sessionID)
+	}
+
+	// Then close persistence manager
+	if pm, ok := persistenceRegistry.managers[sessionID]; ok {
+		if err := pm.Close(); err != nil {
+			slog.Warn("GR-36: Failed to close persistence manager",
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			slog.Debug("GR-36: Persistence manager closed",
+				slog.String("session_id", sessionID),
+			)
+		}
+		delete(persistenceRegistry.managers, sessionID)
+	}
+}
+
+// init registers cleanup hooks.
 func init() {
 	agent.RegisterSessionCleanupHook("coordinator", cleanupCoordinator)
+	agent.RegisterSessionCleanupHook("persistence", cleanupPersistence)
 }
 
 // DefaultDependenciesFactory creates phase Dependencies for agent sessions.
@@ -93,6 +213,14 @@ type DefaultDependenciesFactory struct {
 
 	// enableCoordinator enables MCTS activity coordination
 	enableCoordinator bool
+
+	// enableSessionRestore enables CRS session restore from checkpoints
+	// GR-36: When enabled, attempts to restore CRS state from previous session
+	enableSessionRestore bool
+
+	// persistenceBaseDir is the base directory for CRS persistence
+	// GR-36: Defaults to ~/.aleutian/crs if not set
+	persistenceBaseDir string
 }
 
 // DependenciesFactoryOption configures a DefaultDependenciesFactory.
@@ -213,6 +341,51 @@ func WithCoordinatorEnabled(enabled bool) DependenciesFactoryOption {
 	}
 }
 
+// WithSessionRestoreEnabled enables CRS session restore from checkpoints.
+//
+// Description:
+//
+//	When enabled, attempts to restore CRS state from a previous session
+//	checkpoint. This preserves learned clauses, proof numbers, and other
+//	CRS state across agent sessions.
+//
+// Inputs:
+//
+//	enabled - Whether to enable session restore.
+//
+// Outputs:
+//
+//	DependenciesFactoryOption - The configuration function.
+//
+// GR-36: Added for session restore integration.
+func WithSessionRestoreEnabled(enabled bool) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.enableSessionRestore = enabled
+	}
+}
+
+// WithPersistenceBaseDir sets the base directory for CRS persistence.
+//
+// Description:
+//
+//	Sets the directory where CRS checkpoints and journals are stored.
+//	If not set, defaults to ~/.aleutian/crs.
+//
+// Inputs:
+//
+//	dir - The base directory path.
+//
+// Outputs:
+//
+//	DependenciesFactoryOption - The configuration function.
+//
+// GR-36: Added for session restore integration.
+func WithPersistenceBaseDir(dir string) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.persistenceBaseDir = dir
+	}
+}
+
 // Create implements agent.DependenciesFactory.
 //
 // Description:
@@ -315,6 +488,16 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 	if f.enableCoordinator {
 		// Create CRS for this session
 		sessionCRS := crs.New(nil)
+		deps.CRS = sessionCRS
+
+		// GR-36: Set up session restore infrastructure if enabled
+		var restoreResult *crs.RestoreResult
+		if f.enableSessionRestore {
+			projectRoot := session.GetProjectRoot()
+			if projectRoot != "" {
+				restoreResult = f.trySessionRestore(session.ID, projectRoot, sessionCRS, deps)
+			}
+		}
 
 		// Create Bridge connecting activities to CRS
 		bridge := integration.NewBridge(sessionCRS, nil)
@@ -342,13 +525,135 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 
 		deps.Coordinator = coordinator
 
+		// GR-36: Emit EventSessionRestored if session was restored
+		if restoreResult != nil && restoreResult.Restored {
+			coordinator.HandleEvent(context.Background(), integration.EventSessionRestored, &integration.EventData{
+				SessionID:         session.ID,
+				Generation:        restoreResult.Generation,
+				CheckpointAgeMs:   restoreResult.CheckpointAge.Milliseconds(),
+				ModifiedFileCount: restoreResult.ModifiedFileCount,
+			})
+		}
+
 		slog.Info("Coordinator created for session",
 			slog.String("session_id", session.ID),
 			slog.Int("activity_count", 8),
+			slog.Bool("session_restored", restoreResult != nil && restoreResult.Restored),
 		)
 	}
 
 	return deps, nil
+}
+
+// trySessionRestore attempts to restore CRS state from a previous session.
+//
+// GR-36: Integrates session restore with dependencies factory.
+func (f *DefaultDependenciesFactory) trySessionRestore(
+	sessionID string,
+	projectRoot string,
+	sessionCRS crs.CRS,
+	deps *phases.Dependencies,
+) *crs.RestoreResult {
+	ctx := context.Background()
+
+	// Determine persistence base directory
+	baseDir := f.persistenceBaseDir
+	if baseDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			slog.Warn("GR-36: Failed to get home directory for persistence",
+				slog.String("error", err.Error()),
+			)
+			return nil
+		}
+		baseDir = filepath.Join(homeDir, ".aleutian", "crs")
+	}
+
+	// Create persistence manager
+	pmConfig := &crs.PersistenceConfig{
+		BaseDir:           baseDir,
+		CompressionLevel:  6,
+		LockTimeoutSec:    30,
+		MaxBackupRetries:  3,
+		ValidateOnRestore: true,
+	}
+
+	pm, err := crs.NewPersistenceManager(pmConfig)
+	if err != nil {
+		slog.Warn("GR-36: Failed to create persistence manager",
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+	deps.PersistenceManager = pm
+
+	// Create session identifier
+	sessionIdentifier, err := crs.NewSessionIdentifier(ctx, projectRoot)
+	if err != nil {
+		slog.Warn("GR-36: Failed to create session identifier",
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+
+	// Create BadgerJournal for this session
+	// GR-36: First close any existing journal for this project to prevent lock conflicts
+	projectKey := sessionIdentifier.CheckpointKey()
+	closeExistingJournalForProject(projectKey)
+
+	journalPath := filepath.Join(baseDir, projectKey, "journal")
+	journalConfig := crs.JournalConfig{
+		SessionID:  sessionID,
+		Path:       journalPath,
+		SyncWrites: false,
+	}
+
+	journal, err := crs.NewBadgerJournal(journalConfig)
+	if err != nil {
+		slog.Warn("GR-36: Failed to create BadgerJournal",
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+	deps.BadgerJournal = journal
+
+	// Register for cleanup when session ends (both session-based and project-based)
+	registerPersistence(sessionID, pm, journal)
+	registerJournalForProject(projectKey, sessionID, journal)
+
+	// Create restorer and attempt restore
+	restorer, err := crs.NewSessionRestorer(pm, nil)
+	if err != nil {
+		slog.Warn("GR-36: Failed to create session restorer",
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+
+	result, err := restorer.TryRestore(ctx, sessionCRS, journal, sessionIdentifier)
+	if err != nil {
+		slog.Warn("GR-36: Session restore failed",
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+
+	if result.Restored {
+		slog.Info("GR-36: Session restored from checkpoint",
+			slog.String("session_id", sessionID),
+			slog.String("project_root", projectRoot),
+			slog.Int64("generation", result.Generation),
+			slog.Duration("checkpoint_age", result.CheckpointAge),
+			slog.Int64("duration_ms", result.DurationMs),
+		)
+	} else {
+		slog.Debug("GR-36: No checkpoint to restore",
+			slog.String("session_id", sessionID),
+			slog.String("reason", result.Reason),
+		)
+	}
+
+	return result
 }
 
 // Ensure DefaultDependenciesFactory implements agent.DependenciesFactory.

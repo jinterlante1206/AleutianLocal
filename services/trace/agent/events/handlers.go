@@ -69,7 +69,17 @@ func LoggingHandler(logger *slog.Logger, level slog.Level) Handler {
 				slog.String("model", data.Model),
 				slog.Int("tokens_in", data.TokensIn),
 				slog.Bool("has_tools", data.HasTools),
+				slog.Int("message_count", data.MessageCount),
+				slog.String("message_summary", data.MessageSummary),
 			)
+			if data.LastUserMessage != "" {
+				// Truncate for logging (preview already truncated to 500, further to 100 for logs)
+				preview := data.LastUserMessage
+				if len(preview) > 100 {
+					preview = preview[:100] + "..."
+				}
+				attrs = append(attrs, slog.String("last_user_message", preview))
+			}
 
 		case *LLMResponseData:
 			attrs = append(attrs,
@@ -77,7 +87,19 @@ func LoggingHandler(logger *slog.Logger, level slog.Level) Handler {
 				slog.Int("tokens_out", data.TokensOut),
 				slog.Duration("duration", data.Duration),
 				slog.String("stop_reason", data.StopReason),
+				slog.Int("content_len", data.ContentLen),
 			)
+			if data.ContentPreview != "" {
+				// Truncate for logging (preview already truncated to 500, further to 100 for logs)
+				preview := data.ContentPreview
+				if len(preview) > 100 {
+					preview = preview[:100] + "..."
+				}
+				attrs = append(attrs, slog.String("content_preview", preview))
+			}
+			if data.ToolCallsPreview != "" {
+				attrs = append(attrs, slog.String("tool_calls_preview", data.ToolCallsPreview))
+			}
 
 		case *SafetyCheckData:
 			attrs = append(attrs,

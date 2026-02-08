@@ -951,3 +951,45 @@ type LSPStatusResponse struct {
 	// SupportedLanguages lists all supported languages.
 	SupportedLanguages []string `json:"supported_languages"`
 }
+
+// =============================================================================
+// DEBUG ENDPOINT TYPES (GR-43)
+// =============================================================================
+
+// GraphStatsResponse is the response for GET /v1/codebuddy/debug/graph/stats.
+//
+// Description:
+//
+//	Returns detailed statistics about a cached graph including node/edge counts
+//	broken down by type and kind. Used for debugging and integration tests.
+type GraphStatsResponse struct {
+	// GraphID is the unique identifier for this graph.
+	GraphID string `json:"graph_id"`
+
+	// ProjectRoot is the absolute path to the project root.
+	ProjectRoot string `json:"project_root"`
+
+	// State is the graph state ("building" or "readonly").
+	State string `json:"state"`
+
+	// NodeCount is the total number of nodes in the graph.
+	NodeCount int `json:"node_count"`
+
+	// EdgeCount is the total number of edges in the graph.
+	EdgeCount int `json:"edge_count"`
+
+	// MaxNodes is the configured maximum node capacity.
+	MaxNodes int `json:"max_nodes"`
+
+	// MaxEdges is the configured maximum edge capacity.
+	MaxEdges int `json:"max_edges"`
+
+	// BuiltAtMilli is the Unix timestamp in milliseconds when graph was frozen.
+	BuiltAtMilli int64 `json:"built_at_milli"`
+
+	// EdgesByType maps edge type name to count.
+	EdgesByType map[string]int `json:"edges_by_type"`
+
+	// NodesByKind maps symbol kind name to count.
+	NodesByKind map[string]int `json:"nodes_by_kind"`
+}

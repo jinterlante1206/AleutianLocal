@@ -118,6 +118,15 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		codebuddy.GET("/ready", handlers.HandleReady)
 
 		// =================================================================
+		// DEBUG ENDPOINTS (GR-43)
+		// =================================================================
+
+		debug := codebuddy.Group("/debug")
+		{
+			debug.GET("/graph/stats", handlers.HandleGetGraphStats)
+		}
+
+		// =================================================================
 		// AGENTIC TOOL ENDPOINTS (CB-22b)
 		// =================================================================
 

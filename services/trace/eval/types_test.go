@@ -505,7 +505,7 @@ func TestPropertyResult_WithTimeout(t *testing.T) {
 }
 
 func TestHealthResult_Fields(t *testing.T) {
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	result := HealthResult{
 		Component: "test_component",
 		Status:    HealthHealthy,
@@ -530,7 +530,7 @@ func TestHealthResult_Fields(t *testing.T) {
 	if result.Duration != 100*time.Millisecond {
 		t.Errorf("Duration = %v, want 100ms", result.Duration)
 	}
-	if !result.Timestamp.Equal(now) {
+	if result.Timestamp != now {
 		t.Errorf("Timestamp = %v, want %v", result.Timestamp, now)
 	}
 	if result.Details["memory_usage"] != "100MB" {

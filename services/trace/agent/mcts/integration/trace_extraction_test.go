@@ -81,7 +81,7 @@ func TestExtractTraceStep_NilInputs(t *testing.T) {
 		startTime := time.Now()
 		step := ExtractTraceStep(nil, nil, nil, startTime)
 
-		assert.Equal(t, startTime, step.Timestamp)
+		assert.Equal(t, startTime.UnixMilli(), step.Timestamp)
 		assert.Empty(t, step.Action)
 		assert.Empty(t, step.Target)
 		assert.Empty(t, step.SymbolsFound)
@@ -164,7 +164,7 @@ func TestExtractTraceStep_FullExtraction(t *testing.T) {
 	// Verify result extraction
 	assert.Equal(t, "analyze", step.Action)
 	assert.Equal(t, 250*time.Millisecond, step.Duration)
-	assert.Equal(t, startTime, step.Timestamp)
+	assert.Equal(t, startTime.UnixMilli(), step.Timestamp)
 	assert.Equal(t, "main.go", step.Target)
 
 	// Verify symbols extraction

@@ -12,6 +12,7 @@ package crs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -87,6 +88,9 @@ type crsImpl struct {
 
 	// GR-32 Code Review Fix: Rate-limit DependencyDelta deprecation warning
 	depDeltaWarnOnce sync.Once
+
+	// GR-31: Analytics history for tracking analytics queries
+	analyticsData *AnalyticsHistory
 }
 
 // sessionSteps holds step records for a single session.
@@ -132,6 +136,7 @@ func New(config *Config) CRS {
 		clauseConfig:   DefaultClauseConfig,
 		deltaHistory:   NewDeltaHistoryWorker(DefaultMaxDeltaRecords, logger),
 		stepData:       make(map[string]*sessionSteps),
+		analyticsData:  NewAnalyticsHistory(MaxAnalyticsHistoryRecords),
 	}
 }
 
@@ -162,6 +167,11 @@ func (c *crsImpl) Snapshot() Snapshot {
 
 	// GR-32: Include graph-backed dependency index in snapshot
 	snap.setGraphBackedDepIndex(c.graphBackedDepIndex)
+
+	// GR-31: Include analytics history in snapshot (cloned for immutability)
+	if c.analyticsData != nil {
+		snap.setAnalyticsHistory(c.analyticsData.clone())
+	}
 
 	return snap
 }
@@ -279,6 +289,8 @@ func (c *crsImpl) applyCore(ctx context.Context, delta Delta, spanName string) (
 		err = c.applyStreamingDelta(d, &metrics)
 	case *CompositeDelta:
 		err = c.applyCompositeDelta(ctx, d, &metrics)
+	case *AnalyticsDelta:
+		err = c.applyAnalyticsDelta(d, &metrics)
 	default:
 		err = fmt.Errorf("unknown delta type: %T", delta)
 	}
@@ -287,7 +299,8 @@ func (c *crsImpl) applyCore(ctx context.Context, delta Delta, spanName string) (
 		c.applyErrorCount.Add(1)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "apply failed")
-		return metrics, fmt.Errorf("%w: %w", ErrApplyRollback, err)
+		// Include delta type in error for debugging (P3 fix: C1)
+		return metrics, fmt.Errorf("%w (delta type: %s): %w", ErrApplyRollback, delta.Type(), err)
 	}
 
 	// Increment generation
@@ -478,6 +491,43 @@ func (c *crsImpl) InvalidateGraphCache() {
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Analytics Methods (GR-31)
+// -----------------------------------------------------------------------------
+
+// GetAnalyticsHistory returns all analytics records.
+func (c *crsImpl) GetAnalyticsHistory() []*AnalyticsRecord {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.analyticsData == nil {
+		return nil
+	}
+	return c.analyticsData.All()
+}
+
+// GetLastAnalytics returns the most recent analytics of a given type.
+func (c *crsImpl) GetLastAnalytics(queryType AnalyticsQueryType) *AnalyticsRecord {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.analyticsData == nil {
+		return nil
+	}
+	return c.analyticsData.GetLast(queryType)
+}
+
+// HasRunAnalytics checks if a specific analytics type has been run.
+func (c *crsImpl) HasRunAnalytics(queryType AnalyticsQueryType) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.analyticsData == nil {
+		return false
+	}
+	return c.analyticsData.HasRun(queryType)
+}
+
 // Checkpoint creates a restorable checkpoint.
 func (c *crsImpl) Checkpoint(ctx context.Context) (Checkpoint, error) {
 	if ctx == nil {
@@ -581,6 +631,174 @@ func (c *crsImpl) Restore(ctx context.Context, cp Checkpoint) error {
 }
 
 // -----------------------------------------------------------------------------
+// Disk Persistence Methods (GR-33)
+// -----------------------------------------------------------------------------
+
+// SaveCheckpointToDisk persists current state to disk.
+//
+// Description:
+//
+//	Creates a checkpoint and saves it to disk via the persistence
+//	manager. This is the primary method for cross-session persistence.
+//	Also triggers a journal checkpoint to clear old deltas.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - pm: Persistence manager. Must not be nil.
+//   - projectHash: Project identifier. Must be valid (8-64 hex chars).
+//   - journal: The journal to backup. Must not be nil.
+//
+// Outputs:
+//   - *BackupMetadata: Metadata about the created backup.
+//   - error: Non-nil on failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	if pm == nil {
+		return nil, fmt.Errorf("persistence manager must not be nil")
+	}
+	if journal == nil {
+		return nil, fmt.Errorf("journal must not be nil")
+	}
+
+	// Start tracing
+	ctx, span := otel.Tracer("crs").Start(ctx, "crs.SaveCheckpointToDisk",
+		trace.WithAttributes(
+			attribute.String("project_hash", projectHash),
+		),
+	)
+	defer span.End()
+
+	// First create in-memory checkpoint
+	checkpoint, err := c.Checkpoint(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "create checkpoint failed")
+		return nil, fmt.Errorf("create checkpoint: %w", err)
+	}
+
+	// Checkpoint the journal to clear old deltas
+	if err := journal.Checkpoint(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "journal checkpoint failed")
+		return nil, fmt.Errorf("journal checkpoint: %w", err)
+	}
+
+	// Save to disk
+	opts := &BackupOptions{
+		SessionID: checkpoint.ID, // Use checkpoint ID as session identifier
+	}
+	metadata, err := pm.SaveBackup(ctx, projectHash, journal, opts)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "save backup failed")
+		return nil, fmt.Errorf("save backup: %w", err)
+	}
+
+	span.SetAttributes(
+		attribute.Int64("generation", metadata.Generation),
+		attribute.Int64("compressed_size", metadata.CompressedSize),
+	)
+
+	c.logger.Info("checkpoint saved to disk",
+		slog.String("project_hash", projectHash),
+		slog.Int64("generation", metadata.Generation),
+		slog.Int64("compressed_bytes", metadata.CompressedSize),
+	)
+
+	return metadata, nil
+}
+
+// LoadCheckpointFromDisk restores state from disk.
+//
+// Description:
+//
+//	Loads a backup and replays the journal to restore CRS state.
+//	Returns nil if no backup exists (first run).
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - pm: Persistence manager. Must not be nil.
+//   - projectHash: Project identifier. Must be valid (8-64 hex chars).
+//   - journal: Journal to restore.
+//
+// Outputs:
+//   - *BackupMetadata: Metadata about restored backup, nil if none.
+//   - error: Non-nil on failure (not on missing backup).
+//
+// Thread Safety: Safe for concurrent use.
+func (c *crsImpl) LoadCheckpointFromDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	if pm == nil {
+		return nil, fmt.Errorf("persistence manager must not be nil")
+	}
+	if journal == nil {
+		return nil, fmt.Errorf("journal must not be nil")
+	}
+
+	// Start tracing
+	ctx, span := otel.Tracer("crs").Start(ctx, "crs.LoadCheckpointFromDisk",
+		trace.WithAttributes(
+			attribute.String("project_hash", projectHash),
+		),
+	)
+	defer span.End()
+
+	// Attempt to load backup
+	metadata, err := pm.LoadBackup(ctx, projectHash, journal)
+	if errors.Is(err, ErrBackupNotFound) {
+		span.SetAttributes(attribute.Bool("backup_found", false))
+		c.logger.Info("no backup found, starting fresh",
+			slog.String("project_hash", projectHash),
+		)
+		return nil, nil // First run, no backup exists
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "load backup failed")
+		return nil, fmt.Errorf("load backup: %w", err)
+	}
+
+	span.SetAttributes(attribute.Bool("backup_found", true))
+
+	// Replay journal to restore CRS state
+	deltas, err := journal.Replay(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "replay journal failed")
+		return nil, fmt.Errorf("replay journal: %w", err)
+	}
+
+	// Apply all deltas
+	for i, delta := range deltas {
+		if _, err := c.Apply(ctx, delta); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "apply delta failed")
+			return nil, fmt.Errorf("apply delta %d: %w", i, err)
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int64("restored_generation", metadata.Generation),
+		attribute.Int("deltas_replayed", len(deltas)),
+	)
+
+	c.logger.Info("CRS state restored from disk",
+		slog.String("project_hash", projectHash),
+		slog.Int64("generation", metadata.Generation),
+		slog.Int("deltas_replayed", len(deltas)),
+		slog.Duration("backup_age", metadata.Age()),
+	)
+
+	return metadata, nil
+}
+
+// -----------------------------------------------------------------------------
 // Delta Application Helpers
 // -----------------------------------------------------------------------------
 
@@ -680,6 +898,81 @@ func (c *crsImpl) applyStreamingDelta(d *StreamingDelta, metrics *ApplyMetrics) 
 	return nil
 }
 
+// applyAnalyticsDelta records an analytics query in history and sets proof markers.
+//
+// Description:
+//
+//	Records the analytics query in history, sets proof markers for completion,
+//	and logs the operation for debugging.
+//
+// GR-31: Analytics CRS routing.
+// L-1/L-3 fix: Added structured logging.
+// C-2/L-4 fix: TODO - Emit coordinator event when CRS gains coordinator reference.
+func (c *crsImpl) applyAnalyticsDelta(d *AnalyticsDelta, metrics *ApplyMetrics) error {
+	if d.Record == nil {
+		c.logger.Debug("analytics delta has nil record, skipping")
+		return nil // Nothing to apply
+	}
+
+	// O-4 fix: Truncate large result sets before storing
+	d.Record.TruncateResults()
+
+	// Add to analytics history
+	if c.analyticsData != nil {
+		c.analyticsData.Add(d.Record)
+		metrics.EntriesModified++
+	}
+
+	// Set proof markers for analytics completion
+	now := time.Now().UnixMilli()
+
+	// Mark analytics as done
+	doneKey := d.Record.GetProofDoneKey()
+	c.proofData[doneKey] = ProofNumber{
+		Proof:     1,
+		Disproof:  0,
+		Status:    ProofStatusProven,
+		UpdatedAt: now,
+	}
+	metrics.EntriesModified++
+
+	// If results were found, mark as found
+	foundKey := ""
+	if d.Record.HasResults() {
+		foundKey = d.Record.GetProofFoundKey()
+		c.proofData[foundKey] = ProofNumber{
+			Proof:     1,
+			Disproof:  0,
+			Status:    ProofStatusProven,
+			UpdatedAt: now,
+		}
+		metrics.EntriesModified++
+	}
+
+	// L-1 fix: Log analytics application
+	c.logger.Debug("analytics delta applied",
+		slog.String("query_type", string(d.Record.QueryType)),
+		slog.Int("result_count", d.Record.ResultCount),
+		slog.Int64("execution_ms", d.Record.ExecutionMs),
+		slog.String("done_key", doneKey),
+		slog.String("found_key", foundKey),
+	)
+
+	// TODO(C-2/L-4): Emit EventAnalyticsRun to coordinator when CRS gains
+	// coordinator reference. This enables activities to react to analytics:
+	// if c.coordinator != nil {
+	//     c.coordinator.EmitEvent(integration.EventAnalyticsRun, &integration.EventData{
+	//         Metadata: map[string]any{
+	//             "query_type":   d.Record.QueryType,
+	//             "result_count": d.Record.ResultCount,
+	//         },
+	//     })
+	// }
+
+	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexProof)
+	return nil
+}
+
 func (c *crsImpl) applyCompositeDelta(ctx context.Context, d *CompositeDelta, metrics *ApplyMetrics) error {
 	// Apply each delta in sequence
 	for _, delta := range d.Deltas {
@@ -716,6 +1009,10 @@ func (c *crsImpl) applyCompositeDelta(ctx context.Context, d *CompositeDelta, me
 			}
 		case *CompositeDelta:
 			if err := c.applyCompositeDelta(ctx, dd, metrics); err != nil {
+				return err
+			}
+		case *AnalyticsDelta:
+			if err := c.applyAnalyticsDelta(dd, metrics); err != nil {
 				return err
 			}
 		}

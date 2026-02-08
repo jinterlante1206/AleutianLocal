@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -1078,4 +1079,177 @@ func (j *BadgerJournal) Stats() JournalStats {
 		CorruptedCount: j.corruptedCount.Load(),
 		Degraded:       j.degraded.Load(),
 	}
+}
+
+// -----------------------------------------------------------------------------
+// Backup and Restore Methods (GR-33)
+// -----------------------------------------------------------------------------
+
+// Backup creates a portable backup of the journal.
+//
+// Description:
+//
+//	Uses BadgerDB's built-in streaming backup to export all KV pairs.
+//	The writer receives a binary stream suitable for later restore.
+//	Caller is responsible for compression and storage.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - w: Writer to receive backup stream. Must not be nil.
+//
+// Outputs:
+//   - error: Non-nil if backup fails.
+//
+// Thread Safety: Safe for concurrent use.
+func (j *BadgerJournal) Backup(ctx context.Context, w io.Writer) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if w == nil {
+		return errors.New("writer must not be nil")
+	}
+
+	if j.closed.Load() {
+		return ErrJournalClosed
+	}
+	if j.degraded.Load() {
+		return ErrJournalDegraded
+	}
+
+	ctx, span := otel.Tracer("crs").Start(ctx, "journal.Backup",
+		trace.WithAttributes(
+			attribute.String("session_id", j.config.SessionID),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
+
+	// BadgerDB's Backup streams all KV pairs to writer
+	// Version 0 means full backup (not incremental)
+	since, err := j.db.DB.Backup(w, 0)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "backup failed")
+		return fmt.Errorf("badger backup: %w", err)
+	}
+
+	duration := time.Since(start)
+	span.SetAttributes(
+		attribute.Int64("since_version", int64(since)),
+		attribute.Float64("duration_seconds", duration.Seconds()),
+	)
+
+	j.logger.Info("journal backup created",
+		slog.Duration("duration", duration),
+		slog.Uint64("since_version", since),
+	)
+
+	return nil
+}
+
+// Restore loads state from a backup.
+//
+// Description:
+//
+//	Uses BadgerDB's built-in Load function to restore from a backup
+//	stream. After restore, re-initializes internal state (sequence
+//	numbers, counters).
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - r: Reader with backup stream. Must not be nil.
+//
+// Outputs:
+//   - error: Non-nil if restore fails.
+//
+// Limitations:
+//   - Restore is all-or-nothing: failure leaves journal in undefined state.
+//   - Caller should discard journal and create new one on restore failure.
+//
+// Thread Safety: NOT safe for concurrent use with Append/Replay.
+// Caller must ensure exclusive access during restore.
+func (j *BadgerJournal) Restore(ctx context.Context, r io.Reader) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if r == nil {
+		return errors.New("reader must not be nil")
+	}
+
+	if j.closed.Load() {
+		return ErrJournalClosed
+	}
+	// Allow restore even in degraded mode - might fix the degradation
+
+	ctx, span := otel.Tracer("crs").Start(ctx, "journal.Restore",
+		trace.WithAttributes(
+			attribute.String("session_id", j.config.SessionID),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
+
+	// MaxPendingWrites controls concurrency during restore
+	// 256 is BadgerDB's recommended value for most workloads
+	const maxPendingWrites = 256
+
+	// BadgerDB's Load restores from backup stream
+	err := j.db.DB.Load(r, maxPendingWrites)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "restore failed")
+		return fmt.Errorf("badger load: %w", err)
+	}
+
+	// Re-initialize sequence number from restored data
+	if err := j.initSeqNum(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "reinit seq num failed")
+		return fmt.Errorf("reinit seq num: %w", err)
+	}
+
+	// Clear degraded flag - restore may have fixed underlying issue
+	j.degraded.Store(false)
+
+	// Reset counters
+	j.totalBytes.Store(0) // Will be recomputed on next append
+	j.corruptedCount.Store(0)
+
+	duration := time.Since(start)
+	span.SetAttributes(
+		attribute.Int64("restored_seq_num", int64(j.seqNum.Load())),
+		attribute.Float64("duration_seconds", duration.Seconds()),
+	)
+
+	j.logger.Info("journal restored from backup",
+		slog.Duration("duration", duration),
+		slog.Uint64("last_seq_num", j.seqNum.Load()),
+	)
+
+	return nil
+}
+
+// DB returns the underlying BadgerDB wrapper.
+//
+// Description:
+//
+//	Provides access to the underlying database for backup operations.
+//	Used by PersistenceManager.SaveBackup and LoadBackup.
+//
+// INTERNAL USE ONLY: This method is intended for use by the persistence
+// package only. External callers should use the Journal interface methods
+// (Append, Replay, Checkpoint) rather than accessing the database directly.
+// Direct database access bypasses journal safety mechanisms including:
+//   - CRC checksums on entries
+//   - Sequence number tracking
+//   - Degraded mode handling
+//
+// Outputs:
+//   - *badger.DB: The database wrapper. May be nil in degraded mode.
+//
+// Thread Safety: Safe for concurrent use.
+func (j *BadgerJournal) DB() *badger.DB {
+	return j.db
 }

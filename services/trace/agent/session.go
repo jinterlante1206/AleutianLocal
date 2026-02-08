@@ -155,8 +155,8 @@ type SessionConfig struct {
 	ToolRouterModel string `json:"tool_router_model"`
 
 	// ToolRouterTimeout is the maximum time for a routing decision.
-	// If exceeded, falls back to main LLM tool selection.
-	// Default: 500ms
+	// GR-44: If exceeded, the process fails (no fallback to main LLM).
+	// Default: 20s
 	ToolRouterTimeout time.Duration `json:"tool_router_timeout"`
 
 	// ToolRouterConfidence is the minimum confidence for accepting a routing decision.
@@ -198,7 +198,7 @@ func DefaultSessionConfig() *SessionConfig {
 		// Tool Router defaults (enabled by default for faster tool selection)
 		ToolRouterEnabled:    true,
 		ToolRouterModel:      "granite4:micro-h",
-		ToolRouterTimeout:    500 * time.Millisecond,
+		ToolRouterTimeout:    20 * time.Second, // GR-44: Increased from 500ms to ensure router completes
 		ToolRouterConfidence: 0.7,
 	}
 }
@@ -356,6 +356,12 @@ type Session struct {
 	// cycleDetector detects reasoning cycles in real-time using Brent's algorithm.
 	// CRS-03: Initialized when CRS is enabled for the session.
 	cycleDetector *crs.CycleDetector
+
+	// circuitBreakerActive indicates that the circuit breaker has fired and
+	// the agent is in synthesis mode. When true, the execute phase should NOT
+	// require tool usage and should accept text responses as final answers.
+	// GR-44: Fixes death spiral where CB fires but execute phase still demands tools.
+	circuitBreakerActive bool
 }
 
 // SafetyViolation represents a safety-blocked operation for CDCL learning.
@@ -1291,6 +1297,43 @@ func (s *Session) HasPendingSafetyViolations() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.safetyViolations) > 0
+}
+
+// IsCircuitBreakerActive returns true if the circuit breaker has fired.
+//
+// Description:
+//
+//	When the circuit breaker fires (e.g., tool called too many times),
+//	the agent enters synthesis mode. This flag tells the execute phase
+//	to NOT require tool usage and to accept text responses as final answers.
+//
+// GR-44: Fixes death spiral where CB fires but execute phase still demands tools.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) IsCircuitBreakerActive() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.circuitBreakerActive
+}
+
+// SetCircuitBreakerActive sets the circuit breaker state.
+//
+// Description:
+//
+//	Call this when the circuit breaker fires to signal that the agent
+//	should enter synthesis mode and stop requiring tool usage.
+//
+// Inputs:
+//
+//	active - True when CB has fired, false to reset.
+//
+// GR-44: Fixes death spiral where CB fires but execute phase still demands tools.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetCircuitBreakerActive(active bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.circuitBreakerActive = active
 }
 
 // GetRecentToolErrors returns recent tool failures for router feedback.

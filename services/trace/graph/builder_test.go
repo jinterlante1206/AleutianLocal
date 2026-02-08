@@ -12,6 +12,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -807,4 +808,1117 @@ func TestExtractDir(t *testing.T) {
 // Fix the typo in earlier test - parseResults -> []*ast.ParseResult{parseResult}
 func init() {
 	// This is just to make sure the tests compile
+}
+
+// === GR-40: Go Interface Implementation Detection Tests ===
+
+func TestBuilder_GoInterfaceImplementation(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("basic interface implementation", func(t *testing.T) {
+		// Create an interface with methods
+		readerInterface := &ast.Symbol{
+			ID:        "interface.go:10:Reader",
+			Name:      "Reader",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "interface.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Read", ParamCount: 1, ReturnCount: 2},
+				},
+			},
+		}
+
+		// Create a struct that implements the interface
+		fileReader := &ast.Symbol{
+			ID:        "reader.go:5:FileReader",
+			Name:      "FileReader",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "reader.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Read", ParamCount: 1, ReturnCount: 2, ReceiverType: "*FileReader"},
+				},
+			},
+		}
+
+		parseResult1 := testParseResult("interface.go", []*ast.Symbol{readerInterface}, nil)
+		parseResult2 := testParseResult("reader.go", []*ast.Symbol{fileReader}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Check that EdgeTypeImplements was created
+		fileReaderNode, ok := result.Graph.GetNode(fileReader.ID)
+		if !ok {
+			t.Fatal("FileReader node not found")
+		}
+		foundImplements := false
+		for _, edge := range fileReaderNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == readerInterface.ID {
+				foundImplements = true
+				break
+			}
+		}
+		if !foundImplements {
+			t.Error("expected EdgeTypeImplements from FileReader to Reader")
+		}
+
+		// Verify stats
+		if result.Stats.GoInterfaceEdges != 1 {
+			t.Errorf("expected GoInterfaceEdges=1, got %d", result.Stats.GoInterfaceEdges)
+		}
+	})
+
+	t.Run("partial implementation should not match", func(t *testing.T) {
+		// Interface with two methods
+		handlerInterface := &ast.Symbol{
+			ID:        "handler.go:10:Handler",
+			Name:      "Handler",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "handler.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Handle", ParamCount: 2, ReturnCount: 2},
+					{Name: "Close", ParamCount: 0, ReturnCount: 1},
+				},
+			},
+		}
+
+		// Struct with only one of the methods (partial implementation)
+		partialHandler := &ast.Symbol{
+			ID:        "partial.go:5:PartialHandler",
+			Name:      "PartialHandler",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "partial.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Handle", ParamCount: 2, ReturnCount: 2, ReceiverType: "*PartialHandler"},
+					// Missing Close method
+				},
+			},
+		}
+
+		parseResult1 := testParseResult("handler.go", []*ast.Symbol{handlerInterface}, nil)
+		parseResult2 := testParseResult("partial.go", []*ast.Symbol{partialHandler}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Check that no EdgeTypeImplements was created
+		partialHandlerNode, ok := result.Graph.GetNode(partialHandler.ID)
+		if !ok {
+			t.Fatal("PartialHandler node not found")
+		}
+		for _, edge := range partialHandlerNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == handlerInterface.ID {
+				t.Error("unexpected EdgeTypeImplements from PartialHandler to Handler (missing Close method)")
+			}
+		}
+
+		if result.Stats.GoInterfaceEdges != 0 {
+			t.Errorf("expected GoInterfaceEdges=0, got %d", result.Stats.GoInterfaceEdges)
+		}
+	})
+
+	t.Run("multiple interface implementations", func(t *testing.T) {
+		// Two interfaces
+		reader := &ast.Symbol{
+			ID:        "io.go:10:Reader",
+			Name:      "Reader",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "io.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Read", ParamCount: 1, ReturnCount: 2},
+				},
+			},
+		}
+
+		writer := &ast.Symbol{
+			ID:        "io.go:20:Writer",
+			Name:      "Writer",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "io.go",
+			StartLine: 20,
+			EndLine:   25,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Write", ParamCount: 1, ReturnCount: 2},
+				},
+			},
+		}
+
+		// Struct that implements both
+		buffer := &ast.Symbol{
+			ID:        "buffer.go:5:Buffer",
+			Name:      "Buffer",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "buffer.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Read", ParamCount: 1, ReturnCount: 2, ReceiverType: "*Buffer"},
+					{Name: "Write", ParamCount: 1, ReturnCount: 2, ReceiverType: "*Buffer"},
+				},
+			},
+		}
+
+		parseResult1 := testParseResult("io.go", []*ast.Symbol{reader, writer}, nil)
+		parseResult2 := testParseResult("buffer.go", []*ast.Symbol{buffer}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Check that EdgeTypeImplements was created for both interfaces
+		bufferNode, ok := result.Graph.GetNode(buffer.ID)
+		if !ok {
+			t.Fatal("Buffer node not found")
+		}
+		implementsReader := false
+		implementsWriter := false
+		for _, edge := range bufferNode.Outgoing {
+			if edge.Type == EdgeTypeImplements {
+				if edge.ToID == reader.ID {
+					implementsReader = true
+				}
+				if edge.ToID == writer.ID {
+					implementsWriter = true
+				}
+			}
+		}
+		if !implementsReader {
+			t.Error("expected EdgeTypeImplements from Buffer to Reader")
+		}
+		if !implementsWriter {
+			t.Error("expected EdgeTypeImplements from Buffer to Writer")
+		}
+
+		if result.Stats.GoInterfaceEdges != 2 {
+			t.Errorf("expected GoInterfaceEdges=2, got %d", result.Stats.GoInterfaceEdges)
+		}
+	})
+
+	t.Run("empty interface should not match", func(t *testing.T) {
+		// Empty interface (like interface{})
+		emptyInterface := &ast.Symbol{
+			ID:        "empty.go:10:Empty",
+			Name:      "Empty",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "empty.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			// No Metadata.Methods
+		}
+
+		someType := &ast.Symbol{
+			ID:        "some.go:5:SomeType",
+			Name:      "SomeType",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "some.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "DoSomething", ParamCount: 0, ReturnCount: 0},
+				},
+			},
+		}
+
+		parseResult1 := testParseResult("empty.go", []*ast.Symbol{emptyInterface}, nil)
+		parseResult2 := testParseResult("some.go", []*ast.Symbol{someType}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Empty interfaces are skipped (would match everything - too noisy)
+		if result.Stats.GoInterfaceEdges != 0 {
+			t.Errorf("expected GoInterfaceEdges=0 for empty interface, got %d", result.Stats.GoInterfaceEdges)
+		}
+	})
+
+	t.Run("non-go language should be skipped", func(t *testing.T) {
+		// TypeScript interface
+		tsInterface := &ast.Symbol{
+			ID:        "api.ts:10:Handler",
+			Name:      "Handler",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "api.ts",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript", // Not Go
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Handle", ParamCount: 1, ReturnCount: 1},
+				},
+			},
+		}
+
+		parseResult := &ast.ParseResult{
+			FilePath: "api.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{tsInterface},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// TypeScript uses explicit implements, so this function should skip it
+		if result.Stats.GoInterfaceEdges != 0 {
+			t.Errorf("expected GoInterfaceEdges=0 for TypeScript, got %d", result.Stats.GoInterfaceEdges)
+		}
+	})
+
+	t.Run("cross-file method association (GR-40 C-3 fix)", func(t *testing.T) {
+		// This test verifies that methods defined in a different file than their
+		// receiver type are properly associated and interface detection works.
+
+		// File 1: Interface definition
+		readerInterface := &ast.Symbol{
+			ID:        "io.go:10:Reader",
+			Name:      "Reader",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "io.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Read", ParamCount: 1, ReturnCount: 2},
+				},
+			},
+		}
+
+		// File 2: Type definition (WITHOUT methods - they're in a different file)
+		fileReader := &ast.Symbol{
+			ID:        "types.go:5:FileReader",
+			Name:      "FileReader",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "types.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata:  nil, // Methods will be associated cross-file
+		}
+
+		// File 3: Method definition (separate from type!)
+		readMethod := &ast.Symbol{
+			ID:        "reader_methods.go:10:FileReader.Read",
+			Name:      "Read",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "reader_methods.go",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Signature: "func (f *FileReader) Read(p []byte) (int, error)",
+		}
+
+		parseResult1 := testParseResult("io.go", []*ast.Symbol{readerInterface}, nil)
+		parseResult2 := testParseResult("types.go", []*ast.Symbol{fileReader}, nil)
+		parseResult3 := testParseResult("reader_methods.go", []*ast.Symbol{readMethod}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2, parseResult3})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Verify the method was associated with the type
+		fileReaderNode, ok := result.Graph.GetNode(fileReader.ID)
+		if !ok {
+			t.Fatal("FileReader node not found")
+		}
+
+		// The type should now have methods associated
+		if fileReaderNode.Symbol.Metadata == nil || len(fileReaderNode.Symbol.Metadata.Methods) == 0 {
+			t.Error("expected FileReader to have methods associated cross-file")
+		}
+
+		// Check that EdgeTypeImplements was created
+		foundImplements := false
+		for _, edge := range fileReaderNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == readerInterface.ID {
+				foundImplements = true
+				break
+			}
+		}
+		if !foundImplements {
+			t.Error("expected EdgeTypeImplements from FileReader to Reader (cross-file method association)")
+		}
+
+		// Verify stats
+		if result.Stats.GoInterfaceEdges != 1 {
+			t.Errorf("expected GoInterfaceEdges=1, got %d", result.Stats.GoInterfaceEdges)
+		}
+	})
+}
+
+func TestBuilder_PythonProtocolImplementation(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("Python Protocol implementation detected", func(t *testing.T) {
+		// Protocol (interface in Python)
+		handlerProtocol := &ast.Symbol{
+			ID:        "protocols.py:5:Handler",
+			Name:      "Handler",
+			Kind:      ast.SymbolKindInterface, // Marked as interface by parser
+			FilePath:  "protocols.py",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "python",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "handle", ParamCount: 1, ReturnCount: 1},
+					{Name: "close", ParamCount: 0, ReturnCount: 0},
+				},
+			},
+		}
+
+		// Class that implements the Protocol
+		fileHandler := &ast.Symbol{
+			ID:        "handlers.py:10:FileHandler",
+			Name:      "FileHandler",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "handlers.py",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "python",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "handle", ParamCount: 1, ReturnCount: 1},
+					{Name: "close", ParamCount: 0, ReturnCount: 0},
+					{Name: "extra", ParamCount: 0, ReturnCount: 0},
+				},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "protocols.py",
+			Language: "python",
+			Symbols:  []*ast.Symbol{handlerProtocol},
+			Package:  "myapp",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "handlers.py",
+			Language: "python",
+			Symbols:  []*ast.Symbol{fileHandler},
+			Package:  "myapp",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Check that EdgeTypeImplements was created
+		handlerNode, ok := result.Graph.GetNode(fileHandler.ID)
+		if !ok {
+			t.Fatal("FileHandler node not found")
+		}
+		foundImplements := false
+		for _, edge := range handlerNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == handlerProtocol.ID {
+				foundImplements = true
+				break
+			}
+		}
+		if !foundImplements {
+			t.Error("expected EdgeTypeImplements from FileHandler to Handler Protocol")
+		}
+	})
+
+	t.Run("Python and Go interfaces don't cross-match", func(t *testing.T) {
+		// Go interface
+		goInterface := &ast.Symbol{
+			ID:        "handler.go:5:Handler",
+			Name:      "Handler",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "handler.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Handle", ParamCount: 1, ReturnCount: 1},
+				},
+			},
+		}
+
+		// Python class with same method name (different case)
+		pythonClass := &ast.Symbol{
+			ID:        "handler.py:10:MyHandler",
+			Name:      "MyHandler",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "handler.py",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "python",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Handle", ParamCount: 1, ReturnCount: 1},
+				},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "handler.go",
+			Language: "go",
+			Symbols:  []*ast.Symbol{goInterface},
+			Package:  "main",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "handler.py",
+			Language: "python",
+			Symbols:  []*ast.Symbol{pythonClass},
+			Package:  "myapp",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Python class should NOT implement Go interface (different languages)
+		pythonNode, ok := result.Graph.GetNode(pythonClass.ID)
+		if !ok {
+			t.Fatal("Python class node not found")
+		}
+		for _, edge := range pythonNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == goInterface.ID {
+				t.Error("Python class should NOT implement Go interface (cross-language)")
+			}
+		}
+	})
+}
+
+func TestIsMethodSuperset(t *testing.T) {
+	tests := []struct {
+		name     string
+		superset map[string]bool
+		subset   map[string]bool
+		expected bool
+	}{
+		{
+			name:     "exact match",
+			superset: map[string]bool{"Read": true, "Close": true},
+			subset:   map[string]bool{"Read": true, "Close": true},
+			expected: true,
+		},
+		{
+			name:     "superset has more",
+			superset: map[string]bool{"Read": true, "Write": true, "Close": true},
+			subset:   map[string]bool{"Read": true, "Close": true},
+			expected: true,
+		},
+		{
+			name:     "subset has more - not a superset",
+			superset: map[string]bool{"Read": true},
+			subset:   map[string]bool{"Read": true, "Close": true},
+			expected: false,
+		},
+		{
+			name:     "disjoint sets",
+			superset: map[string]bool{"Read": true},
+			subset:   map[string]bool{"Write": true},
+			expected: false,
+		},
+		{
+			name:     "empty subset",
+			superset: map[string]bool{"Read": true},
+			subset:   map[string]bool{},
+			expected: true,
+		},
+		{
+			name:     "both empty",
+			superset: map[string]bool{},
+			subset:   map[string]bool{},
+			expected: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isMethodSuperset(tc.superset, tc.subset)
+			if result != tc.expected {
+				t.Errorf("isMethodSuperset() = %v, expected %v", result, tc.expected)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// GR-41: Call Edge Extraction Tests
+// =============================================================================
+
+// Helper to create a symbol with call sites for GR-41 tests.
+func testSymbolWithCalls(name string, kind ast.SymbolKind, filePath string, line int, calls []ast.CallSite) *ast.Symbol {
+	sym := testSymbol(name, kind, filePath, line)
+	sym.Calls = calls
+	return sym
+}
+
+func TestBuilder_ExtractCallEdges_SamePackage(t *testing.T) {
+	// Create parse result with function calls
+	callerSym := testSymbolWithCalls("Caller", ast.SymbolKindFunction, "main.go", 5, []ast.CallSite{
+		{
+			Target: "Callee",
+			Location: ast.Location{
+				FilePath:  "main.go",
+				StartLine: 6,
+			},
+		},
+	})
+	calleeSym := testSymbol("Callee", ast.SymbolKindFunction, "main.go", 15)
+
+	result := testParseResult("main.go", []*ast.Symbol{callerSym, calleeSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Check that call edge was created
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	// Check outgoing edges
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == calleeSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("Expected EdgeTypeCalls from Caller to Callee")
+	}
+
+	// Check stats
+	if buildResult.Stats.CallEdgesResolved == 0 {
+		t.Error("Expected CallEdgesResolved > 0")
+	}
+}
+
+func TestBuilder_ExtractCallEdges_Unresolved(t *testing.T) {
+	// Create parse result with unresolved call
+	callerSym := testSymbolWithCalls("Caller", ast.SymbolKindFunction, "main.go", 5, []ast.CallSite{
+		{
+			Target: "ExternalFunc",
+			Location: ast.Location{
+				FilePath:  "main.go",
+				StartLine: 6,
+			},
+		},
+	})
+
+	result := testParseResult("main.go", []*ast.Symbol{callerSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Check that placeholder was created
+	if buildResult.Stats.PlaceholderNodes == 0 {
+		t.Error("Expected placeholder node for unresolved call")
+	}
+
+	// Check stats
+	if buildResult.Stats.CallEdgesUnresolved == 0 {
+		t.Error("Expected CallEdgesUnresolved > 0")
+	}
+}
+
+func TestBuilder_ExtractCallEdges_MethodCall(t *testing.T) {
+	// Create parse result with method call
+	callerSym := testSymbolWithCalls("Handler", ast.SymbolKindMethod, "main.go", 5, []ast.CallSite{
+		{
+			Target:   "Process",
+			IsMethod: true,
+			Receiver: "s",
+			Location: ast.Location{
+				FilePath:  "main.go",
+				StartLine: 6,
+			},
+		},
+	})
+	callerSym.Receiver = "Server"
+
+	processSym := testSymbol("Process", ast.SymbolKindMethod, "main.go", 20)
+	processSym.Receiver = "Server"
+
+	result := testParseResult("main.go", []*ast.Symbol{callerSym, processSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Check that method call edge was created
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Handler node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == processSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("Expected EdgeTypeCalls from Handler to Process")
+	}
+}
+
+func TestBuilder_ExtractCallEdges_NoCalls(t *testing.T) {
+	// Create parse result with function without calls
+	funcSym := testSymbol("NoOp", ast.SymbolKindFunction, "main.go", 5)
+	funcSym.Calls = nil // No calls
+
+	result := testParseResult("main.go", []*ast.Symbol{funcSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// No call edges should be created
+	graph := buildResult.Graph
+	node, ok := graph.GetNode(funcSym.ID)
+	if !ok {
+		t.Fatal("NoOp node not found in graph")
+	}
+
+	for _, edge := range node.Outgoing {
+		if edge.Type == EdgeTypeCalls {
+			t.Error("Expected no EdgeTypeCalls for function without calls")
+		}
+	}
+}
+
+func TestBuilder_ExtractCallEdges_MultipleCallsSameTarget(t *testing.T) {
+	// Create parse result with multiple calls to same target
+	callerSym := testSymbolWithCalls("Caller", ast.SymbolKindFunction, "main.go", 5, []ast.CallSite{
+		{Target: "Helper", Location: ast.Location{FilePath: "main.go", StartLine: 6}},
+		{Target: "Helper", Location: ast.Location{FilePath: "main.go", StartLine: 7}},
+		{Target: "Helper", Location: ast.Location{FilePath: "main.go", StartLine: 8}},
+	})
+	helperSym := testSymbol("Helper", ast.SymbolKindFunction, "main.go", 20)
+
+	result := testParseResult("main.go", []*ast.Symbol{callerSym, helperSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should create edges (duplicates may or may not be created depending on graph implementation)
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	callEdgeCount := 0
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == helperSym.ID {
+			callEdgeCount++
+		}
+	}
+
+	// At least one edge should exist
+	if callEdgeCount == 0 {
+		t.Error("Expected at least one EdgeTypeCalls from Caller to Helper")
+	}
+}
+
+// GR-41c: Tests for findPackageSymbolID
+
+func TestFindPackageSymbolID_WithPackage(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			{ID: "main.go:1:main", Kind: ast.SymbolKindPackage, Name: "main"},
+			{ID: "main.go:5:Setup", Kind: ast.SymbolKindFunction, Name: "Setup"},
+		},
+	}
+	id := findPackageSymbolID(r)
+	if id != "main.go:1:main" {
+		t.Errorf("expected 'main.go:1:main', got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_NoPackage(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			{ID: "main.go:5:Setup", Kind: ast.SymbolKindFunction, Name: "Setup"},
+		},
+	}
+	id := findPackageSymbolID(r)
+	// Falls back to first symbol
+	if id != "main.go:5:Setup" {
+		t.Errorf("expected 'main.go:5:Setup', got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_NilSymbols(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols:  nil,
+	}
+	id := findPackageSymbolID(r)
+	if id != "" {
+		t.Errorf("expected empty string, got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_EmptySymbols(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols:  []*ast.Symbol{},
+	}
+	id := findPackageSymbolID(r)
+	if id != "" {
+		t.Errorf("expected empty string, got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_NilResult(t *testing.T) {
+	id := findPackageSymbolID(nil)
+	if id != "" {
+		t.Errorf("expected empty string, got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_PackageNotFirst(t *testing.T) {
+	// Package symbol is not first - should still find it
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			{ID: "main.go:3:foo", Kind: ast.SymbolKindImport, Name: "foo"},
+			{ID: "main.go:5:Setup", Kind: ast.SymbolKindFunction, Name: "Setup"},
+			{ID: "main.go:1:main", Kind: ast.SymbolKindPackage, Name: "main"},
+		},
+	}
+	id := findPackageSymbolID(r)
+	if id != "main.go:1:main" {
+		t.Errorf("expected 'main.go:1:main', got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_SkipsNilSymbols(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			nil,
+			{ID: "main.go:1:main", Kind: ast.SymbolKindPackage, Name: "main"},
+			nil,
+		},
+	}
+	id := findPackageSymbolID(r)
+	if id != "main.go:1:main" {
+		t.Errorf("expected 'main.go:1:main', got %q", id)
+	}
+}
+
+// GR-41c: Tests for extractImportEdges fix
+
+func TestExtractImportEdges_CreatesEdges(t *testing.T) {
+	// Create a parse result with package symbol and imports using testSymbol helper
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	imports := []ast.Import{
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+		{Path: "context", Location: ast.Location{FilePath: "main.go", StartLine: 4}},
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, imports)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+
+	// Should have created the package node plus 2 placeholder nodes for imports
+	// Node count: 1 (package) + 2 (import placeholders) = 3
+	if graph.NodeCount() < 1 {
+		t.Errorf("expected at least 1 node, got %d", graph.NodeCount())
+	}
+
+	// Should have 2 import edges
+	if graph.EdgeCount() != 2 {
+		t.Errorf("expected 2 edges (imports), got %d", graph.EdgeCount())
+	}
+
+	// Verify the package node exists
+	pkgNode, ok := graph.GetNode(pkgSym.ID)
+	if !ok {
+		t.Fatalf("package node not found: %s", pkgSym.ID)
+	}
+
+	// Verify the package node has outgoing import edges
+	importEdgeCount := 0
+	for _, edge := range pkgNode.Outgoing {
+		if edge.Type == EdgeTypeImports {
+			importEdgeCount++
+		}
+	}
+	if importEdgeCount != 2 {
+		t.Errorf("expected 2 import edges from package, got %d", importEdgeCount)
+	}
+}
+
+func TestExtractImportEdges_NoPackageSymbol_FallsBackToFirstSymbol(t *testing.T) {
+	// Create a parse result without package symbol using testSymbol helper
+	funcSym := testSymbol("Setup", ast.SymbolKindFunction, "main.go", 5)
+
+	imports := []ast.Import{
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{funcSym}, imports)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+
+	// Should have created import edge from the function (fallback)
+	if graph.EdgeCount() != 1 {
+		t.Errorf("expected 1 edge (import), got %d", graph.EdgeCount())
+	}
+
+	// Verify the function node has outgoing import edge
+	funcNode, ok := graph.GetNode(funcSym.ID)
+	if !ok {
+		t.Fatalf("function node not found: %s", funcSym.ID)
+	}
+
+	importEdgeCount := 0
+	for _, edge := range funcNode.Outgoing {
+		if edge.Type == EdgeTypeImports {
+			importEdgeCount++
+		}
+	}
+	if importEdgeCount != 1 {
+		t.Errorf("expected 1 import edge from function, got %d", importEdgeCount)
+	}
+}
+
+func TestExtractImportEdges_NoSymbols_NoEdges(t *testing.T) {
+	// Create a parse result with no symbols but has imports
+	result := &ast.ParseResult{
+		FilePath: "main.go",
+		Language: "go",
+		Symbols:  nil,
+		Imports: []ast.Import{
+			{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+		},
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should have 0 nodes and 0 edges (no source for imports)
+	if buildResult.Graph.NodeCount() != 0 {
+		t.Errorf("expected 0 nodes, got %d", buildResult.Graph.NodeCount())
+	}
+	if buildResult.Graph.EdgeCount() != 0 {
+		t.Errorf("expected 0 edges, got %d", buildResult.Graph.EdgeCount())
+	}
+}
+
+func TestExtractImportEdges_NoImports_NoEdges(t *testing.T) {
+	// Create a parse result with package symbol but no imports using testSymbol helper
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should have 1 node (package) and 0 edges
+	if buildResult.Graph.NodeCount() != 1 {
+		t.Errorf("expected 1 node, got %d", buildResult.Graph.NodeCount())
+	}
+	if buildResult.Graph.EdgeCount() != 0 {
+		t.Errorf("expected 0 edges, got %d", buildResult.Graph.EdgeCount())
+	}
+}
+
+// T-1: Test context cancellation during import edge extraction
+func TestExtractImportEdges_ContextCancellation(t *testing.T) {
+	// Create a parse result with package symbol and many imports
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	// Create 25 imports to ensure we hit the cancellation check (every 10 iterations)
+	imports := make([]ast.Import, 25)
+	for i := 0; i < 25; i++ {
+		imports[i] = ast.Import{
+			Path:     fmt.Sprintf("pkg%d", i),
+			Location: ast.Location{FilePath: "main.go", StartLine: i + 3},
+		}
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, imports)
+
+	// Create a cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	builder := NewBuilder()
+	// Should not panic and should complete (possibly with partial results)
+	buildResult, err := builder.Build(ctx, []*ast.ParseResult{result})
+	if err != nil {
+		// Context cancellation during collectPhase returns early, which is fine
+		// The important thing is it doesn't panic
+		return
+	}
+
+	// If we got a result, it may be incomplete due to cancellation
+	// The test passes as long as no panic occurred
+	_ = buildResult
+}
+
+// T-2: Test duplicate imports are handled correctly
+func TestExtractImportEdges_DuplicateImports(t *testing.T) {
+	// Create a parse result with package symbol and duplicate imports
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	imports := []ast.Import{
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 4}}, // Duplicate
+		{Path: "context", Location: ast.Location{FilePath: "main.go", StartLine: 5}},
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, imports)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+
+	// Should have 3 nodes: 1 package + 2 unique import placeholders (fmt and context)
+	// The placeholder for "fmt" should be reused
+	if graph.NodeCount() < 1 {
+		t.Errorf("expected at least 1 node, got %d", graph.NodeCount())
+	}
+
+	// Verify the package node exists and has edges
+	pkgNode, ok := graph.GetNode(pkgSym.ID)
+	if !ok {
+		t.Fatalf("package node not found: %s", pkgSym.ID)
+	}
+
+	// Count import edges - should have at least 2 (one for each unique import)
+	// Note: duplicate edges may or may not be created depending on AddEdge behavior
+	importEdgeCount := 0
+	for _, edge := range pkgNode.Outgoing {
+		if edge.Type == EdgeTypeImports {
+			importEdgeCount++
+		}
+	}
+
+	// At minimum we should have edges to fmt and context
+	if importEdgeCount < 2 {
+		t.Errorf("expected at least 2 import edges, got %d", importEdgeCount)
+	}
+
+	// Verify no errors occurred (duplicates should be handled gracefully)
+	// Note: EdgeErrors may contain duplicate edge errors which are non-fatal
 }

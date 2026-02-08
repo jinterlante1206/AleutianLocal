@@ -262,6 +262,11 @@ func (m *mockSnapshot) StreamingIndex() StreamingIndexView   { return m.streamin
 func (m *mockSnapshot) Query() QueryAPI                      { return nil }
 func (m *mockSnapshot) GraphQuery() GraphQuery               { return nil }
 
+// GR-31: Analytics methods
+func (m *mockSnapshot) AnalyticsHistory() []*AnalyticsRecord              { return nil }
+func (m *mockSnapshot) LastAnalytics(AnalyticsQueryType) *AnalyticsRecord { return nil }
+func (m *mockSnapshot) HasRunAnalytics(AnalyticsQueryType) bool           { return false }
+
 func TestNewSerializer(t *testing.T) {
 	t.Run("creates serializer with nil logger", func(t *testing.T) {
 		s := NewSerializer(nil)

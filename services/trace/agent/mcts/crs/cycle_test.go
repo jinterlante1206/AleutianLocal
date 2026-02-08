@@ -526,6 +526,11 @@ func (m *mockCRSForCycleAnalysis) Close()                         {}
 func (m *mockCRSForCycleAnalysis) SetGraphProvider(GraphQuery) {}
 func (m *mockCRSForCycleAnalysis) InvalidateGraphCache()       {}
 
+// GR-31: Analytics methods
+func (m *mockCRSForCycleAnalysis) GetAnalyticsHistory() []*AnalyticsRecord              { return nil }
+func (m *mockCRSForCycleAnalysis) GetLastAnalytics(AnalyticsQueryType) *AnalyticsRecord { return nil }
+func (m *mockCRSForCycleAnalysis) HasRunAnalytics(AnalyticsQueryType) bool              { return false }
+
 func TestAnalyzeSessionCycles_NilContext(t *testing.T) {
 	mock := newMockCRSForCycleAnalysis()
 	_, err := AnalyzeSessionCycles(nil, mock, "test-session")

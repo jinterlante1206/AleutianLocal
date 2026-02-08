@@ -22,6 +22,7 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -103,6 +104,47 @@ func countToolCalls(history []agent.ToolHistoryEntry, toolName string) int {
 		}
 	}
 	return count
+}
+
+// buildToolCountMapFromSession builds a map of tool name to call count from session trace steps.
+//
+// Description:
+//
+//	Iterates through the session's trace steps and counts calls per tool.
+//	Counts both "tool_call" and "tool_call_forced" actions to capture calls
+//	from both router and LLM paths.
+//
+//	GR-39b: This is more accurate than ToolHistory which only captures router
+//	path calls. TraceSteps capture ALL tool executions regardless of path.
+//
+//	Optimization: Build the map once before the invocation loop (O(n+m))
+//	instead of counting per-invocation (O(n*m)).
+//
+// Inputs:
+//
+//	s - The session to count from. May be nil (returns empty map).
+//
+// Outputs:
+//
+//	map[string]int - Map of tool name to call count.
+//
+// Thread Safety: Safe for concurrent use (reads snapshot of trace steps).
+func buildToolCountMapFromSession(s *agent.Session) map[string]int {
+	counts := make(map[string]int)
+	if s == nil {
+		return counts
+	}
+
+	steps := s.GetTraceSteps()
+	for _, step := range steps {
+		// Count both tool_call and tool_call_forced actions
+		// CB-31d: tool_call_forced is used by router hard-forcing path
+		if step.Action == "tool_call" || step.Action == "tool_call_forced" {
+			counts[step.Tool]++
+		}
+	}
+
+	return counts
 }
 
 // -----------------------------------------------------------------------------
@@ -441,9 +483,7 @@ func (p *ExecutePhase) checkSemanticRepetition(
 		return false, 0, ""
 	}
 
-	// Query param names to check in Metadata
-	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target", "function_name"}
-
+	// GR-39a: Use shared queryParamNames for consistent deduplication across all tools
 	for i := len(steps) - 1; i >= startIdx; i-- {
 		step := steps[i]
 
@@ -463,6 +503,18 @@ func (p *ExecutePhase) checkSemanticRepetition(
 
 		if prevQuery == "" {
 			continue
+		}
+
+		// GR-38 Issue 14: Check for EXACT duplicate first (fast path)
+		// This catches cases like find_callees("main") called twice
+		if strings.EqualFold(query, prevQuery) {
+			span.AddEvent("exact_duplicate_detected",
+				trace.WithAttributes(
+					attribute.String("tool", tool),
+					attribute.String("query", query),
+				),
+			)
+			return true, 1.0, prevQuery
 		}
 
 		prevTerms := extractQueryTerms(prevQuery)
@@ -592,13 +644,25 @@ func jaccardSimilarity(a, b map[string]bool) float64 {
 // Outputs:
 //
 //	string - The query/pattern string, or empty if not found.
+//
+// queryParamNames contains parameter names used for semantic deduplication.
+// GR-39a: Consolidated list used by all 3 dedup layers (UCB1, CB-30c, GR-39a batch filter).
+// When adding a new tool, add its primary query parameter here.
+var queryParamNames = []string{
+	// Original params (GR-38)
+	"pattern", "query", "search", "symbol", "name", "path", "target", "function_name", "file_path",
+	// GR-39a: Added missing params from tool definitions
+	"package",        // explore_package
+	"symbol_name",    // symbol search tools
+	"interface_name", // find_implementers
+	"symbol_id",      // symbol lookup tools
+	"direction",      // analyze_data_flow
+}
+
 func extractToolQuery(inv *agent.ToolInvocation) string {
 	if inv == nil || inv.Parameters == nil {
 		return ""
 	}
-
-	// Common query parameter names across tools
-	queryParamNames := []string{"pattern", "query", "search", "symbol", "name", "path", "target"}
 
 	// Check StringParams first
 	if inv.Parameters.StringParams != nil {
@@ -1122,4 +1186,74 @@ func getRecentToolsFromSession(s *agent.Session) []string {
 		}
 	}
 	return recent
+}
+
+// -----------------------------------------------------------------------------
+// Semantic Tool History (GR-38 Issue 17)
+// -----------------------------------------------------------------------------
+
+// buildSemanticToolHistoryFromSession converts session trace steps to routing.ToolCallHistory.
+//
+// Description:
+//
+//	Extracts tool calls from session trace steps and builds a semantic history
+//	for duplicate detection. Uses the Metadata["query"] field from tool_routing
+//	steps as the raw query for semantic comparison.
+//
+// Inputs:
+//
+//	s - The session to extract history from.
+//
+// Outputs:
+//
+//	*routing.ToolCallHistory - Semantic history for CheckSemanticStatus.
+//
+// Thread Safety: Safe for concurrent use.
+func buildSemanticToolHistoryFromSession(s *agent.Session) *routing.ToolCallHistory {
+	history := routing.NewToolCallHistory()
+
+	if s == nil {
+		return history
+	}
+
+	traceSteps := s.GetTraceSteps()
+	if len(traceSteps) == 0 {
+		return history
+	}
+
+	stepNum := 0
+	for _, step := range traceSteps {
+		// Look at tool_routing steps which have the query in metadata
+		if step.Action != "tool_routing" {
+			continue
+		}
+
+		stepNum++
+
+		// Extract query from metadata
+		rawQuery := ""
+		if step.Metadata != nil {
+			rawQuery = step.Metadata["query"]
+		}
+
+		// Build signature
+		sig := routing.ToolCallSignature{
+			Tool:       step.Target, // tool_routing uses Target for tool name
+			QueryTerms: routing.ExtractQueryTerms(rawQuery),
+			RawQuery:   rawQuery,
+			StepNumber: stepNum,
+			Success:    step.Error == "",
+		}
+
+		history.Add(sig)
+	}
+
+	// R1.2 Fix: Trim history to maxToolHistoryEntries
+	// ToolCallHistory now has Add() auto-trimming, but we also trim explicitly
+	// in case session has many tool_routing steps.
+	if history.Len() > maxToolHistoryEntries {
+		history.Trim(maxToolHistoryEntries)
+	}
+
+	return history
 }

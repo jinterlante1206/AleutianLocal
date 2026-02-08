@@ -1190,26 +1190,21 @@ func TestCRS_CheckCircuitBreaker(t *testing.T) {
 			t.Error("expected ShouldFire=false with no executions")
 		}
 
-		// Add 2 tool executions
-		c.RecordStep(ctx, StepRecord{
-			SessionID: "session-1",
-			Actor:     ActorRouter,
-			Decision:  DecisionExecuteTool,
-			Outcome:   OutcomeSuccess,
-			Tool:      "list_packages",
-		})
-		c.RecordStep(ctx, StepRecord{
-			SessionID: "session-1",
-			Actor:     ActorRouter,
-			Decision:  DecisionExecuteTool,
-			Outcome:   OutcomeSuccess,
-			Tool:      "list_packages",
-		})
+		// Add 5 tool executions (DefaultCircuitBreakerThreshold is 5 per GR-41b)
+		for i := 0; i < DefaultCircuitBreakerThreshold; i++ {
+			c.RecordStep(ctx, StepRecord{
+				SessionID: "session-1",
+				Actor:     ActorRouter,
+				Decision:  DecisionExecuteTool,
+				Outcome:   OutcomeSuccess,
+				Tool:      "list_packages",
+			})
+		}
 
 		// Now should fire
 		result = c.CheckCircuitBreaker("session-1", "list_packages")
 		if !result.ShouldFire {
-			t.Error("expected ShouldFire=true with 2 executions")
+			t.Errorf("expected ShouldFire=true with %d executions", DefaultCircuitBreakerThreshold)
 		}
 	})
 

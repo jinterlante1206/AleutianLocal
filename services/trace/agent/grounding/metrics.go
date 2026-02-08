@@ -113,6 +113,9 @@ var (
 	semanticCircuitBreakerTotal   metric.Int64Counter
 	repetitionDetectorSuggestions metric.Int64Counter
 
+	// GR-39b: Count-based circuit breaker metrics (LLM path)
+	countCircuitBreakerTotal metric.Int64Counter
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -485,6 +488,16 @@ func initMetrics() error {
 		repetitionDetectorSuggestions, err = meter.Int64Counter(
 			"repetition_detector_suggestions_total",
 			metric.WithDescription("Total alternative tool suggestions from repetition detector"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// GR-39b: Count-based circuit breaker metric
+		countCircuitBreakerTotal, err = meter.Int64Counter(
+			"trace_circuit_breaker_total",
+			metric.WithDescription("Total count-based circuit breaker triggers by path and tool"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -1361,4 +1374,31 @@ func RecordRepetitionDetectorSuggestion(currentTool, suggestion string) {
 	)
 
 	repetitionDetectorSuggestions.Add(context.Background(), 1, attrs)
+}
+
+// RecordCountCircuitBreaker records when the count-based circuit breaker fires.
+//
+// Description:
+//
+//	GR-39b: Tracks when a tool call is blocked because it exceeded the
+//	count threshold (DefaultCircuitBreakerThreshold). Labels include the
+//	tool name and the path (router or llm) where the breaker fired.
+//
+// Inputs:
+//
+//	toolName - Name of the tool that was blocked.
+//	path - The execution path where breaker fired ("router" or "llm").
+//
+// Thread Safety: Safe for concurrent use.
+func RecordCountCircuitBreaker(toolName, path string) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("tool", toolName),
+		attribute.String("path", path),
+	)
+
+	countCircuitBreakerTotal.Add(context.Background(), 1, attrs)
 }

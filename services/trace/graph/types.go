@@ -496,6 +496,9 @@ type PathResult struct {
 }
 
 // GraphStats contains statistics about the graph.
+//
+// Thread Safety: GraphStats is a value type with no internal state.
+// Safe for concurrent use as long as the source Graph is frozen.
 type GraphStats struct {
 	// NodeCount is the total number of nodes.
 	NodeCount int
@@ -505,6 +508,10 @@ type GraphStats struct {
 
 	// EdgesByType maps each EdgeType to the count of edges of that type.
 	EdgesByType map[EdgeType]int
+
+	// NodesByKind maps each SymbolKind to the count of nodes of that kind.
+	// Added for GR-43 debug endpoint.
+	NodesByKind map[ast.SymbolKind]int
 
 	// MaxNodes is the configured maximum node capacity.
 	MaxNodes int
@@ -520,16 +527,41 @@ type GraphStats struct {
 }
 
 // Stats returns statistics about the graph.
+//
+// Description:
+//
+//	Computes and returns statistics including node/edge counts,
+//	breakdowns by edge type and symbol kind, and capacity information.
+//
+// Outputs:
+//
+//	GraphStats - Statistics about the graph.
+//
+// Complexity:
+//
+//	O(V + E) where V is node count and E is edge count.
+//
+// Thread Safety:
+//
+//	Safe for concurrent use on frozen graphs. Not safe during building.
 func (g *Graph) Stats() GraphStats {
 	edgesByType := make(map[EdgeType]int)
 	for _, edge := range g.edges {
 		edgesByType[edge.Type]++
 	}
 
+	nodesByKind := make(map[ast.SymbolKind]int)
+	for _, node := range g.nodes {
+		if node.Symbol != nil {
+			nodesByKind[node.Symbol.Kind]++
+		}
+	}
+
 	return GraphStats{
 		NodeCount:    len(g.nodes),
 		EdgeCount:    len(g.edges),
 		EdgesByType:  edgesByType,
+		NodesByKind:  nodesByKind,
 		MaxNodes:     g.options.MaxNodes,
 		MaxEdges:     g.options.MaxEdges,
 		State:        g.state,

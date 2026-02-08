@@ -112,6 +112,9 @@ func (t *GlobTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	}
 	if p.Path == "" {
 		p.Path = t.config.WorkingDir
+	} else if !filepath.IsAbs(p.Path) {
+		// GR-38: Normalize relative paths to absolute by joining with working directory
+		p.Path = filepath.Join(t.config.WorkingDir, p.Path)
 	}
 
 	// Validate

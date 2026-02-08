@@ -71,12 +71,12 @@ func TestTraceRecorder_RecordStep(t *testing.T) {
 	t.Run("sets timestamp if not provided", func(t *testing.T) {
 		recorder := NewTraceRecorder(DefaultTraceConfig())
 
-		before := time.Now()
+		before := time.Now().UnixMilli()
 		recorder.RecordStep(TraceStep{Action: "test"})
-		after := time.Now()
+		after := time.Now().UnixMilli()
 
 		steps := recorder.GetSteps()
-		if steps[0].Timestamp.Before(before) || steps[0].Timestamp.After(after) {
+		if steps[0].Timestamp < before || steps[0].Timestamp > after {
 			t.Error("Timestamp should be set to current time")
 		}
 	})
@@ -84,11 +84,11 @@ func TestTraceRecorder_RecordStep(t *testing.T) {
 	t.Run("preserves provided timestamp", func(t *testing.T) {
 		recorder := NewTraceRecorder(DefaultTraceConfig())
 
-		customTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+		customTime := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
 		recorder.RecordStep(TraceStep{Action: "test", Timestamp: customTime})
 
 		steps := recorder.GetSteps()
-		if !steps[0].Timestamp.Equal(customTime) {
+		if steps[0].Timestamp != customTime {
 			t.Error("Custom timestamp should be preserved")
 		}
 	})
@@ -210,8 +210,8 @@ func TestTraceRecorder_Clear(t *testing.T) {
 func TestTraceRecorder_Export(t *testing.T) {
 	recorder := NewTraceRecorder(DefaultTraceConfig())
 
-	t1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
-	t2 := time.Date(2024, 1, 1, 12, 5, 0, 0, time.UTC)
+	t1 := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	t2 := time.Date(2024, 1, 1, 12, 5, 0, 0, time.UTC).UnixMilli()
 
 	recorder.RecordStep(TraceStep{Action: "first", Timestamp: t1})
 	recorder.RecordStep(TraceStep{Action: "second", Timestamp: t2})
@@ -224,10 +224,10 @@ func TestTraceRecorder_Export(t *testing.T) {
 	if trace.TotalSteps != 2 {
 		t.Errorf("TotalSteps = %d, want 2", trace.TotalSteps)
 	}
-	if !trace.StartTime.Equal(t1) {
+	if trace.StartTime != t1 {
 		t.Errorf("StartTime = %v, want %v", trace.StartTime, t1)
 	}
-	if !trace.EndTime.Equal(t2) {
+	if trace.EndTime != t2 {
 		t.Errorf("EndTime = %v, want %v", trace.EndTime, t2)
 	}
 	if trace.Duration != "5m0s" {
@@ -372,7 +372,7 @@ func TestTraceStepBuilder(t *testing.T) {
 func TestReasoningTrace_JSONSerializable(t *testing.T) {
 	recorder := NewTraceRecorder(DefaultTraceConfig())
 
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	recorder.RecordStep(TraceStep{
 		Action:       "explore",
 		Target:       "auth.go",

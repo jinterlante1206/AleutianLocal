@@ -30,8 +30,8 @@ type TraceStep struct {
 	// Step is the 1-indexed step number (assigned by recorder).
 	Step int `json:"step"`
 
-	// Timestamp is when this step occurred.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when this step occurred (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Action describes what was done (e.g., "explore", "analyze", "trace_flow").
 	Action string `json:"action"`
@@ -78,11 +78,11 @@ type ReasoningTrace struct {
 	// Duration is the total time from first to last step.
 	Duration string `json:"total_duration"`
 
-	// StartTime is when the first step occurred.
-	StartTime time.Time `json:"start_time,omitempty"`
+	// StartTime is when the first step occurred (Unix milliseconds UTC).
+	StartTime int64 `json:"start_time,omitempty"`
 
-	// EndTime is when the last step occurred.
-	EndTime time.Time `json:"end_time,omitempty"`
+	// EndTime is when the last step occurred (Unix milliseconds UTC).
+	EndTime int64 `json:"end_time,omitempty"`
 
 	// Trace contains all recorded steps.
 	Trace []TraceStep `json:"trace"`
@@ -419,8 +419,8 @@ func (r *TraceRecorder) RecordStep(step TraceStep) {
 	r.nextStepNum++
 
 	// Set timestamp if not provided
-	if step.Timestamp.IsZero() {
-		step.Timestamp = time.Now()
+	if step.Timestamp == 0 {
+		step.Timestamp = time.Now().UnixMilli()
 	}
 
 	// Apply config filters
@@ -594,7 +594,8 @@ func (r *TraceRecorder) Export(sessionID string) ReasoningTrace {
 	if len(steps) > 0 {
 		trace.StartTime = steps[0].Timestamp
 		trace.EndTime = steps[len(steps)-1].Timestamp
-		duration := trace.EndTime.Sub(trace.StartTime)
+		durationMs := trace.EndTime - trace.StartTime
+		duration := time.Duration(durationMs) * time.Millisecond
 		trace.Duration = duration.String()
 	} else {
 		trace.Duration = "0s"
@@ -632,7 +633,7 @@ type TraceStepBuilder struct {
 func NewTraceStepBuilder() *TraceStepBuilder {
 	return &TraceStepBuilder{
 		step: TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 		},
 	}
 }

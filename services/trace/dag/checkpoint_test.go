@@ -374,7 +374,7 @@ func TestLoadCheckpoint_VersionMismatch(t *testing.T) {
 	// Read file and modify version
 	data, _ := os.ReadFile(path)
 	// This is a bit hacky but works for testing
-	modified := []byte(`{"state":{"session_id":"test-session","started_at":"2024-01-01T00:00:00Z","completed_nodes":{},"node_outputs":{},"node_statuses":{},"current_nodes":[]},"timestamp":"2024-01-01T00:00:00Z","version":"0.0","checksum":"invalid","dag_name":"test-dag"}`)
+	modified := []byte(`{"state":{"session_id":"test-session","started_at":1704067200000,"completed_nodes":{},"node_outputs":{},"node_statuses":{},"current_nodes":[]},"timestamp":1704067200000,"version":"0.0","checksum":"invalid","dag_name":"test-dag"}`)
 	_ = data // silence unused variable
 
 	if err := os.WriteFile(path, modified, 0644); err != nil {

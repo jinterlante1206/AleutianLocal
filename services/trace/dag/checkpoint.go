@@ -110,19 +110,19 @@ func (cs *checkpointState) toState() *State {
 // serializableCheckpoint is the on-disk format for checkpoints.
 type serializableCheckpoint struct {
 	State     *checkpointState `json:"state"`
-	Timestamp time.Time        `json:"timestamp"`
+	Timestamp int64            `json:"timestamp"` // Unix milliseconds UTC
 	Version   string           `json:"version"`
 	Checksum  string           `json:"checksum"`
 	DAGName   string           `json:"dag_name"`
 }
 
 // computeChecksum calculates SHA256 of the state for integrity verification.
-func computeChecksum(state *checkpointState, dagName string, timestamp time.Time) (string, error) {
+func computeChecksum(state *checkpointState, dagName string, timestamp int64) (string, error) {
 	// Create a deterministic representation for checksumming
 	// We exclude the checksum field itself
 	data := struct {
 		State     *checkpointState `json:"state"`
-		Timestamp time.Time        `json:"timestamp"`
+		Timestamp int64            `json:"timestamp"`
 		Version   string           `json:"version"`
 		DAGName   string           `json:"dag_name"`
 	}{
@@ -177,7 +177,7 @@ func SaveCheckpoint(state *State, dagName string, path string) error {
 
 	// Convert to serializable form
 	cs := state.toCheckpointState()
-	timestamp := time.Now()
+	timestamp := time.Now().UnixMilli()
 
 	// Compute checksum
 	checksum, err := computeChecksum(cs, dagName, timestamp)
@@ -286,7 +286,7 @@ func LoadCheckpoint(path string) (*Checkpoint, error) {
 	// Convert to Checkpoint with State
 	return &Checkpoint{
 		State:     sc.State.toState(),
-		Timestamp: sc.Timestamp.UnixMilli(),
+		Timestamp: sc.Timestamp,
 		Version:   sc.Version,
 		Checksum:  sc.Checksum,
 		DAGName:   sc.DAGName,
@@ -309,7 +309,7 @@ func (c *Checkpoint) Verify() bool {
 	}
 
 	cs := c.State.toCheckpointState()
-	expectedChecksum, err := computeChecksum(cs, c.DAGName, time.UnixMilli(c.Timestamp))
+	expectedChecksum, err := computeChecksum(cs, c.DAGName, c.Timestamp)
 	if err != nil {
 		return false
 	}

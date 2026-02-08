@@ -196,6 +196,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 	safetyGate := safety.NewDefaultGate(nil)
 
 	// Create dependencies factory
+	// GR-39: Enable Coordinator and Session Restore for CRS persistence
 	depsFactory := code_buddy.NewDependenciesFactory(
 		code_buddy.WithLLMClient(llmClient),
 		code_buddy.WithGraphProvider(graphProvider),
@@ -204,6 +205,8 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 		code_buddy.WithService(svc),
 		code_buddy.WithContextEnabled(withContext),
 		code_buddy.WithToolsEnabled(withTools),
+		code_buddy.WithCoordinatorEnabled(true),
+		code_buddy.WithSessionRestoreEnabled(true),
 	)
 
 	if withContext {

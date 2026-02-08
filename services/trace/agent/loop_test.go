@@ -534,3 +534,169 @@ func TestDefaultAgentLoop_GetLastAssistantMessage_FindsLastNonEmpty(t *testing.T
 		t.Errorf("getLastAssistantMessage = %q, want %q", result, "First answer")
 	}
 }
+
+// =============================================================================
+// GR-38 Tests: Session Completion Tracing
+// =============================================================================
+
+func TestGR38_RecordSessionCompletion_NilSession(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+
+	// Should not panic with nil session
+	loop.recordSessionCompletion(context.Background(), nil, StateComplete, time.Now())
+}
+
+func TestGR38_RecordSessionCompletion_TracesStep(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+
+	// TraceRecorder is created by default in NewSession
+	session, err := NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Record completion with a start time slightly in the past to verify duration
+	startTime := time.Now().Add(-100 * time.Millisecond)
+	loop.recordSessionCompletion(context.Background(), session, StateComplete, startTime)
+
+	// Get trace and verify session_complete step was recorded
+	trace := session.GetReasoningTrace()
+	if trace == nil {
+		t.Fatal("Trace should not be nil when recording is enabled")
+	}
+
+	// Check that session_complete action was recorded
+	found := false
+	for _, step := range trace.Trace {
+		if step.Action == "session_complete" {
+			found = true
+			if step.Target != string(StateComplete) {
+				t.Errorf("Target = %s, want %s", step.Target, string(StateComplete))
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Error("session_complete trace step should be recorded")
+	}
+}
+
+func TestGR38_TerminalStateRecordsCompletion(t *testing.T) {
+	registry := NewMockPhaseRegistry()
+
+	// Register mock phases that go straight to complete
+	registry.RegisterPhase(StateInit, &MockPhase{name: "init", nextState: StatePlan})
+	registry.RegisterPhase(StatePlan, &MockPhase{name: "plan", nextState: StateExecute})
+	registry.RegisterPhase(StateExecute, &MockPhase{name: "execute", nextState: StateComplete})
+
+	loop := NewDefaultAgentLoop(WithPhaseRegistry(registry))
+
+	// TraceRecorder is created by default in NewSession
+	session, err := NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	result, err := loop.Run(context.Background(), session, "test query")
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if result.State != StateComplete {
+		t.Errorf("State = %s, want COMPLETE", result.State)
+	}
+
+	// Verify session_complete was recorded
+	trace := session.GetReasoningTrace()
+	if trace == nil {
+		t.Fatal("Trace should not be nil")
+	}
+
+	found := false
+	for _, step := range trace.Trace {
+		if step.Action == "session_complete" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Error("GR-38: session_complete trace step should be recorded on terminal state")
+	}
+}
+
+// TestGR38_RecordSessionCompletion_Duration verifies duration is recorded correctly.
+// GR-38 Finding 11: session_complete should include DurationMs.
+func TestGR38_RecordSessionCompletion_Duration(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+
+	session, err := NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Start time 500ms in the past
+	startTime := time.Now().Add(-500 * time.Millisecond)
+	loop.recordSessionCompletion(context.Background(), session, StateComplete, startTime)
+
+	// Get trace and verify duration was recorded
+	trace := session.GetReasoningTrace()
+	if trace == nil {
+		t.Fatal("Trace should not be nil")
+	}
+
+	for _, step := range trace.Trace {
+		if step.Action == "session_complete" {
+			// Duration should be at least 500ms (we set startTime 500ms ago)
+			durationMs := step.Duration.Milliseconds()
+			if durationMs < 500 {
+				t.Errorf("Duration = %v (%dms), want >= 500ms", step.Duration, durationMs)
+			}
+			// Check metadata also has duration
+			if _, ok := step.Metadata["duration_ms"]; !ok {
+				t.Error("Metadata should contain duration_ms")
+			}
+			return
+		}
+	}
+
+	t.Error("session_complete step not found")
+}
+
+// TestGR38_RecordSessionCompletion_TraceStepCount verifies trace_step_count is recorded.
+// GR-38 Issue 15: Help clarify step count vs trace step count.
+func TestGR38_RecordSessionCompletion_TraceStepCount(t *testing.T) {
+	loop := NewDefaultAgentLoop()
+
+	session, err := NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Record completion
+	loop.recordSessionCompletion(context.Background(), session, StateComplete, time.Now())
+
+	// Get trace and verify trace_step_count is in metadata
+	trace := session.GetReasoningTrace()
+	if trace == nil {
+		t.Fatal("Trace should not be nil")
+	}
+
+	for _, step := range trace.Trace {
+		if step.Action == "session_complete" {
+			count, ok := step.Metadata["trace_step_count"]
+			if !ok {
+				t.Error("Metadata should contain trace_step_count")
+				return
+			}
+			// Before session_complete, there were 0 trace steps
+			if count != "0" {
+				t.Errorf("trace_step_count = %s, want 0 (before session_complete)", count)
+			}
+			return
+		}
+	}
+
+	t.Error("session_complete step not found")
+}

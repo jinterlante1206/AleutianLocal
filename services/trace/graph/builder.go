@@ -13,10 +13,14 @@ package graph
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 )
@@ -377,19 +381,47 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 			continue
 		}
 
-		// Extract edges for this file
-		b.extractFileEdges(state, r)
+		// Extract edges for this file (GR-41: pass ctx for call edge tracing)
+		b.extractFileEdges(ctx, state, r)
 
 		b.reportProgress(state, ProgressPhaseExtractingEdges, len(results), i+1)
 	}
+
+	// GR-40 FIX (C-3): Associate methods with types across all files
+	// This must run before interface detection because methods may be defined
+	// in different files than their receiver types.
+	b.associateMethodsWithTypesCrossFile(ctx, state)
+
+	// GR-40/GR-40a: Compute interface implementations via method-set matching
+	// This runs after all per-file edges are extracted because it needs
+	// the complete set of interfaces and types across the entire project.
+	// Supports Go interfaces and Python Protocols.
+	if err := b.computeInterfaceImplementations(ctx, state); err != nil {
+		// Non-fatal: interface detection failure shouldn't fail the build
+		state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+			FromID:   "interface_detection",
+			ToID:     "all",
+			EdgeType: EdgeTypeImplements,
+			Err:      err,
+		})
+	}
+
+	// GR-41: Record call edge metrics after all edges extracted
+	recordCallEdgeMetrics(ctx,
+		state.result.Stats.CallEdgesResolved,
+		state.result.Stats.CallEdgesUnresolved,
+		state.result.Stats.CallEdgesResolved+state.result.Stats.CallEdgesUnresolved,
+	)
 
 	return nil
 }
 
 // extractFileEdges extracts all edge types from a single file's parse result.
-func (b *Builder) extractFileEdges(state *buildState, r *ast.ParseResult) {
-	// Extract import edges
-	b.extractImportEdges(state, r)
+// GR-41: Now accepts context for call edge tracing.
+// GR-41c: Passes context to extractImportEdges.
+func (b *Builder) extractFileEdges(ctx context.Context, state *buildState, r *ast.ParseResult) {
+	// Extract import edges (GR-41c: now accepts context)
+	b.extractImportEdges(ctx, state, r)
 
 	// Extract edges from symbols
 	for _, sym := range r.Symbols {
@@ -397,57 +429,183 @@ func (b *Builder) extractFileEdges(state *buildState, r *ast.ParseResult) {
 			continue
 		}
 
-		b.extractSymbolEdges(state, sym, r)
+		b.extractSymbolEdges(ctx, state, sym, r)
 
 		// Process children
-		b.extractChildEdges(state, sym.Children, r)
+		b.extractChildEdges(ctx, state, sym.Children, r)
 	}
 }
 
 // extractChildEdges recursively extracts edges from child symbols.
-func (b *Builder) extractChildEdges(state *buildState, children []*ast.Symbol, r *ast.ParseResult) {
+// GR-41: Now accepts context for call edge tracing.
+func (b *Builder) extractChildEdges(ctx context.Context, state *buildState, children []*ast.Symbol, r *ast.ParseResult) {
 	for _, child := range children {
 		if child == nil {
 			continue
 		}
-		b.extractSymbolEdges(state, child, r)
-		b.extractChildEdges(state, child.Children, r)
+		b.extractSymbolEdges(ctx, state, child, r)
+		b.extractChildEdges(ctx, state, child.Children, r)
 	}
 }
 
 // extractImportEdges creates IMPORTS edges from import statements.
-func (b *Builder) extractImportEdges(state *buildState, r *ast.ParseResult) {
-	// Find file symbol or create virtual one
-	fileSymbolID := fmt.Sprintf("%s:1:file", r.FilePath)
+//
+// Description:
+//
+//	Creates EdgeTypeImports edges from the package symbol to imported packages.
+//	GR-41c: Fixed to use actual package symbol instead of fabricated fileSymbolID.
+//
+// Inputs:
+//   - ctx: Context for tracing and cancellation.
+//   - state: The build state containing graph and symbol indexes.
+//   - r: The ParseResult containing imports and symbols.
+//
+// Outputs:
+//   - None. Edges are added to state.graph, errors to state.result.EdgeErrors.
+//
+// Thread Safety:
+//
+//	This method modifies state.graph and state.result. Not safe for concurrent
+//	use on the same buildState, but the builder serializes calls appropriately.
+func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *ast.ParseResult) {
+	if r == nil || len(r.Imports) == 0 {
+		return
+	}
 
-	for _, imp := range r.Imports {
+	// GR-41c: OTel tracing for observability
+	_, span := tracer.Start(ctx, "GraphBuilder.extractImportEdges",
+		trace.WithAttributes(
+			attribute.String("file", r.FilePath),
+			attribute.Int("import_count", len(r.Imports)),
+		),
+	)
+	defer span.End()
+
+	// GR-41c: Find actual package symbol instead of fabricating fileSymbolID
+	sourceID := findPackageSymbolID(r)
+	if sourceID == "" {
+		slog.Warn("GR-41c: No package symbol found for import edges",
+			slog.String("file", r.FilePath),
+			slog.Int("import_count", len(r.Imports)),
+		)
+		span.SetAttributes(attribute.Bool("no_source_symbol", true))
+		return
+	}
+
+	// GR-41c: Verify sourceID exists in graph before using (I-1: use GetNode method)
+	if _, exists := state.graph.GetNode(sourceID); !exists {
+		slog.Warn("GR-41c: Package symbol not in graph",
+			slog.String("file", r.FilePath),
+			slog.String("source_id", sourceID),
+		)
+		span.SetAttributes(attribute.Bool("source_not_in_graph", true))
+		return
+	}
+
+	edgesCreated := 0
+	edgesFailed := 0
+
+	for i, imp := range r.Imports {
+		// R-1: Check context cancellation every 10 imports for responsiveness
+		if i > 0 && i%10 == 0 {
+			if ctx.Err() != nil {
+				slog.Debug("GR-41c: Context cancelled during import edge extraction",
+					slog.String("file", r.FilePath),
+					slog.Int("processed", i),
+					slog.Int("total", len(r.Imports)),
+				)
+				span.SetAttributes(
+					attribute.Bool("cancelled", true),
+					attribute.Int("processed_before_cancel", i),
+				)
+				recordImportEdgeMetrics(ctx, edgesCreated, edgesFailed)
+				return
+			}
+		}
 		// Create placeholder for imported package
 		pkgID := b.getOrCreatePlaceholder(state, imp.Path, imp.Path)
 
-		// Create edge from file to import
-		err := state.graph.AddEdge(fileSymbolID, pkgID, EdgeTypeImports, imp.Location)
+		// Create edge from package symbol to imported package
+		err := state.graph.AddEdge(sourceID, pkgID, EdgeTypeImports, imp.Location)
 		if err != nil {
-			// File symbol might not exist - try to create from first symbol
-			if len(r.Symbols) > 0 && r.Symbols[0] != nil {
-				firstSymID := r.Symbols[0].ID
-				err = state.graph.AddEdge(firstSymID, pkgID, EdgeTypeImports, imp.Location)
-			}
-			if err != nil {
+			// Check if it's a duplicate edge error (not fatal)
+			if !strings.Contains(err.Error(), "already exists") {
 				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
-					FromID:   fileSymbolID,
+					FromID:   sourceID,
 					ToID:     pkgID,
 					EdgeType: EdgeTypeImports,
 					Err:      err,
 				})
-				continue
+				edgesFailed++
+				slog.Debug("GR-41c: Failed to create import edge",
+					slog.String("file", r.FilePath),
+					slog.String("from", sourceID),
+					slog.String("to", pkgID),
+					slog.String("error", err.Error()),
+				)
 			}
+			continue
 		}
+
 		state.result.Stats.EdgesCreated++
+		edgesCreated++
+
+		slog.Debug("GR-41c: Created import edge",
+			slog.String("file", r.FilePath),
+			slog.String("from", sourceID),
+			slog.String("import", imp.Path),
+		)
 	}
+
+	// GR-41c: Record span attributes and metrics
+	span.SetAttributes(
+		attribute.Int("edges_created", edgesCreated),
+		attribute.Int("edges_failed", edgesFailed),
+	)
+	recordImportEdgeMetrics(ctx, edgesCreated, edgesFailed)
+}
+
+// findPackageSymbolID finds the package symbol ID from a ParseResult.
+//
+// Description:
+//
+//	Searches the symbols for a SymbolKindPackage and returns its ID.
+//	Falls back to the first symbol if no package symbol is found.
+//	This is used by extractImportEdges to find the source node for
+//	import edges.
+//
+// Inputs:
+//   - r: The ParseResult to search. Must not be nil.
+//
+// Outputs:
+//   - string: The symbol ID to use as import source, or empty if no symbols.
+//
+// Thread Safety: This function is safe for concurrent use.
+func findPackageSymbolID(r *ast.ParseResult) string {
+	if r == nil || len(r.Symbols) == 0 {
+		return ""
+	}
+
+	// Strategy 1: Find explicit package symbol
+	for _, sym := range r.Symbols {
+		if sym != nil && sym.Kind == ast.SymbolKindPackage {
+			return sym.ID
+		}
+	}
+
+	// Strategy 2: Use first non-nil symbol as fallback
+	for _, sym := range r.Symbols {
+		if sym != nil {
+			return sym.ID
+		}
+	}
+
+	return ""
 }
 
 // extractSymbolEdges extracts edges for a single symbol.
-func (b *Builder) extractSymbolEdges(state *buildState, sym *ast.Symbol, r *ast.ParseResult) {
+// GR-41: Now accepts context for call edge tracing.
+func (b *Builder) extractSymbolEdges(ctx context.Context, state *buildState, sym *ast.Symbol, r *ast.ParseResult) {
 	switch sym.Kind {
 	case ast.SymbolKindMethod:
 		// Method -> Receiver type (RECEIVES edge)
@@ -457,8 +615,10 @@ func (b *Builder) extractSymbolEdges(state *buildState, sym *ast.Symbol, r *ast.
 		fallthrough // Methods can also have calls, returns, etc.
 
 	case ast.SymbolKindFunction:
-		// Extract call edges would require parsing function body
-		// For now, we extract what we can from metadata
+		// GR-41: Extract call edges from function/method body
+		if len(sym.Calls) > 0 {
+			b.extractCallEdges(ctx, state, sym)
+		}
 		b.extractReturnTypeEdges(state, sym)
 		b.extractParameterEdges(state, sym)
 
@@ -623,6 +783,174 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 	if len(targets) > 1 {
 		state.result.Stats.AmbiguousResolves++
 	}
+}
+
+// extractCallEdges creates CALLS edges from a function/method to its callees.
+//
+// Description:
+//
+//	For each call site in the symbol's Calls slice, this function attempts
+//	to resolve the call target to a symbol ID and creates an EdgeTypeCalls
+//	edge. Unresolved calls create placeholder nodes with SymbolKindExternal.
+//
+// Inputs:
+//   - ctx: Context for tracing and cancellation.
+//   - state: The build state containing symbol indexes.
+//   - sym: The function or method symbol containing call sites.
+//
+// Outputs:
+//   - None. Edges are added to state.graph, errors to state.result.EdgeErrors.
+//
+// Thread Safety:
+//
+//	This method modifies state.graph and state.result. Not safe for concurrent
+//	use on the same buildState, but the builder serializes calls appropriately.
+//
+// See GR-41: Call Edge Extraction for find_callers/find_callees.
+func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *ast.Symbol) {
+	if sym == nil || len(sym.Calls) == 0 {
+		return
+	}
+
+	// GR-41: OTel tracing for observability
+	_, span := tracer.Start(ctx, "GraphBuilder.extractCallEdges",
+		trace.WithAttributes(
+			attribute.String("symbol.id", sym.ID),
+			attribute.String("symbol.name", sym.Name),
+			attribute.Int("call_sites.count", len(sym.Calls)),
+		),
+	)
+	defer span.End()
+
+	callsResolved := 0
+	callsUnresolved := 0
+
+	for _, call := range sym.Calls {
+		// Validate call target
+		if call.Target == "" {
+			continue
+		}
+
+		// Try to resolve the target to a symbol ID
+		targetID := b.resolveCallTarget(state, call, sym)
+		if targetID == "" {
+			// Create placeholder for unresolved external call
+			targetID = b.getOrCreatePlaceholder(state, "", call.Target)
+			callsUnresolved++
+		} else {
+			callsResolved++
+		}
+
+		// Skip self-referential calls (recursive calls are valid but don't need edges)
+		if targetID == sym.ID {
+			slog.Debug("GR-41: Skipping self-referential call",
+				slog.String("symbol", sym.Name),
+				slog.String("target", call.Target),
+			)
+			continue
+		}
+
+		// Validate edge type
+		if !b.validateEdgeType(state, sym.ID, targetID, EdgeTypeCalls) {
+			continue
+		}
+
+		// Create the edge
+		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeCalls, call.Location)
+		if err != nil {
+			// Check if it's a duplicate edge error (not fatal)
+			if !strings.Contains(err.Error(), "already exists") {
+				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					FromID:   sym.ID,
+					ToID:     targetID,
+					EdgeType: EdgeTypeCalls,
+					Err:      err,
+				})
+			}
+			continue
+		}
+		state.result.Stats.EdgesCreated++
+	}
+
+	// Track call edge stats for observability
+	state.result.Stats.CallEdgesResolved += callsResolved
+	state.result.Stats.CallEdgesUnresolved += callsUnresolved
+
+	// GR-41: Record span attributes
+	span.SetAttributes(
+		attribute.Int("calls.resolved", callsResolved),
+		attribute.Int("calls.unresolved", callsUnresolved),
+	)
+}
+
+// resolveCallTarget attempts to find the symbol ID for a call target.
+//
+// Description:
+//
+//	Uses multiple resolution strategies to find the symbol being called:
+//	1. Direct name match in same package
+//	2. Qualified name (package.Function) using import mappings
+//	3. Method call resolution using receiver type
+//
+// Inputs:
+//   - state: The build state containing symbol indexes.
+//   - call: The call site to resolve.
+//   - caller: The calling function/method (for context).
+//
+// Outputs:
+//   - string: The resolved symbol ID, or empty string if unresolved.
+//
+// Thread Safety: This function is safe for concurrent use.
+func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller *ast.Symbol) string {
+	target := call.Target
+
+	// Strategy 1: Direct name match in same package
+	// For simple calls like "DoWork()"
+	if !strings.Contains(target, ".") && !call.IsMethod {
+		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
+		if len(candidates) > 0 {
+			// Prefer functions/methods, not types
+			for _, id := range candidates {
+				if sym, ok := state.symbolsByID[id]; ok {
+					if sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod {
+						return id
+					}
+				}
+			}
+			// Fall back to first match
+			return candidates[0]
+		}
+	}
+
+	// Strategy 2: Qualified name (package.Function)
+	// For calls like "config.Load()" or "http.Get()"
+	if strings.Contains(target, ".") && !call.IsMethod {
+		parts := strings.SplitN(target, ".", 2)
+		if len(parts) == 2 {
+			funcName := parts[1]
+			candidates := b.resolveSymbolByName(state, funcName, caller.FilePath)
+			if len(candidates) > 0 {
+				return candidates[0]
+			}
+		}
+	}
+
+	// Strategy 3: Method call using receiver
+	// For calls like "obj.Method()" where call.Receiver = "obj", call.Target = "Method"
+	if call.IsMethod && call.Receiver != "" {
+		// Try to find methods matching the target name
+		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
+		for _, id := range candidates {
+			if sym, ok := state.symbolsByID[id]; ok {
+				if sym.Kind == ast.SymbolKindMethod {
+					return id
+				}
+			}
+		}
+	}
+
+	// Unresolved - caller will create placeholder
+	return ""
 }
 
 // resolveSymbolByName finds symbols matching the given name.
@@ -829,4 +1157,550 @@ func (b *Builder) reportProgress(state *buildState, phase ProgressPhase, total, 
 		NodesCreated:   state.result.Stats.NodesCreated,
 		EdgesCreated:   state.result.Stats.EdgesCreated,
 	})
+}
+
+// === GR-40 FIX (C-3): Cross-File Method Association ===
+
+// associateMethodsWithTypesCrossFile associates methods with their receiver types across all files.
+//
+// Description:
+//
+//	In Go, methods can be defined in different files than their receiver types.
+//	The parser's associateMethodsWithTypes() only works within a single file.
+//	This function operates on the complete symbol set to handle cross-file cases.
+//
+// Inputs:
+//
+//	ctx - Context for tracing
+//	state - Build state with all symbols from all files
+//
+// Side Effects:
+//
+//	Modifies Symbol.Metadata.Methods for types (structs and type aliases)
+//
+// Thread Safety:
+//
+//	Not safe for concurrent use on the same buildState. The builder serializes calls.
+func (b *Builder) associateMethodsWithTypesCrossFile(ctx context.Context, state *buildState) {
+	ctx, span := tracer.Start(ctx, "GraphBuilder.associateMethodsWithTypesCrossFile")
+	defer span.End()
+
+	if state == nil || len(state.symbolsByID) == 0 {
+		span.AddEvent("no_symbols")
+		return
+	}
+
+	// Collect all Go methods by receiver type name
+	// methodsByReceiverType[receiverTypeName] = []MethodSignature
+	methodsByReceiverType := make(map[string][]ast.MethodSignature)
+	methodCount := 0
+	skippedNoReceiver := 0
+
+	for _, sym := range state.symbolsByID {
+		// L-6: Check context periodically for large codebases
+		if methodCount%1000 == 0 {
+			if err := ctx.Err(); err != nil {
+				span.AddEvent("cancelled", trace.WithAttributes(
+					attribute.Int("methods_processed", methodCount),
+				))
+				return
+			}
+		}
+
+		if sym.Kind != ast.SymbolKindMethod || sym.Language != "go" {
+			continue
+		}
+
+		// Extract receiver type name from signature
+		// Signature format: "func (r *Type) Name(params) returns" or "func (r Type) Name(params) returns"
+		receiverType := extractReceiverTypeFromSignature(sym.Signature)
+		if receiverType == "" {
+			skippedNoReceiver++
+			continue
+		}
+
+		// Create method signature from symbol
+		sig := ast.MethodSignature{
+			Name:         sym.Name,
+			Params:       extractParamsFromSignature(sym.Signature),
+			Returns:      extractReturnsFromSignature(sym.Signature),
+			ReceiverType: receiverType,
+		}
+		sig.ParamCount = countParamString(sig.Params)
+		sig.ReturnCount = countReturnString(sig.Returns)
+
+		methodsByReceiverType[receiverType] = append(methodsByReceiverType[receiverType], sig)
+		methodCount++
+	}
+
+	span.SetAttributes(
+		attribute.Int("methods_collected", methodCount),
+		attribute.Int("receiver_types", len(methodsByReceiverType)),
+		attribute.Int("skipped_no_receiver", skippedNoReceiver),
+	)
+
+	// L-5: Log warning if many methods couldn't be parsed
+	if skippedNoReceiver > 0 {
+		slog.Debug("methods skipped due to unparseable receiver",
+			slog.Int("skipped", skippedNoReceiver),
+			slog.Int("collected", methodCount),
+		)
+	}
+
+	if len(methodsByReceiverType) == 0 {
+		span.AddEvent("no_methods_with_receivers")
+		return
+	}
+
+	// Associate methods with their types (cross-file!)
+	typesUpdated := 0
+	for _, sym := range state.symbolsByID {
+		if sym.Language != "go" {
+			continue
+		}
+		if sym.Kind != ast.SymbolKindStruct && sym.Kind != ast.SymbolKindType {
+			continue
+		}
+
+		methods, ok := methodsByReceiverType[sym.Name]
+		if !ok || len(methods) == 0 {
+			continue
+		}
+
+		// Initialize metadata if needed
+		if sym.Metadata == nil {
+			sym.Metadata = &ast.SymbolMetadata{}
+		}
+
+		// Append cross-file methods (don't overwrite same-file methods)
+		existingNames := make(map[string]bool)
+		for _, m := range sym.Metadata.Methods {
+			existingNames[m.Name] = true
+		}
+
+		for _, m := range methods {
+			if !existingNames[m.Name] {
+				sym.Metadata.Methods = append(sym.Metadata.Methods, m)
+			}
+		}
+		typesUpdated++
+	}
+
+	span.SetAttributes(attribute.Int("types_updated", typesUpdated))
+
+	slog.Debug("cross-file method association complete",
+		slog.Int("methods_collected", methodCount),
+		slog.Int("receiver_types", len(methodsByReceiverType)),
+		slog.Int("types_updated", typesUpdated),
+	)
+}
+
+// extractReceiverTypeFromSignature extracts the receiver type name from a Go method signature.
+// Example: "func (h *Handler) Handle()" returns "Handler"
+// Example: "func (s Server) Start()" returns "Server"
+func extractReceiverTypeFromSignature(sig string) string {
+	if sig == "" || !strings.HasPrefix(sig, "func (") {
+		return ""
+	}
+
+	// Find the closing paren of the receiver
+	parenEnd := strings.Index(sig[6:], ")")
+	if parenEnd == -1 {
+		return ""
+	}
+
+	receiver := sig[6 : 6+parenEnd]
+	// receiver is like "h *Handler" or "s Server"
+
+	parts := strings.Fields(receiver)
+	if len(parts) < 2 {
+		return ""
+	}
+
+	typePart := parts[len(parts)-1]
+	// Remove * prefix if pointer receiver
+	return strings.TrimPrefix(typePart, "*")
+}
+
+// extractParamsFromSignature extracts the parameter list from a method signature.
+func extractParamsFromSignature(sig string) string {
+	if sig == "" {
+		return ""
+	}
+
+	// Find the method name and params: "func (r Type) Name(params) returns"
+	// First, skip past the receiver
+	start := strings.Index(sig, ") ")
+	if start == -1 {
+		return ""
+	}
+
+	// Find the opening paren of params
+	paramStart := strings.Index(sig[start:], "(")
+	if paramStart == -1 {
+		return ""
+	}
+	paramStart += start
+
+	// Find the matching closing paren
+	depth := 0
+	paramEnd := -1
+	for i := paramStart; i < len(sig); i++ {
+		switch sig[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				paramEnd = i
+				break
+			}
+		}
+		if paramEnd != -1 {
+			break
+		}
+	}
+
+	if paramEnd == -1 {
+		return ""
+	}
+
+	return sig[paramStart+1 : paramEnd]
+}
+
+// extractReturnsFromSignature extracts the return types from a method signature.
+func extractReturnsFromSignature(sig string) string {
+	if sig == "" {
+		return ""
+	}
+
+	// Find the last ) which ends the params
+	lastParen := strings.LastIndex(sig, ")")
+	if lastParen == -1 || lastParen >= len(sig)-1 {
+		return ""
+	}
+
+	// Everything after is the return type(s)
+	returns := strings.TrimSpace(sig[lastParen+1:])
+
+	// Remove outer parens from multi-return: "(int, error)" -> "int, error"
+	if strings.HasPrefix(returns, "(") && strings.HasSuffix(returns, ")") {
+		returns = returns[1 : len(returns)-1]
+	}
+
+	return returns
+}
+
+// countParamString counts the number of parameters in a parameter string.
+// Example: "ctx context.Context, name string" returns 2
+// Example: "" returns 0
+func countParamString(params string) int {
+	params = strings.TrimSpace(params)
+	if params == "" {
+		return 0
+	}
+
+	// Count commas outside of nested types
+	count := 1
+	depth := 0
+	for _, c := range params {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// countReturnString counts the number of return types in a return string.
+// Example: "(int, error)" returns 2
+// Example: "error" returns 1
+// Example: "" returns 0
+func countReturnString(returns string) int {
+	returns = strings.TrimSpace(returns)
+	if returns == "" {
+		return 0
+	}
+
+	// Remove outer parens if present
+	if strings.HasPrefix(returns, "(") && strings.HasSuffix(returns, ")") {
+		returns = returns[1 : len(returns)-1]
+	}
+
+	if returns == "" {
+		return 0
+	}
+
+	// Count commas outside of nested types
+	count := 1
+	depth := 0
+	for _, c := range returns {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// === GR-40/GR-40a: Implicit Interface Implementation Detection ===
+
+// computeInterfaceImplementations detects implicit interface implementations via method-set matching.
+//
+// Description:
+//
+//	Go uses implicit interface satisfaction (no "implements" keyword), and Python's
+//	typing.Protocol (PEP 544) works similarly. This function detects when a type
+//	implements an interface by comparing method sets:
+//	  - An interface defines a set of required method signatures
+//	  - A type implements an interface if its method set is a superset of the interface's
+//
+//	Supported languages:
+//	  - Go: All interfaces (GR-40)
+//	  - Python: typing.Protocol classes (GR-40a)
+//
+//	This is called after all symbols are collected and their Metadata.Methods populated.
+//
+// Inputs:
+//   - ctx: Context for cancellation and tracing. Must not be nil.
+//   - state: Build state with symbols and graph. Must not be nil.
+//
+// Outputs:
+//   - error: Non-nil only on context cancellation. Edge creation errors are
+//     recorded in state.result.EdgeErrors and do not cause function failure.
+//
+// Algorithm:
+//
+//	For each interface I (in supported languages):
+//	  1. Collect method names from I.Metadata.Methods
+//
+//	For each type T with methods (T.Metadata.Methods):
+//	  2. For each interface I in the SAME language:
+//	     - If T's method names are a superset of I's method names
+//	     - THEN create EdgeTypeImplements from T → I
+//
+// Thread Safety:
+//
+//	This method modifies state.graph and state.result. Not safe for concurrent use
+//	on the same buildState, but the builder serializes calls appropriately.
+func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *buildState) error {
+	// Start OTel span for observability (GR-40 post-implementation review fix C-1, C-2)
+	ctx, span := tracer.Start(ctx, "GraphBuilder.computeInterfaceImplementations")
+	defer span.End()
+
+	// Check context early
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Collect interfaces and their method sets, grouped by language
+	// interfacesByLang[language][interfaceID] = {methodName: true}
+	interfacesByLang := make(map[string]map[string]map[string]bool)
+
+	for _, sym := range state.symbolsByID {
+		if sym.Kind != ast.SymbolKindInterface {
+			continue
+		}
+		// GR-40: Go, GR-40a: Python
+		if sym.Language != "go" && sym.Language != "python" {
+			continue
+		}
+		if sym.Metadata == nil || len(sym.Metadata.Methods) == 0 {
+			continue // Skip empty interfaces
+		}
+
+		if interfacesByLang[sym.Language] == nil {
+			interfacesByLang[sym.Language] = make(map[string]map[string]bool)
+		}
+
+		methodSet := make(map[string]bool)
+		for _, m := range sym.Metadata.Methods {
+			methodSet[m.Name] = true
+		}
+		interfacesByLang[sym.Language][sym.ID] = methodSet
+	}
+
+	// Count interfaces for span attributes
+	goInterfaceCount := len(interfacesByLang["go"])
+	pythonProtocolCount := len(interfacesByLang["python"])
+
+	span.SetAttributes(
+		attribute.Int("interface.go_count", goInterfaceCount),
+		attribute.Int("interface.python_count", pythonProtocolCount),
+	)
+
+	if len(interfacesByLang) == 0 {
+		span.AddEvent("no_interfaces_found")
+		return nil // No interfaces to match
+	}
+
+	// Check context periodically for cancellation
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Collect types with methods, grouped by language
+	// typesByLang[language][typeID] = {methodName: true}
+	typesByLang := make(map[string]map[string]map[string]bool)
+
+	for _, sym := range state.symbolsByID {
+		if sym.Kind != ast.SymbolKindStruct && sym.Kind != ast.SymbolKindType && sym.Kind != ast.SymbolKindClass {
+			continue
+		}
+		// GR-40: Go, GR-40a: Python
+		if sym.Language != "go" && sym.Language != "python" {
+			continue
+		}
+		if sym.Metadata == nil || len(sym.Metadata.Methods) == 0 {
+			continue // No methods
+		}
+
+		if typesByLang[sym.Language] == nil {
+			typesByLang[sym.Language] = make(map[string]map[string]bool)
+		}
+
+		methodSet := make(map[string]bool)
+		for _, m := range sym.Metadata.Methods {
+			methodSet[m.Name] = true
+		}
+		typesByLang[sym.Language][sym.ID] = methodSet
+	}
+
+	// Count types for span attributes
+	goTypeCount := len(typesByLang["go"])
+	pythonClassCount := len(typesByLang["python"])
+
+	span.SetAttributes(
+		attribute.Int("type.go_count", goTypeCount),
+		attribute.Int("type.python_count", pythonClassCount),
+	)
+
+	if len(typesByLang) == 0 {
+		span.AddEvent("no_types_with_methods")
+		return nil // No types with methods
+	}
+
+	// Match types to interfaces within the same language
+	edgesCreated := 0
+	matchesChecked := 0
+
+	// GR-40a: Track per-language metrics for observability (C-2 fix)
+	edgesByLang := make(map[string]int)
+	matchesByLang := make(map[string]int)
+
+	for lang, interfaces := range interfacesByLang {
+		typesWithMethods, hasTypes := typesByLang[lang]
+		if !hasTypes {
+			continue
+		}
+
+		langEdges := 0
+		langMatches := 0
+
+		for typeID, typeMethods := range typesWithMethods {
+			// Check context periodically for responsiveness on large codebases
+			if matchesChecked%1000 == 0 {
+				if err := ctx.Err(); err != nil {
+					span.SetAttributes(
+						attribute.Int("edges_created", edgesCreated),
+						attribute.Int("matches_checked", matchesChecked),
+						attribute.Bool("cancelled", true),
+					)
+					return err
+				}
+			}
+
+			typeSym := state.symbolsByID[typeID]
+			if typeSym == nil {
+				continue
+			}
+
+			for ifaceID, ifaceMethods := range interfaces {
+				matchesChecked++
+				langMatches++
+
+				// Check if type's method set is a superset of interface's method set
+				if isMethodSuperset(typeMethods, ifaceMethods) {
+					// Create EdgeTypeImplements from type to interface
+					err := state.graph.AddEdge(typeID, ifaceID, EdgeTypeImplements, typeSym.Location())
+					if err != nil {
+						state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+							FromID:   typeID,
+							ToID:     ifaceID,
+							EdgeType: EdgeTypeImplements,
+							Err:      err,
+						})
+						continue
+					}
+					edgesCreated++
+					langEdges++
+					state.result.Stats.EdgesCreated++
+				}
+			}
+		}
+
+		edgesByLang[lang] = langEdges
+		matchesByLang[lang] = langMatches
+	}
+
+	// Track stats for observability
+	state.result.Stats.GoInterfaceEdges = edgesCreated
+
+	// Record metrics with language dimension (GR-40a C-2 fix)
+	for lang, edges := range edgesByLang {
+		recordInterfaceDetectionMetricsWithLanguage(ctx, lang, edges, matchesByLang[lang])
+	}
+	// Also record aggregate metrics for backward compatibility
+	recordInterfaceDetectionMetrics(ctx, edgesCreated, matchesChecked)
+
+	// Set final span attributes
+	span.SetAttributes(
+		attribute.Int("edges_created", edgesCreated),
+		attribute.Int("matches_checked", matchesChecked),
+	)
+
+	span.AddEvent("interface_detection_complete")
+
+	return nil
+}
+
+// isMethodSuperset returns true if superset contains all methods in subset.
+//
+// Description:
+//
+//	Checks if a type's method set (superset) contains all methods required
+//	by an interface (subset). This is the core matching logic for GR-40/GR-40a
+//	interface implementation detection.
+//
+// Inputs:
+//   - superset: Method names from a type (struct/class).
+//   - subset: Method names required by an interface.
+//
+// Outputs:
+//   - bool: True if all methods in subset exist in superset.
+//
+// Limitations:
+//   - Only checks method names, not parameter/return types (Phase 1).
+//   - Phase 2 would add signature matching for higher accuracy.
+//
+// Thread Safety: This function is safe for concurrent use.
+func isMethodSuperset(superset, subset map[string]bool) bool {
+	for methodName := range subset {
+		if !superset[methodName] {
+			return false
+		}
+	}
+	return true
 }

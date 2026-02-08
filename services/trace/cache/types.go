@@ -32,7 +32,33 @@ const (
 
 	// DefaultErrorCacheTTL is how long build errors are cached.
 	DefaultErrorCacheTTL = 5 * time.Second
+
+	// DefaultSourceHashTTL is how long the source hash is cached to avoid
+	// recomputing on every request. Set to 5 seconds for fast change detection.
+	DefaultSourceHashTTL = 5 * time.Second
 )
+
+// L3 Fix: Named constants for stale mark values.
+const (
+	// staleMarkValid indicates the cache entry is valid.
+	staleMarkValid int32 = 0
+
+	// staleMarkStale indicates the cache entry has been invalidated.
+	staleMarkStale int32 = 1
+)
+
+// GR-42: Graph Builder Versioning
+//
+// GraphBuilderVersion is incremented when graph structure changes.
+// Cached graphs with different versions are automatically rebuilt.
+//
+// Increment when:
+//   - New edge types added (e.g., EdgeTypeImplements in GR-40)
+//   - Parser changes affect symbol extraction
+//   - Graph builder logic changes
+//
+// Format: YYYY.MM.DD.feature
+const GraphBuilderVersion = "2026.02.08.gr42"
 
 // CacheEntry represents a cached graph with its metadata.
 //
@@ -55,6 +81,14 @@ type CacheEntry struct {
 	// Used for change detection.
 	Manifest *manifest.Manifest
 
+	// GR-42: BuilderVersion is the GraphBuilderVersion at build time.
+	// If this doesn't match current GraphBuilderVersion, the cache is stale.
+	BuilderVersion string
+
+	// GR-42: SourceHash is a hash of source file metadata (path + mtime + size).
+	// Used for fast staleness detection without reading file contents.
+	SourceHash string
+
 	// BuiltAtMilli is when the graph was built.
 	BuiltAtMilli int64
 
@@ -64,8 +98,9 @@ type CacheEntry struct {
 	// refCount tracks active references to this entry.
 	refCount int32
 
-	// stale is true if the entry has been invalidated.
-	stale bool
+	// staleMark indicates if the entry has been invalidated (1=stale, 0=valid).
+	// Use atomic operations to access: atomic.LoadInt32/StoreInt32.
+	staleMark int32
 
 	// mu protects write operations on this entry.
 	mu sync.Mutex
@@ -98,7 +133,12 @@ func (e *CacheEntry) RefCount() int32 {
 
 // IsStale returns true if the entry has been marked as stale.
 func (e *CacheEntry) IsStale() bool {
-	return e.stale
+	return atomic.LoadInt32(&e.staleMark) == staleMarkStale
+}
+
+// MarkStale marks the entry as stale using atomic operations.
+func (e *CacheEntry) MarkStale() {
+	atomic.StoreInt32(&e.staleMark, staleMarkStale)
 }
 
 // EstimatedMemoryBytes returns an approximate memory usage for this entry.
@@ -185,6 +225,9 @@ type CacheStats struct {
 	// ErrorCount is the number of build errors.
 	ErrorCount int64
 
+	// GR-42: StaleRebuilds is the number of rebuilds triggered by staleness detection.
+	StaleRebuilds int64
+
 	// MaxEntries is the configured maximum entries.
 	MaxEntries int
 
@@ -220,6 +263,11 @@ type CacheOptions struct {
 
 	// ErrorCacheTTL is how long build errors are cached.
 	ErrorCacheTTL time.Duration
+
+	// A2 Fix: DisableStalenessCheck skips staleness checking on cache hits.
+	// Use in production environments with immutable deployments where
+	// source files don't change during server lifetime.
+	DisableStalenessCheck bool
 }
 
 // DefaultCacheOptions returns sensible defaults.
@@ -267,6 +315,19 @@ func WithErrorCacheTTL(d time.Duration) CacheOption {
 		if d > 0 {
 			o.ErrorCacheTTL = d
 		}
+	}
+}
+
+// WithStalenessCheck enables or disables staleness checking. A2 Fix.
+//
+// When disabled, cached entries are returned without checking if source
+// files have changed. Use this in production environments where deployments
+// are immutable and source files don't change during server lifetime.
+//
+// Default: true (staleness checking enabled)
+func WithStalenessCheck(enabled bool) CacheOption {
+	return func(o *CacheOptions) {
+		o.DisableStalenessCheck = !enabled
 	}
 }
 

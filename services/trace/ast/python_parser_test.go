@@ -1200,3 +1200,309 @@ func BenchmarkPythonParser_Parse_Concurrent(b *testing.B) {
 		}
 	})
 }
+
+// === GR-40a: Python Protocol Detection Tests ===
+
+const pythonProtocolSource = `from typing import Protocol
+
+class Handler(Protocol):
+    def handle(self, request) -> Response:
+        ...
+
+    def close(self) -> None:
+        ...
+
+class Reader(Protocol):
+    def read(self, n: int) -> bytes:
+        ...
+
+class FileHandler:
+    def handle(self, request) -> Response:
+        return Response()
+
+    def close(self) -> None:
+        pass
+
+    def extra_method(self):
+        pass
+
+class PartialHandler:
+    def handle(self, request) -> Response:
+        return Response()
+    # Missing close() method
+`
+
+const pythonABCSource = `from abc import ABC, abstractmethod
+
+class BaseHandler(ABC):
+    @abstractmethod
+    def handle(self, request):
+        pass
+
+    @abstractmethod
+    def close(self):
+        pass
+`
+
+func TestPythonParser_ProtocolDetection(t *testing.T) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(pythonProtocolSource), "protocols.py")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	t.Run("Protocol classes are marked as interfaces", func(t *testing.T) {
+		var handler, reader *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Handler" {
+				handler = sym
+			}
+			if sym.Name == "Reader" {
+				reader = sym
+			}
+		}
+
+		if handler == nil {
+			t.Fatal("Handler class not found")
+		}
+		if handler.Kind != SymbolKindInterface {
+			t.Errorf("expected Handler.Kind=SymbolKindInterface, got %v", handler.Kind)
+		}
+
+		if reader == nil {
+			t.Fatal("Reader class not found")
+		}
+		if reader.Kind != SymbolKindInterface {
+			t.Errorf("expected Reader.Kind=SymbolKindInterface, got %v", reader.Kind)
+		}
+	})
+
+	t.Run("Protocol classes have methods in Metadata", func(t *testing.T) {
+		var handler *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Handler" {
+				handler = sym
+				break
+			}
+		}
+		if handler == nil {
+			t.Fatal("Handler not found")
+		}
+
+		if handler.Metadata == nil {
+			t.Fatal("Handler.Metadata is nil")
+		}
+
+		if len(handler.Metadata.Methods) != 2 {
+			t.Errorf("expected 2 methods in Handler.Metadata.Methods, got %d", len(handler.Metadata.Methods))
+		}
+
+		methodNames := make(map[string]bool)
+		for _, m := range handler.Metadata.Methods {
+			methodNames[m.Name] = true
+		}
+		if !methodNames["handle"] {
+			t.Error("expected handle method in Handler.Metadata.Methods")
+		}
+		if !methodNames["close"] {
+			t.Error("expected close method in Handler.Metadata.Methods")
+		}
+	})
+
+	t.Run("Regular classes have methods in Metadata", func(t *testing.T) {
+		var fileHandler *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "FileHandler" {
+				fileHandler = sym
+				break
+			}
+		}
+		if fileHandler == nil {
+			t.Fatal("FileHandler not found")
+		}
+
+		if fileHandler.Kind != SymbolKindClass {
+			t.Errorf("expected FileHandler.Kind=SymbolKindClass, got %v", fileHandler.Kind)
+		}
+
+		if fileHandler.Metadata == nil {
+			t.Fatal("FileHandler.Metadata is nil")
+		}
+
+		// Should have handle, close, extra_method
+		if len(fileHandler.Metadata.Methods) != 3 {
+			t.Errorf("expected 3 methods in FileHandler.Metadata.Methods, got %d", len(fileHandler.Metadata.Methods))
+		}
+	})
+
+	t.Run("Partial implementation has fewer methods", func(t *testing.T) {
+		var partial *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "PartialHandler" {
+				partial = sym
+				break
+			}
+		}
+		if partial == nil {
+			t.Fatal("PartialHandler not found")
+		}
+
+		if partial.Metadata == nil {
+			t.Fatal("PartialHandler.Metadata is nil")
+		}
+
+		// Should only have handle method
+		if len(partial.Metadata.Methods) != 1 {
+			t.Errorf("expected 1 method in PartialHandler.Metadata.Methods, got %d", len(partial.Metadata.Methods))
+		}
+	})
+}
+
+func TestPythonParser_ABCDetection(t *testing.T) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(pythonABCSource), "abc_test.py")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	t.Run("ABC classes are marked as interfaces", func(t *testing.T) {
+		var baseHandler *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "BaseHandler" {
+				baseHandler = sym
+				break
+			}
+		}
+
+		if baseHandler == nil {
+			t.Fatal("BaseHandler class not found")
+		}
+		if baseHandler.Kind != SymbolKindInterface {
+			t.Errorf("expected BaseHandler.Kind=SymbolKindInterface, got %v", baseHandler.Kind)
+		}
+	})
+}
+
+func TestPythonParser_MethodSignatureExtraction(t *testing.T) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	source := `class MyClass:
+    def simple_method(self):
+        pass
+
+    def with_params(self, a, b, c):
+        pass
+
+    def with_return(self, x: int) -> str:
+        return ""
+
+    def with_tuple_return(self, x) -> Tuple[int, str, bool]:
+        return (1, "", True)
+`
+
+	result, err := parser.Parse(ctx, []byte(source), "methods.py")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	var myClass *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "MyClass" {
+			myClass = sym
+			break
+		}
+	}
+	if myClass == nil {
+		t.Fatal("MyClass not found")
+	}
+
+	if myClass.Metadata == nil || len(myClass.Metadata.Methods) == 0 {
+		t.Fatal("MyClass.Metadata.Methods is empty")
+	}
+
+	methodsByName := make(map[string]MethodSignature)
+	for _, m := range myClass.Metadata.Methods {
+		methodsByName[m.Name] = m
+	}
+
+	t.Run("simple method has 0 params (self excluded)", func(t *testing.T) {
+		m := methodsByName["simple_method"]
+		if m.ParamCount != 0 {
+			t.Errorf("expected ParamCount=0, got %d", m.ParamCount)
+		}
+	})
+
+	t.Run("method with params excludes self", func(t *testing.T) {
+		m := methodsByName["with_params"]
+		if m.ParamCount != 3 {
+			t.Errorf("expected ParamCount=3, got %d", m.ParamCount)
+		}
+	})
+
+	t.Run("method with return type", func(t *testing.T) {
+		m := methodsByName["with_return"]
+		if m.ReturnCount != 1 {
+			t.Errorf("expected ReturnCount=1, got %d", m.ReturnCount)
+		}
+	})
+
+	t.Run("method with tuple return", func(t *testing.T) {
+		m := methodsByName["with_tuple_return"]
+		if m.ReturnCount != 3 {
+			t.Errorf("expected ReturnCount=3, got %d", m.ReturnCount)
+		}
+	})
+}
+
+// === GR-40a H-2: Benchmark Tests for Protocol Detection ===
+
+// BenchmarkProtocolDetection benchmarks Protocol class detection.
+func BenchmarkProtocolDetection(b *testing.B) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse(ctx, []byte(pythonProtocolSource), "protocol.py")
+	}
+}
+
+// BenchmarkMethodSignatureExtraction benchmarks method signature extraction.
+func BenchmarkMethodSignatureExtraction(b *testing.B) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	source := `class LargeClass:
+    def method1(self, a: int, b: str) -> bool: pass
+    def method2(self, x, y, z) -> Tuple[int, str]: pass
+    def method3(self) -> None: pass
+    def method4(self, data: bytes) -> int: pass
+    def method5(self, callback) -> list: pass
+    def method6(self, ctx, opts) -> dict: pass
+    def method7(self, a, b, c, d, e) -> str: pass
+    def method8(self) -> object: pass
+    def method9(self, arg) -> None: pass
+    def method10(self, x: float) -> float: pass
+`
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse(ctx, []byte(source), "large.py")
+	}
+}
+
+// BenchmarkABCDetection benchmarks ABC class detection.
+func BenchmarkABCDetection(b *testing.B) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse(ctx, []byte(pythonABCSource), "abc.py")
+	}
+}

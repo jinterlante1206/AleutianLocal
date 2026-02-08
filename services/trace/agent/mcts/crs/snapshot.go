@@ -41,6 +41,9 @@ type snapshot struct {
 
 	// GR-32: Graph-backed dependency index (preferred over dependencyData)
 	graphBackedDepIndex *GraphBackedDependencyIndex
+
+	// GR-31: Analytics history
+	analyticsData *AnalyticsHistory
 }
 
 // newSnapshot creates a new immutable snapshot from current state.
@@ -230,6 +233,36 @@ func (s *snapshot) setGraphQuery(gq GraphQuery) {
 // Used internally by CRS when creating snapshots (GR-32).
 func (s *snapshot) setGraphBackedDepIndex(idx *GraphBackedDependencyIndex) {
 	s.graphBackedDepIndex = idx
+}
+
+// setAnalyticsHistory sets the analytics history for this snapshot.
+// Used internally by CRS when creating snapshots (GR-31).
+func (s *snapshot) setAnalyticsHistory(history *AnalyticsHistory) {
+	s.analyticsData = history
+}
+
+// AnalyticsHistory returns recent analytics records.
+func (s *snapshot) AnalyticsHistory() []*AnalyticsRecord {
+	if s.analyticsData == nil {
+		return nil
+	}
+	return s.analyticsData.All()
+}
+
+// LastAnalytics returns the most recent analytics of a given type.
+func (s *snapshot) LastAnalytics(queryType AnalyticsQueryType) *AnalyticsRecord {
+	if s.analyticsData == nil {
+		return nil
+	}
+	return s.analyticsData.GetLast(queryType)
+}
+
+// HasRunAnalytics checks if a specific analytics type has been run.
+func (s *snapshot) HasRunAnalytics(queryType AnalyticsQueryType) bool {
+	if s.analyticsData == nil {
+		return false
+	}
+	return s.analyticsData.HasRun(queryType)
 }
 
 // -----------------------------------------------------------------------------

@@ -54,7 +54,7 @@ func ExtractTraceStep(
 	startTime time.Time,
 ) crs.TraceStep {
 	step := crs.TraceStep{
-		Timestamp: startTime,
+		Timestamp: startTime.UnixMilli(),
 	}
 
 	// Extract from result
