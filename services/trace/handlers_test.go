@@ -307,3 +307,51 @@ func TestSymbolInfoFromAST(t *testing.T) {
 		}
 	})
 }
+
+// =============================================================================
+// DEBUG ENDPOINT TESTS (GR-43)
+// =============================================================================
+
+func TestHandlers_HandleGetGraphStats_NoGraphsCached(t *testing.T) {
+	svc := NewService(DefaultServiceConfig())
+	router := setupTestRouter(svc)
+
+	req, _ := http.NewRequest("GET", "/v1/codebuddy/debug/graph/stats", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if errResp.Code != "NO_GRAPHS" {
+		t.Errorf("expected code 'NO_GRAPHS', got %q", errResp.Code)
+	}
+}
+
+func TestHandlers_HandleGetGraphStats_GraphNotFound(t *testing.T) {
+	svc := NewService(DefaultServiceConfig())
+	router := setupTestRouter(svc)
+
+	req, _ := http.NewRequest("GET", "/v1/codebuddy/debug/graph/stats?graph_id=nonexistent", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if errResp.Code != "GRAPH_NOT_FOUND" {
+		t.Errorf("expected code 'GRAPH_NOT_FOUND', got %q", errResp.Code)
+	}
+}

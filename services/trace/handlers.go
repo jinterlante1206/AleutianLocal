@@ -470,6 +470,103 @@ func (h *Handlers) HandleReady(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// HandleGetGraphStats handles GET /v1/codebuddy/debug/graph/stats.
+//
+// Description:
+//
+//	Returns statistics about a cached graph including node/edge counts
+//	broken down by type and kind. Used for debugging and integration tests.
+//	GR-43: Added to validate EdgeTypeImplements edges are being created.
+//
+// Query Parameters:
+//
+//	graph_id: ID of the graph to query (optional, uses first cached if not specified)
+//	project_root: Project root to look up graph (alternative to graph_id)
+//
+// Response:
+//
+//	200 OK: GraphStatsResponse
+//	404 Not Found: No graphs cached or graph not found
+//
+// Thread Safety: This method is safe for concurrent use. Read-only access to graph.
+func (h *Handlers) HandleGetGraphStats(c *gin.Context) {
+	requestID := getOrCreateRequestID(c)
+	logger := slog.With("request_id", requestID, "handler", "HandleGetGraphStats")
+
+	graphID := c.Query("graph_id")
+
+	// If no graph_id, try to get from project_root
+	if graphID == "" {
+		projectRoot := c.Query("project_root")
+		if projectRoot != "" {
+			// Generate graph ID from project root (same algorithm as service.go)
+			graphID = h.svc.generateGraphID(projectRoot)
+		}
+	}
+
+	var cached *CachedGraph
+	var err error
+
+	if graphID != "" {
+		// Try to get specific graph
+		cached, err = h.svc.GetGraph(graphID)
+		if err != nil {
+			logger.Warn("Graph not found", "graph_id", graphID, "error", err)
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error: "graph not found",
+				Code:  "GRAPH_NOT_FOUND",
+			})
+			return
+		}
+	} else {
+		// Get the first cached graph (for convenience)
+		cached = h.svc.getFirstGraph()
+		if cached == nil {
+			logger.Info("No graphs cached")
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error: "no graphs cached",
+				Code:  "NO_GRAPHS",
+			})
+			return
+		}
+		graphID = h.svc.generateGraphID(cached.ProjectRoot)
+	}
+
+	// Get stats from the graph
+	stats := cached.Graph.Stats()
+
+	// Convert EdgesByType map to string keys for JSON
+	edgesByType := make(map[string]int)
+	for edgeType, count := range stats.EdgesByType {
+		edgesByType[edgeType.String()] = count
+	}
+
+	// Convert NodesByKind map to string keys for JSON
+	nodesByKind := make(map[string]int)
+	for kind, count := range stats.NodesByKind {
+		nodesByKind[kind.String()] = count
+	}
+
+	logger.Info("Returning graph stats",
+		"graph_id", graphID,
+		"node_count", stats.NodeCount,
+		"edge_count", stats.EdgeCount,
+		"implements_edges", edgesByType["implements"])
+
+	c.JSON(http.StatusOK, GraphStatsResponse{
+		GraphID:      graphID,
+		ProjectRoot:  cached.ProjectRoot,
+		State:        stats.State.String(),
+		NodeCount:    stats.NodeCount,
+		EdgeCount:    stats.EdgeCount,
+		MaxNodes:     stats.MaxNodes,
+		MaxEdges:     stats.MaxEdges,
+		BuiltAtMilli: stats.BuiltAtMilli,
+		EdgesByType:  edgesByType,
+		NodesByKind:  nodesByKind,
+	})
+}
+
 // HandleSeed handles POST /v1/codebuddy/seed.
 //
 // Description:

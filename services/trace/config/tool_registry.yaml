@@ -1,0 +1,542 @@
+# Tool Routing Registry
+# Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+#
+# CB-31e: This file defines when to use each tool for optimal routing.
+# Part of the tool contract - update when adding new tools.
+#
+# Structure:
+#   keywords: Query terms that should trigger this tool (matched against user query)
+#   use_when: Scenarios where this tool is the right choice
+#   avoid_when: Scenarios where this tool should NOT be used
+#   instead_of: Tools this should replace in specific scenarios
+#   requires: Prerequisites for using this tool
+
+tools:
+  # =============================================================================
+  # GRAPH QUERY TOOLS (P0 - Critical for routing)
+  # =============================================================================
+  - name: find_callers
+    keywords:
+      - callers
+      - who calls
+      - what calls
+      - upstream
+      - incoming calls
+      - call sites
+      - invocations of
+      - references to
+      - called by
+      - where is it called
+    use_when: "User asks who or what calls a specific function"
+    avoid_when: "User asks what a function calls (use find_callees instead)"
+    instead_of:
+      - tool: Grep
+        when: "Searching for function call patterns in code"
+    requires:
+      - graph_initialized
+
+  - name: find_callees
+    keywords:
+      - callees
+      - calls
+      - what does it call
+      - downstream
+      - outgoing calls
+      - dependencies
+      - invokes
+      - functions called by
+      - what it calls
+    use_when: "User asks what functions are called by a specific function"
+    avoid_when: "User asks who calls a function (use find_callers instead)"
+    instead_of:
+      - tool: Grep
+        when: "Searching for function calls inside a function"
+    requires:
+      - graph_initialized
+
+  - name: find_implementations
+    keywords:
+      - implementations
+      - implements
+      - concrete types
+      - implementers
+      - interface implementations
+      - types that implement
+      - structs implementing
+    use_when: "User asks what types implement an interface"
+    avoid_when: "User asks about callers or callees"
+    requires:
+      - graph_initialized
+
+  - name: find_references
+    keywords:
+      - references
+      - usages
+      - where is it used
+      - occurrences
+      - all usages
+      - find all uses
+    use_when: "User asks where a symbol is used or referenced"
+    avoid_when: "User specifically asks about callers (use find_callers)"
+    instead_of:
+      - tool: Grep
+        when: "Looking for all usages of a symbol"
+    requires:
+      - graph_initialized
+
+  - name: find_symbol
+    keywords:
+      - find symbol
+      - locate function
+      - where is defined
+      - definition of
+      - find function
+      - find type
+      - find variable
+    use_when: "User wants to find where a symbol is defined"
+    avoid_when: "User wants to find usages (use find_references)"
+    requires:
+      - graph_initialized
+
+  - name: get_call_chain
+    keywords:
+      - call chain
+      - call graph
+      - transitive callers
+      - transitive callees
+      - all the way up
+      - all the way down
+      - trace calls
+      - full call hierarchy
+      - recursive callers
+    use_when: "User wants to see the full call hierarchy, not just immediate callers/callees"
+    avoid_when: "User only wants immediate callers or callees"
+    requires:
+      - graph_initialized
+
+  - name: find_path
+    keywords:
+      - path between
+      - shortest path
+      - how connected
+      - connection between
+      - path from
+      - route between
+      - how to get from
+      - are connected
+    use_when: "User wants to find how two symbols are connected in the call graph"
+    avoid_when: "User wants all callers or callees (use find_callers/find_callees)"
+    requires:
+      - graph_initialized
+
+  # =============================================================================
+  # FILE TOOLS
+  # =============================================================================
+  - name: Read
+    keywords:
+      - read file
+      - show file
+      - view file
+      - file contents
+      - what's in
+      - look at
+      - open file
+      - display file
+      - cat
+    use_when: "User wants to see the contents of a specific file"
+    avoid_when: "User wants to search across files (use Grep or Glob)"
+
+  - name: Grep
+    keywords:
+      - search
+      - find in files
+      - grep
+      - pattern
+      - regex
+      - where is
+      - look for text
+      - search for
+      - find text
+    use_when: "User wants to search for text or patterns across files"
+    avoid_when: "User asks about function relationships (use find_callers, find_callees). Graph tools are more accurate for structural queries."
+    instead_of: []
+
+  - name: Glob
+    keywords:
+      - find files
+      - list files
+      - file pattern
+      - files matching
+      - what files
+      - ls
+      - directory listing
+    use_when: "User wants to find files by name pattern"
+    avoid_when: "User wants to search file contents (use Grep)"
+
+  - name: Edit
+    keywords:
+      - change
+      - modify
+      - update
+      - replace
+      - edit
+      - fix
+      - refactor
+      - alter
+    use_when: "User wants to modify existing file content"
+    avoid_when: "User wants to create a new file (use Write)"
+    requires:
+      - file_read
+
+  - name: Write
+    keywords:
+      - create file
+      - new file
+      - write file
+      - save as
+    use_when: "User wants to create a new file"
+    avoid_when: "User wants to modify existing file (use Edit)"
+
+  - name: Diff
+    keywords:
+      - diff
+      - compare files
+      - differences
+      - what changed
+    use_when: "User wants to compare two files"
+    avoid_when: ""
+
+  - name: Tree
+    keywords:
+      - tree
+      - directory structure
+      - folder structure
+      - project structure
+    use_when: "User wants to see directory structure"
+    avoid_when: "User wants to find specific files (use Glob)"
+
+  - name: JSON
+    keywords:
+      - json
+      - parse json
+      - json query
+      - jq
+    use_when: "User wants to parse or query JSON files"
+    avoid_when: "User just wants to read a file (use Read)"
+
+  # =============================================================================
+  # BASH TOOLS
+  # =============================================================================
+  - name: Bash
+    keywords:
+      - run
+      - execute
+      - command
+      - shell
+      - terminal
+      - test
+      - build
+      - git
+      - go test
+      - npm
+      - make
+    use_when: "User wants to run shell commands (tests, builds, git operations)"
+    avoid_when: "User wants to read/write files (use file tools for safety)"
+
+  # =============================================================================
+  # GRAPH ANALYSIS TOOLS (Exploration)
+  # =============================================================================
+  - name: find_entry_points
+    keywords:
+      - entry points
+      - main functions
+      - handlers
+      - where does it start
+      - starting point
+      - endpoints
+    use_when: "User wants to find where code execution begins"
+    requires:
+      - graph_initialized
+
+  - name: trace_data_flow
+    keywords:
+      - data flow
+      - how data flows
+      - data path
+      - traces data
+      - data transformation
+    use_when: "User wants to understand how data moves through the code"
+    requires:
+      - graph_initialized
+
+  - name: trace_error_flow
+    keywords:
+      - error flow
+      - error handling
+      - error propagation
+      - how errors
+    use_when: "User wants to trace error handling paths"
+    requires:
+      - graph_initialized
+
+  - name: find_config_usage
+    keywords:
+      - config
+      - configuration
+      - env var
+      - environment variable
+      - settings
+    use_when: "User wants to find configuration usage in the codebase"
+    requires:
+      - graph_initialized
+
+  - name: find_similar_code
+    keywords:
+      - similar code
+      - code like
+      - similar to
+      - resembles
+    use_when: "User wants to find structurally similar code"
+    requires:
+      - graph_initialized
+
+  - name: build_minimal_context
+    keywords:
+      - minimal context
+      - context for
+      - understand function
+    use_when: "User needs focused context to understand a function"
+    requires:
+      - graph_initialized
+
+  - name: summarize_file
+    keywords:
+      - summarize file
+      - file summary
+      - what does file do
+    use_when: "User wants an overview of a file's contents"
+    requires:
+      - graph_initialized
+
+  - name: summarize_package
+    keywords:
+      - summarize package
+      - package summary
+      - package API
+    use_when: "User wants an overview of a package's public API"
+    requires:
+      - graph_initialized
+
+  - name: analyze_change_impact
+    keywords:
+      - change impact
+      - blast radius
+      - affected by change
+      - impact analysis
+    use_when: "User wants to understand the impact of a proposed change"
+    requires:
+      - graph_initialized
+
+  # =============================================================================
+  # GRAPH ANALYSIS TOOLS (Reasoning)
+  # =============================================================================
+  - name: check_breaking_changes
+    keywords:
+      - breaking changes
+      - will it break
+      - backwards compatible
+      - API compatibility
+    use_when: "User wants to check if a change will break callers"
+    requires:
+      - graph_initialized
+
+  - name: simulate_change
+    keywords:
+      - simulate change
+      - what if
+      - preview change
+    use_when: "User wants to preview the effect of a change without applying it"
+    requires:
+      - graph_initialized
+
+  - name: validate_change
+    keywords:
+      - validate
+      - syntax check
+      - is valid
+    use_when: "User wants to validate code syntax"
+
+  - name: find_test_coverage
+    keywords:
+      - test coverage
+      - tests for
+      - covered by tests
+      - which tests
+    use_when: "User wants to find tests that cover a function"
+    requires:
+      - graph_initialized
+
+  - name: detect_side_effects
+    keywords:
+      - side effects
+      - mutations
+      - state changes
+      - io operations
+    use_when: "User wants to detect side effects of a function"
+    requires:
+      - graph_initialized
+
+  - name: suggest_refactor
+    keywords:
+      - refactor
+      - improve
+      - clean up
+      - simplify
+    use_when: "User wants refactoring suggestions"
+    requires:
+      - graph_initialized
+
+  # =============================================================================
+  # GRAPH ANALYSIS TOOLS (Coordination)
+  # =============================================================================
+  - name: plan_multi_file_change
+    keywords:
+      - multi-file
+      - coordinated change
+      - change plan
+      - refactor across files
+    use_when: "User wants to plan a change affecting multiple files"
+    requires:
+      - graph_initialized
+
+  - name: validate_plan
+    keywords:
+      - validate plan
+      - check plan
+    use_when: "User wants to validate a change plan before execution"
+
+  - name: preview_changes
+    keywords:
+      - preview
+      - show diff
+      - what will change
+    use_when: "User wants to see diffs for planned changes"
+
+  # =============================================================================
+  # GRAPH ANALYSIS TOOLS (Patterns)
+  # =============================================================================
+  - name: detect_patterns
+    keywords:
+      - patterns
+      - design patterns
+      - singleton
+      - factory
+    use_when: "User wants to detect design patterns in the codebase"
+    requires:
+      - graph_initialized
+
+  - name: find_code_smells
+    keywords:
+      - code smells
+      - quality issues
+      - bad code
+      - anti-patterns
+    use_when: "User wants to find code quality issues"
+    requires:
+      - graph_initialized
+
+  - name: find_duplication
+    keywords:
+      - duplication
+      - duplicate code
+      - copy paste
+      - clones
+    use_when: "User wants to find duplicate or near-duplicate code"
+    requires:
+      - graph_initialized
+
+  - name: find_circular_deps
+    keywords:
+      - circular
+      - cycles
+      - circular dependencies
+      - dependency cycle
+    use_when: "User wants to find circular dependencies"
+    requires:
+      - graph_initialized
+
+  - name: find_cycles
+    keywords:
+      - call cycles
+      - cyclic calls
+      - mutual recursion
+      - recursive calls
+      - function cycles
+      - circular calls
+    use_when: "User wants to find circular call dependencies between functions"
+    avoid_when: "User asks about package-level circular dependencies (use find_circular_deps)"
+    requires:
+      - graph_initialized
+
+  - name: find_hotspots
+    keywords:
+      - hotspots
+      - most connected
+      - high coupling
+      - central functions
+      - heavily used
+      - most called
+      - connectivity
+      - hub functions
+    use_when: "User wants to find highly-connected symbols that may need refactoring"
+    avoid_when: "User wants to find callers of a specific function (use find_callers)"
+    requires:
+      - graph_initialized
+
+  - name: find_important
+    keywords:
+      - important
+      - most important
+      - critical functions
+      - pagerank
+      - architecturally important
+      - key functions
+      - influential
+      - core functions
+      - significance
+      - impact analysis
+    use_when: "User wants to find the most important symbols using PageRank algorithm"
+    avoid_when: "User just wants connection counts (use find_hotspots for degree-based ranking)"
+    requires:
+      - graph_initialized
+
+  - name: extract_conventions
+    keywords:
+      - conventions
+      - coding standards
+      - naming patterns
+    use_when: "User wants to extract coding conventions from the codebase"
+    requires:
+      - graph_initialized
+
+  - name: find_dead_code
+    keywords:
+      - dead code
+      - unused code
+      - unreferenced
+      - orphan code
+    use_when: "User wants to find unreferenced code"
+    requires:
+      - graph_initialized
+
+  # =============================================================================
+  # SPECIAL TOOLS
+  # =============================================================================
+  - name: answer
+    keywords:
+      - synthesize
+      - summarize
+      - explain
+      - ready to answer
+    use_when: "Enough information has been gathered to answer the user's query"
+    avoid_when: "More information is needed from tools"

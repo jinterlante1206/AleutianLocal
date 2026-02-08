@@ -140,9 +140,21 @@ type ToolSpec struct {
 	// Description explains what the tool does.
 	Description string `json:"description"`
 
-	// BestFor lists example use cases where this tool excels.
-	// Used in the system prompt to help the router understand when to select it.
+	// BestFor lists keywords that should trigger this tool.
+	// CB-31e: Now populated from WhenToUse.Keywords.
 	BestFor []string `json:"best_for,omitempty"`
+
+	// UseWhen describes when to use this tool.
+	// CB-31e: New field for structured routing guidance.
+	UseWhen string `json:"use_when,omitempty"`
+
+	// AvoidWhen describes when NOT to use this tool.
+	// CB-31e: New field for structured routing guidance.
+	AvoidWhen string `json:"avoid_when,omitempty"`
+
+	// InsteadOf lists tools this should replace in specific scenarios.
+	// CB-31e: New field for tool substitution patterns.
+	InsteadOf []ToolSubstitution `json:"instead_of,omitempty"`
 
 	// Params lists the parameter names (without full schema).
 	// Used to generate parameter hints.
@@ -151,6 +163,16 @@ type ToolSpec struct {
 	// Category groups similar tools (e.g., "search", "read", "analyze").
 	// Helps the router with coarse-grained classification.
 	Category string `json:"category,omitempty"`
+}
+
+// ToolSubstitution describes when one tool should be used instead of another.
+// CB-31e: Captures tool substitution patterns for the router.
+type ToolSubstitution struct {
+	// Tool is the name of the tool to replace.
+	Tool string `json:"tool"`
+
+	// When describes when substitution applies.
+	When string `json:"when"`
 }
 
 // =============================================================================

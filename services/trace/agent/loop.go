@@ -1004,7 +1004,7 @@ func (l *DefaultAgentLoop) recordSessionCompletion(_ context.Context, session *S
 
 	// Record session completion trace step
 	session.RecordTraceStep(crs.TraceStep{
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Action:    "session_complete",
 		Target:    string(finalState),
 		Duration:  duration,

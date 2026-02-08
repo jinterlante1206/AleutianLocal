@@ -62,7 +62,16 @@ const systemPromptTemplate = `You are a tool router for a code assistant. Your j
 ### {{.Name}}
 {{.Description}}
 {{- if .BestFor}}
-Best for: {{join .BestFor ", "}}
+Keywords: {{join .BestFor ", "}}
+{{- end}}
+{{- if .UseWhen}}
+Use when: {{.UseWhen}}
+{{- end}}
+{{- if .AvoidWhen}}
+Avoid when: {{.AvoidWhen}}
+{{- end}}
+{{- if .InsteadOf}}
+Prefer over:{{range .InsteadOf}} {{.Tool}} ({{.When}}){{end}}
 {{- end}}
 {{- if .Params}}
 Parameters: {{join .Params ", "}}

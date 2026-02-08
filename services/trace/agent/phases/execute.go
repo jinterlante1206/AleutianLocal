@@ -26,6 +26,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/integration"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -317,7 +318,7 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			slog.String("configured_model", routerModel),
 		)
 		deps.Session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "router_fallback",
 			Target:    routerModel,
 			Error:     "Router configured but not initialized - check server logs for initialization errors",
@@ -802,18 +803,73 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 	}
 
 	if selection.Confidence < threshold {
-		slog.Debug("ToolRouter confidence below threshold",
+		// CB-31e Phase 4: Block fallback to main LLM for tool selection
+		// Instead of returning nil (which triggers classifier fallback),
+		// we log the low confidence and still use the router's suggestion
+		// if we have gathered enough tool results to synthesize an answer.
+		slog.Info("CB-31e: Router low confidence, checking if synthesis is possible",
 			slog.String("session_id", deps.Session.ID),
 			slog.String("tool", selection.Tool),
 			slog.Float64("confidence", selection.Confidence),
 			slog.Float64("threshold", threshold),
 		)
 		span.SetAttributes(
-			attribute.String("fallback_reason", "low_confidence"),
+			attribute.String("fallback_blocked", "true"),
 			attribute.Float64("confidence", selection.Confidence),
 			attribute.Float64("threshold", threshold),
 		)
-		return nil
+
+		// Check if we have tool results to synthesize from
+		hasToolResults := false
+		var toolResultCount int
+		if deps.Session != nil {
+			if ctx := deps.Session.GetCurrentContext(); ctx != nil && len(ctx.ToolResults) > 0 {
+				hasToolResults = true
+				toolResultCount = len(ctx.ToolResults)
+			}
+		}
+
+		if hasToolResults {
+			// CB-31e: Force synthesis instead of fallback
+			slog.Info("CB-31e: Forcing synthesis from existing tool results",
+				slog.String("session_id", deps.Session.ID),
+				slog.Int("tool_result_count", toolResultCount),
+			)
+			// Record metric
+			config.RecordFallbackBlocked()
+			// Return "answer" tool to force synthesis
+			return &agent.ToolRouterSelection{
+				Tool:       "answer",
+				Confidence: 0.9,
+				Reasoning:  "CB-31e: Router low confidence but tool results available - forcing synthesis",
+			}
+		}
+
+		// If no tool results, still try the router's suggestion (better than random classifier)
+		// but log that this is a degraded path
+		slog.Warn("CB-31e: No tool results available, using low-confidence router suggestion",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("tool", selection.Tool),
+			slog.Float64("confidence", selection.Confidence),
+		)
+		// Record metric
+		config.RecordFallbackBlocked()
+
+		// C1: Record routing decision in CRS trace
+		if deps.Session != nil && deps.Session.HasCRS() {
+			deps.Session.RecordTraceStep(crs.TraceStep{
+				Timestamp: time.Now().UnixMilli(),
+				Action:    "tool_routing_decision",
+				Target:    selection.Tool,
+				Tool:      "router",
+				Metadata: map[string]string{
+					"source":           "low_confidence_fallback",
+					"confidence":       fmt.Sprintf("%.2f", selection.Confidence),
+					"fallback_blocked": "true",
+				},
+			})
+		}
+		// Continue with the selection despite low confidence
 	}
 
 	span.SetAttributes(
@@ -881,6 +937,9 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 		// CRS-06: Emit EventCircuitBreaker to Coordinator
 		p.emitCoordinatorEvent(ctx, deps, integration.EventCircuitBreaker, nil, nil, cbReason, crs.ErrorCategoryInternal)
 
+		// GR-44: Set circuit breaker active so execute phase doesn't require tools
+		deps.Session.SetCircuitBreakerActive(true)
+
 		// Force "answer" to synthesize a response from gathered information
 		return &agent.ToolRouterSelection{
 			Tool:       "answer",
@@ -928,6 +987,9 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			// CRS-06: Emit EventSemanticRepetition to Coordinator
 			p.emitCoordinatorEvent(ctx, deps, integration.EventSemanticRepetition, nil, nil, srReason, crs.ErrorCategoryInternal)
 
+			// GR-44: Set circuit breaker active so execute phase doesn't require tools
+			deps.Session.SetCircuitBreakerActive(true)
+
 			// Force "answer" to synthesize
 			return &agent.ToolRouterSelection{
 				Tool:       "answer",
@@ -965,8 +1027,46 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			)
 		}
 
+		// C1: Record routing decision in CRS trace
+		if deps.Session.HasCRS() {
+			deps.Session.RecordTraceStep(crs.TraceStep{
+				Timestamp: time.Now().UnixMilli(),
+				Action:    "tool_routing_decision",
+				Target:    ucb1Selection.Tool,
+				Tool:      "router",
+				Metadata: map[string]string{
+					"source":           "router",
+					"confidence":       fmt.Sprintf("%.2f", ucb1Selection.Confidence),
+					"original_tool":    selection.Tool,
+					"ucb1_modified":    fmt.Sprintf("%t", modified),
+					"fallback_blocked": "false",
+				},
+			})
+		}
+
+		// C1: Record routing decision metric
+		config.RecordRoutingDecision(ucb1Selection.Tool, "router")
+
 		return ucb1Selection
 	}
+
+	// C1: Record answer routing decision in CRS trace
+	if deps.Session != nil && deps.Session.HasCRS() {
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now().UnixMilli(),
+			Action:    "tool_routing_decision",
+			Target:    selection.Tool,
+			Tool:      "router",
+			Metadata: map[string]string{
+				"source":           "router",
+				"confidence":       fmt.Sprintf("%.2f", selection.Confidence),
+				"fallback_blocked": "false",
+			},
+		})
+	}
+
+	// C1: Record answer routing decision metric
+	config.RecordRoutingDecision(selection.Tool, "router")
 
 	return selection
 }
@@ -992,9 +1092,22 @@ func toolDefsToSpecs(defs []tools.ToolDefinition) []agent.ToolRouterSpec {
 			}
 		}
 
+		// CB-31e: Convert InsteadOf to router substitution format
+		var insteadOf []agent.ToolRouterSubstitution
+		for _, sub := range def.WhenToUse.InsteadOf {
+			insteadOf = append(insteadOf, agent.ToolRouterSubstitution{
+				Tool: sub.Tool,
+				When: sub.When,
+			})
+		}
+
 		specs[i] = agent.ToolRouterSpec{
 			Name:        def.Name,
 			Description: def.Description,
+			BestFor:     def.WhenToUse.Keywords,  // CB-31e: Now populated from WhenToUse
+			UseWhen:     def.WhenToUse.UseWhen,   // CB-31e: New field
+			AvoidWhen:   def.WhenToUse.AvoidWhen, // CB-31e: New field
+			InsteadOf:   insteadOf,               // CB-31e: New field
 			Params:      params,
 			Category:    def.Category.String(),
 		}
@@ -1059,7 +1172,7 @@ func (p *ExecutePhase) callLLM(ctx context.Context, deps *Dependencies, request 
 		}
 
 		deps.Session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "llm_call",
 			Target:    deps.LLMClient.Model(),
 			Tool:      "llm",
@@ -1243,8 +1356,16 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 				slog.Int("retry_count", forcingRetries),
 			)
 
-			// Check if we should retry with stronger tool_choice
-			if validation.Retryable && p.responseValidator.ShouldRetry(validation, forcingRetries) {
+			// GR-44: Skip tool requirement when circuit breaker has forced synthesis mode.
+			// This prevents the death spiral where CB fires but execute phase still demands tools.
+			if deps.Session.IsCircuitBreakerActive() {
+				slog.Debug("GR-44: Skipping tool requirement (circuit breaker active)",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("validation_reason", validation.Reason),
+				)
+				// Proceed to completion - don't retry with stronger tool_choice
+			} else if validation.Retryable && p.responseValidator.ShouldRetry(validation, forcingRetries) {
+				// Check if we should retry with stronger tool_choice
 				return p.retryWithStrongerToolChoice(ctx, deps, response, validation, stepNumber)
 			}
 		}
@@ -1845,7 +1966,7 @@ func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolRe
 		// Record trace step
 		if deps.Session != nil {
 			deps.Session.RecordTraceStep(crs.TraceStep{
-				Timestamp: time.Now(),
+				Timestamp: time.Now().UnixMilli(),
 				Action:    "forced_synthesis",
 				Target:    reason,
 				Metadata: map[string]string{

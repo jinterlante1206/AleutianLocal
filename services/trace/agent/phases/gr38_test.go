@@ -31,7 +31,7 @@ func TestGR38_DuplicateToolCallPrevention(t *testing.T) {
 
 		// Simulate a previous tool call by adding to trace
 		session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "tool_call",
 			Tool:      "find_entry_points",
 		})
@@ -75,7 +75,7 @@ func TestGR38_DuplicateToolCallPrevention(t *testing.T) {
 
 		// Record a call to a different tool
 		session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "tool_call",
 			Tool:      "find_symbol",
 		})
@@ -104,7 +104,7 @@ func TestGR38_DuplicateToolCallPrevention(t *testing.T) {
 
 		// Record a forced tool call (CB-31d format)
 		session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "tool_call_forced",
 			Tool:      "find_entry_points",
 		})
@@ -136,7 +136,7 @@ func TestGR38_ToolHistoryLimiting(t *testing.T) {
 	// Record many tool calls
 	for i := 0; i < maxToolHistoryEntries+10; i++ {
 		session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "tool_call",
 			Tool:      "test_tool",
 		})
@@ -182,7 +182,7 @@ func TestGR38_SemanticToolHistoryFromSession(t *testing.T) {
 
 		// Record a tool_routing step with query in metadata
 		session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "tool_routing",
 			Target:    "Grep",
 			Metadata: map[string]string{
@@ -216,7 +216,7 @@ func TestGR38_SemanticToolHistoryFromSession(t *testing.T) {
 
 		// Record a tool_call step (not tool_routing)
 		session.RecordTraceStep(crs.TraceStep{
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 			Action:    "tool_call",
 			Tool:      "Grep",
 		})
@@ -237,7 +237,7 @@ func TestGR38_SemanticSameToolDifferentParams(t *testing.T) {
 
 	// Record a Grep call for "parseConfig"
 	session.RecordTraceStep(crs.TraceStep{
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Action:    "tool_routing",
 		Target:    "Grep",
 		Metadata: map[string]string{
@@ -273,7 +273,7 @@ func TestGR38_SemanticSimilarQueriesBlocked(t *testing.T) {
 
 	// Record a Grep call for "parseConfig"
 	session.RecordTraceStep(crs.TraceStep{
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Action:    "tool_routing",
 		Target:    "Grep",
 		Metadata: map[string]string{
@@ -316,7 +316,7 @@ func TestGR38_SemanticPenalizedButAllowed(t *testing.T) {
 
 	// Record a Grep call for parsing config
 	session.RecordTraceStep(crs.TraceStep{
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Action:    "tool_routing",
 		Target:    "Grep",
 		Metadata: map[string]string{
@@ -353,7 +353,7 @@ func TestGR38_SemanticDifferentToolSameQuery(t *testing.T) {
 
 	// Record a Grep call
 	session.RecordTraceStep(crs.TraceStep{
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 		Action:    "tool_routing",
 		Target:    "Grep",
 		Metadata: map[string]string{

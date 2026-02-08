@@ -72,6 +72,13 @@ const (
 )
 
 // ParamDef defines a single parameter for a tool.
+//
+// NOTE: This struct uses `any` types for Default and Enum to support JSON schema
+// flexibility. The default value and enum options can be any JSON-compatible type
+// (string, number, boolean, object, array). This is an intentional exception to
+// CLAUDE.md Section 4.5 ("no map[string]any") because tool definitions require
+// schema flexibility for LLM tool calling. All values are validated at runtime
+// when the tool is invoked.
 type ParamDef struct {
 	// Type is the parameter type.
 	Type ParamType `json:"type"`
@@ -83,9 +90,11 @@ type ParamDef struct {
 	Required bool `json:"required"`
 
 	// Default is the default value if not provided.
+	// Uses `any` for JSON schema flexibility - can be string, number, boolean, etc.
 	Default any `json:"default,omitempty"`
 
 	// Enum restricts values to a set of options.
+	// Uses `[]any` for JSON schema flexibility - enum values match the param type.
 	Enum []any `json:"enum,omitempty"`
 
 	// MinLength is the minimum string length (for string type).
@@ -138,6 +147,10 @@ type ToolDefinition struct {
 
 	// Examples provides usage examples.
 	Examples []ToolExample `json:"examples,omitempty"`
+
+	// WhenToUse provides structured routing guidance for the tool router.
+	// CB-31e: Part of the tool contract - every new tool should define this.
+	WhenToUse WhenToUse `json:"when_to_use,omitempty" yaml:"when_to_use,omitempty"`
 }
 
 // ToolExample provides an example invocation for a tool.
@@ -150,6 +163,56 @@ type ToolExample struct {
 
 	// ExpectedOutput describes what output to expect.
 	ExpectedOutput string `json:"expected_output,omitempty"`
+}
+
+// WhenToUse provides structured guidance for tool selection.
+//
+// Description:
+//
+//	This is part of the tool contract - every new tool must define this
+//	to enable accurate routing by the tool router. Keywords are matched
+//	against user queries for fast O(1) lookup.
+//
+// Thread Safety: WhenToUse is immutable after initialization.
+//
+// CB-31e: This struct addresses the router inefficiency where BestFor
+// was never populated, leading to poor tool selection.
+type WhenToUse struct {
+	// Keywords are query terms that should trigger this tool.
+	// Router matches these against the user's query for fast selection.
+	// Example: ["callers", "who calls", "upstream", "incoming calls"]
+	Keywords []string `json:"keywords" yaml:"keywords"`
+
+	// UseWhen describes scenarios where this tool is the right choice.
+	// Example: "User asks who or what calls a specific function"
+	UseWhen string `json:"use_when" yaml:"use_when"`
+
+	// AvoidWhen describes scenarios where this tool should NOT be used.
+	// Example: "User asks what a function calls (use find_callees instead)"
+	AvoidWhen string `json:"avoid_when,omitempty" yaml:"avoid_when,omitempty"`
+
+	// InsteadOf lists tools this tool should replace in specific scenarios.
+	// This helps the router learn substitution patterns.
+	InsteadOf []ToolSubstitution `json:"instead_of,omitempty" yaml:"instead_of,omitempty"`
+}
+
+// ToolSubstitution describes when one tool should be used instead of another.
+//
+// Description:
+//
+//	Captures tool substitution patterns to help the router learn that
+//	specialized tools (like find_callers) should be preferred over
+//	generic tools (like Grep) for specific query types.
+//
+// Example:
+//
+//	{Tool: "Grep", When: "searching for function call patterns"}
+type ToolSubstitution struct {
+	// Tool is the name of the tool to replace.
+	Tool string `json:"tool" yaml:"tool"`
+
+	// When describes the scenario where substitution applies.
+	When string `json:"when" yaml:"when"`
 }
 
 // RequiredParams returns a list of required parameter names.

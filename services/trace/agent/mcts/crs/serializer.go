@@ -130,8 +130,8 @@ type CRSExport struct {
 	// Generation is the CRS generation at export time.
 	Generation int64 `json:"generation"`
 
-	// Timestamp is when this export was created.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when this export was created (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Indexes contains all six CRS indexes in exportable form.
 	Indexes IndexesExport `json:"indexes"`
@@ -338,8 +338,8 @@ type HistoryEntryExport struct {
 	// Source indicates signal source.
 	Source string `json:"source"`
 
-	// Timestamp is when this decision was made.
-	Timestamp time.Time `json:"timestamp"`
+	// Timestamp is when this decision was made (Unix milliseconds UTC).
+	Timestamp int64 `json:"timestamp"`
 
 	// Metadata contains additional context.
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -437,7 +437,7 @@ func (s *Serializer) ExportFull(ctx context.Context, snapshot Snapshot, sessionI
 	result := &ExportResult{
 		Export: &CRSExport{
 			SessionID: sessionID,
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UnixMilli(),
 		},
 		Warnings: make([]string, 0),
 	}
@@ -587,7 +587,7 @@ func (s *Serializer) ExportFull(ctx context.Context, snapshot Snapshot, sessionI
 func (s *Serializer) Export(snapshot Snapshot, sessionID string) *CRSExport {
 	export := &CRSExport{
 		SessionID: sessionID,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UnixMilli(),
 	}
 
 	if snapshot == nil {
@@ -799,7 +799,7 @@ func (s *Serializer) exportHistoryIndex(idx HistoryIndexView) HistoryIndexExport
 			Action:    entry.Action,
 			Result:    entry.Result,
 			Source:    entry.Source.String(),
-			Timestamp: time.UnixMilli(entry.Timestamp).UTC(),
+			Timestamp: entry.Timestamp,
 			Metadata:  metadataCopy,
 		})
 	}
@@ -1357,7 +1357,7 @@ func (s *Serializer) importHistoryIndex(export HistoryIndexExport) ([]HistoryEnt
 			Action:    entry.Action,
 			Result:    entry.Result,
 			Source:    parseSignalSource(entry.Source),
-			Timestamp: entry.Timestamp.UnixMilli(),
+			Timestamp: entry.Timestamp,
 			Metadata:  metadataCopy,
 		})
 	}

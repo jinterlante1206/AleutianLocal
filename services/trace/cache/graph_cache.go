@@ -13,14 +13,20 @@ package cache
 import (
 	"container/list"
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/manifest"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 )
+
+var graphCacheTracer = otel.Tracer("aleutian.cache.graph")
 
 // BuildFunc is the function signature for building a graph.
 type BuildFunc func(ctx context.Context, projectRoot string) (*graph.Graph, *manifest.Manifest, error)
@@ -78,6 +84,7 @@ type GraphCache struct {
 	refreshCount    int64
 	errorCount      int64
 	memoryEvictions int64 // Evictions due to memory pressure
+	staleRebuilds   int64 // GR-42: Rebuilds due to staleness detection
 }
 
 // NewGraphCache creates a new GraphCache with the given options.
@@ -113,7 +120,7 @@ func (c *GraphCache) Get(projectRoot string) (*CacheEntry, func(), bool) {
 	}
 
 	// Check if stale
-	if entry.stale {
+	if entry.IsStale() {
 		c.mu.RUnlock()
 		atomic.AddInt64(&c.misses, 1)
 		return nil, nil, false
@@ -129,7 +136,7 @@ func (c *GraphCache) Get(projectRoot string) (*CacheEntry, func(), bool) {
 
 	// Acquire reference before releasing lock
 	entry.Acquire()
-	entry.LastAccessMilli = time.Now().UnixMilli()
+	atomic.StoreInt64(&entry.LastAccessMilli, time.Now().UnixMilli())
 	c.mu.RUnlock()
 
 	// Update LRU (separate lock operation)
@@ -140,7 +147,7 @@ func (c *GraphCache) Get(projectRoot string) (*CacheEntry, func(), bool) {
 	release := func() {
 		entry.Release()
 		// Check if should be removed (stale + released)
-		if entry.stale && !entry.InUse() {
+		if entry.IsStale() && !entry.InUse() {
 			c.tryRemove(graphID)
 		}
 	}
@@ -150,20 +157,93 @@ func (c *GraphCache) Get(projectRoot string) (*CacheEntry, func(), bool) {
 
 // GetOrBuild retrieves a cached entry or builds a new one.
 //
-// Uses singleflight to deduplicate concurrent builds for the same project.
-// Build errors are cached for ErrorCacheTTL to prevent retry storms.
+// Description:
 //
-// The release function MUST be called when done using the entry.
+//	Retrieves a cached graph entry, checking for staleness before returning.
+//	If the entry is stale (builder version mismatch or source files changed),
+//	it is automatically invalidated and rebuilt.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation. Must not be nil.
+//	projectRoot - Absolute path to the project root.
+//	build - Function to build the graph if not cached or stale.
+//
+// Outputs:
+//
+//	*CacheEntry - The cached or freshly built entry.
+//	func() - Release function that MUST be called when done.
+//	error - Non-nil if build failed.
+//
+// Behavior:
+//
+//	Uses singleflight to deduplicate concurrent builds for the same project.
+//	Build errors are cached for ErrorCacheTTL to prevent retry storms.
+//	GR-42: Checks staleness on every cache hit to ensure fresh graphs.
+//
+// Thread Safety: Safe for concurrent use.
 func (c *GraphCache) GetOrBuild(ctx context.Context, projectRoot string, build BuildFunc) (*CacheEntry, func(), error) {
+	ctx, span := graphCacheTracer.Start(ctx, "GraphCache.GetOrBuild",
+		trace.WithAttributes(
+			attribute.String("project_root", projectRoot),
+		),
+	)
+	defer span.End()
+
 	graphID := GenerateGraphID(projectRoot)
 
 	// Check cache first (fast path)
 	if entry, release, ok := c.Get(projectRoot); ok {
-		return entry, release, nil
+		// A2 Fix: Skip staleness check if disabled (for immutable deployments)
+		if c.options.DisableStalenessCheck {
+			span.SetAttributes(
+				attribute.Bool("cache_hit", true),
+				attribute.Bool("staleness_check_disabled", true),
+			)
+			return entry, release, nil
+		}
+
+		// GR-42: Check staleness before returning cached entry
+		reason, err := CheckStaleness(ctx, entry)
+		if err != nil {
+			// Log but continue - staleness check failure shouldn't block
+			slog.Warn("GR-42: staleness check failed, assuming stale",
+				slog.String("graph_id", graphID),
+				slog.String("error", err.Error()),
+			)
+			reason = StalenessHashError
+		}
+
+		if reason != StalenessNone {
+			// Entry is stale - release and rebuild
+			span.SetAttributes(
+				attribute.Bool("cache_hit", true),
+				attribute.Bool("stale", true),
+				attribute.String("staleness_reason", string(reason)),
+			)
+			slog.Debug("GR-42: cache entry stale, rebuilding",
+				slog.String("graph_id", graphID),
+				slog.String("reason", string(reason)),
+			)
+			atomic.AddInt64(&c.staleRebuilds, 1)
+			release() // Release our reference
+			// H3 Fix: Invalidate hash cache BEFORE ForceInvalidate
+			// (ensures next request sees fresh hash)
+			InvalidateHashCache(projectRoot)
+			c.ForceInvalidate(projectRoot)
+		} else {
+			// Entry is fresh
+			span.SetAttributes(
+				attribute.Bool("cache_hit", true),
+				attribute.Bool("stale", false),
+			)
+			return entry, release, nil
+		}
 	}
 
 	// Check for cached error
 	if fb := c.getCachedError(graphID); fb != nil {
+		span.SetAttributes(attribute.Bool("cached_error", true))
 		return nil, nil, &ErrBuildFailed{
 			Err:      fb.err,
 			FailedAt: time.UnixMilli(fb.failedAt),
@@ -172,7 +252,8 @@ func (c *GraphCache) GetOrBuild(ctx context.Context, projectRoot string, build B
 	}
 
 	// Singleflight: only one build per graphID
-	result, err, _ := c.flight.Do(graphID, func() (interface{}, error) {
+	span.SetAttributes(attribute.Bool("cache_hit", false))
+	result, err, shared := c.flight.Do(graphID, func() (interface{}, error) {
 		entry, err := c.buildAndCache(ctx, projectRoot, graphID, build)
 		if err != nil {
 			c.cacheError(graphID, err)
@@ -182,7 +263,10 @@ func (c *GraphCache) GetOrBuild(ctx context.Context, projectRoot string, build B
 		return entry, nil
 	})
 
+	span.SetAttributes(attribute.Bool("singleflight_shared", shared))
+
 	if err != nil {
+		span.RecordError(err)
 		return nil, nil, err
 	}
 
@@ -191,7 +275,7 @@ func (c *GraphCache) GetOrBuild(ctx context.Context, projectRoot string, build B
 
 	release := func() {
 		entry.Release()
-		if entry.stale && !entry.InUse() {
+		if entry.IsStale() && !entry.InUse() {
 			c.tryRemove(graphID)
 		}
 	}
@@ -200,11 +284,60 @@ func (c *GraphCache) GetOrBuild(ctx context.Context, projectRoot string, build B
 }
 
 // buildAndCache builds a graph and adds it to the cache.
+//
+// Description:
+//
+//	Builds a new graph using the provided BuildFunc and stores it in the cache.
+//	GR-42: Sets BuilderVersion and SourceHash for staleness detection.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	projectRoot - Absolute path to the project root.
+//	graphID - Unique identifier for this cache entry.
+//	build - Function to build the graph.
+//
+// Outputs:
+//
+//	*CacheEntry - The newly created and cached entry.
+//	error - Non-nil if build failed.
+//
+// Thread Safety: Safe for concurrent use (uses singleflight at caller).
 func (c *GraphCache) buildAndCache(ctx context.Context, projectRoot, graphID string, build BuildFunc) (*CacheEntry, error) {
+	ctx, span := graphCacheTracer.Start(ctx, "GraphCache.buildAndCache",
+		trace.WithAttributes(
+			attribute.String("graph_id", graphID),
+			attribute.String("project_root", projectRoot),
+		),
+	)
+	defer span.End()
+
+	buildStart := time.Now()
+
 	g, m, err := build(ctx, projectRoot)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
+
+	buildDuration := time.Since(buildStart)
+	span.SetAttributes(attribute.Int64("build_duration_ms", buildDuration.Milliseconds()))
+
+	// GR-42: Compute source hash for staleness detection
+	sourceHash, fileCount, hashErr := ComputeSourceHash(ctx, projectRoot)
+	if hashErr != nil {
+		// Log but continue - we'll just have an empty hash
+		slog.Warn("GR-42: failed to compute source hash for new entry",
+			slog.String("graph_id", graphID),
+			slog.String("error", hashErr.Error()),
+		)
+		sourceHash = ""
+	}
+
+	span.SetAttributes(
+		attribute.Int("source_file_count", fileCount),
+		attribute.String("builder_version", GraphBuilderVersion),
+	)
 
 	now := time.Now().UnixMilli()
 	entry := &CacheEntry{
@@ -212,6 +345,8 @@ func (c *GraphCache) buildAndCache(ctx context.Context, projectRoot, graphID str
 		ProjectRoot:     projectRoot,
 		Graph:           g,
 		Manifest:        m,
+		BuilderVersion:  GraphBuilderVersion, // GR-42: Track builder version
+		SourceHash:      sourceHash,          // GR-42: Track source hash
 		BuiltAtMilli:    now,
 		LastAccessMilli: now,
 	}
@@ -219,9 +354,17 @@ func (c *GraphCache) buildAndCache(ctx context.Context, projectRoot, graphID str
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if entry was added while we were building
-	if existing, ok := c.entries[graphID]; ok {
+	// Check if entry was added while we were building (and is not stale)
+	if existing, ok := c.entries[graphID]; ok && !existing.IsStale() {
+		slog.Debug("GR-42: entry added by concurrent build, using existing",
+			slog.String("graph_id", graphID),
+		)
 		return existing, nil
+	}
+
+	// Remove stale entry if present
+	if existing, ok := c.entries[graphID]; ok && existing.IsStale() && !existing.InUse() {
+		c.removeEntryLocked(graphID, existing)
 	}
 
 	// Evict if needed
@@ -231,6 +374,16 @@ func (c *GraphCache) buildAndCache(ctx context.Context, projectRoot, graphID str
 	entry.lruElement = c.lru.PushFront(graphID)
 	c.entries[graphID] = entry
 	atomic.AddInt64(&c.buildCount, 1)
+
+	// L5 Fix: Use Debug for routine build logging (Info for errors only)
+	slog.Debug("GR-42: graph built and cached",
+		slog.String("graph_id", graphID),
+		slog.String("builder_version", GraphBuilderVersion),
+		slog.Int("source_files", fileCount),
+		slog.Duration("build_duration", buildDuration),
+		slog.Int("node_count", g.NodeCount()),
+		slog.Int("edge_count", g.EdgeCount()),
+	)
 
 	return entry, nil
 }
@@ -269,7 +422,8 @@ func (c *GraphCache) ForceInvalidate(projectRoot string) {
 	defer c.mu.Unlock()
 
 	if entry, ok := c.entries[graphID]; ok {
-		entry.stale = true
+		// L3 Fix: Use helper method for consistent stale marking
+		entry.MarkStale()
 	}
 }
 
@@ -293,6 +447,7 @@ func (c *GraphCache) Stats() CacheStats {
 		BuildCount:        atomic.LoadInt64(&c.buildCount),
 		RefreshCount:      atomic.LoadInt64(&c.refreshCount),
 		ErrorCount:        atomic.LoadInt64(&c.errorCount),
+		StaleRebuilds:     atomic.LoadInt64(&c.staleRebuilds), // GR-42
 		MaxEntries:        c.options.MaxEntries,
 		MaxAge:            c.options.MaxAge,
 		MaxMemoryMB:       c.options.MaxMemoryMB,
@@ -309,7 +464,8 @@ func (c *GraphCache) Clear() {
 
 	for graphID, entry := range c.entries {
 		if entry.InUse() {
-			entry.stale = true
+			// L3 Fix: Use helper method for consistent stale marking
+			entry.MarkStale()
 		} else {
 			c.removeEntryLocked(graphID, entry)
 		}
@@ -345,9 +501,10 @@ func (c *GraphCache) removeExpired(graphID string) {
 		return
 	}
 
-	// Don't remove if in use
+	// Don't remove if in use - mark stale instead
 	if entry.InUse() {
-		entry.stale = true
+		// L3 Fix: Use helper method for consistent stale marking
+		entry.MarkStale()
 		return
 	}
 
@@ -591,7 +748,7 @@ func (c *GraphCache) Refresh(ctx context.Context, projectRoot string, refresh Re
 	// Get existing entry directly (not using Get() to avoid the release callback issue)
 	c.mu.RLock()
 	entry, ok := c.entries[graphID]
-	if !ok || entry.stale || c.isExpired(entry) {
+	if !ok || entry.IsStale() || c.isExpired(entry) {
 		c.mu.RUnlock()
 		return ErrEntryNotFound
 	}
@@ -619,6 +776,16 @@ func (c *GraphCache) Refresh(ctx context.Context, projectRoot string, refresh Re
 		return nil
 	}
 
+	// GR-42: Compute source hash for the refreshed entry
+	sourceHash, _, hashErr := ComputeSourceHash(ctx, projectRoot)
+	if hashErr != nil {
+		slog.Warn("GR-42: failed to compute source hash during refresh",
+			slog.String("graph_id", entry.GraphID),
+			slog.String("error", hashErr.Error()),
+		)
+		sourceHash = ""
+	}
+
 	now := time.Now().UnixMilli()
 
 	// Create new entry
@@ -627,6 +794,8 @@ func (c *GraphCache) Refresh(ctx context.Context, projectRoot string, refresh Re
 		ProjectRoot:     projectRoot,
 		Graph:           newGraph,
 		Manifest:        newManifest,
+		BuilderVersion:  GraphBuilderVersion, // GR-42: Track builder version
+		SourceHash:      sourceHash,          // GR-42: Track source hash
 		BuiltAtMilli:    now,
 		LastAccessMilli: now,
 	}

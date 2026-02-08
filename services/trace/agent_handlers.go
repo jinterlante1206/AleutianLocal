@@ -841,11 +841,11 @@ func convertReasoningTrace(trace *crs.ReasoningTrace, summary *agent.ReasoningSu
 		Trace:      make([]ReasoningStep, 0, len(trace.Trace)),
 	}
 
-	if !trace.StartTime.IsZero() {
-		response.StartTime = trace.StartTime.Format("2006-01-02T15:04:05Z07:00")
+	if trace.StartTime != 0 {
+		response.StartTime = time.UnixMilli(trace.StartTime).UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
-	if !trace.EndTime.IsZero() {
-		response.EndTime = trace.EndTime.Format("2006-01-02T15:04:05Z07:00")
+	if trace.EndTime != 0 {
+		response.EndTime = time.UnixMilli(trace.EndTime).UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	for _, step := range trace.Trace {
@@ -860,8 +860,8 @@ func convertReasoningTrace(trace *crs.ReasoningTrace, summary *agent.ReasoningSu
 			Metadata:     step.Metadata,
 		}
 
-		if !step.Timestamp.IsZero() {
-			respStep.Timestamp = step.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+		if step.Timestamp != 0 {
+			respStep.Timestamp = time.UnixMilli(step.Timestamp).UTC().Format("2006-01-02T15:04:05Z07:00")
 		}
 
 		for _, update := range step.ProofUpdates {
@@ -920,8 +920,8 @@ func convertCRSExport(export *crs.CRSExport) *CRSExportResponse {
 		},
 	}
 
-	if !export.Timestamp.IsZero() {
-		response.Timestamp = export.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+	if export.Timestamp != 0 {
+		response.Timestamp = time.UnixMilli(export.Timestamp).UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	// Convert proof index entries
@@ -956,8 +956,8 @@ func convertCRSExport(export *crs.CRSExport) *CRSExportResponse {
 			NodeID:     entry.NodeID,
 			VisitCount: 1, // Each entry represents one visit
 		}
-		if !entry.Timestamp.IsZero() {
-			histEntry.LastVisitedAt = entry.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+		if entry.Timestamp != 0 {
+			histEntry.LastVisitedAt = time.UnixMilli(entry.Timestamp).UTC().Format("2006-01-02T15:04:05Z07:00")
 		}
 		response.Indexes.History = append(response.Indexes.History, histEntry)
 	}

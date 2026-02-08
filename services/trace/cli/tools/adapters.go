@@ -66,6 +66,23 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	registry.Register(NewFindSymbolTool(g, idx))
 	registry.Register(NewGetCallChainTool(g, idx))
 	registry.Register(NewFindReferencesTool(g, idx))
+
+	// Level 5: Graph analytics tools (GR-02 to GR-05, GR-12/GR-13)
+	// These wrap GraphAnalytics for code quality insights.
+	// Requires wrapping Graph into HierarchicalGraph for analytics.
+	if g.IsFrozen() {
+		hg, err := graph.WrapGraph(g)
+		if err == nil && hg != nil {
+			analytics := graph.NewGraphAnalytics(hg)
+			registry.Register(NewFindHotspotsTool(analytics, idx))
+			registry.Register(NewFindDeadCodeTool(analytics, idx))
+			registry.Register(NewFindCyclesTool(analytics, idx))
+			registry.Register(NewFindImportantTool(analytics, idx)) // GR-13: PageRank
+		}
+	}
+
+	// find_path uses Graph directly (doesn't need HierarchicalGraph)
+	registry.Register(NewFindPathTool(g, idx))
 }
 
 // ============================================================================
@@ -1121,6 +1138,111 @@ func StaticToolDefinitions() []ToolDefinition {
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     5 * time.Second,
+		},
+		// GR-02 to GR-05: Graph Analytics Tools
+		{
+			Name: "find_hotspots",
+			Description: "Find the most-connected symbols in the codebase (hotspots). " +
+				"Hotspots indicate high coupling and potential refactoring targets. " +
+				"Returns symbols ranked by connectivity score (inDegree*2 + outDegree).",
+			Parameters: map[string]ParamDef{
+				"top": {
+					Type:        ParamTypeInt,
+					Description: "Number of hotspots to return (1-100)",
+					Required:    false,
+					Default:     10,
+				},
+				"kind": {
+					Type:        ParamTypeString,
+					Description: "Filter by symbol kind: function, type, or all",
+					Required:    false,
+					Default:     "all",
+					Enum:        []any{"function", "type", "all"},
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    86,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+		},
+		{
+			Name: "find_dead_code",
+			Description: "Find potentially unused code (symbols with no callers). " +
+				"Excludes entry points (main, init, Test*) and interface methods. " +
+				"By default only shows unexported symbols; use include_exported=true for all.",
+			Parameters: map[string]ParamDef{
+				"include_exported": {
+					Type:        ParamTypeBool,
+					Description: "Include exported symbols (by default only unexported are shown)",
+					Required:    false,
+					Default:     false,
+				},
+				"package": {
+					Type:        ParamTypeString,
+					Description: "Filter to a specific package path",
+					Required:    false,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of results to return",
+					Required:    false,
+					Default:     50,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    84,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+		},
+		{
+			Name: "find_cycles",
+			Description: "Find circular dependencies in the codebase. " +
+				"Uses Tarjan's SCC algorithm to detect cycles. " +
+				"Cycles indicate tight coupling that can make code harder to maintain.",
+			Parameters: map[string]ParamDef{
+				"min_size": {
+					Type:        ParamTypeInt,
+					Description: "Minimum cycle size to report (default: 2)",
+					Required:    false,
+					Default:     2,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of cycles to return",
+					Required:    false,
+					Default:     20,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    82,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     15 * time.Second,
+		},
+		{
+			Name: "find_path",
+			Description: "Find the shortest path between two symbols. " +
+				"Uses BFS to find the minimum-hop path. " +
+				"Useful for understanding how two pieces of code are connected.",
+			Parameters: map[string]ParamDef{
+				"from": {
+					Type:        ParamTypeString,
+					Description: "Starting symbol name (e.g., 'main', 'parseConfig')",
+					Required:    true,
+				},
+				"to": {
+					Type:        ParamTypeString,
+					Description: "Target symbol name",
+					Required:    true,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    83,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
 		},
 	}
 }

@@ -712,12 +712,43 @@ type ToolRouterSelection struct {
 }
 
 // ToolRouterSpec describes a tool for the router.
+//
+// CB-31e: Extended with UseWhen, AvoidWhen, and InsteadOf fields
+// to provide structured guidance for tool selection.
 type ToolRouterSpec struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	BestFor     []string `json:"best_for,omitempty"`
-	Params      []string `json:"params,omitempty"`
-	Category    string   `json:"category,omitempty"`
+	// Name is the tool name.
+	Name string `json:"name"`
+
+	// Description explains what the tool does.
+	Description string `json:"description"`
+
+	// BestFor contains keywords that should trigger this tool.
+	// CB-31e: Now populated from WhenToUse.Keywords.
+	BestFor []string `json:"best_for,omitempty"`
+
+	// UseWhen describes when to use this tool.
+	UseWhen string `json:"use_when,omitempty"`
+
+	// AvoidWhen describes when NOT to use this tool.
+	AvoidWhen string `json:"avoid_when,omitempty"`
+
+	// InsteadOf lists tools this should replace.
+	InsteadOf []ToolRouterSubstitution `json:"instead_of,omitempty"`
+
+	// Params lists parameter names.
+	Params []string `json:"params,omitempty"`
+
+	// Category is the tool category.
+	Category string `json:"category,omitempty"`
+}
+
+// ToolRouterSubstitution describes a tool substitution for the router.
+type ToolRouterSubstitution struct {
+	// Tool is the name of the tool to replace.
+	Tool string `json:"tool"`
+
+	// When describes when substitution applies.
+	When string `json:"when"`
 }
 
 // ToolRouterCodeContext provides context about the codebase.

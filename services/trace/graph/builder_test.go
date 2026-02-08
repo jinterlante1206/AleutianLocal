@@ -1119,6 +1119,94 @@ func TestBuilder_GoInterfaceImplementation(t *testing.T) {
 			t.Errorf("expected GoInterfaceEdges=0 for TypeScript, got %d", result.Stats.GoInterfaceEdges)
 		}
 	})
+
+	t.Run("cross-file method association (GR-40 C-3 fix)", func(t *testing.T) {
+		// This test verifies that methods defined in a different file than their
+		// receiver type are properly associated and interface detection works.
+
+		// File 1: Interface definition
+		readerInterface := &ast.Symbol{
+			ID:        "io.go:10:Reader",
+			Name:      "Reader",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "io.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Read", ParamCount: 1, ReturnCount: 2},
+				},
+			},
+		}
+
+		// File 2: Type definition (WITHOUT methods - they're in a different file)
+		fileReader := &ast.Symbol{
+			ID:        "types.go:5:FileReader",
+			Name:      "FileReader",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "types.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata:  nil, // Methods will be associated cross-file
+		}
+
+		// File 3: Method definition (separate from type!)
+		readMethod := &ast.Symbol{
+			ID:        "reader_methods.go:10:FileReader.Read",
+			Name:      "Read",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "reader_methods.go",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Signature: "func (f *FileReader) Read(p []byte) (int, error)",
+		}
+
+		parseResult1 := testParseResult("io.go", []*ast.Symbol{readerInterface}, nil)
+		parseResult2 := testParseResult("types.go", []*ast.Symbol{fileReader}, nil)
+		parseResult3 := testParseResult("reader_methods.go", []*ast.Symbol{readMethod}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2, parseResult3})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Verify the method was associated with the type
+		fileReaderNode, ok := result.Graph.GetNode(fileReader.ID)
+		if !ok {
+			t.Fatal("FileReader node not found")
+		}
+
+		// The type should now have methods associated
+		if fileReaderNode.Symbol.Metadata == nil || len(fileReaderNode.Symbol.Metadata.Methods) == 0 {
+			t.Error("expected FileReader to have methods associated cross-file")
+		}
+
+		// Check that EdgeTypeImplements was created
+		foundImplements := false
+		for _, edge := range fileReaderNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == readerInterface.ID {
+				foundImplements = true
+				break
+			}
+		}
+		if !foundImplements {
+			t.Error("expected EdgeTypeImplements from FileReader to Reader (cross-file method association)")
+		}
+
+		// Verify stats
+		if result.Stats.GoInterfaceEdges != 1 {
+			t.Errorf("expected GoInterfaceEdges=1, got %d", result.Stats.GoInterfaceEdges)
+		}
+	})
 }
 
 func TestBuilder_PythonProtocolImplementation(t *testing.T) {

@@ -695,6 +695,35 @@ func (s *Service) evictIfNeeded() {
 	}
 }
 
+// getFirstGraph returns the first cached graph, or nil if none exist.
+//
+// Description:
+//
+//	Used by debug endpoints when no graph_id is specified.
+//	Returns the most recently built graph if multiple exist.
+//
+// Outputs:
+//
+//	*CachedGraph - The first cached graph, or nil if none exist.
+//
+// Thread Safety: Safe for concurrent use.
+func (s *Service) getFirstGraph() *CachedGraph {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var newest *CachedGraph
+	var newestTime int64
+
+	for _, cached := range s.graphs {
+		if cached.BuiltAtMilli > newestTime {
+			newestTime = cached.BuiltAtMilli
+			newest = cached
+		}
+	}
+
+	return newest
+}
+
 // =============================================================================
 // PLAN STORAGE METHODS (CB-22b)
 // =============================================================================

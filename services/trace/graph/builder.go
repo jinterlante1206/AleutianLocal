@@ -387,6 +387,11 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 		b.reportProgress(state, ProgressPhaseExtractingEdges, len(results), i+1)
 	}
 
+	// GR-40 FIX (C-3): Associate methods with types across all files
+	// This must run before interface detection because methods may be defined
+	// in different files than their receiver types.
+	b.associateMethodsWithTypesCrossFile(ctx, state)
+
 	// GR-40: Compute Go interface implementations via method-set matching
 	// This runs after all per-file edges are extracted because it needs
 	// the complete set of interfaces and types across the entire project.
@@ -1026,6 +1031,302 @@ func (b *Builder) reportProgress(state *buildState, phase ProgressPhase, total, 
 		NodesCreated:   state.result.Stats.NodesCreated,
 		EdgesCreated:   state.result.Stats.EdgesCreated,
 	})
+}
+
+// === GR-40 FIX (C-3): Cross-File Method Association ===
+
+// associateMethodsWithTypesCrossFile associates methods with their receiver types across all files.
+//
+// Description:
+//
+//	In Go, methods can be defined in different files than their receiver types.
+//	The parser's associateMethodsWithTypes() only works within a single file.
+//	This function operates on the complete symbol set to handle cross-file cases.
+//
+// Inputs:
+//
+//	ctx - Context for tracing
+//	state - Build state with all symbols from all files
+//
+// Side Effects:
+//
+//	Modifies Symbol.Metadata.Methods for types (structs and type aliases)
+//
+// Thread Safety:
+//
+//	Not safe for concurrent use on the same buildState. The builder serializes calls.
+func (b *Builder) associateMethodsWithTypesCrossFile(ctx context.Context, state *buildState) {
+	ctx, span := tracer.Start(ctx, "GraphBuilder.associateMethodsWithTypesCrossFile")
+	defer span.End()
+
+	if state == nil || len(state.symbolsByID) == 0 {
+		span.AddEvent("no_symbols")
+		return
+	}
+
+	// Collect all Go methods by receiver type name
+	// methodsByReceiverType[receiverTypeName] = []MethodSignature
+	methodsByReceiverType := make(map[string][]ast.MethodSignature)
+	methodCount := 0
+	skippedNoReceiver := 0
+
+	for _, sym := range state.symbolsByID {
+		// L-6: Check context periodically for large codebases
+		if methodCount%1000 == 0 {
+			if err := ctx.Err(); err != nil {
+				span.AddEvent("cancelled", trace.WithAttributes(
+					attribute.Int("methods_processed", methodCount),
+				))
+				return
+			}
+		}
+
+		if sym.Kind != ast.SymbolKindMethod || sym.Language != "go" {
+			continue
+		}
+
+		// Extract receiver type name from signature
+		// Signature format: "func (r *Type) Name(params) returns" or "func (r Type) Name(params) returns"
+		receiverType := extractReceiverTypeFromSignature(sym.Signature)
+		if receiverType == "" {
+			skippedNoReceiver++
+			continue
+		}
+
+		// Create method signature from symbol
+		sig := ast.MethodSignature{
+			Name:         sym.Name,
+			Params:       extractParamsFromSignature(sym.Signature),
+			Returns:      extractReturnsFromSignature(sym.Signature),
+			ReceiverType: receiverType,
+		}
+		sig.ParamCount = countParamString(sig.Params)
+		sig.ReturnCount = countReturnString(sig.Returns)
+
+		methodsByReceiverType[receiverType] = append(methodsByReceiverType[receiverType], sig)
+		methodCount++
+	}
+
+	span.SetAttributes(
+		attribute.Int("methods_collected", methodCount),
+		attribute.Int("receiver_types", len(methodsByReceiverType)),
+		attribute.Int("skipped_no_receiver", skippedNoReceiver),
+	)
+
+	// L-5: Log warning if many methods couldn't be parsed
+	if skippedNoReceiver > 0 {
+		slog.Debug("methods skipped due to unparseable receiver",
+			slog.Int("skipped", skippedNoReceiver),
+			slog.Int("collected", methodCount),
+		)
+	}
+
+	if len(methodsByReceiverType) == 0 {
+		span.AddEvent("no_methods_with_receivers")
+		return
+	}
+
+	// Associate methods with their types (cross-file!)
+	typesUpdated := 0
+	for _, sym := range state.symbolsByID {
+		if sym.Language != "go" {
+			continue
+		}
+		if sym.Kind != ast.SymbolKindStruct && sym.Kind != ast.SymbolKindType {
+			continue
+		}
+
+		methods, ok := methodsByReceiverType[sym.Name]
+		if !ok || len(methods) == 0 {
+			continue
+		}
+
+		// Initialize metadata if needed
+		if sym.Metadata == nil {
+			sym.Metadata = &ast.SymbolMetadata{}
+		}
+
+		// Append cross-file methods (don't overwrite same-file methods)
+		existingNames := make(map[string]bool)
+		for _, m := range sym.Metadata.Methods {
+			existingNames[m.Name] = true
+		}
+
+		for _, m := range methods {
+			if !existingNames[m.Name] {
+				sym.Metadata.Methods = append(sym.Metadata.Methods, m)
+			}
+		}
+		typesUpdated++
+	}
+
+	span.SetAttributes(attribute.Int("types_updated", typesUpdated))
+
+	slog.Debug("cross-file method association complete",
+		slog.Int("methods_collected", methodCount),
+		slog.Int("receiver_types", len(methodsByReceiverType)),
+		slog.Int("types_updated", typesUpdated),
+	)
+}
+
+// extractReceiverTypeFromSignature extracts the receiver type name from a Go method signature.
+// Example: "func (h *Handler) Handle()" returns "Handler"
+// Example: "func (s Server) Start()" returns "Server"
+func extractReceiverTypeFromSignature(sig string) string {
+	if sig == "" || !strings.HasPrefix(sig, "func (") {
+		return ""
+	}
+
+	// Find the closing paren of the receiver
+	parenEnd := strings.Index(sig[6:], ")")
+	if parenEnd == -1 {
+		return ""
+	}
+
+	receiver := sig[6 : 6+parenEnd]
+	// receiver is like "h *Handler" or "s Server"
+
+	parts := strings.Fields(receiver)
+	if len(parts) < 2 {
+		return ""
+	}
+
+	typePart := parts[len(parts)-1]
+	// Remove * prefix if pointer receiver
+	return strings.TrimPrefix(typePart, "*")
+}
+
+// extractParamsFromSignature extracts the parameter list from a method signature.
+func extractParamsFromSignature(sig string) string {
+	if sig == "" {
+		return ""
+	}
+
+	// Find the method name and params: "func (r Type) Name(params) returns"
+	// First, skip past the receiver
+	start := strings.Index(sig, ") ")
+	if start == -1 {
+		return ""
+	}
+
+	// Find the opening paren of params
+	paramStart := strings.Index(sig[start:], "(")
+	if paramStart == -1 {
+		return ""
+	}
+	paramStart += start
+
+	// Find the matching closing paren
+	depth := 0
+	paramEnd := -1
+	for i := paramStart; i < len(sig); i++ {
+		switch sig[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				paramEnd = i
+				break
+			}
+		}
+		if paramEnd != -1 {
+			break
+		}
+	}
+
+	if paramEnd == -1 {
+		return ""
+	}
+
+	return sig[paramStart+1 : paramEnd]
+}
+
+// extractReturnsFromSignature extracts the return types from a method signature.
+func extractReturnsFromSignature(sig string) string {
+	if sig == "" {
+		return ""
+	}
+
+	// Find the last ) which ends the params
+	lastParen := strings.LastIndex(sig, ")")
+	if lastParen == -1 || lastParen >= len(sig)-1 {
+		return ""
+	}
+
+	// Everything after is the return type(s)
+	returns := strings.TrimSpace(sig[lastParen+1:])
+
+	// Remove outer parens from multi-return: "(int, error)" -> "int, error"
+	if strings.HasPrefix(returns, "(") && strings.HasSuffix(returns, ")") {
+		returns = returns[1 : len(returns)-1]
+	}
+
+	return returns
+}
+
+// countParamString counts the number of parameters in a parameter string.
+// Example: "ctx context.Context, name string" returns 2
+// Example: "" returns 0
+func countParamString(params string) int {
+	params = strings.TrimSpace(params)
+	if params == "" {
+		return 0
+	}
+
+	// Count commas outside of nested types
+	count := 1
+	depth := 0
+	for _, c := range params {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// countReturnString counts the number of return types in a return string.
+// Example: "(int, error)" returns 2
+// Example: "error" returns 1
+// Example: "" returns 0
+func countReturnString(returns string) int {
+	returns = strings.TrimSpace(returns)
+	if returns == "" {
+		return 0
+	}
+
+	// Remove outer parens if present
+	if strings.HasPrefix(returns, "(") && strings.HasSuffix(returns, ")") {
+		returns = returns[1 : len(returns)-1]
+	}
+
+	if returns == "" {
+		return 0
+	}
+
+	// Count commas outside of nested types
+	count := 1
+	depth := 0
+	for _, c := range returns {
+		switch c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 // === GR-40/GR-40a: Implicit Interface Implementation Detection ===
