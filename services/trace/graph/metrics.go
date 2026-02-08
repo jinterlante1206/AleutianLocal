@@ -29,11 +29,16 @@ var (
 
 // Metrics for graph building operations.
 var (
-	buildLatency metric.Float64Histogram
-	buildTotal   metric.Int64Counter
-	nodesCreated metric.Int64Histogram
-	edgesCreated metric.Int64Histogram
-	queryLatency metric.Float64Histogram
+	buildLatency            metric.Float64Histogram
+	buildTotal              metric.Int64Counter
+	nodesCreated            metric.Int64Histogram
+	edgesCreated            metric.Int64Histogram
+	queryLatency            metric.Float64Histogram
+	interfaceEdgesCreated   metric.Int64Counter // GR-40: Interface implementation edges
+	interfaceMatchesChecked metric.Int64Counter // GR-40: Type-interface pairs checked
+	callEdgesResolved       metric.Int64Counter // GR-41: Call edges resolved to symbols
+	callEdgesUnresolved     metric.Int64Counter // GR-41: Call edges to placeholders
+	callSitesExtracted      metric.Int64Counter // GR-41: Total call sites extracted
 
 	metricsOnce sync.Once
 	metricsErr  error
@@ -85,6 +90,53 @@ func initMetrics() error {
 			"graph_query_duration_seconds",
 			metric.WithDescription("Duration of graph query operations"),
 			metric.WithUnit("s"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// GR-40: Interface implementation detection metrics
+		interfaceEdgesCreated, err = meter.Int64Counter(
+			"graph_interface_edges_created_total",
+			metric.WithDescription("Total EdgeTypeImplements edges created via method-set matching"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		interfaceMatchesChecked, err = meter.Int64Counter(
+			"graph_interface_matches_checked_total",
+			metric.WithDescription("Total type-interface pairs checked for implementation"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// GR-41: Call edge extraction metrics
+		callEdgesResolved, err = meter.Int64Counter(
+			"graph_call_edges_resolved_total",
+			metric.WithDescription("Total EdgeTypeCalls edges resolved to existing symbols"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		callEdgesUnresolved, err = meter.Int64Counter(
+			"graph_call_edges_unresolved_total",
+			metric.WithDescription("Total EdgeTypeCalls edges to placeholder nodes"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		callSitesExtracted, err = meter.Int64Counter(
+			"graph_call_sites_extracted_total",
+			metric.WithDescription("Total call sites extracted from function bodies"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -148,4 +200,50 @@ func startQuerySpan(ctx context.Context, queryType, symbolID string) (context.Co
 			attribute.String("graph.symbol_id", symbolID),
 		),
 	)
+}
+
+// recordInterfaceDetectionMetrics records metrics for GR-40 interface detection.
+//
+// Description:
+//
+//	Records the number of EdgeTypeImplements edges created via method-set matching
+//	and the number of type-interface pairs checked.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - edgesCreated: Number of EdgeTypeImplements edges created.
+//   - matchesChecked: Number of type-interface pairs checked.
+//
+// Thread Safety: Safe for concurrent use.
+func recordInterfaceDetectionMetrics(ctx context.Context, edgesCreated, matchesChecked int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	interfaceEdgesCreated.Add(ctx, int64(edgesCreated))
+	interfaceMatchesChecked.Add(ctx, int64(matchesChecked))
+}
+
+// recordCallEdgeMetrics records metrics for GR-41 call edge extraction.
+//
+// Description:
+//
+//	Records the number of call edges resolved to existing symbols,
+//	call edges to placeholder nodes, and total call sites extracted.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - resolved: Number of call edges resolved to existing symbols.
+//   - unresolved: Number of call edges to placeholder nodes.
+//   - extracted: Total call sites extracted from function bodies.
+//
+// Thread Safety: Safe for concurrent use.
+func recordCallEdgeMetrics(ctx context.Context, resolved, unresolved, extracted int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	callEdgesResolved.Add(ctx, int64(resolved))
+	callEdgesUnresolved.Add(ctx, int64(unresolved))
+	callSitesExtracted.Add(ctx, int64(extracted))
 }

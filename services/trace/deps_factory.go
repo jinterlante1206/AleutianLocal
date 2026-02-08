@@ -51,6 +51,18 @@ var persistenceRegistry = struct {
 	journals: make(map[string]*crs.BadgerJournal),
 }
 
+// journalsByProject tracks journals by project key (checkpoint key).
+// GR-36: Ensures only one journal is open per project at a time.
+// This prevents BadgerDB lock conflicts when multiple sessions work on the same project.
+var journalsByProject = struct {
+	mu       sync.RWMutex
+	journals map[string]*crs.BadgerJournal // key is checkpoint key (project hash)
+	sessions map[string]string             // maps project key -> session ID that owns it
+}{
+	journals: make(map[string]*crs.BadgerJournal),
+	sessions: make(map[string]string),
+}
+
 // registerCoordinator stores a coordinator for later cleanup.
 func registerCoordinator(sessionID string, coord *integration.Coordinator) {
 	coordinatorRegistry.mu.Lock()
@@ -69,6 +81,49 @@ func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal *
 	if journal != nil {
 		persistenceRegistry.journals[sessionID] = journal
 	}
+}
+
+// closeExistingJournalForProject closes any existing journal for a project.
+// GR-36: Called before creating a new journal to prevent BadgerDB lock conflicts.
+// Returns true if a journal was closed.
+func closeExistingJournalForProject(projectKey string) bool {
+	journalsByProject.mu.Lock()
+	defer journalsByProject.mu.Unlock()
+
+	if existingJournal, ok := journalsByProject.journals[projectKey]; ok {
+		oldSessionID := journalsByProject.sessions[projectKey]
+		slog.Debug("GR-36: Closing existing journal for project before opening new one",
+			slog.String("project_key", projectKey),
+			slog.String("old_session_id", oldSessionID),
+		)
+		if err := existingJournal.Close(); err != nil {
+			slog.Warn("GR-36: Failed to close existing journal for project",
+				slog.String("project_key", projectKey),
+				slog.String("error", err.Error()),
+			)
+		}
+		delete(journalsByProject.journals, projectKey)
+		delete(journalsByProject.sessions, projectKey)
+
+		// Also remove from session-based registry if it exists
+		persistenceRegistry.mu.Lock()
+		if oldSessionID != "" {
+			delete(persistenceRegistry.journals, oldSessionID)
+		}
+		persistenceRegistry.mu.Unlock()
+
+		return true
+	}
+	return false
+}
+
+// registerJournalForProject tracks a journal by its project key.
+// GR-36: Enables proper cleanup when multiple sessions work on the same project.
+func registerJournalForProject(projectKey, sessionID string, journal *crs.BadgerJournal) {
+	journalsByProject.mu.Lock()
+	defer journalsByProject.mu.Unlock()
+	journalsByProject.journals[projectKey] = journal
+	journalsByProject.sessions[projectKey] = sessionID
 }
 
 // cleanupCoordinator removes and closes the coordinator for a session.
@@ -542,7 +597,11 @@ func (f *DefaultDependenciesFactory) trySessionRestore(
 	}
 
 	// Create BadgerJournal for this session
-	journalPath := filepath.Join(baseDir, sessionIdentifier.CheckpointKey(), "journal")
+	// GR-36: First close any existing journal for this project to prevent lock conflicts
+	projectKey := sessionIdentifier.CheckpointKey()
+	closeExistingJournalForProject(projectKey)
+
+	journalPath := filepath.Join(baseDir, projectKey, "journal")
 	journalConfig := crs.JournalConfig{
 		SessionID:  sessionID,
 		Path:       journalPath,
@@ -558,8 +617,9 @@ func (f *DefaultDependenciesFactory) trySessionRestore(
 	}
 	deps.BadgerJournal = journal
 
-	// Register for cleanup when session ends
+	// Register for cleanup when session ends (both session-based and project-based)
 	registerPersistence(sessionID, pm, journal)
+	registerJournalForProject(projectKey, sessionID, journal)
 
 	// Create restorer and attempt restore
 	restorer, err := crs.NewSessionRestorer(pm, nil)

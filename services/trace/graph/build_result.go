@@ -78,6 +78,21 @@ type BuildStats struct {
 	// multiple symbols (over-approximated by creating edges to all).
 	AmbiguousResolves int
 
+	// GoInterfaceEdges is the number of EdgeTypeImplements edges created
+	// via Go interface implementation detection (method-set matching).
+	// See GR-40 for details.
+	GoInterfaceEdges int
+
+	// CallEdgesResolved is the number of EdgeTypeCalls edges where the
+	// target was successfully resolved to an existing symbol.
+	// See GR-41 for details.
+	CallEdgesResolved int
+
+	// CallEdgesUnresolved is the number of EdgeTypeCalls edges where the
+	// target could not be resolved and a placeholder was created.
+	// See GR-41 for details.
+	CallEdgesUnresolved int
+
 	// DurationMilli is the total build time in milliseconds.
 	DurationMilli int64
 }

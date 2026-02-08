@@ -313,6 +313,20 @@ func (p *ExecutePhase) emitCoordinatorEvent(
 	// CR-3 fix: No nil check needed - already validated at function start
 	data.StepNumber = deps.Session.GetMetric(agent.MetricSteps)
 
+	// GR-30: Build GraphContext for tool execution events
+	if inv != nil && (event == integration.EventToolExecuted || event == integration.EventToolFailed) {
+		data.Graph = p.buildGraphContextForTool(inv, result)
+		if data.Graph != nil {
+			// Use Info level so it appears in server logs (test 8 greps for "graph_context")
+			slog.Info("GR-30: Event with graph_context",
+				slog.String("event", string(event)),
+				slog.String("tool", inv.Tool),
+				slog.Int("node_count", data.Graph.NodeCount),
+				slog.Int("result_count", data.Graph.ResultCount),
+			)
+		}
+	}
+
 	// Handle the event - activities run synchronously in priority order
 	results, err := deps.Coordinator.HandleEvent(ctx, event, data)
 	if err != nil {
@@ -329,4 +343,98 @@ func (p *ExecutePhase) emitCoordinatorEvent(
 			slog.Int("activities_run", len(results)),
 		)
 	}
+}
+
+// -----------------------------------------------------------------------------
+// GR-30: GraphContext Building
+// -----------------------------------------------------------------------------
+
+// graphToolQueryTypes maps graph tools to their QueryType constants.
+var graphToolQueryTypes = map[string]integration.QueryType{
+	"find_callers":      integration.QueryTypeCallers,
+	"find_callees":      integration.QueryTypeCallees,
+	"find_path":         integration.QueryTypePath,
+	"find_hotspots":     integration.QueryTypeHotspots,
+	"find_dead_code":    integration.QueryTypeDeadCode,
+	"find_cycles":       integration.QueryTypeCycles,
+	"find_references":   integration.QueryTypeReferences,
+	"find_symbol":       integration.QueryTypeSymbol,
+	"find_implementers": integration.QueryTypeImplementations,
+}
+
+// buildGraphContextForTool creates a GraphContext from tool invocation and result.
+//
+// Description:
+//
+//	Extracts relevant graph information from tool execution:
+//	- File paths from Read/Write/Grep tools
+//	- Query metadata from graph tools (find_callers, etc.)
+//	- Result counts from tool output
+//
+// Inputs:
+//
+//	inv - The tool invocation.
+//	result - The tool result (may be nil).
+//
+// Outputs:
+//
+//	*integration.GraphContext - The constructed context, or nil if not applicable.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ExecutePhase) buildGraphContextForTool(
+	inv *agent.ToolInvocation,
+	result *tools.Result,
+) *integration.GraphContext {
+	if inv == nil {
+		return nil
+	}
+
+	builder := integration.NewGraphContextBuilder()
+
+	// Extract file paths for file-related tools
+	if inv.Parameters != nil && inv.Parameters.StringParams != nil {
+		if filePath, ok := inv.Parameters.StringParams["file_path"]; ok && filePath != "" {
+			switch inv.Tool {
+			case "Read":
+				builder.WithFilesRead(filePath)
+			case "Write", "Edit":
+				builder.WithFilesModified(filePath)
+			}
+		}
+		if pattern, ok := inv.Parameters.StringParams["pattern"]; ok && pattern != "" {
+			if inv.Tool == "Grep" || inv.Tool == "Glob" {
+				// For search tools, track the query target
+				builder.WithQuery("", pattern, 0)
+			}
+		}
+	}
+
+	// Extract query metadata for graph tools
+	if queryType, isGraphTool := graphToolQueryTypes[inv.Tool]; isGraphTool {
+		target := ""
+		if inv.Parameters != nil && inv.Parameters.StringParams != nil {
+			// Try common parameter names for graph tool targets
+			for _, key := range []string{"function_name", "symbol", "symbol_name", "target", "name"} {
+				if val, ok := inv.Parameters.StringParams[key]; ok && val != "" {
+					target = val
+					break
+				}
+			}
+		}
+
+		// Note: Result count would require parsing tool output; using 0 for now
+		builder.WithQuery(queryType, target, 0)
+	}
+
+	// Build and return (using BuildUnsafe since we don't need validation here)
+	gc := builder.BuildUnsafe()
+
+	// Only return if we captured something meaningful
+	if len(gc.FilesRead) == 0 && len(gc.FilesModified) == 0 &&
+		gc.QueryType == "" && gc.QueryTarget == "" {
+		integration.ReleaseGraphContext(gc)
+		return nil
+	}
+
+	return gc
 }

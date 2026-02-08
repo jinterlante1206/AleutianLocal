@@ -106,6 +106,47 @@ func countToolCalls(history []agent.ToolHistoryEntry, toolName string) int {
 	return count
 }
 
+// buildToolCountMapFromSession builds a map of tool name to call count from session trace steps.
+//
+// Description:
+//
+//	Iterates through the session's trace steps and counts calls per tool.
+//	Counts both "tool_call" and "tool_call_forced" actions to capture calls
+//	from both router and LLM paths.
+//
+//	GR-39b: This is more accurate than ToolHistory which only captures router
+//	path calls. TraceSteps capture ALL tool executions regardless of path.
+//
+//	Optimization: Build the map once before the invocation loop (O(n+m))
+//	instead of counting per-invocation (O(n*m)).
+//
+// Inputs:
+//
+//	s - The session to count from. May be nil (returns empty map).
+//
+// Outputs:
+//
+//	map[string]int - Map of tool name to call count.
+//
+// Thread Safety: Safe for concurrent use (reads snapshot of trace steps).
+func buildToolCountMapFromSession(s *agent.Session) map[string]int {
+	counts := make(map[string]int)
+	if s == nil {
+		return counts
+	}
+
+	steps := s.GetTraceSteps()
+	for _, step := range steps {
+		// Count both tool_call and tool_call_forced actions
+		// CB-31d: tool_call_forced is used by router hard-forcing path
+		if step.Action == "tool_call" || step.Action == "tool_call_forced" {
+			counts[step.Tool]++
+		}
+	}
+
+	return counts
+}
+
 // -----------------------------------------------------------------------------
 // Semantic Repetition Detection
 // -----------------------------------------------------------------------------

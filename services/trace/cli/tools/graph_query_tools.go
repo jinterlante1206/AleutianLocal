@@ -13,6 +13,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -40,7 +41,14 @@ var graphQueryTracer = otel.Tracer("trace.tools.graph_query")
 //	for understanding code dependencies and answering questions like
 //	"Find all functions that call parseConfig".
 //
-// Thread Safety: Safe for concurrent use (graph queries are read-only).
+// GR-01 Optimization:
+//
+//	Uses O(1) SymbolIndex lookup before falling back to O(V) graph scan.
+//	When multiple symbols share the same name (e.g., "Setup" in different
+//	packages), the limit parameter applies per symbol, not as a global ceiling.
+//	Total results may be up to limit × number_of_matching_symbols.
+//
+// Thread Safety: Safe for concurrent use. All operations are read-only.
 type findCallersTool struct {
 	graph *graph.Graph
 	index *index.SymbolIndex
@@ -100,31 +108,93 @@ func (t *findCallersTool) Definition() ToolDefinition {
 }
 
 func (t *findCallersTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+	// M4: Validate and extract parameters before starting span
+	name, _ := params["function_name"].(string)
+	if name == "" {
+		return &Result{Success: false, Error: "function_name is required"}, nil
+	}
+
+	// M1: Cap limit at 1000 to prevent resource exhaustion
+	limit := 50
+	if l, ok := getIntParam(params, "limit"); ok && l > 0 {
+		if l > 1000 {
+			l = 1000
+		}
+		limit = l
+	}
+
+	// M4: Start span with all context upfront
 	ctx, span := graphQueryTracer.Start(ctx, "find_callers.Execute",
 		trace.WithAttributes(
 			attribute.String("tool", "find_callers"),
+			attribute.String("function_name", name),
+			attribute.Int("limit", limit),
+			attribute.Bool("index_available", t.index != nil),
 		),
 	)
 	defer span.End()
 
-	name, _ := params["function_name"].(string)
-	if name == "" {
-		span.SetAttributes(attribute.Bool("error", true))
-		return &Result{Success: false, Error: "function_name is required"}, nil
-	}
+	// GR-01: Use index first for O(1) lookup instead of O(V) graph scan
+	var results map[string]*graph.QueryResult
+	var err error
+	var queryErrors int // C2: Track query errors
 
-	span.SetAttributes(attribute.String("function_name", name))
+	if t.index != nil {
+		// O(1) index lookup
+		symbols := t.index.GetByName(name)
+		span.SetAttributes(
+			attribute.Bool("index_used", true),
+			attribute.Int("index_matches", len(symbols)),
+		)
 
-	limit := 50
-	if l, ok := getIntParam(params, "limit"); ok && l > 0 {
-		limit = l
-	}
-	span.SetAttributes(attribute.Int("limit", limit))
-
-	results, err := t.graph.FindCallersByName(ctx, name, graph.WithLimit(limit))
-	if err != nil {
-		span.RecordError(err)
-		return &Result{Success: false, Error: fmt.Sprintf("graph query failed: %v", err)}, nil
+		if len(symbols) > 0 {
+			results = make(map[string]*graph.QueryResult, len(symbols))
+			for _, sym := range symbols {
+				// C1: Nil symbol check
+				if sym == nil {
+					continue
+				}
+				if err := ctx.Err(); err != nil {
+					span.RecordError(err)
+					return nil, err
+				}
+				result, qErr := t.graph.FindCallersByID(ctx, sym.ID, graph.WithLimit(limit))
+				if qErr != nil {
+					// C2: Track errors instead of silent continue
+					queryErrors++
+					slog.Warn("graph query failed",
+						slog.String("tool", "find_callers"),
+						slog.String("operation", "FindCallersByID"),
+						slog.String("symbol_id", sym.ID),
+						slog.String("error", qErr.Error()),
+					)
+					continue
+				}
+				results[sym.ID] = result
+			}
+			// C2: Record query errors in span
+			if queryErrors > 0 {
+				span.SetAttributes(attribute.Int("query_errors", queryErrors))
+			}
+		} else {
+			// No matches in index - return empty result (O(1) fail-fast)
+			span.SetAttributes(attribute.Bool("fast_not_found", true))
+			results = make(map[string]*graph.QueryResult)
+		}
+	} else {
+		// Fallback to O(V) graph scan (index unavailable)
+		slog.Warn("graph query fallback",
+			slog.String("tool", "find_callers"),
+			slog.String("reason", "index_unavailable"),
+			slog.String("function_name", name),
+		)
+		span.SetAttributes(attribute.Bool("index_used", false))
+		results, err = t.graph.FindCallersByName(ctx, name, graph.WithLimit(limit))
+		if err != nil {
+			span.RecordError(err)
+			// M2: Improved error wrapping
+			return &Result{Success: false, Error: fmt.Sprintf("find callers for '%s': %v", name, err)}, nil
+		}
 	}
 
 	// Format results
@@ -149,6 +219,19 @@ func (t *findCallersTool) Execute(ctx context.Context, params map[string]any) (*
 // =============================================================================
 
 // findCalleesTool wraps graph.FindCalleesByName.
+//
+// Description:
+//
+//	Finds all functions called by a given function by name. Essential for
+//	understanding dependencies and data flow.
+//
+// GR-01 Optimization:
+//
+//	Uses O(1) SymbolIndex lookup before falling back to O(V) graph scan.
+//	When multiple symbols share the same name, the limit parameter applies
+//	per symbol, not as a global ceiling.
+//
+// Thread Safety: Safe for concurrent use. All operations are read-only.
 type findCalleesTool struct {
 	graph *graph.Graph
 	index *index.SymbolIndex
@@ -198,30 +281,93 @@ func (t *findCalleesTool) Definition() ToolDefinition {
 }
 
 func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+	// M4: Validate and extract parameters before starting span
+	name, _ := params["function_name"].(string)
+	if name == "" {
+		return &Result{Success: false, Error: "function_name is required"}, nil
+	}
+
+	// M1: Cap limit at 1000 to prevent resource exhaustion
+	limit := 50
+	if l, ok := getIntParam(params, "limit"); ok && l > 0 {
+		if l > 1000 {
+			l = 1000
+		}
+		limit = l
+	}
+
+	// M4: Start span with all context upfront
 	ctx, span := graphQueryTracer.Start(ctx, "find_callees.Execute",
 		trace.WithAttributes(
 			attribute.String("tool", "find_callees"),
+			attribute.String("function_name", name),
+			attribute.Int("limit", limit),
+			attribute.Bool("index_available", t.index != nil),
 		),
 	)
 	defer span.End()
 
-	name, _ := params["function_name"].(string)
-	if name == "" {
-		span.SetAttributes(attribute.Bool("error", true))
-		return &Result{Success: false, Error: "function_name is required"}, nil
-	}
+	// GR-01: Use index first for O(1) lookup instead of O(V) graph scan
+	var results map[string]*graph.QueryResult
+	var err error
+	var queryErrors int // C2: Track query errors
 
-	span.SetAttributes(attribute.String("function_name", name))
+	if t.index != nil {
+		// O(1) index lookup
+		symbols := t.index.GetByName(name)
+		span.SetAttributes(
+			attribute.Bool("index_used", true),
+			attribute.Int("index_matches", len(symbols)),
+		)
 
-	limit := 50
-	if l, ok := getIntParam(params, "limit"); ok && l > 0 {
-		limit = l
-	}
-
-	results, err := t.graph.FindCalleesByName(ctx, name, graph.WithLimit(limit))
-	if err != nil {
-		span.RecordError(err)
-		return &Result{Success: false, Error: fmt.Sprintf("graph query failed: %v", err)}, nil
+		if len(symbols) > 0 {
+			results = make(map[string]*graph.QueryResult, len(symbols))
+			for _, sym := range symbols {
+				// C1: Nil symbol check
+				if sym == nil {
+					continue
+				}
+				if err := ctx.Err(); err != nil {
+					span.RecordError(err)
+					return nil, err
+				}
+				result, qErr := t.graph.FindCalleesByID(ctx, sym.ID, graph.WithLimit(limit))
+				if qErr != nil {
+					// C2: Track errors instead of silent continue
+					queryErrors++
+					slog.Warn("graph query failed",
+						slog.String("tool", "find_callees"),
+						slog.String("operation", "FindCalleesByID"),
+						slog.String("symbol_id", sym.ID),
+						slog.String("error", qErr.Error()),
+					)
+					continue
+				}
+				results[sym.ID] = result
+			}
+			// C2: Record query errors in span
+			if queryErrors > 0 {
+				span.SetAttributes(attribute.Int("query_errors", queryErrors))
+			}
+		} else {
+			// No matches in index - return empty result (O(1) fail-fast)
+			span.SetAttributes(attribute.Bool("fast_not_found", true))
+			results = make(map[string]*graph.QueryResult)
+		}
+	} else {
+		// Fallback to O(V) graph scan (index unavailable)
+		slog.Warn("graph query fallback",
+			slog.String("tool", "find_callees"),
+			slog.String("reason", "index_unavailable"),
+			slog.String("function_name", name),
+		)
+		span.SetAttributes(attribute.Bool("index_used", false))
+		results, err = t.graph.FindCalleesByName(ctx, name, graph.WithLimit(limit))
+		if err != nil {
+			span.RecordError(err)
+			// M2: Improved error wrapping
+			return &Result{Success: false, Error: fmt.Sprintf("find callees for '%s': %v", name, err)}, nil
+		}
 	}
 
 	output := formatCalleeResults(name, results)
@@ -245,6 +391,19 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 // =============================================================================
 
 // findImplementationsTool wraps graph.FindImplementationsByName.
+//
+// Description:
+//
+//	Finds all types that implement a given interface by name. Essential for
+//	understanding polymorphism and interface usage.
+//
+// GR-01 Optimization:
+//
+//	Uses O(1) SymbolIndex lookup before falling back to O(V) graph scan.
+//	Only symbols with Kind=SymbolKindInterface are queried; other matching
+//	names are filtered out with debug logging.
+//
+// Thread Safety: Safe for concurrent use. All operations are read-only.
 type findImplementationsTool struct {
 	graph *graph.Graph
 	index *index.SymbolIndex
@@ -294,30 +453,117 @@ func (t *findImplementationsTool) Definition() ToolDefinition {
 }
 
 func (t *findImplementationsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+	// M4: Validate and extract parameters before starting span
+	name, _ := params["interface_name"].(string)
+	if name == "" {
+		return &Result{Success: false, Error: "interface_name is required"}, nil
+	}
+
+	// M1: Cap limit at 1000 to prevent resource exhaustion
+	limit := 50
+	if l, ok := getIntParam(params, "limit"); ok && l > 0 {
+		if l > 1000 {
+			l = 1000
+		}
+		limit = l
+	}
+
+	// M4: Start span with all context upfront
 	ctx, span := graphQueryTracer.Start(ctx, "find_implementations.Execute",
 		trace.WithAttributes(
 			attribute.String("tool", "find_implementations"),
+			attribute.String("interface_name", name),
+			attribute.Int("limit", limit),
+			attribute.Bool("index_available", t.index != nil),
 		),
 	)
 	defer span.End()
 
-	name, _ := params["interface_name"].(string)
-	if name == "" {
-		span.SetAttributes(attribute.Bool("error", true))
-		return &Result{Success: false, Error: "interface_name is required"}, nil
-	}
+	// GR-01: Use index first for O(1) lookup instead of O(V) graph scan
+	var results map[string]*graph.QueryResult
+	var err error
+	var queryErrors int // C2: Track query errors
 
-	span.SetAttributes(attribute.String("interface_name", name))
+	if t.index != nil {
+		// O(1) index lookup
+		symbols := t.index.GetByName(name)
 
-	limit := 50
-	if l, ok := getIntParam(params, "limit"); ok && l > 0 {
-		limit = l
-	}
+		// Filter to only interface symbols (per review finding H3)
+		var interfaces []*ast.Symbol
+		var nonInterfaces int
+		for _, sym := range symbols {
+			// C1: Nil symbol check
+			if sym == nil {
+				continue
+			}
+			if sym.Kind == ast.SymbolKindInterface {
+				interfaces = append(interfaces, sym)
+			} else {
+				nonInterfaces++
+			}
+		}
 
-	results, err := t.graph.FindImplementationsByName(ctx, name, graph.WithLimit(limit))
-	if err != nil {
-		span.RecordError(err)
-		return &Result{Success: false, Error: fmt.Sprintf("graph query failed: %v", err)}, nil
+		// H3: Log filtered symbols for debugging
+		if nonInterfaces > 0 {
+			slog.Debug("filtered non-interface symbols",
+				slog.String("tool", "find_implementations"),
+				slog.String("interface_name", name),
+				slog.Int("filtered_count", nonInterfaces),
+				slog.Int("interfaces_found", len(interfaces)),
+			)
+		}
+
+		span.SetAttributes(
+			attribute.Bool("index_used", true),
+			attribute.Int("index_matches", len(symbols)),
+			attribute.Int("interfaces_found", len(interfaces)),
+			attribute.Int("non_interfaces_filtered", nonInterfaces),
+		)
+
+		if len(interfaces) > 0 {
+			results = make(map[string]*graph.QueryResult, len(interfaces))
+			for _, sym := range interfaces {
+				if err := ctx.Err(); err != nil {
+					span.RecordError(err)
+					return nil, err
+				}
+				result, qErr := t.graph.FindImplementationsByID(ctx, sym.ID, graph.WithLimit(limit))
+				if qErr != nil {
+					// C2: Track errors instead of silent continue
+					queryErrors++
+					slog.Warn("graph query failed",
+						slog.String("tool", "find_implementations"),
+						slog.String("operation", "FindImplementationsByID"),
+						slog.String("symbol_id", sym.ID),
+						slog.String("error", qErr.Error()),
+					)
+					continue
+				}
+				results[sym.ID] = result
+			}
+			// C2: Record query errors in span
+			if queryErrors > 0 {
+				span.SetAttributes(attribute.Int("query_errors", queryErrors))
+			}
+		} else {
+			// No matching interfaces in index - return empty result (O(1) fail-fast)
+			span.SetAttributes(attribute.Bool("fast_not_found", true))
+			results = make(map[string]*graph.QueryResult)
+		}
+	} else {
+		// Fallback to O(V) graph scan (index unavailable)
+		slog.Warn("graph query fallback",
+			slog.String("tool", "find_implementations"),
+			slog.String("reason", "index_unavailable"),
+			slog.String("interface_name", name),
+		)
+		span.SetAttributes(attribute.Bool("index_used", false))
+		results, err = t.graph.FindImplementationsByName(ctx, name, graph.WithLimit(limit))
+		if err != nil {
+			span.RecordError(err)
+			// M2: Improved error wrapping
+			return &Result{Success: false, Error: fmt.Sprintf("find implementations for '%s': %v", name, err)}, nil
+		}
 	}
 
 	output := formatImplementationResults(name, results)
@@ -846,49 +1092,109 @@ func formatCallerResultsText(name string, results map[string]*graph.QueryResult)
 }
 
 // formatCalleeResults formats callee results as a map.
+//
+// GR-41: Separates resolved (in-codebase) callees from external/placeholder ones.
 func formatCalleeResults(name string, results map[string]*graph.QueryResult) map[string]any {
-	output := map[string]any{
-		"function_name": name,
-		"match_count":   len(results),
-	}
+	var resolvedCallees []map[string]any
+	var externalCallees []string
 
-	var callees []map[string]any
 	for symbolID, result := range results {
 		if result == nil {
 			continue
 		}
 
-		entry := map[string]any{
-			"source_id":    symbolID,
-			"callee_count": len(result.Symbols),
-		}
-
-		var calleeList []map[string]any
 		for _, sym := range result.Symbols {
 			if sym == nil {
 				continue
 			}
-			calleeList = append(calleeList, map[string]any{
-				"name":      sym.Name,
-				"file":      sym.FilePath,
-				"line":      sym.StartLine,
-				"package":   sym.Package,
-				"signature": sym.Signature,
-			})
+			// External/placeholder symbols have empty FilePath or Kind=External
+			if sym.FilePath == "" || sym.Kind == ast.SymbolKindExternal {
+				externalCallees = append(externalCallees, sym.Name)
+			} else {
+				resolvedCallees = append(resolvedCallees, map[string]any{
+					"name":      sym.Name,
+					"file":      sym.FilePath,
+					"line":      sym.StartLine,
+					"package":   sym.Package,
+					"signature": sym.Signature,
+					"source_id": symbolID,
+				})
+			}
 		}
-		entry["callees"] = calleeList
-		callees = append(callees, entry)
 	}
-	output["results"] = callees
 
-	return output
+	// Deduplicate external callees
+	seen := make(map[string]bool)
+	var uniqueExternal []string
+	for _, name := range externalCallees {
+		if !seen[name] {
+			seen[name] = true
+			uniqueExternal = append(uniqueExternal, name)
+		}
+	}
+
+	return map[string]any{
+		"function_name":    name,
+		"resolved_count":   len(resolvedCallees),
+		"external_count":   len(uniqueExternal),
+		"total_count":      len(resolvedCallees) + len(uniqueExternal),
+		"resolved_callees": resolvedCallees,
+		"external_callees": uniqueExternal,
+	}
 }
 
 // formatCalleeResultsText formats callee results as readable text.
+//
+// Description:
+//
+//	Separates in-codebase callees (with file locations) from external/stdlib
+//	callees (placeholders without file paths). This helps the agent understand
+//	which callees are navigable and which are external dependencies.
+//
+// GR-41: Improved to distinguish resolved vs external callees for agent clarity.
 func formatCalleeResultsText(name string, results map[string]*graph.QueryResult) string {
 	var sb strings.Builder
 
-	totalCallees := countTotalCallers(results)
+	// Separate resolved (in-codebase) and external callees
+	var resolvedCallees []struct {
+		name     string
+		file     string
+		line     int
+		sourceID string
+	}
+	var externalCallees []string
+
+	for symbolID, result := range results {
+		if result == nil {
+			continue
+		}
+		for _, sym := range result.Symbols {
+			if sym == nil {
+				continue
+			}
+			// External/placeholder symbols have empty FilePath or Kind=External
+			if sym.FilePath == "" || sym.Kind == ast.SymbolKindExternal {
+				externalCallees = append(externalCallees, sym.Name)
+			} else {
+				resolvedCallees = append(resolvedCallees, struct {
+					name     string
+					file     string
+					line     int
+					sourceID string
+				}{
+					name:     sym.Name,
+					file:     sym.FilePath,
+					line:     sym.StartLine,
+					sourceID: symbolID,
+				})
+			}
+		}
+	}
+
+	totalResolved := len(resolvedCallees)
+	totalExternal := len(externalCallees)
+	totalCallees := totalResolved + totalExternal
+
 	if totalCallees == 0 {
 		sb.WriteString(fmt.Sprintf("No callees found for function '%s'.\n", name))
 		sb.WriteString("This could mean:\n")
@@ -897,21 +1203,45 @@ func formatCalleeResultsText(name string, results map[string]*graph.QueryResult)
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Function '%s' calls %d functions:\n\n", name, totalCallees))
+	// Header with clear breakdown
+	sb.WriteString(fmt.Sprintf("Function '%s' calls %d functions", name, totalCallees))
+	if totalResolved > 0 && totalExternal > 0 {
+		sb.WriteString(fmt.Sprintf(" (%d in-codebase, %d external/stdlib)", totalResolved, totalExternal))
+	}
+	sb.WriteString(":\n\n")
 
-	for symbolID, result := range results {
-		if result == nil || len(result.Symbols) == 0 {
-			continue
-		}
-
-		sb.WriteString(fmt.Sprintf("From: %s\n", symbolID))
-		for _, sym := range result.Symbols {
-			if sym == nil {
-				continue
-			}
-			sb.WriteString(fmt.Sprintf("  → %s() in %s:%d\n", sym.Name, sym.FilePath, sym.StartLine))
+	// Show resolved (in-codebase) callees first - these are actionable
+	if totalResolved > 0 {
+		sb.WriteString("## In-Codebase Callees (navigable)\n")
+		for _, callee := range resolvedCallees {
+			sb.WriteString(fmt.Sprintf("  → %s() in %s:%d\n", callee.name, callee.file, callee.line))
 		}
 		sb.WriteString("\n")
+	}
+
+	// Summarize external callees without cluttering - these aren't navigable
+	if totalExternal > 0 {
+		sb.WriteString("## External/Stdlib Callees (not in codebase)\n")
+		// Deduplicate and sort external names
+		seen := make(map[string]bool)
+		var uniqueExternal []string
+		for _, name := range externalCallees {
+			if !seen[name] {
+				seen[name] = true
+				uniqueExternal = append(uniqueExternal, name)
+			}
+		}
+		// Show up to 10 external calls, summarize the rest
+		if len(uniqueExternal) <= 10 {
+			for _, name := range uniqueExternal {
+				sb.WriteString(fmt.Sprintf("  → %s() (external)\n", name))
+			}
+		} else {
+			for _, name := range uniqueExternal[:10] {
+				sb.WriteString(fmt.Sprintf("  → %s() (external)\n", name))
+			}
+			sb.WriteString(fmt.Sprintf("  ... and %d more external calls\n", len(uniqueExternal)-10))
+		}
 	}
 
 	return sb.String()

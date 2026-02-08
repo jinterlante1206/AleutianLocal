@@ -12,6 +12,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
@@ -266,13 +267,14 @@ func TestFindCalleesTool_Execute(t *testing.T) {
 			t.Fatalf("Output is not a map")
 		}
 
-		results, ok := output["results"].([]map[string]any)
+		// GR-41: New format separates resolved and external callees
+		resolvedCallees, ok := output["resolved_callees"].([]map[string]any)
 		if !ok {
-			t.Fatalf("results is not a slice")
+			t.Fatalf("resolved_callees is not a slice")
 		}
 
-		if len(results) != 1 {
-			t.Errorf("got %d result entries, want 1", len(results))
+		if len(resolvedCallees) != 1 {
+			t.Errorf("got %d resolved callees, want 1", len(resolvedCallees))
 		}
 	})
 
@@ -564,5 +566,631 @@ func TestRegisterExploreTools_IncludesGraphQueryTools(t *testing.T) {
 	// Should have at least 16 tools (10 original + 6 new)
 	if count := registry.Count(); count < 16 {
 		t.Errorf("Registry has %d tools, want at least 16", count)
+	}
+}
+
+// =============================================================================
+// GR-01: Index Optimization Tests
+// =============================================================================
+
+// TestFindCallersTool_NilIndexFallback tests that find_callers falls back to
+// O(V) graph scan when index is nil (GR-01 requirement M5).
+func TestFindCallersTool_NilIndexFallback(t *testing.T) {
+	ctx := context.Background()
+	g, _ := createTestGraphWithCallers(t)
+
+	// Create tool with nil index
+	tool := NewFindCallersTool(g, nil)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "parseConfig",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Should still find callers via graph fallback
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	results, ok := output["results"].([]map[string]any)
+	if !ok {
+		t.Fatalf("results is not a slice")
+	}
+
+	// Should have 1 entry (one parseConfig function) with 3 callers
+	if len(results) != 1 {
+		t.Errorf("got %d result entries, want 1", len(results))
+	}
+}
+
+// TestFindCalleesTool_NilIndexFallback tests nil index fallback for find_callees.
+func TestFindCalleesTool_NilIndexFallback(t *testing.T) {
+	ctx := context.Background()
+	g, _ := createTestGraphWithCallers(t)
+
+	tool := NewFindCalleesTool(g, nil)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "main",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Should still find callees via graph fallback
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	// GR-41: New format separates resolved and external callees
+	resolvedCallees, ok := output["resolved_callees"].([]map[string]any)
+	if !ok {
+		t.Fatalf("resolved_callees is not a slice")
+	}
+
+	if len(resolvedCallees) != 1 {
+		t.Errorf("got %d resolved callees, want 1", len(resolvedCallees))
+	}
+}
+
+// TestFindImplementationsTool_NilIndexFallback tests nil index fallback.
+func TestFindImplementationsTool_NilIndexFallback(t *testing.T) {
+	ctx := context.Background()
+	g, _ := createTestGraphWithCallers(t)
+
+	tool := NewFindImplementationsTool(g, nil)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"interface_name": "Handler",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Should still find implementations via graph fallback
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	results, ok := output["results"].([]map[string]any)
+	if !ok {
+		t.Fatalf("results is not a slice")
+	}
+
+	if len(results) != 1 {
+		t.Errorf("got %d result entries, want 1", len(results))
+	}
+}
+
+// createTestGraphWithMultipleMatches creates a graph with multiple functions
+// having the same name (e.g., "Setup" in different packages).
+func createTestGraphWithMultipleMatches(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create multiple "Setup" functions in different packages
+	symbols := []*ast.Symbol{
+		{
+			ID:        "pkg/a/setup.go:10:Setup",
+			Name:      "Setup",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pkg/a/setup.go",
+			StartLine: 10,
+			EndLine:   20,
+			Package:   "a",
+			Language:  "go",
+		},
+		{
+			ID:        "pkg/b/setup.go:15:Setup",
+			Name:      "Setup",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pkg/b/setup.go",
+			StartLine: 15,
+			EndLine:   25,
+			Package:   "b",
+			Language:  "go",
+		},
+		{
+			ID:        "pkg/c/setup.go:20:Setup",
+			Name:      "Setup",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pkg/c/setup.go",
+			StartLine: 20,
+			EndLine:   30,
+			Package:   "c",
+			Language:  "go",
+		},
+		{
+			ID:        "main.go:5:main",
+			Name:      "main",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "main.go",
+			StartLine: 5,
+			EndLine:   15,
+			Package:   "main",
+			Language:  "go",
+		},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol %s: %v", sym.ID, err)
+		}
+	}
+
+	// main calls all three Setup functions
+	g.AddEdge("main.go:5:main", "pkg/a/setup.go:10:Setup", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "main.go", StartLine: 10,
+	})
+	g.AddEdge("main.go:5:main", "pkg/b/setup.go:15:Setup", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "main.go", StartLine: 11,
+	})
+	g.AddEdge("main.go:5:main", "pkg/c/setup.go:20:Setup", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "main.go", StartLine: 12,
+	})
+
+	g.Freeze()
+
+	return g, idx
+}
+
+// TestFindCallersTool_MultipleMatches tests that find_callers correctly handles
+// multiple functions with the same name (GR-01 requirement M2).
+func TestFindCallersTool_MultipleMatches(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithMultipleMatches(t)
+
+	tool := NewFindCallersTool(g, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "Setup",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	results, ok := output["results"].([]map[string]any)
+	if !ok {
+		t.Fatalf("results is not a slice")
+	}
+
+	// Should have 3 result entries (one per Setup function)
+	if len(results) != 3 {
+		t.Errorf("got %d result entries, want 3 (one per Setup)", len(results))
+	}
+
+	// Each Setup should have 1 caller (main)
+	for i, entry := range results {
+		callers, ok := entry["callers"].([]map[string]any)
+		if !ok {
+			t.Fatalf("callers[%d] is not a slice", i)
+		}
+		if len(callers) != 1 {
+			t.Errorf("result[%d] got %d callers, want 1", i, len(callers))
+		}
+	}
+}
+
+// TestFindCalleesTool_MultipleMatches tests multiple symbol matches.
+func TestFindCalleesTool_MultipleMatches(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithMultipleMatches(t)
+
+	tool := NewFindCalleesTool(g, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "main",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	// GR-41: New format has resolved_callees as a flat list
+	resolvedCallees, ok := output["resolved_callees"].([]map[string]any)
+	if !ok {
+		t.Fatalf("resolved_callees is not a slice")
+	}
+
+	// main has 3 callees (three Setup functions)
+	if len(resolvedCallees) != 3 {
+		t.Errorf("got %d resolved callees, want 3", len(resolvedCallees))
+	}
+}
+
+// TestFindCallersTool_FastNotFound tests that queries for non-existent symbols
+// return quickly (O(1) index miss, not O(V) scan).
+func TestFindCallersTool_FastNotFound(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithCallers(t)
+
+	tool := NewFindCallersTool(g, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "NonExistentFunctionXYZ123",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Should have empty results and message about no callers
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	results, ok := output["results"].([]map[string]any)
+	if !ok {
+		t.Fatalf("results is not a slice")
+	}
+
+	if len(results) != 0 {
+		t.Errorf("got %d results for non-existent function, want 0", len(results))
+	}
+
+	// OutputText should mention no callers found
+	if result.OutputText == "" {
+		t.Error("OutputText is empty")
+	}
+}
+
+// =============================================================================
+// GR-01: Benchmark Tests
+// =============================================================================
+
+// createLargeGraph creates a graph with many symbols for benchmarking.
+func createLargeGraph(b *testing.B, size int) (*graph.Graph, *index.SymbolIndex) {
+	b.Helper()
+
+	g := graph.NewGraph("/benchmark")
+	idx := index.NewSymbolIndex()
+
+	// Create a chain of function calls (StartLine must be >= 1)
+	var symbols []*ast.Symbol
+	for i := 0; i < size; i++ {
+		startLine := i*10 + 1 // 1-indexed, starting at 1
+		sym := &ast.Symbol{
+			ID:        fmt.Sprintf("pkg/module%d/file.go:%d:Function%d", i, startLine, i),
+			Name:      fmt.Sprintf("Function%d", i),
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  fmt.Sprintf("pkg/module%d/file.go", i),
+			StartLine: startLine,
+			EndLine:   startLine + 10,
+			Package:   fmt.Sprintf("module%d", i),
+			Language:  "go",
+		}
+		symbols = append(symbols, sym)
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			b.Fatalf("Failed to add symbol: %v", err)
+		}
+	}
+
+	// Create call edges: each function calls the next
+	for i := 0; i < size-1; i++ {
+		g.AddEdge(symbols[i].ID, symbols[i+1].ID, graph.EdgeTypeCalls, ast.Location{
+			FilePath: symbols[i].FilePath, StartLine: symbols[i].StartLine + 5,
+		})
+	}
+
+	g.Freeze()
+
+	return g, idx
+}
+
+// BenchmarkFindCallers_WithIndex benchmarks find_callers using O(1) index lookup.
+func BenchmarkFindCallers_WithIndex(b *testing.B) {
+	g, idx := createLargeGraph(b, 10000)
+	tool := NewFindCallersTool(g, idx)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Query for a function in the middle of the graph
+		_, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Function5000",
+		})
+		if err != nil {
+			b.Fatalf("Execute failed: %v", err)
+		}
+	}
+}
+
+// BenchmarkFindCallers_WithoutIndex benchmarks find_callers using O(V) graph scan.
+func BenchmarkFindCallers_WithoutIndex(b *testing.B) {
+	g, _ := createLargeGraph(b, 10000)
+	tool := NewFindCallersTool(g, nil) // nil index forces graph fallback
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Query for a function in the middle of the graph
+		_, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Function5000",
+		})
+		if err != nil {
+			b.Fatalf("Execute failed: %v", err)
+		}
+	}
+}
+
+// BenchmarkFindCallees_WithIndex benchmarks find_callees using O(1) index lookup.
+func BenchmarkFindCallees_WithIndex(b *testing.B) {
+	g, idx := createLargeGraph(b, 10000)
+	tool := NewFindCalleesTool(g, idx)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Function5000",
+		})
+		if err != nil {
+			b.Fatalf("Execute failed: %v", err)
+		}
+	}
+}
+
+// BenchmarkFindCallees_WithoutIndex benchmarks find_callees using O(V) graph scan.
+func BenchmarkFindCallees_WithoutIndex(b *testing.B) {
+	g, _ := createLargeGraph(b, 10000)
+	tool := NewFindCalleesTool(g, nil) // nil index forces graph fallback
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Function5000",
+		})
+		if err != nil {
+			b.Fatalf("Execute failed: %v", err)
+		}
+	}
+}
+
+// =============================================================================
+// GR-01: Additional Test Coverage (L1, L2)
+// =============================================================================
+
+// TestFindCallersTool_ContextCancellation tests that context cancellation is handled.
+// L1: Verify context cancellation path is covered.
+func TestFindCallersTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphWithMultipleMatches(t)
+	tool := NewFindCallersTool(g, idx)
+
+	// Create already-cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := tool.Execute(ctx, map[string]any{
+		"function_name": "Setup",
+	})
+
+	// Should return context.Canceled error
+	if err == nil {
+		t.Error("Expected context.Canceled error, got nil")
+	}
+	if err != context.Canceled {
+		t.Errorf("Expected context.Canceled, got %v", err)
+	}
+}
+
+// TestFindCalleesTool_ContextCancellation tests context cancellation for find_callees.
+func TestFindCalleesTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphWithMultipleMatches(t)
+	tool := NewFindCalleesTool(g, idx)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := tool.Execute(ctx, map[string]any{
+		"function_name": "main",
+	})
+
+	if err == nil {
+		t.Error("Expected context.Canceled error, got nil")
+	}
+}
+
+// TestFindImplementationsTool_ContextCancellation tests context cancellation.
+func TestFindImplementationsTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphWithCallers(t)
+	tool := NewFindImplementationsTool(g, idx)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := tool.Execute(ctx, map[string]any{
+		"interface_name": "Handler",
+	})
+
+	if err == nil {
+		t.Error("Expected context.Canceled error, got nil")
+	}
+}
+
+// TestFindCallersTool_LimitCapped tests that limit is capped at 1000 (M1).
+func TestFindCallersTool_LimitCapped(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithCallers(t)
+
+	tool := NewFindCallersTool(g, idx)
+
+	// Request a very large limit
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "parseConfig",
+		"limit":         1000000, // Should be capped to 1000
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// The test doesn't have 1000+ callers, but the limit should be silently capped
+	// Verify the query still works
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	matchCount, _ := output["match_count"].(int)
+	if matchCount != 1 {
+		t.Errorf("Expected 1 match, got %d", matchCount)
+	}
+}
+
+// TestFindImplementationsTool_NonInterfaceFiltered tests that non-interface symbols
+// are filtered out (H3).
+func TestFindImplementationsTool_NonInterfaceFiltered(t *testing.T) {
+	ctx := context.Background()
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create two symbols with same name: one interface, one struct
+	handler := &ast.Symbol{
+		ID:        "handler/handler.go:5:Handler",
+		Name:      "Handler",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "handler/handler.go",
+		StartLine: 5,
+		EndLine:   10,
+		Package:   "handler",
+		Language:  "go",
+	}
+
+	handlerStruct := &ast.Symbol{
+		ID:        "other/handler.go:10:Handler",
+		Name:      "Handler", // Same name, different kind
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "other/handler.go",
+		StartLine: 10,
+		EndLine:   20,
+		Package:   "other",
+		Language:  "go",
+	}
+
+	g.AddNode(handler)
+	g.AddNode(handlerStruct)
+	_ = idx.Add(handler)
+	_ = idx.Add(handlerStruct)
+	g.Freeze()
+
+	tool := NewFindImplementationsTool(g, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"interface_name": "Handler",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Should only query the interface, not the struct
+	output, ok := result.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output is not a map")
+	}
+
+	// The match_count should be 1 (only the interface was queried)
+	matchCount, _ := output["match_count"].(int)
+	if matchCount != 1 {
+		t.Errorf("Expected 1 interface match, got %d (struct should be filtered)", matchCount)
+	}
+}
+
+// TestFindCallersTool_IndexAndGraphPathConsistency tests that index and graph paths
+// return consistent results.
+func TestFindCallersTool_IndexAndGraphPathConsistency(t *testing.T) {
+	g, idx := createTestGraphWithCallers(t)
+
+	toolWithIndex := NewFindCallersTool(g, idx)
+	toolWithoutIndex := NewFindCallersTool(g, nil)
+
+	ctx := context.Background()
+
+	result1, err1 := toolWithIndex.Execute(ctx, map[string]any{
+		"function_name": "parseConfig",
+	})
+	result2, err2 := toolWithoutIndex.Execute(ctx, map[string]any{
+		"function_name": "parseConfig",
+	})
+
+	if err1 != nil || err2 != nil {
+		t.Fatalf("Execute errors: %v, %v", err1, err2)
+	}
+
+	output1, _ := result1.Output.(map[string]any)
+	output2, _ := result2.Output.(map[string]any)
+
+	matchCount1, _ := output1["match_count"].(int)
+	matchCount2, _ := output2["match_count"].(int)
+
+	if matchCount1 != matchCount2 {
+		t.Errorf("Index path got %d matches, graph path got %d - results inconsistent",
+			matchCount1, matchCount2)
+	}
+}
+
+// L2: Add find_references benchmark
+func BenchmarkFindReferences_WithIndex(b *testing.B) {
+	g, idx := createLargeGraph(b, 10000)
+	tool := NewFindReferencesTool(g, idx)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := tool.Execute(ctx, map[string]any{
+			"symbol_name": "Function5000",
+		})
+		if err != nil {
+			b.Fatalf("Execute failed: %v", err)
+		}
 	}
 }

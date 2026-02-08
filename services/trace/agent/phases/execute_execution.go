@@ -115,7 +115,20 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 	results := make([]*tools.Result, 0, len(invocations))
 	blocked := false
 
+	// GR-39b: Build tool count map ONCE before the loop for O(n+m) efficiency.
+	// This counts ALL tool calls (router + LLM paths) from session trace steps.
+	toolCounts := buildToolCountMapFromSession(deps.Session)
+
 	for i, inv := range invocations {
+		// GR-39 Issue 3: Emit routing decision for batch-executed tools.
+		// This ensures all tool calls have routing trace steps, not just router-selected ones.
+		p.emitToolRouting(deps, &agent.ToolRouterSelection{
+			Tool:       inv.Tool,
+			Confidence: 1.0, // Batch calls have implicit full confidence from LLM
+			Reasoning:  "batch_execution",
+			Duration:   0,
+		})
+
 		// Refresh graph if dirty files exist (before tool queries stale data)
 		p.maybeRefreshGraph(ctx, deps)
 
@@ -162,6 +175,76 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 				continue
 			}
 		}
+
+		// GR-39b: Count-based circuit breaker check BEFORE semantic check.
+		// This blocks tool calls after N=2 calls regardless of query similarity.
+		// The semantic check (CB-30c) catches variations with similarity >= 0.7,
+		// but LLMs can produce queries with < 0.7 similarity (e.g., "main" vs "func main").
+		// Count-based check provides a hard stop after threshold is reached.
+		if deps.Session != nil {
+			callCount := toolCounts[inv.Tool]
+			if callCount >= crs.DefaultCircuitBreakerThreshold {
+				slog.Warn("GR-39b: Count-based circuit breaker fired in LLM path",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("tool", inv.Tool),
+					slog.Int("call_count", callCount),
+					slog.Int("threshold", crs.DefaultCircuitBreakerThreshold),
+				)
+
+				// Record metric
+				grounding.RecordCountCircuitBreaker(inv.Tool, "llm")
+
+				// Record trace step for observability
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Action: "circuit_breaker",
+					Tool:   inv.Tool,
+					Error:  fmt.Sprintf("GR-39b: count threshold exceeded (%d >= %d)", callCount, crs.DefaultCircuitBreakerThreshold),
+					Metadata: map[string]string{
+						"path":      "llm",
+						"count":     fmt.Sprintf("%d", callCount),
+						"threshold": fmt.Sprintf("%d", crs.DefaultCircuitBreakerThreshold),
+					},
+				})
+
+				// Add span event for tracing
+				span := trace.SpanFromContext(ctx)
+				if span.IsRecording() {
+					span.AddEvent("count_circuit_breaker_fired",
+						trace.WithAttributes(
+							attribute.String("tool", inv.Tool),
+							attribute.Int("count", callCount),
+							attribute.String("path", "llm"),
+						),
+					)
+				}
+
+				// Learn from repeated calls (CDCL clause generation)
+				p.learnFromFailure(ctx, deps, crs.FailureEvent{
+					SessionID:    deps.Session.ID,
+					FailureType:  crs.FailureTypeCircuitBreaker,
+					Tool:         inv.Tool,
+					ErrorMessage: "GR-39b: LLM path count threshold exceeded",
+					Source:       crs.SignalSourceHard,
+				})
+
+				// Emit coordinator event for activity orchestration
+				p.emitCoordinatorEvent(ctx, deps, integration.EventCircuitBreaker, &inv, nil,
+					fmt.Sprintf("GR-39b: %s count threshold exceeded (%d >= %d)", inv.Tool, callCount, crs.DefaultCircuitBreakerThreshold),
+					crs.ErrorCategoryInternal)
+
+				// Return error result - signals synthesis should happen
+				results = append(results, &tools.Result{
+					Success: false,
+					Error:   fmt.Sprintf("GR-39b: Tool %s already called %d times (threshold: %d). Synthesize from existing results.", inv.Tool, callCount, crs.DefaultCircuitBreakerThreshold),
+				})
+				blocked = true
+				continue
+			}
+		}
+
+		// GR-39b: Increment count for this tool (for within-batch duplicate detection).
+		// Must happen AFTER circuit breaker check passes but BEFORE execution.
+		toolCounts[inv.Tool]++
 
 		// CB-30c: Check for semantic repetition BEFORE executing the tool.
 		// This catches cases where the main LLM (not router) calls similar tools repeatedly.
@@ -286,7 +369,91 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		p.emitToolResult(deps, &inv, result)
 	}
 
+	// GR-39 Issue 2: Check for "not found" pattern across results.
+	// If multiple tools returned "not found" style messages, the agent is likely
+	// searching for something that doesn't exist. Force early synthesis.
+	notFoundCount := p.countNotFoundResults(results)
+	if notFoundCount >= maxNotFoundBeforeSynthesize {
+		slog.Info("GR-39: Not-found pattern detected, signaling synthesis",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("not_found_count", notFoundCount),
+			slog.Int("threshold", maxNotFoundBeforeSynthesize),
+		)
+		// Add a synthetic result that signals synthesis should happen
+		results = append(results, &tools.Result{
+			Success: false,
+			Error:   fmt.Sprintf("GR-39: %d tools returned 'not found'. The requested symbol may not exist. Please synthesize a helpful explanation.", notFoundCount),
+		})
+		blocked = true
+	}
+
 	return results, blocked
+}
+
+// maxNotFoundBeforeSynthesize is the number of "not found" results before forcing synthesis.
+const maxNotFoundBeforeSynthesize = 3
+
+// countNotFoundResults counts tool results that indicate "not found" patterns.
+//
+// Description:
+//
+//	Detects when tools are returning "not found" style messages, which indicates
+//	the agent is searching for something that doesn't exist. This prevents the
+//	agent from spiraling through many failed search attempts.
+//
+// Inputs:
+//
+//	results - The tool results to check.
+//
+// Outputs:
+//
+//	int - Count of results with "not found" patterns.
+//
+// Thread Safety: Safe for concurrent use (read-only).
+func (p *ExecutePhase) countNotFoundResults(results []*tools.Result) int {
+	count := 0
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		// Check both successful results with "not found" output and error messages
+		if r.Success && r.Output != nil {
+			if containsNotFoundPattern(fmt.Sprintf("%v", r.Output)) {
+				count++
+			}
+		} else if r.Error != "" && containsNotFoundPattern(r.Error) {
+			count++
+		}
+	}
+	return count
+}
+
+// containsNotFoundPattern checks if a string contains "not found" style messages.
+func containsNotFoundPattern(s string) bool {
+	lower := strings.ToLower(s)
+	patterns := []string{
+		"not found",
+		"no results",
+		"no matches",
+		"no callees",
+		"no callers",
+		"no symbols",
+		"no files",
+		"symbol not found",
+		"function not found",
+		"does not exist",
+		"could not find",
+		"unable to find",
+		"no such",
+		"0 results",
+		"zero results",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // recordTraceStep records a reasoning trace step for a tool execution.

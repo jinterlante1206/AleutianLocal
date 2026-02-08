@@ -442,7 +442,122 @@ type Symbol struct {
 	// Examples: decorators for Python, generics for TypeScript.
 	// Keys are well-defined strings, not arbitrary data.
 	Metadata *SymbolMetadata `json:"metadata,omitempty"`
+
+	// Calls contains function/method calls made within this symbol's body.
+	// Only populated for functions and methods during AST parsing.
+	// Used by the graph builder to create EdgeTypeCalls edges.
+	// See GR-41: Call Edge Extraction for find_callers/find_callees.
+	Calls []CallSite `json:"calls,omitempty"`
 }
+
+// MethodSignature represents a method's signature for interface implementation detection.
+//
+// This struct captures the essential signature information needed to determine
+// if a type implements an interface via method-set matching. It focuses on
+// structural compatibility rather than exact type matching.
+//
+// For Go interface implementation detection, we compare method names and
+// parameter/return counts. Full type checking would require go/types which
+// needs the complete compilation context.
+type MethodSignature struct {
+	// Name is the method name.
+	// Example: "Read", "Write", "Close"
+	Name string `json:"name"`
+
+	// Params is the normalized parameter list (types only, no names).
+	// Example: "[]byte" for func Read(p []byte) (int, error)
+	// Used for Phase 2 signature matching.
+	Params string `json:"params,omitempty"`
+
+	// Returns is the normalized return type list.
+	// Example: "int, error" for func Read(p []byte) (int, error)
+	// Used for Phase 2 signature matching.
+	Returns string `json:"returns,omitempty"`
+
+	// ParamCount is the number of parameters.
+	// Used for quick filtering before detailed signature comparison.
+	ParamCount int `json:"param_count"`
+
+	// ReturnCount is the number of return values.
+	// Used for quick filtering before detailed signature comparison.
+	ReturnCount int `json:"return_count"`
+
+	// ReceiverType is the receiver type for methods (e.g., "*Handler", "Handler").
+	// Empty for interface method declarations.
+	// Used to distinguish value vs pointer receivers.
+	ReceiverType string `json:"receiver_type,omitempty"`
+}
+
+// CallSite represents a function or method call within a symbol's body.
+//
+// Description:
+//
+//	CallSite captures the essential information about a function or method
+//	call expression found during AST parsing. This enables the graph builder
+//	to create EdgeTypeCalls edges for the find_callers and find_callees tools.
+//
+// Used by:
+//   - GoParser.extractCallSites() to collect calls from function bodies
+//   - Builder.extractCallEdges() to create EdgeTypeCalls edges
+//   - find_callers/find_callees CRS tools for call graph queries
+//
+// Thread Safety: CallSite is immutable after creation and safe for concurrent read.
+type CallSite struct {
+	// Target is the name of the called function or method.
+	//
+	// For simple function calls: "FunctionName"
+	// For qualified calls: "package.Function" or "receiver.Method"
+	// For method calls: "Method" (receiver tracked separately)
+	//
+	// Example values:
+	//   - "Setup" (local function)
+	//   - "config.Load" (imported package function)
+	//   - "Connect" (method call, Receiver="db")
+	Target string `json:"target"`
+
+	// Location is where the call expression occurs in the source file.
+	// Points to the start of the call expression.
+	Location Location `json:"location"`
+
+	// IsMethod indicates if this is a method call (has a receiver).
+	// True for: obj.Method(), s.Initialize()
+	// False for: Function(), pkg.Function()
+	IsMethod bool `json:"is_method,omitempty"`
+
+	// Receiver is the receiver expression text for method calls.
+	// Empty for plain function calls.
+	//
+	// Examples:
+	//   - "db" for db.Connect()
+	//   - "s" for s.Initialize()
+	//   - "ctx" for ctx.Done()
+	Receiver string `json:"receiver,omitempty"`
+}
+
+// Validate checks if the CallSite has valid field values.
+//
+// Returns nil if valid, or a ValidationError describing the issue.
+//
+// Validates:
+//   - Target is non-empty
+//   - Location.StartLine is positive
+func (c *CallSite) Validate() error {
+	if c.Target == "" {
+		return ValidationError{Field: "Target", Message: "must not be empty"}
+	}
+	if c.Location.StartLine < 1 {
+		return ValidationError{Field: "Location.StartLine", Message: "must be >= 1"}
+	}
+	return nil
+}
+
+// MaxCallSitesPerSymbol is the maximum number of call sites extracted per symbol.
+// This prevents memory exhaustion from pathologically large functions.
+const MaxCallSitesPerSymbol = 1000
+
+// MaxCallExpressionDepth is the maximum nesting depth for call expression traversal.
+// This prevents stack overflow from deeply nested expressions like f(g(h(i(...)))).
+const MaxCallExpressionDepth = 50
 
 // SymbolMetadata contains optional language-specific metadata for a symbol.
 //
@@ -478,10 +593,19 @@ type SymbolMetadata struct {
 	AccessModifier string `json:"access_modifier,omitempty"`
 
 	// Implements lists interface names that a class/struct implements.
+	// For languages with explicit implements (TypeScript, Java), this is populated
+	// by the parser. For Go, this is populated by the graph builder via
+	// method-set matching (see GR-40).
 	Implements []string `json:"implements,omitempty"`
 
 	// Extends is the parent class name for inheritance.
 	Extends string `json:"extends,omitempty"`
+
+	// Methods contains method signatures for interfaces and types.
+	// For interfaces: lists required method signatures.
+	// For structs/types: lists methods with receivers matching this type.
+	// Used for Go interface implementation detection via method-set matching (GR-40).
+	Methods []MethodSignature `json:"methods,omitempty"`
 
 	// CSSSelector is the full CSS selector for CSS symbols.
 	CSSSelector string `json:"css_selector,omitempty"`

@@ -542,10 +542,17 @@ func (p *PythonParser) processClass(node *sitter.Node, content []byte, filePath 
 		docstring = p.extractDocstring(bodyNode, content)
 	}
 
+	// GR-40a: Check if this is a Protocol class (structural interface)
+	isProtocol := p.isProtocolClass(bases)
+	kind := SymbolKindClass
+	if isProtocol {
+		kind = SymbolKindInterface
+	}
+
 	sym := &Symbol{
 		ID:         GenerateID(filePath, int(node.StartPoint().Row+1), name),
 		Name:       name,
-		Kind:       SymbolKindClass,
+		Kind:       kind,
 		FilePath:   filePath,
 		Language:   "python",
 		Exported:   exported,
@@ -574,6 +581,9 @@ func (p *PythonParser) processClass(node *sitter.Node, content []byte, filePath 
 	if bodyNode != nil {
 		p.extractClassMembers(bodyNode, content, filePath, sym)
 	}
+
+	// GR-40a: Collect method signatures for Protocol implementation detection
+	p.collectPythonClassMethods(sym)
 
 	result.Symbols = append(result.Symbols, sym)
 	return sym
@@ -996,6 +1006,156 @@ func isAllCaps(name string) bool {
 		}
 	}
 	return len(name) > 0
+}
+
+// === GR-40a: Python Protocol Implementation Detection ===
+
+// isProtocolClass checks if a class is a typing.Protocol (structural interface).
+//
+// Description:
+//
+//	Detects Protocol classes by checking if any base class is "Protocol" or
+//	"typing.Protocol". Protocol classes define structural interfaces similar
+//	to Go's implicit interface satisfaction.
+//
+// Inputs:
+//   - bases: List of base class names from the class definition
+//
+// Outputs:
+//   - bool: true if this is a Protocol class
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (p *PythonParser) isProtocolClass(bases []string) bool {
+	for _, base := range bases {
+		// Check for Protocol or typing.Protocol
+		if base == "Protocol" || base == "typing.Protocol" {
+			return true
+		}
+		// Also check for ABC (Abstract Base Class) which is similar
+		if base == "ABC" || base == "abc.ABC" {
+			return true
+		}
+	}
+	return false
+}
+
+// collectPythonClassMethods populates Metadata.Methods with method signatures.
+//
+// Description:
+//
+//	Collects method signatures from a class's children and stores them in
+//	Metadata.Methods for use in Protocol implementation detection (GR-40a).
+//	This enables the graph builder to create EdgeTypeImplements edges
+//	when a class's method set is a superset of a Protocol's method set.
+//
+// Inputs:
+//   - classSym: The class symbol with Children already populated
+//
+// Thread Safety:
+//
+//	This method modifies classSym in place. Not safe for concurrent use
+//	on the same symbol.
+func (p *PythonParser) collectPythonClassMethods(classSym *Symbol) {
+	if classSym == nil || len(classSym.Children) == 0 {
+		return
+	}
+
+	methods := make([]MethodSignature, 0)
+
+	for _, child := range classSym.Children {
+		if child.Kind != SymbolKindMethod {
+			continue
+		}
+
+		// Skip dunder methods for interface matching (except special ones)
+		if strings.HasPrefix(child.Name, "__") && strings.HasSuffix(child.Name, "__") {
+			// Keep __init__, __call__, __iter__, __next__ as they're often part of protocols
+			if child.Name != "__init__" && child.Name != "__call__" &&
+				child.Name != "__iter__" && child.Name != "__next__" &&
+				child.Name != "__enter__" && child.Name != "__exit__" &&
+				child.Name != "__aenter__" && child.Name != "__aexit__" &&
+				child.Name != "__getitem__" && child.Name != "__setitem__" &&
+				child.Name != "__len__" && child.Name != "__contains__" {
+				continue
+			}
+		}
+
+		sig := p.extractPythonMethodSignature(child)
+		methods = append(methods, sig)
+	}
+
+	if len(methods) > 0 {
+		if classSym.Metadata == nil {
+			classSym.Metadata = &SymbolMetadata{}
+		}
+		classSym.Metadata.Methods = methods
+	}
+}
+
+// extractPythonMethodSignature creates a MethodSignature from a method symbol.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *PythonParser) extractPythonMethodSignature(method *Symbol) MethodSignature {
+	// Validate input (GR-40a post-implementation review fix H-4)
+	if method == nil {
+		return MethodSignature{}
+	}
+
+	// Parse signature to extract param/return counts
+	// Signature format: "def name(self, a, b) -> ReturnType" or "async def name(...)"
+	signature := method.Signature
+
+	// Handle empty signature gracefully
+	if signature == "" {
+		return MethodSignature{Name: method.Name}
+	}
+
+	paramCount := 0
+	returnCount := 0
+
+	// Find parameter list
+	parenStart := strings.Index(signature, "(")
+	parenEnd := strings.LastIndex(signature, ")")
+	if parenStart != -1 && parenEnd > parenStart {
+		params := signature[parenStart+1 : parenEnd]
+		if params != "" {
+			// Count commas + 1 for parameter count
+			// But subtract 1 if 'self' or 'cls' is the first param
+			paramCount = strings.Count(params, ",") + 1
+
+			// Check for self/cls as first param
+			firstParam := strings.TrimSpace(strings.Split(params, ",")[0])
+			if firstParam == "self" || firstParam == "cls" ||
+				strings.HasPrefix(firstParam, "self:") || strings.HasPrefix(firstParam, "cls:") {
+				paramCount--
+			}
+		}
+	}
+
+	// Check for return type annotation
+	arrowIdx := strings.Index(signature, "->")
+	returnType := ""
+	if arrowIdx != -1 {
+		returnType = strings.TrimSpace(signature[arrowIdx+2:])
+		if returnType != "" && returnType != "None" {
+			returnCount = 1
+			// Check for tuple return (multiple values)
+			if strings.HasPrefix(returnType, "Tuple[") || strings.HasPrefix(returnType, "tuple[") {
+				// Count commas in the tuple
+				returnCount = strings.Count(returnType, ",") + 1
+			}
+		}
+	}
+
+	return MethodSignature{
+		Name:        method.Name,
+		Params:      "", // Python doesn't need normalized params for Phase 1
+		Returns:     returnType,
+		ParamCount:  paramCount,
+		ReturnCount: returnCount,
+	}
 }
 
 // Compile-time interface compliance check.
