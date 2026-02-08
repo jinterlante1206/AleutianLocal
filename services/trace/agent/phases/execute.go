@@ -29,6 +29,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -299,6 +300,12 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		return agent.StateError, err
 	}
 
+	// GR-44 Rev 2: DO NOT reset CB flag here!
+	// The CB flag must persist across Execute() retries within the same query.
+	// When retryWithStrongerToolChoice returns StateExecute, the agent loop
+	// calls Execute() again - we need the CB flag to survive that re-entry.
+	// The flag is naturally reset when a new session/query starts.
+
 	// GR-41b: Log router status at session start for debugging
 	routerEnabled := deps.Session.IsToolRouterEnabled()
 	routerModel := deps.Session.Config.ToolRouterModel
@@ -341,7 +348,15 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	)
 
 	// Build the LLM request
-	request, hardForcing := p.buildLLMRequest(deps)
+	request, hardForcing, buildErr := p.buildLLMRequest(deps)
+	if buildErr != nil {
+		// GR-44 Rev 2: Router errors are fatal - propagate up
+		slog.Error("GR-44: buildLLMRequest failed due to router error",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", buildErr.Error()),
+		)
+		return agent.StateError, buildErr
+	}
 
 	// O1.3 Fix: Capture semantic info for trace step metadata
 	var lastSemanticInfo *SemanticInfo
@@ -593,7 +608,8 @@ func (p *ExecutePhase) validateDependencies(deps *Dependencies) error {
 //
 //	*llm.Request - The LLM request.
 //	*agent.ToolRouterSelection - Non-nil if hard forcing is enabled.
-func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent.ToolRouterSelection) {
+//	error - Non-nil if router is configured but fails (GR-44: fatal, no fallback).
+func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent.ToolRouterSelection, error) {
 	// Get available tools
 	var toolDefs []tools.ToolDefinition
 	var toolNames []string
@@ -636,7 +652,11 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent
 			slog.Bool("router_is_nil", router == nil),
 		)
 		if router != nil {
-			routerSelection := p.tryToolRouterSelection(context.Background(), deps, router, toolDefs)
+			routerSelection, routerErr := p.tryToolRouterSelection(context.Background(), deps, router, toolDefs)
+			// GR-44 Rev 2: Router errors are fatal - propagate up
+			if routerErr != nil {
+				return nil, nil, routerErr
+			}
 			if routerSelection != nil {
 				// Handle meta-actions vs real tools.
 				// "answer" and "clarify" are meta-actions that aren't real tools.
@@ -701,7 +721,7 @@ Answer the user's question now based on the tool results shown above.`
 						slog.Float64("confidence", routerSelection.Confidence),
 					)
 					// Return request with hard forcing selection
-					return request, routerSelection
+					return request, routerSelection, nil
 				}
 
 				// Emit routing event if we didn't exit early
@@ -712,15 +732,45 @@ Answer the user's question now based on the tool results shown above.`
 		}
 	}
 
-	// Fall back to hybrid stack classifier if router wasn't used or failed.
-	if !routerUsed && p.toolChoiceSelector != nil && deps.Query != "" && len(toolDefs) > 0 {
+	// GR-44 Rev 2: Router enforcement - if router is configured, it MUST be used.
+	// No silent fallback to classifier allowed.
+	if sessionExists && deps.Session.Config.ToolRouterEnabled {
+		if !routerUsed {
+			// Router was configured but not used - this is a fatal error
+			router := deps.Session.GetToolRouter()
+			if router == nil {
+				errMsg := "GR-44: Router configured but not initialized (nil). Cannot proceed."
+				slog.Error(errMsg,
+					slog.String("session_id", deps.Session.ID),
+					slog.String("configured_model", deps.Session.Config.ToolRouterModel),
+				)
+				// Record in trace for debugging
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Timestamp: time.Now().UnixMilli(),
+					Action:    "router_fatal_error",
+					Error:     errMsg,
+				})
+				return nil, nil, errors.New(errMsg)
+			}
+			// If router exists but wasn't used, something else went wrong
+			errMsg := "GR-44: Router configured and initialized but not used. This indicates a logic error."
+			slog.Error(errMsg,
+				slog.String("session_id", deps.Session.ID),
+			)
+			return nil, nil, errors.New(errMsg)
+		}
+	}
+
+	// Classifier fallback ONLY allowed when router is NOT configured.
+	// This prevents the main LLM from selecting tools - that's the router's job.
+	if !routerUsed && !deps.Session.Config.ToolRouterEnabled && p.toolChoiceSelector != nil && deps.Query != "" && len(toolDefs) > 0 {
 		selection := p.toolChoiceSelector.SelectToolChoice(context.Background(), deps.Query, toolNames)
 
 		// Only set tool_choice for analytical queries
 		if selection.IsAnalytical {
 			request.ToolChoice = selection.ToolChoice
 
-			slog.Debug("tool_choice selected (fallback classifier)",
+			slog.Debug("tool_choice selected (classifier - router not configured)",
 				slog.String("session_id", deps.Session.ID),
 				slog.String("tool_choice_type", selection.ToolChoice.Type),
 				slog.String("suggested_tool", selection.SuggestedTool),
@@ -730,7 +780,7 @@ Answer the user's question now based on the tool results shown above.`
 		}
 	}
 
-	return request, nil
+	return request, nil, nil
 }
 
 // tryToolRouterSelection attempts to get a tool selection from the ToolRouter.
@@ -738,8 +788,8 @@ Answer the user's question now based on the tool results shown above.`
 // Description:
 //
 //	Converts tool definitions to ToolSpecs, calls the router, and returns
-//	the selection if confidence is above threshold. Returns nil on error
-//	or low confidence to allow fallback to other mechanisms.
+//	the selection if confidence is above threshold.
+//	GR-44 Rev 2: Router errors are now FATAL - no silent fallback allowed.
 //
 // Inputs:
 //
@@ -750,8 +800,9 @@ Answer the user's question now based on the tool results shown above.`
 //
 // Outputs:
 //
-//	*agent.ToolRouterSelection - The selection if confident, nil otherwise.
-func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Dependencies, router agent.ToolRouter, toolDefs []tools.ToolDefinition) *agent.ToolRouterSelection {
+//	*agent.ToolRouterSelection - The selection if confident, nil for low confidence.
+//	error - Non-nil if router fails (GR-44: fatal error, no fallback).
+func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Dependencies, router agent.ToolRouter, toolDefs []tools.ToolDefinition) (*agent.ToolRouterSelection, error) {
 	slog.Info("CB-31d tryToolRouterSelection CALLED",
 		slog.String("session_id", deps.Session.ID),
 		slog.Int("num_tool_defs", len(toolDefs)),
@@ -781,13 +832,24 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 
 	selection, err := router.SelectTool(ctx, deps.Query, toolSpecs, codeContext)
 	if err != nil {
-		// Log but don't fail - we'll fall back to the classifier
-		slog.Warn("CB-31d ToolRouter selection FAILED, falling back to classifier",
+		// GR-44 Rev 2: Router failure is FATAL - no silent fallback to classifier.
+		// The router is the router PERIOD. If it fails, the whole process fails.
+		errMsg := fmt.Sprintf("GR-44: Router selection failed: %v", err)
+		slog.Error(errMsg,
 			slog.String("session_id", deps.Session.ID),
-			slog.String("error", err.Error()),
+			slog.String("router_model", router.Model()),
 		)
-		span.SetAttributes(attribute.String("fallback_reason", "router_error"))
-		return nil
+		span.SetAttributes(attribute.String("router_fatal_error", err.Error()))
+		span.SetStatus(codes.Error, errMsg)
+
+		// Record in trace for debugging
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now().UnixMilli(),
+			Action:    "router_fatal_error",
+			Error:     errMsg,
+		})
+
+		return nil, errors.New(errMsg)
 	}
 
 	slog.Info("CB-31d tryToolRouterSelection router.SelectTool RETURNED",
@@ -842,7 +904,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 				Tool:       "answer",
 				Confidence: 0.9,
 				Reasoning:  "CB-31e: Router low confidence but tool results available - forcing synthesis",
-			}
+			}, nil
 		}
 
 		// If no tool results, still try the router's suggestion (better than random classifier)
@@ -946,7 +1008,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			Confidence: 0.8,
 			Reasoning:  fmt.Sprintf("Circuit breaker: %s. Synthesizing answer from gathered information.", cbReason),
 			Duration:   selection.Duration,
-		}
+		}, nil
 	}
 
 	// CB-30c: Semantic repetition check
@@ -996,7 +1058,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 				Confidence: 0.8,
 				Reasoning:  fmt.Sprintf("Semantic repetition: %s. Synthesizing answer from gathered information.", srReason),
 				Duration:   selection.Duration,
-			}
+			}, nil
 		}
 	}
 
@@ -1047,7 +1109,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 		// C1: Record routing decision metric
 		config.RecordRoutingDecision(ucb1Selection.Tool, "router")
 
-		return ucb1Selection
+		return ucb1Selection, nil
 	}
 
 	// C1: Record answer routing decision in CRS trace
@@ -1068,7 +1130,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 	// C1: Record answer routing decision metric
 	config.RecordRoutingDecision(selection.Tool, "router")
 
-	return selection
+	return selection, nil
 }
 
 // toolDefsToSpecs converts tool.ToolDefinition slice to agent.ToolRouterSpec slice.
@@ -1401,7 +1463,8 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 	}
 
 	// Check if tool forcing should be applied (before grounding validation)
-	if p.shouldForceToolUsage(ctx, deps, stepNumber) {
+	// GR-44: Skip tool forcing when circuit breaker has fired
+	if !deps.Session.IsCircuitBreakerActive() && p.shouldForceToolUsage(ctx, deps, stepNumber) {
 		return p.forceToolUsage(ctx, deps, response, stepNumber)
 	}
 

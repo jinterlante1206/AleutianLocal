@@ -375,3 +375,79 @@ func TestGR38_SemanticDifferentToolSameQuery(t *testing.T) {
 			status, similarity)
 	}
 }
+
+// =============================================================================
+// GR-44: Circuit Breaker Recovery Tests
+// =============================================================================
+
+// TestGR44_CircuitBreakerActive tests the circuit breaker flag on sessions.
+func TestGR44_CircuitBreakerActive(t *testing.T) {
+	t.Run("default circuit breaker is inactive", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		if session.IsCircuitBreakerActive() {
+			t.Error("Expected circuit breaker to be inactive by default")
+		}
+	})
+
+	t.Run("circuit breaker can be activated", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		session.SetCircuitBreakerActive(true)
+
+		if !session.IsCircuitBreakerActive() {
+			t.Error("Expected circuit breaker to be active after SetCircuitBreakerActive(true)")
+		}
+	})
+
+	t.Run("circuit breaker can be deactivated", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		session.SetCircuitBreakerActive(true)
+		session.SetCircuitBreakerActive(false)
+
+		if session.IsCircuitBreakerActive() {
+			t.Error("Expected circuit breaker to be inactive after SetCircuitBreakerActive(false)")
+		}
+	})
+}
+
+// TestGR44_CircuitBreakerSkipsToolRequirement documents the expected behavior:
+// When circuit breaker fires, the execute phase should NOT require tool usage.
+func TestGR44_CircuitBreakerSkipsToolRequirement(t *testing.T) {
+	t.Run("documentation of expected behavior", func(t *testing.T) {
+		// This test documents the expected behavior after GR-44 fix:
+		//
+		// 1. Circuit breaker fires in tryToolRouterSelection
+		// 2. SetCircuitBreakerActive(true) is called
+		// 3. Response validation sees no tool calls
+		// 4. IsCircuitBreakerActive() returns true
+		// 5. retryWithStrongerToolChoice is SKIPPED
+		// 6. Response proceeds to completion
+		//
+		// The actual integration test would require mocking the LLM.
+		// This test just verifies the flag mechanism works.
+
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		// Simulate circuit breaker firing
+		session.SetCircuitBreakerActive(true)
+
+		// Verify the flag is set (this is what execute phase checks)
+		if !session.IsCircuitBreakerActive() {
+			t.Error("IsCircuitBreakerActive() should return true after circuit breaker fires")
+		}
+	})
+}

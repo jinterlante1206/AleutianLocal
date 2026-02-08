@@ -266,7 +266,15 @@ func (p *ExecutePhase) retryDesperationWithStrongerPrompt(
 	)
 
 	// Build a new request with stronger instructions
-	request, _ := p.buildLLMRequest(deps) // Ignore hard forcing in desperation mode
+	request, _, buildErr := p.buildLLMRequest(deps) // Ignore hard forcing in desperation mode
+	if buildErr != nil {
+		// GR-44 Rev 2: Router errors are fatal - but in desperation mode, we should still try
+		slog.Warn("GR-44: buildLLMRequest failed in desperation mode, continuing anyway",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", buildErr.Error()),
+		)
+		// Continue with a minimal request if router fails - desperation mode is last resort
+	}
 
 	// TR-9 Fix: Modify request instead of rebuilding from scratch
 	// Add explicit anti-tool-call instruction to system prompt

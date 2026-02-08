@@ -39,6 +39,8 @@ var (
 	callEdgesResolved       metric.Int64Counter // GR-41: Call edges resolved to symbols
 	callEdgesUnresolved     metric.Int64Counter // GR-41: Call edges to placeholders
 	callSitesExtracted      metric.Int64Counter // GR-41: Total call sites extracted
+	importEdgesCreated      metric.Int64Counter // GR-41c: Import edges created
+	importEdgesFailed       metric.Int64Counter // GR-41c: Import edges failed
 
 	metricsOnce sync.Once
 	metricsErr  error
@@ -142,6 +144,25 @@ func initMetrics() error {
 			metricsErr = err
 			return
 		}
+
+		// GR-41c: Import edge metrics
+		importEdgesCreated, err = meter.Int64Counter(
+			"graph_import_edges_created_total",
+			metric.WithDescription("Total EdgeTypeImports edges created"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		importEdgesFailed, err = meter.Int64Counter(
+			"graph_import_edges_failed_total",
+			metric.WithDescription("Total EdgeTypeImports edges that failed to create"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
 	})
 	return metricsErr
 }
@@ -202,15 +223,17 @@ func startQuerySpan(ctx context.Context, queryType, symbolID string) (context.Co
 	)
 }
 
-// recordInterfaceDetectionMetrics records metrics for GR-40 interface detection.
+// recordInterfaceDetectionMetrics records metrics for GR-40/GR-40a interface detection.
 //
 // Description:
 //
 //	Records the number of EdgeTypeImplements edges created via method-set matching
-//	and the number of type-interface pairs checked.
+//	and the number of type-interface pairs checked. Supports both Go interfaces (GR-40)
+//	and Python Protocols (GR-40a) via the language parameter.
 //
 // Inputs:
 //   - ctx: Context for metric recording.
+//   - language: Language of the interfaces ("go" or "python").
 //   - edgesCreated: Number of EdgeTypeImplements edges created.
 //   - matchesChecked: Number of type-interface pairs checked.
 //
@@ -222,6 +245,30 @@ func recordInterfaceDetectionMetrics(ctx context.Context, edgesCreated, matchesC
 
 	interfaceEdgesCreated.Add(ctx, int64(edgesCreated))
 	interfaceMatchesChecked.Add(ctx, int64(matchesChecked))
+}
+
+// recordInterfaceDetectionMetricsWithLanguage records metrics with language dimension.
+//
+// Description:
+//
+//	GR-40a: Same as recordInterfaceDetectionMetrics but includes language label
+//	to distinguish Go interface detection from Python Protocol detection.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - language: Language of the interfaces ("go" or "python").
+//   - edgesCreated: Number of EdgeTypeImplements edges created.
+//   - matchesChecked: Number of type-interface pairs checked.
+//
+// Thread Safety: Safe for concurrent use.
+func recordInterfaceDetectionMetricsWithLanguage(ctx context.Context, language string, edgesCreated, matchesChecked int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(attribute.String("language", language))
+	interfaceEdgesCreated.Add(ctx, int64(edgesCreated), attrs)
+	interfaceMatchesChecked.Add(ctx, int64(matchesChecked), attrs)
 }
 
 // recordCallEdgeMetrics records metrics for GR-41 call edge extraction.
@@ -246,4 +293,25 @@ func recordCallEdgeMetrics(ctx context.Context, resolved, unresolved, extracted 
 	callEdgesResolved.Add(ctx, int64(resolved))
 	callEdgesUnresolved.Add(ctx, int64(unresolved))
 	callSitesExtracted.Add(ctx, int64(extracted))
+}
+
+// recordImportEdgeMetrics records metrics for GR-41c import edge extraction.
+//
+// Description:
+//
+//	Records the number of import edges created and failed.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - created: Number of import edges successfully created.
+//   - failed: Number of import edges that failed to create.
+//
+// Thread Safety: Safe for concurrent use.
+func recordImportEdgeMetrics(ctx context.Context, created, failed int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	importEdgesCreated.Add(ctx, int64(created))
+	importEdgesFailed.Add(ctx, int64(failed))
 }

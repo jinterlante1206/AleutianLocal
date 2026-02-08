@@ -155,8 +155,8 @@ type SessionConfig struct {
 	ToolRouterModel string `json:"tool_router_model"`
 
 	// ToolRouterTimeout is the maximum time for a routing decision.
-	// If exceeded, falls back to main LLM tool selection.
-	// Default: 500ms
+	// GR-44: If exceeded, the process fails (no fallback to main LLM).
+	// Default: 20s
 	ToolRouterTimeout time.Duration `json:"tool_router_timeout"`
 
 	// ToolRouterConfidence is the minimum confidence for accepting a routing decision.
@@ -198,7 +198,7 @@ func DefaultSessionConfig() *SessionConfig {
 		// Tool Router defaults (enabled by default for faster tool selection)
 		ToolRouterEnabled:    true,
 		ToolRouterModel:      "granite4:micro-h",
-		ToolRouterTimeout:    500 * time.Millisecond,
+		ToolRouterTimeout:    20 * time.Second, // GR-44: Increased from 500ms to ensure router completes
 		ToolRouterConfidence: 0.7,
 	}
 }

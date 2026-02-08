@@ -251,7 +251,7 @@ func (p *PythonParser) Parse(ctx context.Context, content []byte, filePath strin
 	p.extractImports(rootNode, content, filePath, result)
 
 	// Extract classes and their methods
-	p.extractClasses(rootNode, content, filePath, result)
+	p.extractClasses(ctx, rootNode, content, filePath, result)
 
 	// Extract top-level functions
 	p.extractFunctions(rootNode, content, filePath, result, nil)
@@ -491,20 +491,20 @@ func (p *PythonParser) addImport(node *sitter.Node, path, alias string, names []
 }
 
 // extractClasses extracts class definitions from the AST.
-func (p *PythonParser) extractClasses(root *sitter.Node, content []byte, filePath string, result *ParseResult) {
+func (p *PythonParser) extractClasses(ctx context.Context, root *sitter.Node, content []byte, filePath string, result *ParseResult) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
 		switch child.Type() {
 		case "class_definition":
-			p.processClass(child, content, filePath, result, nil)
+			p.processClass(ctx, child, content, filePath, result, nil)
 		case "decorated_definition":
-			p.processDecoratedDefinition(child, content, filePath, result, nil)
+			p.processDecoratedDefinition(ctx, child, content, filePath, result, nil)
 		}
 	}
 }
 
 // processClass extracts a class definition.
-func (p *PythonParser) processClass(node *sitter.Node, content []byte, filePath string, result *ParseResult, decorators []string) *Symbol {
+func (p *PythonParser) processClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, decorators []string) *Symbol {
 	var name string
 	var bases []string
 	var bodyNode *sitter.Node
@@ -543,9 +543,13 @@ func (p *PythonParser) processClass(node *sitter.Node, content []byte, filePath 
 	}
 
 	// GR-40a: Check if this is a Protocol class (structural interface)
-	isProtocol := p.isProtocolClass(bases)
+	// Check for typing.Protocol first (pure structural interface)
+	isTypingProtocol := p.isTypingProtocol(ctx, bases)
+	// Check for ABC (requires @abstractmethod check after member extraction)
+	isABC := p.isABCClass(ctx, bases)
+
 	kind := SymbolKindClass
-	if isProtocol {
+	if isTypingProtocol {
 		kind = SymbolKindInterface
 	}
 
@@ -582,8 +586,22 @@ func (p *PythonParser) processClass(node *sitter.Node, content []byte, filePath 
 		p.extractClassMembers(bodyNode, content, filePath, sym)
 	}
 
+	// GR-40a M-1: For ABC classes, only mark as interface if they have @abstractmethod
+	if isABC && !isTypingProtocol {
+		if p.hasAbstractMethod(ctx, sym) {
+			sym.Kind = SymbolKindInterface
+			slog.Debug("GR-40a: ABC class with @abstractmethod marked as interface",
+				slog.String("class", name),
+			)
+		} else {
+			slog.Debug("GR-40a: ABC class without @abstractmethod remains a class",
+				slog.String("class", name),
+			)
+		}
+	}
+
 	// GR-40a: Collect method signatures for Protocol implementation detection
-	p.collectPythonClassMethods(sym)
+	p.collectPythonClassMethods(ctx, sym)
 
 	result.Symbols = append(result.Symbols, sym)
 	return sym
@@ -828,14 +846,14 @@ func (p *PythonParser) processFunction(node *sitter.Node, content []byte, filePa
 }
 
 // processDecoratedDefinition handles decorated classes and functions at module level.
-func (p *PythonParser) processDecoratedDefinition(node *sitter.Node, content []byte, filePath string, result *ParseResult, parent *Symbol) {
+func (p *PythonParser) processDecoratedDefinition(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, parent *Symbol) {
 	decorators := p.extractDecorators(node, content)
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		switch child.Type() {
 		case "class_definition":
-			p.processClass(child, content, filePath, result, decorators)
+			p.processClass(ctx, child, content, filePath, result, decorators)
 		case "function_definition":
 			// Handled in extractFunctions
 		}
@@ -1010,7 +1028,7 @@ func isAllCaps(name string) bool {
 
 // === GR-40a: Python Protocol Implementation Detection ===
 
-// isProtocolClass checks if a class is a typing.Protocol (structural interface).
+// isTypingProtocol checks if a class is a typing.Protocol (structural interface).
 //
 // Description:
 //
@@ -1019,23 +1037,107 @@ func isAllCaps(name string) bool {
 //	to Go's implicit interface satisfaction.
 //
 // Inputs:
-//   - bases: List of base class names from the class definition
+//   - ctx: Context for tracing. Must not be nil.
+//   - bases: List of base class names from the class definition.
 //
 // Outputs:
-//   - bool: true if this is a Protocol class
+//   - bool: true if this is a typing.Protocol class.
+//
+// Assumptions:
+//   - Base class names are extracted from the class definition AST.
+//   - "Protocol" and "typing.Protocol" are the standard ways to define Protocols.
 //
 // Thread Safety:
 //
 //	This method is safe for concurrent use.
-func (p *PythonParser) isProtocolClass(bases []string) bool {
+func (p *PythonParser) isTypingProtocol(ctx context.Context, bases []string) bool {
 	for _, base := range bases {
-		// Check for Protocol or typing.Protocol
 		if base == "Protocol" || base == "typing.Protocol" {
+			slog.Debug("GR-40a: Protocol class detected",
+				slog.String("base", base),
+			)
 			return true
 		}
-		// Also check for ABC (Abstract Base Class) which is similar
+	}
+	return false
+}
+
+// isABCClass checks if a class inherits from abc.ABC.
+//
+// Description:
+//
+//	Detects ABC (Abstract Base Class) by checking if any base class is "ABC"
+//	or "abc.ABC". Note: ABC classes only define interfaces if they have
+//	at least one @abstractmethod decorated method.
+//
+// Inputs:
+//   - ctx: Context for tracing. Must not be nil.
+//   - bases: List of base class names from the class definition.
+//
+// Outputs:
+//   - bool: true if this class inherits from ABC.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *PythonParser) isABCClass(ctx context.Context, bases []string) bool {
+	for _, base := range bases {
 		if base == "ABC" || base == "abc.ABC" {
 			return true
+		}
+	}
+	return false
+}
+
+// isProtocolClass checks if a class is a Protocol or ABC with abstract methods.
+//
+// Description:
+//
+//	Legacy wrapper that checks for either typing.Protocol or abc.ABC.
+//	For ABC classes, use hasAbstractMethod() to verify they define an interface.
+//
+// Deprecated: Use isTypingProtocol() and isABCClass() separately for better control.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *PythonParser) isProtocolClass(ctx context.Context, bases []string) bool {
+	return p.isTypingProtocol(ctx, bases) || p.isABCClass(ctx, bases)
+}
+
+// hasAbstractMethod checks if a class has at least one @abstractmethod decorated method.
+//
+// Description:
+//
+//	GR-40a M-1 fix: ABC classes only define interfaces if they have abstract methods.
+//	This function checks the class's children for any method with @abstractmethod
+//	or @abc.abstractmethod decorator.
+//
+// Inputs:
+//   - ctx: Context for tracing. Must not be nil.
+//   - classSym: The class symbol with Children already populated.
+//
+// Outputs:
+//   - bool: true if at least one method has @abstractmethod decorator.
+//
+// Thread Safety: This method is safe for concurrent use (read-only).
+func (p *PythonParser) hasAbstractMethod(ctx context.Context, classSym *Symbol) bool {
+	if classSym == nil {
+		return false
+	}
+
+	for _, child := range classSym.Children {
+		if child.Kind != SymbolKindMethod {
+			continue
+		}
+		if child.Metadata == nil {
+			continue
+		}
+
+		for _, dec := range child.Metadata.Decorators {
+			if dec == "abstractmethod" || dec == "abc.abstractmethod" {
+				slog.Debug("GR-40a: Found @abstractmethod",
+					slog.String("class", classSym.Name),
+					slog.String("method", child.Name),
+				)
+				return true
+			}
 		}
 	}
 	return false
@@ -1051,38 +1153,44 @@ func (p *PythonParser) isProtocolClass(bases []string) bool {
 //	when a class's method set is a superset of a Protocol's method set.
 //
 // Inputs:
-//   - classSym: The class symbol with Children already populated
+//   - ctx: Context for tracing. Must not be nil.
+//   - classSym: The class symbol with Children already populated.
+//
+// Limitations:
+//   - Only checks method names, not parameter/return types (Phase 1).
+//   - Dunder methods are filtered except for common Protocol methods.
+//
+// Assumptions:
+//   - classSym.Children are already populated from class body extraction.
+//   - Method signatures are in the format "def name(params) -> return".
 //
 // Thread Safety:
 //
 //	This method modifies classSym in place. Not safe for concurrent use
 //	on the same symbol.
-func (p *PythonParser) collectPythonClassMethods(classSym *Symbol) {
+func (p *PythonParser) collectPythonClassMethods(ctx context.Context, classSym *Symbol) {
 	if classSym == nil || len(classSym.Children) == 0 {
 		return
 	}
 
 	methods := make([]MethodSignature, 0)
+	skippedDunders := 0
 
 	for _, child := range classSym.Children {
 		if child.Kind != SymbolKindMethod {
 			continue
 		}
 
-		// Skip dunder methods for interface matching (except special ones)
+		// Skip dunder methods for interface matching (except Protocol-relevant ones)
+		// GR-40a M-3: Expanded dunder list to include comparison and hashing protocols
 		if strings.HasPrefix(child.Name, "__") && strings.HasSuffix(child.Name, "__") {
-			// Keep __init__, __call__, __iter__, __next__ as they're often part of protocols
-			if child.Name != "__init__" && child.Name != "__call__" &&
-				child.Name != "__iter__" && child.Name != "__next__" &&
-				child.Name != "__enter__" && child.Name != "__exit__" &&
-				child.Name != "__aenter__" && child.Name != "__aexit__" &&
-				child.Name != "__getitem__" && child.Name != "__setitem__" &&
-				child.Name != "__len__" && child.Name != "__contains__" {
+			if !isProtocolDunderMethod(child.Name) {
+				skippedDunders++
 				continue
 			}
 		}
 
-		sig := p.extractPythonMethodSignature(child)
+		sig := p.extractPythonMethodSignature(ctx, child)
 		methods = append(methods, sig)
 	}
 
@@ -1091,13 +1199,43 @@ func (p *PythonParser) collectPythonClassMethods(classSym *Symbol) {
 			classSym.Metadata = &SymbolMetadata{}
 		}
 		classSym.Metadata.Methods = methods
+
+		// GR-40a M-4: Structured logging for Protocol method collection
+		slog.Debug("GR-40a: collected class methods",
+			slog.String("class", classSym.Name),
+			slog.Int("method_count", len(methods)),
+			slog.Int("skipped_dunders", skippedDunders),
+			slog.Bool("is_protocol", classSym.Kind == SymbolKindInterface),
+		)
 	}
 }
 
 // extractPythonMethodSignature creates a MethodSignature from a method symbol.
 //
+// Description:
+//
+//	Parses a Python method symbol to extract signature information for
+//	Protocol implementation detection (GR-40a). Extracts parameter count
+//	(excluding self/cls) and return type information.
+//
+// Inputs:
+//   - ctx: Context for tracing. Must not be nil.
+//   - method: The method symbol with Signature populated. May be nil.
+//
+// Outputs:
+//   - MethodSignature: Extracted signature info. Returns empty signature for nil input.
+//
+// Limitations:
+//   - Params field is empty (Phase 1 - name-only matching).
+//   - Does not validate parameter types, only counts them.
+//   - Tuple return types count commas, may be imprecise for nested types.
+//
+// Assumptions:
+//   - Signature format: "def name(params) -> ReturnType" or "async def name(...)".
+//   - First parameter is self/cls for instance/class methods.
+//
 // Thread Safety: This method is safe for concurrent use.
-func (p *PythonParser) extractPythonMethodSignature(method *Symbol) MethodSignature {
+func (p *PythonParser) extractPythonMethodSignature(ctx context.Context, method *Symbol) MethodSignature {
 	// Validate input (GR-40a post-implementation review fix H-4)
 	if method == nil {
 		return MethodSignature{}
@@ -1156,6 +1294,98 @@ func (p *PythonParser) extractPythonMethodSignature(method *Symbol) MethodSignat
 		ParamCount:  paramCount,
 		ReturnCount: returnCount,
 	}
+}
+
+// protocolDunderMethods is the set of dunder methods commonly used in Protocols.
+// GR-40a M-3: Expanded list to include comparison, hashing, and numeric protocols.
+var protocolDunderMethods = map[string]bool{
+	// Object lifecycle
+	"__init__": true,
+	"__call__": true,
+	"__del__":  true,
+
+	// Iterator protocol
+	"__iter__": true,
+	"__next__": true,
+
+	// Context manager protocol
+	"__enter__": true,
+	"__exit__":  true,
+
+	// Async context manager protocol
+	"__aenter__": true,
+	"__aexit__":  true,
+
+	// Async iterator protocol
+	"__aiter__": true,
+	"__anext__": true,
+
+	// Container protocol
+	"__getitem__":  true,
+	"__setitem__":  true,
+	"__delitem__":  true,
+	"__len__":      true,
+	"__contains__": true,
+
+	// Comparison protocol (Comparable, Hashable)
+	"__eq__":   true,
+	"__ne__":   true,
+	"__lt__":   true,
+	"__le__":   true,
+	"__gt__":   true,
+	"__ge__":   true,
+	"__hash__": true,
+
+	// String representation
+	"__str__":  true,
+	"__repr__": true,
+
+	// Numeric protocol
+	"__add__":      true,
+	"__sub__":      true,
+	"__mul__":      true,
+	"__truediv__":  true,
+	"__floordiv__": true,
+	"__mod__":      true,
+	"__neg__":      true,
+	"__pos__":      true,
+	"__abs__":      true,
+
+	// Boolean
+	"__bool__": true,
+
+	// Attribute access
+	"__getattr__":      true,
+	"__setattr__":      true,
+	"__delattr__":      true,
+	"__getattribute__": true,
+
+	// Descriptor protocol
+	"__get__":    true,
+	"__set__":    true,
+	"__delete__": true,
+
+	// Awaitable protocol
+	"__await__": true,
+}
+
+// isProtocolDunderMethod returns true if the method name is a Protocol-relevant dunder.
+//
+// Description:
+//
+//	Checks if a dunder method should be included in Protocol method matching.
+//	This includes methods from common Protocols like Iterator, ContextManager,
+//	Container, Comparable, Hashable, and numeric protocols.
+//
+// Inputs:
+//   - name: The method name to check. Should be a dunder (starts and ends with __).
+//
+// Outputs:
+//   - bool: True if the method is Protocol-relevant and should be included.
+//
+// Thread Safety: Safe for concurrent use (reads from immutable map).
+func isProtocolDunderMethod(name string) bool {
+	return protocolDunderMethods[name]
 }
 
 // Compile-time interface compliance check.

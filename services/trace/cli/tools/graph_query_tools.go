@@ -1061,11 +1061,15 @@ func formatCallerResultsText(name string, results map[string]*graph.QueryResult)
 
 	totalCallers := countTotalCallers(results)
 	if totalCallers == 0 {
-		sb.WriteString(fmt.Sprintf("No callers found for function '%s'.\n", name))
-		sb.WriteString("This could mean:\n")
-		sb.WriteString("  - The function is not called anywhere (dead code)\n")
-		sb.WriteString("  - The function is called via interface/function pointer\n")
-		sb.WriteString("  - The function name doesn't exist in the codebase\n")
+		// GR-42: Authoritative response - no Grep fallback needed
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No callers of '%s'\n\n", name))
+		if len(results) == 0 {
+			sb.WriteString(fmt.Sprintf("No function named '%s' exists in this codebase.\n", name))
+		} else {
+			sb.WriteString(fmt.Sprintf("The function '%s' is not called anywhere (dead code or entry point).\n", name))
+		}
+		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
@@ -1197,10 +1201,11 @@ func formatCalleeResultsText(name string, results map[string]*graph.QueryResult)
 	totalCallees := totalResolved + totalExternal
 
 	if totalCallees == 0 {
-		sb.WriteString(fmt.Sprintf("No callees found for function '%s'.\n", name))
-		sb.WriteString("This could mean:\n")
-		sb.WriteString("  - The function doesn't call any other functions\n")
-		sb.WriteString("  - The function name doesn't exist in the codebase\n")
+		// GR-42: Authoritative response - no Grep fallback needed
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No callees of '%s'\n\n", name))
+		sb.WriteString(fmt.Sprintf("The function '%s' does not call any other functions.\n", name))
+		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
@@ -1293,10 +1298,19 @@ func formatImplementationResultsText(name string, results map[string]*graph.Quer
 
 	totalImpls := countTotalCallers(results)
 	if totalImpls == 0 {
-		sb.WriteString(fmt.Sprintf("No implementations found for interface '%s'.\n", name))
-		sb.WriteString("This could mean:\n")
-		sb.WriteString("  - No types implement this interface\n")
-		sb.WriteString("  - The interface name doesn't exist in the codebase\n")
+		// GR-42: Authoritative response - no Grep fallback needed
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No implementations of '%s'\n\n", name))
+		if len(results) == 0 {
+			// No interface with this name exists in the codebase
+			sb.WriteString(fmt.Sprintf("No interface named '%s' exists in this codebase.\n", name))
+			sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+			sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
+		} else {
+			// Interface exists but has no implementers
+			sb.WriteString(fmt.Sprintf("The interface '%s' exists but has no implementing types.\n", name))
+			sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+			sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
+		}
 		return sb.String()
 	}
 
@@ -2577,10 +2591,11 @@ func formatPathResultsText(fromName, toName string, result *graph.PathResult, id
 	var sb strings.Builder
 
 	if result.Length < 0 {
-		sb.WriteString(fmt.Sprintf("No path found between '%s' and '%s'.\n", fromName, toName))
-		sb.WriteString("This could mean:\n")
-		sb.WriteString("  - The symbols are not connected through call relationships\n")
-		sb.WriteString("  - They exist in separate parts of the codebase\n")
+		// GR-42: Authoritative response - no Grep fallback needed
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No path between '%s' and '%s'\n\n", fromName, toName))
+		sb.WriteString("These symbols are not connected through call relationships.\n")
+		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 

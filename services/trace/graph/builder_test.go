@@ -12,6 +12,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1608,4 +1609,316 @@ func TestBuilder_ExtractCallEdges_MultipleCallsSameTarget(t *testing.T) {
 	if callEdgeCount == 0 {
 		t.Error("Expected at least one EdgeTypeCalls from Caller to Helper")
 	}
+}
+
+// GR-41c: Tests for findPackageSymbolID
+
+func TestFindPackageSymbolID_WithPackage(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			{ID: "main.go:1:main", Kind: ast.SymbolKindPackage, Name: "main"},
+			{ID: "main.go:5:Setup", Kind: ast.SymbolKindFunction, Name: "Setup"},
+		},
+	}
+	id := findPackageSymbolID(r)
+	if id != "main.go:1:main" {
+		t.Errorf("expected 'main.go:1:main', got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_NoPackage(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			{ID: "main.go:5:Setup", Kind: ast.SymbolKindFunction, Name: "Setup"},
+		},
+	}
+	id := findPackageSymbolID(r)
+	// Falls back to first symbol
+	if id != "main.go:5:Setup" {
+		t.Errorf("expected 'main.go:5:Setup', got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_NilSymbols(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols:  nil,
+	}
+	id := findPackageSymbolID(r)
+	if id != "" {
+		t.Errorf("expected empty string, got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_EmptySymbols(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols:  []*ast.Symbol{},
+	}
+	id := findPackageSymbolID(r)
+	if id != "" {
+		t.Errorf("expected empty string, got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_NilResult(t *testing.T) {
+	id := findPackageSymbolID(nil)
+	if id != "" {
+		t.Errorf("expected empty string, got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_PackageNotFirst(t *testing.T) {
+	// Package symbol is not first - should still find it
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			{ID: "main.go:3:foo", Kind: ast.SymbolKindImport, Name: "foo"},
+			{ID: "main.go:5:Setup", Kind: ast.SymbolKindFunction, Name: "Setup"},
+			{ID: "main.go:1:main", Kind: ast.SymbolKindPackage, Name: "main"},
+		},
+	}
+	id := findPackageSymbolID(r)
+	if id != "main.go:1:main" {
+		t.Errorf("expected 'main.go:1:main', got %q", id)
+	}
+}
+
+func TestFindPackageSymbolID_SkipsNilSymbols(t *testing.T) {
+	r := &ast.ParseResult{
+		FilePath: "main.go",
+		Symbols: []*ast.Symbol{
+			nil,
+			{ID: "main.go:1:main", Kind: ast.SymbolKindPackage, Name: "main"},
+			nil,
+		},
+	}
+	id := findPackageSymbolID(r)
+	if id != "main.go:1:main" {
+		t.Errorf("expected 'main.go:1:main', got %q", id)
+	}
+}
+
+// GR-41c: Tests for extractImportEdges fix
+
+func TestExtractImportEdges_CreatesEdges(t *testing.T) {
+	// Create a parse result with package symbol and imports using testSymbol helper
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	imports := []ast.Import{
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+		{Path: "context", Location: ast.Location{FilePath: "main.go", StartLine: 4}},
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, imports)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+
+	// Should have created the package node plus 2 placeholder nodes for imports
+	// Node count: 1 (package) + 2 (import placeholders) = 3
+	if graph.NodeCount() < 1 {
+		t.Errorf("expected at least 1 node, got %d", graph.NodeCount())
+	}
+
+	// Should have 2 import edges
+	if graph.EdgeCount() != 2 {
+		t.Errorf("expected 2 edges (imports), got %d", graph.EdgeCount())
+	}
+
+	// Verify the package node exists
+	pkgNode, ok := graph.GetNode(pkgSym.ID)
+	if !ok {
+		t.Fatalf("package node not found: %s", pkgSym.ID)
+	}
+
+	// Verify the package node has outgoing import edges
+	importEdgeCount := 0
+	for _, edge := range pkgNode.Outgoing {
+		if edge.Type == EdgeTypeImports {
+			importEdgeCount++
+		}
+	}
+	if importEdgeCount != 2 {
+		t.Errorf("expected 2 import edges from package, got %d", importEdgeCount)
+	}
+}
+
+func TestExtractImportEdges_NoPackageSymbol_FallsBackToFirstSymbol(t *testing.T) {
+	// Create a parse result without package symbol using testSymbol helper
+	funcSym := testSymbol("Setup", ast.SymbolKindFunction, "main.go", 5)
+
+	imports := []ast.Import{
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{funcSym}, imports)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+
+	// Should have created import edge from the function (fallback)
+	if graph.EdgeCount() != 1 {
+		t.Errorf("expected 1 edge (import), got %d", graph.EdgeCount())
+	}
+
+	// Verify the function node has outgoing import edge
+	funcNode, ok := graph.GetNode(funcSym.ID)
+	if !ok {
+		t.Fatalf("function node not found: %s", funcSym.ID)
+	}
+
+	importEdgeCount := 0
+	for _, edge := range funcNode.Outgoing {
+		if edge.Type == EdgeTypeImports {
+			importEdgeCount++
+		}
+	}
+	if importEdgeCount != 1 {
+		t.Errorf("expected 1 import edge from function, got %d", importEdgeCount)
+	}
+}
+
+func TestExtractImportEdges_NoSymbols_NoEdges(t *testing.T) {
+	// Create a parse result with no symbols but has imports
+	result := &ast.ParseResult{
+		FilePath: "main.go",
+		Language: "go",
+		Symbols:  nil,
+		Imports: []ast.Import{
+			{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+		},
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should have 0 nodes and 0 edges (no source for imports)
+	if buildResult.Graph.NodeCount() != 0 {
+		t.Errorf("expected 0 nodes, got %d", buildResult.Graph.NodeCount())
+	}
+	if buildResult.Graph.EdgeCount() != 0 {
+		t.Errorf("expected 0 edges, got %d", buildResult.Graph.EdgeCount())
+	}
+}
+
+func TestExtractImportEdges_NoImports_NoEdges(t *testing.T) {
+	// Create a parse result with package symbol but no imports using testSymbol helper
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Should have 1 node (package) and 0 edges
+	if buildResult.Graph.NodeCount() != 1 {
+		t.Errorf("expected 1 node, got %d", buildResult.Graph.NodeCount())
+	}
+	if buildResult.Graph.EdgeCount() != 0 {
+		t.Errorf("expected 0 edges, got %d", buildResult.Graph.EdgeCount())
+	}
+}
+
+// T-1: Test context cancellation during import edge extraction
+func TestExtractImportEdges_ContextCancellation(t *testing.T) {
+	// Create a parse result with package symbol and many imports
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	// Create 25 imports to ensure we hit the cancellation check (every 10 iterations)
+	imports := make([]ast.Import, 25)
+	for i := 0; i < 25; i++ {
+		imports[i] = ast.Import{
+			Path:     fmt.Sprintf("pkg%d", i),
+			Location: ast.Location{FilePath: "main.go", StartLine: i + 3},
+		}
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, imports)
+
+	// Create a cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	builder := NewBuilder()
+	// Should not panic and should complete (possibly with partial results)
+	buildResult, err := builder.Build(ctx, []*ast.ParseResult{result})
+	if err != nil {
+		// Context cancellation during collectPhase returns early, which is fine
+		// The important thing is it doesn't panic
+		return
+	}
+
+	// If we got a result, it may be incomplete due to cancellation
+	// The test passes as long as no panic occurred
+	_ = buildResult
+}
+
+// T-2: Test duplicate imports are handled correctly
+func TestExtractImportEdges_DuplicateImports(t *testing.T) {
+	// Create a parse result with package symbol and duplicate imports
+	pkgSym := testSymbol("main", ast.SymbolKindPackage, "main.go", 1)
+
+	imports := []ast.Import{
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 3}},
+		{Path: "fmt", Location: ast.Location{FilePath: "main.go", StartLine: 4}}, // Duplicate
+		{Path: "context", Location: ast.Location{FilePath: "main.go", StartLine: 5}},
+	}
+
+	result := testParseResult("main.go", []*ast.Symbol{pkgSym}, imports)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+
+	// Should have 3 nodes: 1 package + 2 unique import placeholders (fmt and context)
+	// The placeholder for "fmt" should be reused
+	if graph.NodeCount() < 1 {
+		t.Errorf("expected at least 1 node, got %d", graph.NodeCount())
+	}
+
+	// Verify the package node exists and has edges
+	pkgNode, ok := graph.GetNode(pkgSym.ID)
+	if !ok {
+		t.Fatalf("package node not found: %s", pkgSym.ID)
+	}
+
+	// Count import edges - should have at least 2 (one for each unique import)
+	// Note: duplicate edges may or may not be created depending on AddEdge behavior
+	importEdgeCount := 0
+	for _, edge := range pkgNode.Outgoing {
+		if edge.Type == EdgeTypeImports {
+			importEdgeCount++
+		}
+	}
+
+	// At minimum we should have edges to fmt and context
+	if importEdgeCount < 2 {
+		t.Errorf("expected at least 2 import edges, got %d", importEdgeCount)
+	}
+
+	// Verify no errors occurred (duplicates should be handled gracefully)
+	// Note: EdgeErrors may contain duplicate edge errors which are non-fatal
 }

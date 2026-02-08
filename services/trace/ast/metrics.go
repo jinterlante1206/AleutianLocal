@@ -34,6 +34,10 @@ var (
 	symbolsExtracted metric.Int64Histogram
 	parseErrors      metric.Int64Counter
 
+	// GR-40a: Python Protocol detection metrics
+	protocolsDetected metric.Int64Counter
+	methodsCollected  metric.Int64Counter
+
 	metricsOnce sync.Once
 	metricsErr  error
 )
@@ -74,6 +78,25 @@ func initMetrics() error {
 		parseErrors, err = meter.Int64Counter(
 			"ast_parse_errors_total",
 			metric.WithDescription("Total number of parse errors"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		// GR-40a: Python Protocol detection metrics
+		protocolsDetected, err = meter.Int64Counter(
+			"ast_protocols_detected_total",
+			metric.WithDescription("Total Protocol/ABC classes detected"),
+		)
+		if err != nil {
+			metricsErr = err
+			return
+		}
+
+		methodsCollected, err = meter.Int64Counter(
+			"ast_protocol_methods_collected_total",
+			metric.WithDescription("Total methods collected for Protocol matching"),
 		)
 		if err != nil {
 			metricsErr = err
@@ -141,5 +164,55 @@ func setParseSpanResult(span trace.Span, symbolCount int, errorCount int) {
 	span.SetAttributes(
 		attribute.Int("ast.symbol_count", symbolCount),
 		attribute.Int("ast.error_count", errorCount),
+	)
+}
+
+// recordProtocolDetected records when a Python Protocol/ABC class is detected.
+//
+// Description:
+//
+//	GR-40a: Records metrics when a Protocol or ABC class is detected during parsing.
+//	This enables monitoring of Protocol detection across codebases.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - className: Name of the detected Protocol class.
+//   - methodCount: Number of methods extracted from the Protocol.
+//
+// Thread Safety: Safe for concurrent use.
+func recordProtocolDetected(ctx context.Context, className string, methodCount int) {
+	if err := initMetrics(); err != nil {
+		return
+	}
+
+	protocolsDetected.Add(ctx, 1,
+		metric.WithAttributes(attribute.String("class_name", className)),
+	)
+
+	if methodCount > 0 {
+		methodsCollected.Add(ctx, int64(methodCount),
+			metric.WithAttributes(attribute.String("class_name", className)),
+		)
+	}
+}
+
+// startProtocolDetectionSpan creates a span for Protocol detection operations.
+//
+// Description:
+//
+//	GR-40a C-1 fix: Provides tracing for Python Protocol detection path.
+//
+// Inputs:
+//   - ctx: Parent context.
+//   - className: Name of the class being checked.
+//
+// Returns:
+//   - ctx: Context with span.
+//   - span: The created span (caller must call span.End()).
+func startProtocolDetectionSpan(ctx context.Context, className string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "PythonParser.ProtocolDetection",
+		trace.WithAttributes(
+			attribute.String("ast.class_name", className),
+		),
 	)
 }

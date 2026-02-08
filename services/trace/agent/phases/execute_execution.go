@@ -232,6 +232,15 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					fmt.Sprintf("GR-39b: %s count threshold exceeded (%d >= %d)", inv.Tool, callCount, crs.DefaultCircuitBreakerThreshold),
 					crs.ErrorCategoryInternal)
 
+				// GR-44 Rev 2: Set circuit breaker active in LLM path.
+				// This ensures handleCompletion knows CB has fired and won't
+				// send "Your response didn't use tools as required" messages.
+				deps.Session.SetCircuitBreakerActive(true)
+				slog.Debug("GR-44 Rev 2: CB flag set in LLM path (count-based)",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("tool", inv.Tool),
+				)
+
 				// Return error result - signals synthesis should happen
 				results = append(results, &tools.Result{
 					Success: false,
@@ -276,6 +285,15 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					p.emitCoordinatorEvent(ctx, deps, integration.EventSemanticRepetition, &inv, nil,
 						fmt.Sprintf("query %.0f%% similar to '%s'", similarity*100, truncateQuery(similarQuery, 30)),
 						crs.ErrorCategoryInternal)
+
+					// GR-44 Rev 2: Set circuit breaker active in LLM path.
+					// This ensures handleCompletion knows CB has fired and won't
+					// send "Your response didn't use tools as required" messages.
+					deps.Session.SetCircuitBreakerActive(true)
+					slog.Debug("GR-44 Rev 2: CB flag set in LLM path (semantic repetition)",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", inv.Tool),
+					)
 
 					// Return a result that indicates semantic repetition
 					// This will cause the completion handler to synthesize instead

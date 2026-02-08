@@ -1458,3 +1458,51 @@ func TestPythonParser_MethodSignatureExtraction(t *testing.T) {
 		}
 	})
 }
+
+// === GR-40a H-2: Benchmark Tests for Protocol Detection ===
+
+// BenchmarkProtocolDetection benchmarks Protocol class detection.
+func BenchmarkProtocolDetection(b *testing.B) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse(ctx, []byte(pythonProtocolSource), "protocol.py")
+	}
+}
+
+// BenchmarkMethodSignatureExtraction benchmarks method signature extraction.
+func BenchmarkMethodSignatureExtraction(b *testing.B) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	source := `class LargeClass:
+    def method1(self, a: int, b: str) -> bool: pass
+    def method2(self, x, y, z) -> Tuple[int, str]: pass
+    def method3(self) -> None: pass
+    def method4(self, data: bytes) -> int: pass
+    def method5(self, callback) -> list: pass
+    def method6(self, ctx, opts) -> dict: pass
+    def method7(self, a, b, c, d, e) -> str: pass
+    def method8(self) -> object: pass
+    def method9(self, arg) -> None: pass
+    def method10(self, x: float) -> float: pass
+`
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse(ctx, []byte(source), "large.py")
+	}
+}
+
+// BenchmarkABCDetection benchmarks ABC class detection.
+func BenchmarkABCDetection(b *testing.B) {
+	parser := NewPythonParser()
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse(ctx, []byte(pythonABCSource), "abc.py")
+	}
+}

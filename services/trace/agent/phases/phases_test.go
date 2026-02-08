@@ -55,6 +55,9 @@ func (m *MockGraphProvider) IsAvailable() bool {
 // Helper to create test dependencies
 func createTestDependencies() *Dependencies {
 	session, _ := agent.NewSession("/test/project", nil)
+	// GR-44 Rev 2: Disable router by default for tests that don't need it.
+	// Tests requiring router must initialize a mock router explicitly.
+	session.Config.ToolRouterEnabled = false
 	return &Dependencies{
 		Session:       session,
 		Query:         "What does this function do?",

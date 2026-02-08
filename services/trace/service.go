@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,18 +234,64 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	}
 	s.mu.RUnlock()
 
-	// Create new graph and index
-	g := graph.NewGraph(projectRoot)
+	// Create index
 	idx := index.NewSymbolIndex()
 
-	// Parse files
-	result, err := s.parseProject(ctx, projectRoot, languages, excludes, g, idx)
+	// Parse files into ParseResults
+	parseResults, result, err := s.parseProjectToResults(ctx, projectRoot, languages, excludes)
 	if err != nil {
 		return nil, err
 	}
 
-	// Freeze the graph
-	g.Freeze()
+	// Build graph with edges using the Builder
+	// GR-41c: This ensures edge extraction (imports, calls, etc.) runs properly
+	builder := graph.NewBuilder(graph.WithProjectRoot(projectRoot))
+	buildResult, err := builder.Build(ctx, parseResults)
+	if err != nil {
+		return nil, fmt.Errorf("building graph: %w", err)
+	}
+
+	// R-1: Handle incomplete builds (context cancelled or memory limits)
+	if buildResult.Incomplete {
+		slog.Warn("GR-41c: Graph build incomplete",
+			slog.String("project_root", projectRoot),
+			slog.Int("nodes_created", buildResult.Stats.NodesCreated),
+			slog.Int("edges_created", buildResult.Stats.EdgesCreated),
+		)
+	}
+
+	// R-2: Merge builder errors into result.Errors
+	for _, fe := range buildResult.FileErrors {
+		result.Errors = append(result.Errors, fe.Error())
+	}
+	for _, ee := range buildResult.EdgeErrors {
+		result.Errors = append(result.Errors, ee.Error())
+	}
+
+	g := buildResult.Graph
+
+	// I-1: Add symbols to index recursively (including child symbols)
+	for _, pr := range parseResults {
+		if pr == nil {
+			continue
+		}
+		addSymbolsToIndexRecursive(idx, pr.Symbols)
+	}
+
+	result.SymbolsExtracted = idx.Stats().TotalSymbols
+
+	// O-1: Log build statistics for observability
+	slog.Info("GR-41c: Graph built",
+		slog.String("project_root", projectRoot),
+		slog.Int("nodes", buildResult.Stats.NodesCreated),
+		slog.Int("edges", buildResult.Stats.EdgesCreated),
+		slog.Int("placeholders", buildResult.Stats.PlaceholderNodes),
+		slog.Int("call_edges_resolved", buildResult.Stats.CallEdgesResolved),
+		slog.Int("call_edges_unresolved", buildResult.Stats.CallEdgesUnresolved),
+		slog.Int("interface_edges", buildResult.Stats.GoInterfaceEdges),
+		slog.Int64("build_duration_ms", buildResult.Stats.DurationMilli),
+		slog.Bool("incomplete", buildResult.Incomplete),
+	)
 
 	// Create assembler
 	assembler := cbcontext.NewAssembler(g, idx)
@@ -289,11 +336,28 @@ type parseResult struct {
 	Errors           []string
 }
 
-// parseProject parses project files and builds the graph.
-func (s *Service) parseProject(ctx context.Context, projectRoot string, languages, excludes []string, g *graph.Graph, idx *index.SymbolIndex) (*parseResult, error) {
+// parseProjectToResults parses project files and returns ParseResults for builder.
+//
+// Description:
+//
+//	GR-41c: Changed to return []*ast.ParseResult for use with graph.Builder
+//	to ensure proper edge extraction (imports, calls, implements, etc.).
+//
+// Inputs:
+//   - ctx: Context for cancellation
+//   - projectRoot: Absolute path to project root
+//   - languages: Language filters
+//   - excludes: Exclusion patterns
+//
+// Outputs:
+//   - []*ast.ParseResult: Parse results for all files
+//   - *parseResult: Stats (FilesParsed, Errors)
+//   - error: Non-nil on fatal errors
+func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string, languages, excludes []string) ([]*ast.ParseResult, *parseResult, error) {
 	result := &parseResult{
 		Errors: make([]string, 0),
 	}
+	var parseResults []*ast.ParseResult
 
 	// Walk the project directory
 	fileCount := 0
@@ -356,10 +420,11 @@ func (s *Service) parseProject(ctx context.Context, projectRoot string, language
 		}
 
 		// Parse file
-		parseErr := s.parseFile(ctx, path, relPath, g, idx)
+		pr, parseErr := s.parseFileToResult(ctx, path, relPath)
 		if parseErr != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", relPath, parseErr))
 		} else {
+			parseResults = append(parseResults, pr)
 			result.FilesParsed++
 		}
 
@@ -367,22 +432,47 @@ func (s *Service) parseProject(ctx context.Context, projectRoot string, language
 	})
 
 	if err != nil && err != ErrProjectTooLarge {
-		return nil, fmt.Errorf("walking project: %w", err)
+		return nil, nil, fmt.Errorf("walking project: %w", err)
 	}
 	if err == ErrProjectTooLarge {
-		return nil, err
+		return nil, nil, err
 	}
 
-	result.SymbolsExtracted = idx.Stats().TotalSymbols
-
-	return result, nil
+	return parseResults, result, nil
 }
 
-// parseFile parses a single file and adds symbols to graph and index.
-func (s *Service) parseFile(ctx context.Context, absPath, relPath string, g *graph.Graph, idx *index.SymbolIndex) error {
+// parseFileToResult parses a single file and returns the ParseResult.
+//
+// Description:
+//
+//	GR-41c: Changed to return *ast.ParseResult instead of adding directly
+//	to graph/index, enabling proper edge extraction via graph.Builder.
+//	Reads the file content, selects the appropriate parser based on file
+//	extension, and returns the parsed symbols and imports.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Passed to parser.Parse().
+//   - absPath: Absolute path to the file on disk. Must exist and be readable.
+//   - relPath: Relative path from project root. Used for symbol ID generation.
+//
+// Outputs:
+//   - *ast.ParseResult: Contains symbols, imports, and file metadata. Never nil on success.
+//   - error: Non-nil if file cannot be read or no parser exists for extension.
+//
+// Limitations:
+//   - Only parses files with registered parser extensions.
+//   - Does not validate file content encoding (assumes UTF-8).
+//
+// Assumptions:
+//   - absPath points to a regular file (not directory or symlink).
+//   - relPath uses forward slashes and is within project boundary.
+//   - s.registry is initialized with at least one parser.
+//
+// Thread Safety: Safe for concurrent use (reads only).
+func (s *Service) parseFileToResult(ctx context.Context, absPath, relPath string) (*ast.ParseResult, error) {
 	content, err := os.ReadFile(absPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Determine language from extension
@@ -391,35 +481,11 @@ func (s *Service) parseFile(ctx context.Context, absPath, relPath string, g *gra
 	// Get parser for file extension
 	parser, ok := s.registry.GetByExtension(ext)
 	if !ok {
-		return fmt.Errorf("no parser for extension: %s", ext)
+		return nil, fmt.Errorf("no parser for extension: %s", ext)
 	}
 
 	// Parse the file
-	parseResult, err := parser.Parse(ctx, content, relPath)
-	if err != nil {
-		return err
-	}
-
-	// Add symbols to graph and index
-	for _, sym := range parseResult.Symbols {
-		if sym == nil {
-			continue
-		}
-
-		// Add to graph
-		if _, err := g.AddNode(sym); err != nil {
-			// Skip duplicates
-			continue
-		}
-
-		// Add to index
-		if err := idx.Add(sym); err != nil {
-			// Skip duplicates
-			continue
-		}
-	}
-
-	return nil
+	return parser.Parse(ctx, content, relPath)
 }
 
 // isLanguageFile checks if a file extension matches any of the specified languages.
@@ -439,6 +505,35 @@ func (s *Service) isLanguageFile(ext string, languages []string) bool {
 	}
 
 	return false
+}
+
+// addSymbolsToIndexRecursive adds symbols and their children to the index.
+//
+// Description:
+//
+//	GR-41c I-1 Fix: Recursively adds all symbols including children to ensure
+//	the index contains all symbols that exist in the graph. Without this,
+//	child symbols (e.g., nested functions, struct fields) would be in the
+//	graph but not findable via the index.
+//
+// Inputs:
+//   - idx: The symbol index to add to. Must not be nil.
+//   - symbols: Slice of symbols to add. Nil entries are skipped.
+//
+// Thread Safety: Depends on index.SymbolIndex thread safety.
+func addSymbolsToIndexRecursive(idx *index.SymbolIndex, symbols []*ast.Symbol) {
+	for _, sym := range symbols {
+		if sym == nil {
+			continue
+		}
+		// Add symbol to index, ignoring duplicates
+		_ = idx.Add(sym)
+
+		// Recursively add children
+		if len(sym.Children) > 0 {
+			addSymbolsToIndexRecursive(idx, sym.Children)
+		}
+	}
 }
 
 // GetContext assembles context for a query.

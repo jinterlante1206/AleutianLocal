@@ -392,10 +392,11 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 	// in different files than their receiver types.
 	b.associateMethodsWithTypesCrossFile(ctx, state)
 
-	// GR-40: Compute Go interface implementations via method-set matching
+	// GR-40/GR-40a: Compute interface implementations via method-set matching
 	// This runs after all per-file edges are extracted because it needs
 	// the complete set of interfaces and types across the entire project.
-	if err := b.computeGoInterfaceImplementations(ctx, state); err != nil {
+	// Supports Go interfaces and Python Protocols.
+	if err := b.computeInterfaceImplementations(ctx, state); err != nil {
 		// Non-fatal: interface detection failure shouldn't fail the build
 		state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
 			FromID:   "interface_detection",
@@ -417,9 +418,10 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 
 // extractFileEdges extracts all edge types from a single file's parse result.
 // GR-41: Now accepts context for call edge tracing.
+// GR-41c: Passes context to extractImportEdges.
 func (b *Builder) extractFileEdges(ctx context.Context, state *buildState, r *ast.ParseResult) {
-	// Extract import edges
-	b.extractImportEdges(state, r)
+	// Extract import edges (GR-41c: now accepts context)
+	b.extractImportEdges(ctx, state, r)
 
 	// Extract edges from symbols
 	for _, sym := range r.Symbols {
@@ -447,34 +449,158 @@ func (b *Builder) extractChildEdges(ctx context.Context, state *buildState, chil
 }
 
 // extractImportEdges creates IMPORTS edges from import statements.
-func (b *Builder) extractImportEdges(state *buildState, r *ast.ParseResult) {
-	// Find file symbol or create virtual one
-	fileSymbolID := fmt.Sprintf("%s:1:file", r.FilePath)
+//
+// Description:
+//
+//	Creates EdgeTypeImports edges from the package symbol to imported packages.
+//	GR-41c: Fixed to use actual package symbol instead of fabricated fileSymbolID.
+//
+// Inputs:
+//   - ctx: Context for tracing and cancellation.
+//   - state: The build state containing graph and symbol indexes.
+//   - r: The ParseResult containing imports and symbols.
+//
+// Outputs:
+//   - None. Edges are added to state.graph, errors to state.result.EdgeErrors.
+//
+// Thread Safety:
+//
+//	This method modifies state.graph and state.result. Not safe for concurrent
+//	use on the same buildState, but the builder serializes calls appropriately.
+func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *ast.ParseResult) {
+	if r == nil || len(r.Imports) == 0 {
+		return
+	}
 
-	for _, imp := range r.Imports {
+	// GR-41c: OTel tracing for observability
+	_, span := tracer.Start(ctx, "GraphBuilder.extractImportEdges",
+		trace.WithAttributes(
+			attribute.String("file", r.FilePath),
+			attribute.Int("import_count", len(r.Imports)),
+		),
+	)
+	defer span.End()
+
+	// GR-41c: Find actual package symbol instead of fabricating fileSymbolID
+	sourceID := findPackageSymbolID(r)
+	if sourceID == "" {
+		slog.Warn("GR-41c: No package symbol found for import edges",
+			slog.String("file", r.FilePath),
+			slog.Int("import_count", len(r.Imports)),
+		)
+		span.SetAttributes(attribute.Bool("no_source_symbol", true))
+		return
+	}
+
+	// GR-41c: Verify sourceID exists in graph before using (I-1: use GetNode method)
+	if _, exists := state.graph.GetNode(sourceID); !exists {
+		slog.Warn("GR-41c: Package symbol not in graph",
+			slog.String("file", r.FilePath),
+			slog.String("source_id", sourceID),
+		)
+		span.SetAttributes(attribute.Bool("source_not_in_graph", true))
+		return
+	}
+
+	edgesCreated := 0
+	edgesFailed := 0
+
+	for i, imp := range r.Imports {
+		// R-1: Check context cancellation every 10 imports for responsiveness
+		if i > 0 && i%10 == 0 {
+			if ctx.Err() != nil {
+				slog.Debug("GR-41c: Context cancelled during import edge extraction",
+					slog.String("file", r.FilePath),
+					slog.Int("processed", i),
+					slog.Int("total", len(r.Imports)),
+				)
+				span.SetAttributes(
+					attribute.Bool("cancelled", true),
+					attribute.Int("processed_before_cancel", i),
+				)
+				recordImportEdgeMetrics(ctx, edgesCreated, edgesFailed)
+				return
+			}
+		}
 		// Create placeholder for imported package
 		pkgID := b.getOrCreatePlaceholder(state, imp.Path, imp.Path)
 
-		// Create edge from file to import
-		err := state.graph.AddEdge(fileSymbolID, pkgID, EdgeTypeImports, imp.Location)
+		// Create edge from package symbol to imported package
+		err := state.graph.AddEdge(sourceID, pkgID, EdgeTypeImports, imp.Location)
 		if err != nil {
-			// File symbol might not exist - try to create from first symbol
-			if len(r.Symbols) > 0 && r.Symbols[0] != nil {
-				firstSymID := r.Symbols[0].ID
-				err = state.graph.AddEdge(firstSymID, pkgID, EdgeTypeImports, imp.Location)
-			}
-			if err != nil {
+			// Check if it's a duplicate edge error (not fatal)
+			if !strings.Contains(err.Error(), "already exists") {
 				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
-					FromID:   fileSymbolID,
+					FromID:   sourceID,
 					ToID:     pkgID,
 					EdgeType: EdgeTypeImports,
 					Err:      err,
 				})
-				continue
+				edgesFailed++
+				slog.Debug("GR-41c: Failed to create import edge",
+					slog.String("file", r.FilePath),
+					slog.String("from", sourceID),
+					slog.String("to", pkgID),
+					slog.String("error", err.Error()),
+				)
 			}
+			continue
 		}
+
 		state.result.Stats.EdgesCreated++
+		edgesCreated++
+
+		slog.Debug("GR-41c: Created import edge",
+			slog.String("file", r.FilePath),
+			slog.String("from", sourceID),
+			slog.String("import", imp.Path),
+		)
 	}
+
+	// GR-41c: Record span attributes and metrics
+	span.SetAttributes(
+		attribute.Int("edges_created", edgesCreated),
+		attribute.Int("edges_failed", edgesFailed),
+	)
+	recordImportEdgeMetrics(ctx, edgesCreated, edgesFailed)
+}
+
+// findPackageSymbolID finds the package symbol ID from a ParseResult.
+//
+// Description:
+//
+//	Searches the symbols for a SymbolKindPackage and returns its ID.
+//	Falls back to the first symbol if no package symbol is found.
+//	This is used by extractImportEdges to find the source node for
+//	import edges.
+//
+// Inputs:
+//   - r: The ParseResult to search. Must not be nil.
+//
+// Outputs:
+//   - string: The symbol ID to use as import source, or empty if no symbols.
+//
+// Thread Safety: This function is safe for concurrent use.
+func findPackageSymbolID(r *ast.ParseResult) string {
+	if r == nil || len(r.Symbols) == 0 {
+		return ""
+	}
+
+	// Strategy 1: Find explicit package symbol
+	for _, sym := range r.Symbols {
+		if sym != nil && sym.Kind == ast.SymbolKindPackage {
+			return sym.ID
+		}
+	}
+
+	// Strategy 2: Use first non-nil symbol as fallback
+	for _, sym := range r.Symbols {
+		if sym != nil {
+			return sym.ID
+		}
+	}
+
+	return ""
 }
 
 // extractSymbolEdges extracts edges for a single symbol.
@@ -1331,7 +1457,7 @@ func countReturnString(returns string) int {
 
 // === GR-40/GR-40a: Implicit Interface Implementation Detection ===
 
-// computeGoInterfaceImplementations detects implicit interface implementations via method-set matching.
+// computeInterfaceImplementations detects implicit interface implementations via method-set matching.
 //
 // Description:
 //
@@ -1369,9 +1495,9 @@ func countReturnString(returns string) int {
 //
 //	This method modifies state.graph and state.result. Not safe for concurrent use
 //	on the same buildState, but the builder serializes calls appropriately.
-func (b *Builder) computeGoInterfaceImplementations(ctx context.Context, state *buildState) error {
+func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *buildState) error {
 	// Start OTel span for observability (GR-40 post-implementation review fix C-1, C-2)
-	ctx, span := tracer.Start(ctx, "GraphBuilder.computeGoInterfaceImplementations")
+	ctx, span := tracer.Start(ctx, "GraphBuilder.computeInterfaceImplementations")
 	defer span.End()
 
 	// Check context early
@@ -1470,11 +1596,18 @@ func (b *Builder) computeGoInterfaceImplementations(ctx context.Context, state *
 	edgesCreated := 0
 	matchesChecked := 0
 
+	// GR-40a: Track per-language metrics for observability (C-2 fix)
+	edgesByLang := make(map[string]int)
+	matchesByLang := make(map[string]int)
+
 	for lang, interfaces := range interfacesByLang {
 		typesWithMethods, hasTypes := typesByLang[lang]
 		if !hasTypes {
 			continue
 		}
+
+		langEdges := 0
+		langMatches := 0
 
 		for typeID, typeMethods := range typesWithMethods {
 			// Check context periodically for responsiveness on large codebases
@@ -1496,6 +1629,7 @@ func (b *Builder) computeGoInterfaceImplementations(ctx context.Context, state *
 
 			for ifaceID, ifaceMethods := range interfaces {
 				matchesChecked++
+				langMatches++
 
 				// Check if type's method set is a superset of interface's method set
 				if isMethodSuperset(typeMethods, ifaceMethods) {
@@ -1511,16 +1645,24 @@ func (b *Builder) computeGoInterfaceImplementations(ctx context.Context, state *
 						continue
 					}
 					edgesCreated++
+					langEdges++
 					state.result.Stats.EdgesCreated++
 				}
 			}
 		}
+
+		edgesByLang[lang] = langEdges
+		matchesByLang[lang] = langMatches
 	}
 
 	// Track stats for observability
 	state.result.Stats.GoInterfaceEdges = edgesCreated
 
-	// Record metrics (GR-40 post-implementation review fix H-1)
+	// Record metrics with language dimension (GR-40a C-2 fix)
+	for lang, edges := range edgesByLang {
+		recordInterfaceDetectionMetricsWithLanguage(ctx, lang, edges, matchesByLang[lang])
+	}
+	// Also record aggregate metrics for backward compatibility
 	recordInterfaceDetectionMetrics(ctx, edgesCreated, matchesChecked)
 
 	// Set final span attributes
