@@ -20,6 +20,7 @@ import (
 	agentcontext "github.com/AleutianAI/AleutianFOSS/services/trace/agent/context"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
@@ -898,4 +899,136 @@ func TestExecutePhase_ToolFailed_WithNilCoordinator_NoError(t *testing.T) {
 	if nextState != agent.StateExecute {
 		t.Errorf("nextState = %s, want EXECUTE", nextState)
 	}
+}
+
+// CB-31: Test empty response fallback when LLM returns empty and synthesis fails
+func TestExecutePhase_EmptyResponseFallback(t *testing.T) {
+	phase := NewExecutePhase(WithReflectionThreshold(100))
+	deps := createTestDependencies()
+	deps.Query = "What does the parseConfig function do?"
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{
+			{Role: "user", Content: deps.Query},
+		},
+		// Empty ToolResults - synthesis will fail
+		ToolResults: []agent.ToolResult{},
+	}
+	deps.Coordinator = nil
+
+	// Mock LLM that returns EMPTY response
+	mockLLM := llm.NewMockClient()
+	mockLLM.QueueFinalResponse("") // Empty response triggers the bug path
+	deps.LLMClient = mockLLM
+
+	// Execute - should complete with fallback message instead of empty
+	nextState, err := phase.Execute(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if nextState != agent.StateComplete {
+		t.Errorf("nextState = %s, want COMPLETE", nextState)
+	}
+
+	// Check that fallback response was generated
+	ctx := deps.Session.GetCurrentContext()
+	if ctx == nil {
+		t.Fatal("Expected context to be set")
+	}
+
+	// Find last assistant response
+	var assistantMsg *agent.Message
+	for i := len(ctx.ConversationHistory) - 1; i >= 0; i-- {
+		if ctx.ConversationHistory[i].Role == "assistant" {
+			assistantMsg = &ctx.ConversationHistory[i]
+			break
+		}
+	}
+
+	if assistantMsg == nil {
+		t.Fatal("Expected assistant response in conversation history")
+	}
+
+	// CB-31: Verify we get a fallback message, NOT empty
+	if assistantMsg.Content == "" {
+		t.Error("CB-31 Bug: Got empty response when fallback should have been provided")
+	}
+
+	// Check fallback contains expected elements
+	if !contains(assistantMsg.Content, "unable") {
+		t.Errorf("Fallback should mention being unable to respond, got: %s", truncateForTest(assistantMsg.Content, 200))
+	}
+	if !contains(assistantMsg.Content, "Suggestions") {
+		t.Errorf("Fallback should contain suggestions, got: %s", truncateForTest(assistantMsg.Content, 200))
+	}
+}
+
+// CB-31: Test buildEmptyResponseFallback directly with tool history
+func TestExecutePhase_BuildEmptyResponseFallback(t *testing.T) {
+	phase := NewExecutePhase()
+	deps := createTestDependencies()
+	deps.Query = "Find the implementation of processRequest"
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{},
+		ToolResults:         []agent.ToolResult{},
+	}
+
+	t.Run("no_tools_executed", func(t *testing.T) {
+		fallback := phase.buildEmptyResponseFallback(deps)
+
+		if fallback == "" {
+			t.Error("Expected non-empty fallback message")
+		}
+		if !contains(fallback, "unable") {
+			t.Errorf("Fallback should mention being unable, got: %s", truncateForTest(fallback, 200))
+		}
+		if !contains(fallback, "Suggestions") {
+			t.Errorf("Fallback should contain suggestions, got: %s", truncateForTest(fallback, 200))
+		}
+		// Should mention no codebase exploration was completed
+		if !contains(fallback, "No codebase exploration") {
+			t.Errorf("Fallback should mention no exploration when no tools ran, got: %s", truncateForTest(fallback, 200))
+		}
+	})
+
+	t.Run("with_tools_executed", func(t *testing.T) {
+		// Add some trace steps to simulate tool execution
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Action: "tool_call",
+			Tool:   "Grep",
+		})
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Action: "tool_call",
+			Tool:   "Read",
+		})
+
+		fallback := phase.buildEmptyResponseFallback(deps)
+
+		if fallback == "" {
+			t.Error("Expected non-empty fallback message")
+		}
+		// Should mention tool execution summary
+		if !contains(fallback, "tool call") {
+			t.Errorf("Fallback should mention tool calls when tools were executed, got: %s", truncateForTest(fallback, 300))
+		}
+		if !contains(fallback, "Exploration Summary") {
+			t.Errorf("Fallback should have exploration summary, got: %s", truncateForTest(fallback, 300))
+		}
+	})
+
+	t.Run("includes_query", func(t *testing.T) {
+		fallback := phase.buildEmptyResponseFallback(deps)
+
+		// Should include the original query for reference
+		if !contains(fallback, "Original Query") {
+			t.Errorf("Fallback should include original query, got: %s", truncateForTest(fallback, 300))
+		}
+	})
+}
+
+// Helper for test truncation
+func truncateForTest(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

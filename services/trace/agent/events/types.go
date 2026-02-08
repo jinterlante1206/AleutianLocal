@@ -197,6 +197,25 @@ type LLMRequestData struct {
 
 	// ToolCount is the number of tools available.
 	ToolCount int `json:"tool_count,omitempty"`
+
+	// === Prompt Hierarchy (CRS enhancement for debugging) ===
+
+	// SystemPromptLen is the length of the system prompt in characters.
+	// Full system prompt is not included to avoid bloating logs.
+	SystemPromptLen int `json:"system_prompt_len,omitempty"`
+
+	// MessageCount is the number of messages in the conversation history.
+	MessageCount int `json:"message_count,omitempty"`
+
+	// MessageSummary shows role distribution: "user:3,assistant:2,tool:5"
+	MessageSummary string `json:"message_summary,omitempty"`
+
+	// LastUserMessage is the last user message (truncated to 500 chars).
+	// This is the query being answered - critical for debugging.
+	LastUserMessage string `json:"last_user_message,omitempty"`
+
+	// ToolNames lists the available tools (for understanding what agent can do).
+	ToolNames []string `json:"tool_names,omitempty"`
 }
 
 // LLMResponseData is the data for LLM response events.
@@ -218,6 +237,18 @@ type LLMResponseData struct {
 
 	// ToolCallCount is the number of tool calls.
 	ToolCallCount int `json:"tool_call_count,omitempty"`
+
+	// === Response Content (CRS enhancement for debugging) ===
+
+	// ContentLen is the length of the text content in characters.
+	ContentLen int `json:"content_len,omitempty"`
+
+	// ContentPreview is the first 500 chars of the text content.
+	// Critical for debugging empty response issues like CB-31/Test 30.
+	ContentPreview string `json:"content_preview,omitempty"`
+
+	// ToolCallsPreview summarizes tool calls: "Grep(query=main),ReadFile(path=main.go)"
+	ToolCallsPreview string `json:"tool_calls_preview,omitempty"`
 }
 
 // SafetyCheckData is the data for safety check events.

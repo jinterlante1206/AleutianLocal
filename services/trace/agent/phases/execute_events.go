@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
@@ -115,12 +116,56 @@ func (p *ExecutePhase) emitLLMRequest(deps *Dependencies, request *llm.Request) 
 		return
 	}
 
+	// Build message summary: "user:3,assistant:2,tool:1"
+	messageSummary := buildMessageSummary(request.Messages)
+
+	// Get last user message (truncated)
+	lastUserMessage := getLastUserMessage(request.Messages)
+
+	// Get tool names
+	toolNames := make([]string, 0, len(request.Tools))
+	for _, tool := range request.Tools {
+		toolNames = append(toolNames, tool.Name)
+	}
+
 	deps.EventEmitter.Emit(events.TypeLLMRequest, &events.LLMRequestData{
-		Model:     deps.LLMClient.Model(),
-		TokensIn:  request.MaxTokens, // Approximation
-		HasTools:  len(request.Tools) > 0,
-		ToolCount: len(request.Tools),
+		Model:           deps.LLMClient.Model(),
+		TokensIn:        request.MaxTokens, // Approximation
+		HasTools:        len(request.Tools) > 0,
+		ToolCount:       len(request.Tools),
+		SystemPromptLen: len(request.SystemPrompt),
+		MessageCount:    len(request.Messages),
+		MessageSummary:  messageSummary,
+		LastUserMessage: lastUserMessage,
+		ToolNames:       toolNames,
 	})
+}
+
+// buildMessageSummary creates a summary of message roles: "user:3,assistant:2,tool:1"
+func buildMessageSummary(messages []llm.Message) string {
+	counts := make(map[string]int)
+	for _, msg := range messages {
+		counts[msg.Role]++
+	}
+	parts := make([]string, 0, len(counts))
+	for role, count := range counts {
+		parts = append(parts, fmt.Sprintf("%s:%d", role, count))
+	}
+	return strings.Join(parts, ",")
+}
+
+// getLastUserMessage returns the last user message content, truncated to 500 chars.
+func getLastUserMessage(messages []llm.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && messages[i].Content != "" {
+			content := messages[i].Content
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			return content
+		}
+	}
+	return ""
 }
 
 // emitLLMResponse emits an LLM response event.
@@ -129,14 +174,53 @@ func (p *ExecutePhase) emitLLMResponse(deps *Dependencies, response *llm.Respons
 		return
 	}
 
+	// Get content preview (truncated to 500 chars)
+	contentPreview := response.Content
+	if len(contentPreview) > 500 {
+		contentPreview = contentPreview[:500] + "..."
+	}
+
+	// Build tool calls preview: "Grep(query=main),ReadFile(path=main.go)"
+	toolCallsPreview := buildToolCallsPreview(response.ToolCalls)
+
 	deps.EventEmitter.Emit(events.TypeLLMResponse, &events.LLMResponseData{
-		Model:         response.Model,
-		TokensOut:     response.OutputTokens,
-		Duration:      response.Duration,
-		StopReason:    response.StopReason,
-		HasToolCalls:  response.HasToolCalls(),
-		ToolCallCount: len(response.ToolCalls),
+		Model:            response.Model,
+		TokensOut:        response.OutputTokens,
+		Duration:         response.Duration,
+		StopReason:       response.StopReason,
+		HasToolCalls:     response.HasToolCalls(),
+		ToolCallCount:    len(response.ToolCalls),
+		ContentLen:       len(response.Content),
+		ContentPreview:   contentPreview,
+		ToolCallsPreview: toolCallsPreview,
 	})
+}
+
+// buildToolCallsPreview creates a summary of tool calls: "Grep(query=main),ReadFile(path=main.go)"
+func buildToolCallsPreview(toolCalls []llm.ToolCall) string {
+	if len(toolCalls) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		// Parse arguments to get a short preview
+		preview := tc.Name
+		if tc.Arguments != "" {
+			// Extract first key-value for brevity
+			preview = fmt.Sprintf("%s(%s)", tc.Name, truncateArgs(tc.Arguments, 50))
+		}
+		parts = append(parts, preview)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// truncateArgs truncates JSON arguments to a short preview.
+func truncateArgs(args string, maxLen int) string {
+	if len(args) <= maxLen {
+		return args
+	}
+	return args[:maxLen] + "..."
 }
 
 // emitToolInvocation emits a tool invocation event.

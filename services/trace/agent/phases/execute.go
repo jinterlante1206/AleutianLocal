@@ -298,10 +298,35 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		return agent.StateError, err
 	}
 
+	// GR-41b: Log router status at session start for debugging
+	routerEnabled := deps.Session.IsToolRouterEnabled()
+	routerModel := deps.Session.Config.ToolRouterModel
+
 	slog.Info("ExecutePhase starting",
 		slog.String("session_id", deps.Session.ID),
 		slog.String("query", deps.Query),
+		slog.Bool("router_enabled", routerEnabled),
+		slog.String("router_model", routerModel),
 	)
+
+	// Record router status in trace for debugging
+	if !routerEnabled && deps.Session.Config.ToolRouterEnabled {
+		// Router was configured but failed to initialize - surface this issue
+		slog.Warn("GR-41b: Router configured but not initialized - falling back to main LLM for tool selection",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("configured_model", routerModel),
+		)
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now(),
+			Action:    "router_fallback",
+			Target:    routerModel,
+			Error:     "Router configured but not initialized - check server logs for initialization errors",
+			Metadata: map[string]string{
+				"configured_model": routerModel,
+				"fallback":         "main_llm",
+			},
+		})
+	}
 
 	stepStart := time.Now()
 	stepNumber := 0
@@ -500,6 +525,25 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 
 	// Emit step complete event
 	p.emitStepComplete(deps, stepStart, stepNumber, len(invocations))
+
+	// GR-41b: Force synthesis after graph tools return substantive results.
+	// This prevents the agent from calling Grep 10+ times after find_callees
+	// already returned the answer. If graph tools produced results and we've
+	// done at least 2 steps, synthesize instead of continuing to search.
+	if p.shouldForceSynthesisAfterGraphTools(deps, toolResults, stepNumber) {
+		slog.Info("GR-41b: Forcing synthesis after graph tool results",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("step_number", stepNumber),
+			slog.Int("tool_results", len(toolResults)),
+		)
+
+		// Build a synthesis from the graph tool results
+		synthResult := p.synthesizeFromGraphToolResults(deps, toolResults, "graph_tool_completion")
+		if synthResult != "" {
+			response.Content = synthResult
+			return p.handleCompletion(ctx, deps, response, stepStart, stepNumber)
+		}
+	}
 
 	// Check if reflection is needed
 	if p.shouldReflect(deps, stepNumber) {
@@ -983,6 +1027,8 @@ func (p *ExecutePhase) callLLM(ctx context.Context, deps *Dependencies, request 
 	// Emit LLM request event
 	p.emitLLMRequest(deps, request)
 
+	startTime := time.Now()
+
 	// Call LLM
 	response, err := deps.LLMClient.Complete(ctx, request)
 	if err != nil {
@@ -991,6 +1037,46 @@ func (p *ExecutePhase) callLLM(ctx context.Context, deps *Dependencies, request 
 
 	// Emit LLM response event
 	p.emitLLMResponse(deps, response)
+
+	// Record LLM call as TraceStep for CRS debugging (prompt hierarchy enhancement)
+	if deps.Session != nil {
+		// Get last user message for the trace
+		lastUserMsg := ""
+		for i := len(request.Messages) - 1; i >= 0; i-- {
+			if request.Messages[i].Role == "user" && request.Messages[i].Content != "" {
+				lastUserMsg = request.Messages[i].Content
+				if len(lastUserMsg) > 200 {
+					lastUserMsg = lastUserMsg[:200] + "..."
+				}
+				break
+			}
+		}
+
+		// Get content preview
+		contentPreview := response.Content
+		if len(contentPreview) > 200 {
+			contentPreview = contentPreview[:200] + "..."
+		}
+
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now(),
+			Action:    "llm_call",
+			Target:    deps.LLMClient.Model(),
+			Tool:      "llm",
+			Duration:  time.Since(startTime),
+			Metadata: map[string]string{
+				"message_count":     fmt.Sprintf("%d", len(request.Messages)),
+				"system_prompt_len": fmt.Sprintf("%d", len(request.SystemPrompt)),
+				"tool_count":        fmt.Sprintf("%d", len(request.Tools)),
+				"last_user_message": lastUserMsg,
+				"output_tokens":     fmt.Sprintf("%d", response.OutputTokens),
+				"content_len":       fmt.Sprintf("%d", len(response.Content)),
+				"content_preview":   contentPreview,
+				"stop_reason":       response.StopReason,
+				"tool_call_count":   fmt.Sprintf("%d", len(response.ToolCalls)),
+			},
+		})
+	}
 
 	return response, nil
 }
@@ -1106,9 +1192,30 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 			)
 			response.Content = synthesized
 		} else {
-			slog.Warn("GR-39a: No tool results available for synthesis, continuing with empty response",
+			// CB-31 Fix: Provide user-friendly fallback instead of empty response.
+			// This ensures the user always receives meaningful feedback even when:
+			// - LLM returns empty response AND
+			// - ToolResults is empty AND
+			// - TraceSteps fallback also fails
+			slog.Warn("CB-31: No tool results available for synthesis, providing fallback response",
 				slog.String("session_id", deps.Session.ID),
 			)
+
+			// Build a contextual fallback message based on what we know
+			fallbackMsg := p.buildEmptyResponseFallback(deps)
+			response.Content = fallbackMsg
+
+			// Record this in trace for debugging
+			if deps.Session != nil {
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Action: "synthesis_fallback",
+					Tool:   "empty_response_handler",
+					Metadata: map[string]string{
+						"reason":       "no_tool_results",
+						"fallback_len": fmt.Sprintf("%d", len(fallbackMsg)),
+					},
+				})
+			}
 		}
 	}
 
@@ -1458,4 +1565,299 @@ func (p *ExecutePhase) forceToolUsage(ctx context.Context, deps *Dependencies, r
 
 	// Return to EXECUTE to retry with the hint
 	return agent.StateExecute, nil
+}
+
+// buildEmptyResponseFallback constructs a user-friendly fallback message when
+// both the LLM and synthesis fail to produce content.
+//
+// Description:
+//
+//	CB-31 Fix: Instead of returning an empty response to the user, this function
+//	builds a contextual message explaining what happened. It examines the session
+//	state to provide specific feedback about what was attempted.
+//
+// Inputs:
+//
+//	deps - Phase dependencies containing session and context.
+//
+// Outputs:
+//
+//	string - A user-friendly fallback message, never empty.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *ExecutePhase) buildEmptyResponseFallback(deps *Dependencies) string {
+	var sb strings.Builder
+
+	// Start with an apologetic but informative message
+	sb.WriteString("I was unable to generate a complete response for your query.\n\n")
+
+	// Add context about what was attempted
+	toolCount := 0
+	stepCount := 0
+	if deps.Session != nil {
+		steps := deps.Session.GetTraceSteps()
+		stepCount = len(steps)
+		for _, step := range steps {
+			if step.Action == "tool_call" || step.Action == "tool_call_forced" {
+				toolCount++
+			}
+		}
+	}
+
+	if toolCount > 0 {
+		sb.WriteString(fmt.Sprintf("**Exploration Summary**: I executed %d tool calls across %d steps, ", toolCount, stepCount))
+		sb.WriteString("but was unable to synthesize a coherent answer from the results.\n\n")
+		sb.WriteString("This may indicate:\n")
+		sb.WriteString("- The relevant code wasn't found in the searched locations\n")
+		sb.WriteString("- The query requires information not available in the codebase\n")
+		sb.WriteString("- A technical issue with processing the tool outputs\n\n")
+	} else {
+		sb.WriteString("No codebase exploration was completed before this response was generated.\n\n")
+		sb.WriteString("This may indicate:\n")
+		sb.WriteString("- The query couldn't be matched to appropriate tools\n")
+		sb.WriteString("- A context or configuration issue\n\n")
+	}
+
+	// Provide actionable suggestions
+	sb.WriteString("**Suggestions**:\n")
+	sb.WriteString("1. Try rephrasing your question with more specific details\n")
+	sb.WriteString("2. Mention specific file names, function names, or code patterns\n")
+	sb.WriteString("3. Break complex queries into smaller, focused questions\n")
+
+	// Add the query for reference if available
+	if deps.Query != "" && len(deps.Query) < 200 {
+		sb.WriteString(fmt.Sprintf("\n**Original Query**: %s\n", deps.Query))
+	}
+
+	return sb.String()
+}
+
+// =============================================================================
+// GR-41b: Graph Tool Synthesis Enhancement
+// =============================================================================
+
+// graphToolsWithSubstantiveResults are the graph tools that, when they return
+// results, indicate we have enough information to synthesize an answer.
+var graphToolsWithSubstantiveResults = map[string]bool{
+	"find_callers":    true,
+	"find_callees":    true,
+	"find_references": true,
+	"find_path":       true,
+	"get_call_chain":  true,
+}
+
+// shouldForceSynthesisAfterGraphTools determines if we should force synthesis
+// instead of letting the LLM call more tools.
+//
+// Description:
+//
+//	This prevents the "Grep 10 times" problem where the agent keeps searching
+//	after already getting good results from graph tools. If a graph tool like
+//	find_callees returned substantive results, we should synthesize instead of
+//	continuing to search.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//	toolResults - Results from the most recent tool execution.
+//	stepNumber - Current step number in execution.
+//
+// Outputs:
+//
+//	bool - True if synthesis should be forced.
+//
+// Thread Safety: Safe for concurrent use (read-only operations).
+func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, toolResults []*tools.Result, stepNumber int) bool {
+	// Only consider forcing synthesis after at least 2 steps
+	// This gives the agent a chance to explore before we intervene
+	if stepNumber < 2 {
+		return false
+	}
+
+	// Check if any of the executed tools were graph tools with results
+	for _, result := range toolResults {
+		if result == nil || result.Error != "" {
+			continue
+		}
+
+		// Get the tool name from the invocation if available
+		toolName := getToolNameFromResult(result)
+
+		// Check if this is a graph tool that returns substantive results
+		if graphToolsWithSubstantiveResults[toolName] {
+			// Check if the result contains actual data (not "No X found" messages)
+			if hasSubstantiveGraphResult(result.OutputText) {
+				slog.Debug("GR-41b: Graph tool returned substantive results",
+					slog.String("tool", toolName),
+					slog.Int("content_len", len(result.OutputText)),
+				)
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// getToolNameFromResult extracts the tool name from a result.
+// The tool name is typically embedded in the output or needs to be tracked separately.
+func getToolNameFromResult(result *tools.Result) string {
+	if result == nil {
+		return ""
+	}
+
+	// Check if Output has a Name field (depends on tool implementation)
+	if m, ok := result.Output.(map[string]any); ok {
+		if name, ok := m["tool"].(string); ok {
+			return name
+		}
+	}
+
+	// For graph tools, check OutputText for patterns
+	outputLower := strings.ToLower(result.OutputText)
+	if strings.Contains(outputLower, "callers found") || strings.Contains(outputLower, "called by") {
+		return "find_callers"
+	}
+	if strings.Contains(outputLower, "callees found") || strings.Contains(outputLower, "calls to") || strings.Contains(outputLower, "functions called") {
+		return "find_callees"
+	}
+	if strings.Contains(outputLower, "references found") || strings.Contains(outputLower, "referenced by") {
+		return "find_references"
+	}
+	if strings.Contains(outputLower, "call chain") {
+		return "get_call_chain"
+	}
+
+	return ""
+}
+
+// hasSubstantiveGraphResult checks if a graph tool result contains actual data
+// rather than "No results found" type messages.
+func hasSubstantiveGraphResult(content string) bool {
+	if content == "" {
+		return false
+	}
+
+	// Check for common "no results" patterns
+	noResultPatterns := []string{
+		"No callers found",
+		"No callees found",
+		"No references found",
+		"No path found",
+		"No call chain found",
+		"not found",
+		"No results",
+	}
+
+	contentLower := strings.ToLower(content)
+	for _, pattern := range noResultPatterns {
+		if strings.Contains(contentLower, strings.ToLower(pattern)) {
+			return false
+		}
+	}
+
+	// If content is substantial (more than just a short error/empty message)
+	// consider it as having results
+	return len(content) > 50
+}
+
+// synthesizeFromGraphToolResults creates a synthesis from graph tool results.
+//
+// Description:
+//
+//	Called when we want to force synthesis from tool results without going
+//	back to the LLM for more tool calls. This is used by GR-41b to synthesize
+//	after graph tools return good results.
+//
+// Inputs:
+//
+//	deps - Phase dependencies.
+//	toolResults - Tool results to synthesize from.
+//	reason - Why synthesis was triggered (for logging).
+//
+// Outputs:
+//
+//	string - Synthesized response, or empty if synthesis failed.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolResults []*tools.Result, reason string) string {
+	if len(toolResults) == 0 {
+		return ""
+	}
+
+	// Build a summary of the tool results
+	var sb strings.Builder
+	sb.WriteString("Based on my analysis of the codebase:\n\n")
+
+	for _, result := range toolResults {
+		if result == nil || result.Error != "" {
+			continue
+		}
+
+		// Get the tool name
+		toolName := getToolNameFromResult(result)
+		content := result.OutputText
+
+		// Format based on tool type
+		switch toolName {
+		case "find_callees":
+			sb.WriteString("**Functions called:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
+		case "find_callers":
+			sb.WriteString("**Called by:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
+		case "find_references":
+			sb.WriteString("**References found:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
+		case "get_call_chain":
+			sb.WriteString("**Call chain:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
+		default:
+			// For other tools, just include the content if substantive
+			if len(content) > 50 {
+				sb.WriteString(fmt.Sprintf("**Analysis result:**\n"))
+				// Truncate very long results
+				if len(content) > 2000 {
+					content = content[:2000] + "\n... (truncated)"
+				}
+				sb.WriteString(content)
+				sb.WriteString("\n\n")
+			}
+		}
+	}
+
+	synthesized := sb.String()
+	if len(synthesized) > 50 {
+		slog.Info("GR-41b: Synthesized from graph tool results",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("reason", reason),
+			slog.Int("result_len", len(synthesized)),
+		)
+
+		// Record trace step
+		if deps.Session != nil {
+			deps.Session.RecordTraceStep(crs.TraceStep{
+				Timestamp: time.Now(),
+				Action:    "forced_synthesis",
+				Target:    reason,
+				Metadata: map[string]string{
+					"reason":       reason,
+					"result_count": fmt.Sprintf("%d", len(toolResults)),
+					"output_len":   fmt.Sprintf("%d", len(synthesized)),
+				},
+			})
+		}
+
+		return synthesized
+	}
+
+	return ""
 }

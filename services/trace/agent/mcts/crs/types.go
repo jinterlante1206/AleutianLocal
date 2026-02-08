@@ -1907,7 +1907,10 @@ const MaxPropagationDepth = 100
 // hasn't yet integrated proof numbers.
 //
 // NOTE: This value should match maxRepeatedToolCalls in execute.go.
-const DefaultCircuitBreakerThreshold = 2
+// GR-41b: Increased from 2 to 5 to allow more exploration before blocking.
+// 2 was too aggressive - graph tools like find_callees may need 3-4 calls
+// to explore different parts of the call graph legitimately.
+const DefaultCircuitBreakerThreshold = 5
 
 // -----------------------------------------------------------------------------
 // Learning Activity Types (CRS-04)

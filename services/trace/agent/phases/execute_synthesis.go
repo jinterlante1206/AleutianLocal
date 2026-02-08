@@ -49,24 +49,67 @@ import (
 //
 // Thread Safety: This method is safe for concurrent use.
 func (p *ExecutePhase) synthesizeFromToolResults(deps *Dependencies) string {
+	// CB-31 Enhancement: Diagnostic logging at entry for debugging empty response issues
+	toolResultsCount := 0
+	if deps.Context != nil {
+		toolResultsCount = len(deps.Context.ToolResults)
+	}
+	traceStepsCount := 0
+	toolCallStepsCount := 0
+	if deps.Session != nil {
+		steps := deps.Session.GetTraceSteps()
+		traceStepsCount = len(steps)
+		for _, step := range steps {
+			if step.Action == "tool_call" || step.Action == "tool_call_forced" {
+				toolCallStepsCount++
+			}
+		}
+	}
+
+	sessionID := "nil"
+	if deps.Session != nil {
+		sessionID = deps.Session.ID
+	}
+
+	slog.Debug("CB-31: synthesizeFromToolResults entering",
+		slog.String("session_id", sessionID),
+		slog.Bool("has_context", deps.Context != nil),
+		slog.Int("tool_results_count", toolResultsCount),
+		slog.Int("trace_steps_count", traceStepsCount),
+		slog.Int("tool_call_steps_count", toolCallStepsCount),
+	)
+
 	// Primary path: Use ToolResults (preferred, has full output)
 	if deps.Context != nil && len(deps.Context.ToolResults) > 0 {
 		result := p.synthesizeFromToolResultsSlice(deps.Context.ToolResults)
 
 		// Record synthesis in CRS for observability
-		if deps.Session != nil && result != "" {
-			deps.Session.RecordTraceStep(crs.TraceStep{
-				Action: "synthesis",
-				Tool:   "tool_results",
-				Metadata: map[string]string{
-					"source":       "ToolResults",
-					"result_count": fmt.Sprintf("%d", len(deps.Context.ToolResults)),
-					"output_len":   fmt.Sprintf("%d", len(result)),
-				},
-			})
+		if deps.Session != nil {
+			if result != "" {
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Action: "synthesis",
+					Tool:   "tool_results",
+					Metadata: map[string]string{
+						"source":       "ToolResults",
+						"result_count": fmt.Sprintf("%d", len(deps.Context.ToolResults)),
+						"output_len":   fmt.Sprintf("%d", len(result)),
+					},
+				})
+			} else {
+				// CB-31: Log when ToolResults exist but synthesis returned empty
+				// This catches edge cases like all results being duplicates or errors
+				slog.Warn("CB-31: synthesizeFromToolResultsSlice returned empty despite having results",
+					slog.String("session_id", deps.Session.ID),
+					slog.Int("tool_results_count", len(deps.Context.ToolResults)),
+				)
+				// Fall through to TraceSteps fallback instead of returning empty
+			}
 		}
 
-		return result
+		// Only return if we got content; otherwise fall through to TraceSteps fallback
+		if result != "" {
+			return result
+		}
 	}
 
 	// Fallback: Use TraceSteps if ToolResults is empty but tools executed
