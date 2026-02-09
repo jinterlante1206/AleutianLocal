@@ -178,20 +178,30 @@ func (a *SearchActivity) Execute(
 	span.SetAttributes(attribute.String("root_node", searchInput.RootNodeID))
 
 	// Create algorithm-specific inputs
+	// Return nil to skip algorithms when required data is missing
 	makeInput := func(algo algorithms.Algorithm) any {
 		switch algo.Name() {
 		case "pnmcts":
+			if searchInput.RootNodeID == "" {
+				return nil // Skip PNMCTS when no root node
+			}
 			return &search.PNMCTSInput{
 				RootNodeID:  searchInput.RootNodeID,
 				TargetNodes: searchInput.TargetNodeIDs,
 				MaxDepth:    searchInput.MaxExpansions, // Use MaxExpansions as depth limit
 			}
 		case "transposition":
+			if searchInput.RootNodeID == "" {
+				return nil // Skip transposition when no root node
+			}
 			return &search.TranspositionInput{
 				Nodes:             []string{searchInput.RootNodeID},
 				CurrentGeneration: snapshot.Generation(),
 			}
 		case "unit_propagation":
+			if searchInput.RootNodeID == "" {
+				return nil // Skip unit propagation when no root node
+			}
 			return &search.UnitPropInput{
 				FocusNodes: []string{searchInput.RootNodeID},
 			}

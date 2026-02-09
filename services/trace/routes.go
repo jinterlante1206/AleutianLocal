@@ -246,5 +246,12 @@ func RegisterAgentRoutesWithMiddleware(rg *gin.RouterGroup, handlers *AgentHandl
 		// CRS Export API (CB-29-2)
 		agent.GET("/:id/reasoning", handlers.HandleGetReasoningTrace)
 		agent.GET("/:id/crs", handlers.HandleGetCRSExport)
+
+		// Debug endpoints (GR-Phase1 Issue 5, Issue 5b)
+		debug := agent.Group("/debug")
+		{
+			debug.GET("/crs", handlers.HandleDebugCRS)
+			debug.GET("/history", handlers.HandleDebugHistory)
+		}
 	}
 }

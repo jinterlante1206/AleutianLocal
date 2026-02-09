@@ -65,7 +65,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -73,12 +72,10 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
-	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/classifier"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
-	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
@@ -88,23 +85,20 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
-// warmupStatus tracks whether the main LLM model has completed warming up.
-// 0 = not complete, 1 = complete.
-// Used to return 503 Service Unavailable for agent endpoints during warmup.
-var warmupStatus atomic.Int32
-
-// IsWarmupComplete returns true if the main model warmup has finished.
+// IsWarmupComplete checks if the main model warmup has finished.
+// Delegates to the code_buddy package's warmup registry.
 //
 // Thread Safety: This function is safe for concurrent use.
 func IsWarmupComplete() bool {
-	return warmupStatus.Load() == 1
+	return code_buddy.IsWarmupComplete()
 }
 
 // markWarmupComplete marks the warmup as complete.
+// Delegates to the code_buddy package's warmup registry.
 //
 // Thread Safety: This function is safe for concurrent use.
 func markWarmupComplete() {
-	warmupStatus.Store(1)
+	code_buddy.MarkWarmupComplete()
 }
 
 // WarmupGuardMiddleware returns 503 Service Unavailable for agent endpoints
@@ -301,29 +295,23 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 			slog.String("model", model))
 	}()
 
-	// Create LLM classifier for better query classification.
-	// The classifier is created immediately but will work correctly once warmup completes.
-	// If called before warmup, it may experience slower first call or fall back to regex.
-	llmClassifier, classifierErr := createLLMClassifier(llmClient)
-	if classifierErr != nil {
-		slog.Warn("Failed to create LLM classifier, using regex fallback",
-			slog.String("error", classifierErr.Error()))
-	}
+	// GR-Phase1: Query classification architecture
+	//
+	// The system uses a two-tier classification approach:
+	// 1. RegexClassifier (default): Fast pattern matching (~1ms) to determine if
+	//    a query is "analytical" (needs codebase exploration) or not.
+	// 2. Granite4Router: Uses granite4:micro-h (~100ms) to select the specific
+	//    tool when a query is analytical.
+	//
+	// This avoids using the slow main model (glm-4.7-flash) for classification,
+	// which was causing ~9s delays due to JSON output format issues.
+	slog.Info("Using regex classifier + Granite4Router for tool selection")
 
 	// Create phase registry with actual phase implementations
 	registry := agent.NewPhaseRegistry()
 	registry.Register(agent.StateInit, code_buddy.NewPhaseAdapter(phases.NewInitPhase()))
 	registry.Register(agent.StatePlan, code_buddy.NewPhaseAdapter(phases.NewPlanPhase()))
-
-	// Use LLM classifier if available
-	if llmClassifier != nil {
-		slog.Info("Using LLM-based query classifier")
-		registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(
-			phases.NewExecutePhase(phases.WithQueryClassifier(llmClassifier)),
-		))
-	} else {
-		registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
-	}
+	registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
 
 	registry.Register(agent.StateReflect, code_buddy.NewPhaseAdapter(phases.NewReflectPhase()))
 	registry.Register(agent.StateClarify, code_buddy.NewPhaseAdapter(phases.NewClarifyPhase()))
@@ -418,47 +406,6 @@ func printBanner(port int, agentEnabled bool) {
 ╚═══════════════════════════════════════════════════════════════════╝
 `
 	fmt.Printf(banner, agentStatus, port, port, port, port)
-}
-
-// createLLMClassifier creates an LLM-based query classifier.
-//
-// Description:
-//
-//	Creates an LLMClassifier using the provided LLM client and static
-//	tool definitions. This enables better query classification than
-//	regex patterns alone.
-//
-// Inputs:
-//
-//	client - The LLM client for classification calls.
-//
-// Outputs:
-//
-//	classifier.QueryClassifier - The LLM classifier, or nil on error.
-//	error - Non-nil if classifier creation fails.
-//
-// Limitations:
-//
-//   - Requires tool definitions to be non-empty. Returns error if none available.
-//   - Relies on default classifier configuration. For custom config, use NewLLMClassifier directly.
-//   - May fail if LLM client is in degraded state (timeout, rate-limited).
-//   - First classification call may be slow due to model cold-start.
-//
-// Assumptions:
-//
-//   - LLM client is fully initialized and connected.
-//   - Tool definitions are stable during operation.
-//   - DefaultClassifierConfig() returns valid configuration for this LLM.
-//
-// Thread Safety: This function is safe for concurrent use.
-func createLLMClassifier(client agentllm.Client) (classifier.QueryClassifier, error) {
-	toolDefs := tools.StaticToolDefinitions()
-	if len(toolDefs) == 0 {
-		return nil, fmt.Errorf("no static tool definitions available")
-	}
-
-	config := classifier.DefaultClassifierConfig()
-	return classifier.NewLLMClassifier(client, toolDefs, config)
 }
 
 // warmMainModel pre-loads the main LLM model into VRAM to prevent cold-start issues.

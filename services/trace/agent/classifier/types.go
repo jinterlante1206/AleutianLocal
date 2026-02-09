@@ -198,7 +198,11 @@ func (c ClassifierConfig) Validate() error {
 // Thread Safety: This function is safe for concurrent use.
 func DefaultClassifierConfig() ClassifierConfig {
 	return ClassifierConfig{
-		Temperature:         0.0,
+		// GR-Phase1: Use Temperature=0.1 instead of 0.0.
+		// Some models (e.g., glm-4.7-flash) return empty responses with Temperature=0.0.
+		// A small non-zero temperature ensures the model generates output while
+		// remaining mostly deterministic for classification tasks.
+		Temperature:         0.1,
 		MaxTokens:           256,
 		Timeout:             5 * time.Second,
 		MaxRetries:          2,

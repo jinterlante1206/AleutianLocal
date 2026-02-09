@@ -83,9 +83,9 @@ func (t *findCallersTool) Category() ToolCategory {
 func (t *findCallersTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name: "find_callers",
-		Description: "Find all functions that call a given function by name. " +
-			"Essential for understanding code dependencies and impact analysis. " +
-			"Use this instead of Grep when you need to find callers of a function. " +
+		Description: "Find all functions that CALL a given function (upstream dependencies). " +
+			"Use when asked 'who calls X?' or 'what calls X?' or 'find usages of X'. " +
+			"NOT for 'what does X call' - use find_callees for that instead. " +
 			"Returns the list of callers with file locations and signatures.",
 		Parameters: map[string]ParamDef{
 			"function_name": {
@@ -105,6 +105,18 @@ func (t *findCallersTool) Definition() ToolDefinition {
 		Requires:    []string{"graph_initialized"},
 		SideEffects: false,
 		Timeout:     5 * time.Second,
+		WhenToUse: WhenToUse{
+			Keywords: []string{
+				"who calls", "what calls", "find callers", "callers of",
+				"usages of", "incoming calls", "upstream", "called from",
+				"references to", "uses of", "invocations of",
+			},
+			UseWhen: "User asks WHO or WHAT calls a specific function. " +
+				"Questions like 'who calls X?', 'what calls X?', 'find usages of X', 'callers of X'.",
+			AvoidWhen: "User asks what a function CALLS or what it depends on. " +
+				"Questions like 'what does X call?', 'what functions does X call?'. " +
+				"Use find_callees instead for those.",
+		},
 	}
 }
 
@@ -257,9 +269,10 @@ func (t *findCalleesTool) Category() ToolCategory {
 func (t *findCalleesTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name: "find_callees",
-		Description: "Find all functions called by a given function. " +
-			"Essential for understanding dependencies and data flow. " +
-			"Use this to understand what a function depends on.",
+		Description: "Find all functions that a given function CALLS (downstream dependencies). " +
+			"Use when asked 'what does X call?' or 'what functions does X call?' or 'what does X depend on?'. " +
+			"NOT for 'who calls X' - use find_callers for that instead. " +
+			"Returns the list of called functions with file locations.",
 		Parameters: map[string]ParamDef{
 			"function_name": {
 				Type:        ParamTypeString,
@@ -278,6 +291,18 @@ func (t *findCalleesTool) Definition() ToolDefinition {
 		Requires:    []string{"graph_initialized"},
 		SideEffects: false,
 		Timeout:     5 * time.Second,
+		WhenToUse: WhenToUse{
+			Keywords: []string{
+				"what does call", "functions called by", "find callees", "callees of",
+				"calls to", "outgoing calls", "downstream", "dependencies of",
+				"what X calls", "what functions X calls",
+			},
+			UseWhen: "User asks what functions a specific function CALLS. " +
+				"Questions like 'what does X call?', 'what functions does X call?', 'dependencies of X'.",
+			AvoidWhen: "User asks WHO calls a function. " +
+				"Questions like 'who calls X?', 'find usages of X', 'callers of X'. " +
+				"Use find_callers instead for those.",
+		},
 	}
 }
 

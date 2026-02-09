@@ -443,8 +443,19 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 				slog.String("error", paramErr.Error()),
 			)
 			grounding.RecordRouterFallback(hardForcing.Tool, "param_extraction_failed")
-			// Continue with normal LLM flow using ToolChoiceRequired
-			request.ToolChoice = llm.ToolChoiceRequired(hardForcing.Tool)
+			// GR-Phase1 Fix: When hard forcing fails, check if we already have tool results.
+			// If so, don't require new tool calls - the LLM should synthesize from existing results.
+			// If not, use ToolChoiceAny to encourage tool use without forcing a specific tool.
+			if deps.Context != nil && len(deps.Context.ToolResults) > 0 {
+				// Already have tool results - let LLM decide (may synthesize)
+				request.ToolChoice = nil
+				slog.Info("GR-Phase1: Skipping tool forcing, already have tool results",
+					slog.String("session_id", deps.Session.ID),
+					slog.Int("tool_results", len(deps.Context.ToolResults)),
+				)
+			} else {
+				request.ToolChoice = llm.ToolChoiceAny()
+			}
 		} else {
 			execResult, execErr := p.executeToolDirectlyWithFallback(ctx, deps, hardForcing.Tool, params, toolDefs)
 			if execErr != nil {
@@ -454,8 +465,16 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 					slog.String("error", execErr.Error()),
 				)
 				grounding.RecordRouterFallback(hardForcing.Tool, "execution_failed")
-				// Continue with normal LLM flow
-				request.ToolChoice = llm.ToolChoiceRequired(hardForcing.Tool)
+				// GR-Phase1 Fix: Same as above - check for existing tool results
+				if deps.Context != nil && len(deps.Context.ToolResults) > 0 {
+					request.ToolChoice = nil
+					slog.Info("GR-Phase1: Skipping tool forcing, already have tool results",
+						slog.String("session_id", deps.Session.ID),
+						slog.Int("tool_results", len(deps.Context.ToolResults)),
+					)
+				} else {
+					request.ToolChoice = llm.ToolChoiceAny()
+				}
 			} else {
 				// Success! Tool executed directly - return early
 				grounding.RecordRouterHardForced(hardForcing.Tool, true)
@@ -518,7 +537,7 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			slog.String("session_id", deps.Session.ID),
 		)
 
-		return p.handleCompletion(ctx, deps, response, stepStart, stepNumber)
+		return p.handleCompletion(ctx, deps, response, request, stepStart, stepNumber)
 	}
 
 	// Parse and execute tool calls
@@ -557,7 +576,7 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		synthResult := p.synthesizeFromGraphToolResults(deps, toolResults, "graph_tool_completion")
 		if synthResult != "" {
 			response.Content = synthResult
-			return p.handleCompletion(ctx, deps, response, stepStart, stepNumber)
+			return p.handleCompletion(ctx, deps, response, request, stepStart, stepNumber)
 		}
 	}
 
@@ -803,10 +822,13 @@ Answer the user's question now based on the tool results shown above.`
 //	*agent.ToolRouterSelection - The selection if confident, nil for low confidence.
 //	error - Non-nil if router fails (GR-44: fatal error, no fallback).
 func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Dependencies, router agent.ToolRouter, toolDefs []tools.ToolDefinition) (*agent.ToolRouterSelection, error) {
+	// GR-Phase1: Track router invocation count to debug duplicate calls
+	routerCallID := time.Now().UnixNano()
 	slog.Info("CB-31d tryToolRouterSelection CALLED",
 		slog.String("session_id", deps.Session.ID),
 		slog.Int("num_tool_defs", len(toolDefs)),
 		slog.String("router_model", router.Model()),
+		slog.Int64("call_id", routerCallID),
 	)
 
 	ctx, span := executePhaseTracer.Start(ctx, "ExecutePhase.tryToolRouterSelection")
@@ -857,6 +879,66 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 		slog.String("selected_tool", selection.Tool),
 		slog.Float64("confidence", selection.Confidence),
 	)
+
+	// GR-Phase1: Semantic validation to catch callers/callees confusion
+	// Only validate if tool hasn't already been corrected (check for marker in reasoning)
+	if !strings.Contains(selection.Reasoning, "Semantic correction:") {
+		if correctedTool, wasChanged, reason := ValidateToolQuerySemantics(deps.Query, selection.Tool); wasChanged {
+			originalTool := selection.Tool
+
+			// GR-Phase1: Check if we've already applied this correction for this query
+			// Use fast in-memory cache first, then fall back to trace step check
+			alreadyCorrected := hasSemanticCorrectionInCache(deps.Session.ID, deps.Query, correctedTool)
+			if !alreadyCorrected {
+				// Double-check with trace steps (belt and suspenders)
+				alreadyCorrected = hasSemanticCorrectionForQuery(deps.Session, deps.Query, correctedTool)
+			}
+
+			if !alreadyCorrected {
+				// Only log warning on first correction
+				slog.Warn("GR-Phase1: Router selection semantically corrected",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("original_tool", originalTool),
+					slog.String("corrected_tool", correctedTool),
+					slog.String("reason", reason),
+					slog.Int64("call_id", routerCallID),
+				)
+
+				// Mark as corrected in fast cache
+				markSemanticCorrectionApplied(deps.Session.ID, deps.Query, correctedTool)
+
+				// GR-Phase1: Record semantic correction in CRS trace for observability
+				if deps.Session != nil && deps.Session.HasCRS() {
+					deps.Session.RecordTraceStep(crs.TraceStep{
+						Timestamp: time.Now().UnixMilli(),
+						Action:    "semantic_correction",
+						Target:    correctedTool,
+						Tool:      "semantic_validator",
+						Metadata: map[string]string{
+							"original_tool":  originalTool,
+							"corrected_tool": correctedTool,
+							"reason":         reason,
+							"query_preview":  truncateQuery(deps.Query, 100),
+						},
+					})
+				}
+			} else {
+				slog.Debug("GR-Phase1: Semantic correction already applied, skipping duplicate",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("corrected_tool", correctedTool),
+				)
+			}
+
+			span.SetAttributes(
+				attribute.String("semantic_correction_original", originalTool),
+				attribute.String("semantic_correction_applied", correctedTool),
+				attribute.String("semantic_correction_reason", reason),
+			)
+
+			selection.Tool = correctedTool
+			selection.Reasoning = fmt.Sprintf("Semantic correction: %s. Original: %s", reason, selection.Reasoning)
+		}
+	}
 
 	// Check confidence threshold
 	threshold := 0.7 // Default
@@ -1344,7 +1426,7 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 //
 //	agent.AgentState - COMPLETE if grounded, EXECUTE if retry needed.
 //	error - Non-nil only for unrecoverable errors.
-func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies, response *llm.Response, stepStart time.Time, stepNumber int) (agent.AgentState, error) {
+func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies, response *llm.Response, request *llm.Request, stepStart time.Time, stepNumber int) (agent.AgentState, error) {
 	slog.Info("Handling completion",
 		slog.String("session_id", deps.Session.ID),
 		slog.Int("output_tokens", response.OutputTokens),
@@ -1402,17 +1484,12 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 
 	// Validate response for prohibited patterns (hybrid stack layer 4)
 	if p.responseValidator != nil {
-		// Get the tool_choice that was used for this request
-		var toolChoice *llm.ToolChoice
-		if p.toolChoiceSelector != nil && deps.Query != "" {
-			toolNames := p.getToolNames(deps)
-			selection := p.toolChoiceSelector.SelectToolChoice(ctx, deps.Query, toolNames)
-			if selection.IsAnalytical {
-				toolChoice = selection.ToolChoice
-			}
-		}
-
-		validation := p.responseValidator.Validate(response, toolChoice)
+		// GR-Phase1 Fix: Use the actual tool_choice from the request instead of
+		// re-computing from classifier. This prevents false failures when:
+		// 1. Router hard-forced a tool (executed directly, LLM gets no tool_choice)
+		// 2. Circuit breaker fired (tool_choice=none is correct)
+		// 3. Classifier was already called once in buildLLMRequest
+		validation := p.responseValidator.Validate(response, request.ToolChoice)
 		if !validation.Valid {
 			forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
 
@@ -1441,13 +1518,13 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 
 	// Validate response quality (hedging language, citations) for analytical queries
 	if p.qualityValidator != nil && response.Content != "" {
-		// Determine if this is an analytical query
-		isAnalytical := false
-		if p.toolChoiceSelector != nil && deps.Query != "" {
-			toolNames := p.getToolNames(deps)
-			selection := p.toolChoiceSelector.SelectToolChoice(ctx, deps.Query, toolNames)
-			isAnalytical = selection.IsAnalytical
-		}
+		// GR-Phase1 Fix: Determine if analytical from actual request tool_choice
+		// instead of re-computing from classifier. A query is analytical if:
+		// - tool_choice is "required" (specific tool) or "any" (must use a tool)
+		// - NOT "none" (synthesis mode) or "auto" (LLM decides)
+		isAnalytical := request.ToolChoice != nil &&
+			request.ToolChoice.Type != "none" &&
+			request.ToolChoice.Type != "auto"
 
 		qualityResult := p.qualityValidator.ValidateQuality(response.Content, isAnalytical)
 		if !qualityResult.Valid {
@@ -2010,10 +2087,27 @@ func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolRe
 			sb.WriteString(content)
 			sb.WriteString("\n\n")
 
+		case "Read", "read_file", "read_symbol":
+			// GR-Phase1 Fix: Skip raw file content in synthesis.
+			// Read tool outputs are too verbose and unstructured for synthesis.
+			// They often contain comments, build instructions, etc. that aren't
+			// relevant to the query. Graph tools provide structured data that's
+			// better for synthesis.
+			slog.Debug("GR-Phase1: Skipping Read tool output in synthesis",
+				slog.Int("content_len", len(content)),
+			)
+			continue
+
+		case "find_entry_points":
+			sb.WriteString("**Entry points found:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
 		default:
-			// For other tools, just include the content if substantive
-			if len(content) > 50 {
-				sb.WriteString(fmt.Sprintf("**Analysis result:**\n"))
+			// For other graph tools, include the content if substantive
+			// but skip generic file operations
+			if len(content) > 50 && !strings.Contains(toolName, "read") && !strings.Contains(toolName, "grep") {
+				sb.WriteString(fmt.Sprintf("**%s result:**\n", toolName))
 				// Truncate very long results
 				if len(content) > 2000 {
 					content = content[:2000] + "\n... (truncated)"
