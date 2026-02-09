@@ -1186,6 +1186,181 @@ func (p *ExecutePhase) extractToolParameters(
 		// Use defaults
 		return map[string]interface{}{}, nil
 
+	case "find_callers", "find_callees":
+		// GR-Phase1: Extract function name from query or context
+		funcName := extractFunctionNameFromQuery(query)
+
+		// If not found in query, try to get from context (previous tool results)
+		if funcName == "" && ctx != nil {
+			funcName = extractFunctionNameFromContext(ctx)
+		}
+
+		if funcName == "" {
+			return nil, fmt.Errorf("could not extract function name from query for %s", toolName)
+		}
+
+		return map[string]interface{}{
+			"function_name": funcName,
+			"limit":         20,
+		}, nil
+
+	case "find_implementations":
+		// Extract interface name from query
+		// Similar patterns to function name but looking for interface
+		interfaceName := extractFunctionNameFromQuery(query) // Reuse same logic
+		if interfaceName == "" && ctx != nil {
+			interfaceName = extractFunctionNameFromContext(ctx)
+		}
+		if interfaceName == "" {
+			return nil, fmt.Errorf("could not extract interface name from query")
+		}
+		return map[string]interface{}{
+			"interface_name": interfaceName,
+			"limit":          20,
+		}, nil
+
+	case "find_references":
+		// Extract symbol name from query
+		symbolName := extractFunctionNameFromQuery(query)
+		if symbolName == "" && ctx != nil {
+			symbolName = extractFunctionNameFromContext(ctx)
+		}
+		if symbolName == "" {
+			return nil, fmt.Errorf("could not extract symbol name from query")
+		}
+		return map[string]interface{}{
+			"symbol_name": symbolName,
+			"limit":       20,
+		}, nil
+
+	// GR-Phase1: Parameter extraction for graph analytics tools
+	case "find_hotspots":
+		// Extract "top N" and "kind" from query
+		// Defaults: top=10, kind="all"
+		top := extractTopNFromQuery(query, 10)
+		kind := extractKindFromQuery(query)
+		slog.Debug("GR-Phase1: extracted find_hotspots params",
+			slog.String("tool", toolName),
+			slog.Int("top", top),
+			slog.String("kind", kind),
+		)
+		return map[string]interface{}{
+			"top":  top,
+			"kind": kind,
+		}, nil
+
+	case "find_dead_code":
+		// Defaults work for most queries
+		// include_exported=false, package="", limit=50
+		params := map[string]interface{}{
+			"include_exported": false,
+			"limit":            50,
+		}
+		// Check if user specifically asks for exported symbols
+		lowerQuery := strings.ToLower(query)
+		if strings.Contains(lowerQuery, "export") || strings.Contains(lowerQuery, "public") {
+			params["include_exported"] = true
+		}
+		// Try to extract package name if specified
+		if pkgName := extractPackageNameFromQuery(query); pkgName != "" {
+			params["package"] = pkgName
+		}
+		slog.Debug("GR-Phase1: extracted find_dead_code params",
+			slog.String("tool", toolName),
+			slog.Bool("include_exported", params["include_exported"].(bool)),
+			slog.Int("limit", params["limit"].(int)),
+		)
+		return params, nil
+
+	case "find_cycles":
+		// Defaults: min_size=2, limit=20
+		slog.Debug("GR-Phase1: extracted find_cycles params (defaults)",
+			slog.String("tool", toolName),
+			slog.Int("min_size", 2),
+			slog.Int("limit", 20),
+		)
+		return map[string]interface{}{
+			"min_size": 2,
+			"limit":    20,
+		}, nil
+
+	case "find_path":
+		// Extract "from" and "to" symbols - both required
+		from, to, ok := extractPathSymbolsFromQuery(query)
+		if !ok {
+			// Try to extract any two function names from the query
+			funcName := extractFunctionNameFromQuery(query)
+			if funcName != "" && (from == "" || to == "") {
+				if from == "" {
+					from = funcName
+				} else if to == "" {
+					to = funcName
+				}
+			}
+		}
+		if from == "" || to == "" {
+			slog.Debug("GR-Phase1: find_path extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+				slog.String("from", from),
+				slog.String("to", to),
+			)
+			return nil, fmt.Errorf("could not extract 'from' and 'to' symbols from query for find_path (need both source and target)")
+		}
+		slog.Debug("GR-Phase1: extracted find_path params",
+			slog.String("tool", toolName),
+			slog.String("from", from),
+			slog.String("to", to),
+		)
+		return map[string]interface{}{
+			"from": from,
+			"to":   to,
+		}, nil
+
+	case "find_important":
+		// Extract "top N" and "kind" from query (same as find_hotspots)
+		// Defaults: top=10, kind="all"
+		top := extractTopNFromQuery(query, 10)
+		kind := extractKindFromQuery(query)
+		slog.Debug("GR-Phase1: extracted find_important params",
+			slog.String("tool", toolName),
+			slog.Int("top", top),
+			slog.String("kind", kind),
+		)
+		return map[string]interface{}{
+			"top":  top,
+			"kind": kind,
+		}, nil
+
+	case "find_symbol":
+		// Extract symbol name from query
+		symbolName := extractFunctionNameFromQuery(query)
+		if symbolName == "" && ctx != nil {
+			symbolName = extractFunctionNameFromContext(ctx)
+		}
+		if symbolName == "" {
+			slog.Debug("GR-Phase1: find_symbol extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			return nil, fmt.Errorf("could not extract symbol name from query for find_symbol")
+		}
+		params := map[string]interface{}{
+			"name": symbolName,
+			"kind": "all",
+		}
+		// Check if user specified a kind filter
+		kind := extractKindFromQuery(query)
+		if kind != "all" {
+			params["kind"] = kind
+		}
+		slog.Debug("GR-Phase1: extracted find_symbol params",
+			slog.String("tool", toolName),
+			slog.String("name", symbolName),
+			slog.String("kind", kind),
+		)
+		return params, nil
+
 	default:
 		// For other tools, fallback to Main LLM
 		return nil, fmt.Errorf("parameter extraction not implemented for tool: %s", toolName)

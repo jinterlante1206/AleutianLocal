@@ -657,6 +657,32 @@ type SessionState struct {
 	DegradedMode bool `json:"degraded_mode"`
 }
 
+// SessionSummary is a brief summary of a session for listing/debug endpoints.
+//
+// Description:
+//
+//	Contains minimal session information for debug endpoints that need to
+//	list all sessions without exposing full session internals.
+type SessionSummary struct {
+	// ID is the session identifier.
+	ID string `json:"id"`
+
+	// State is the current agent state.
+	State AgentState `json:"state"`
+
+	// TraceStepCount is the number of CRS trace steps recorded.
+	TraceStepCount int `json:"trace_step_count"`
+
+	// CircuitBreakerActive indicates if the circuit breaker has fired.
+	CircuitBreakerActive bool `json:"circuit_breaker_active"`
+
+	// CreatedAt is when the session started (Unix milliseconds UTC).
+	CreatedAt int64 `json:"created_at"`
+
+	// ToolCalls is the total number of tool calls made.
+	ToolCalls int `json:"tool_calls"`
+}
+
 // =============================================================================
 // Tool Router Interface
 // =============================================================================

@@ -174,6 +174,18 @@ type AgentLoop interface {
 	// Thread Safety: This method is safe for concurrent use.
 	GetSession(sessionID string) (*Session, error)
 
+	// ListSessions returns a summary of all active sessions.
+	//
+	// Description:
+	//   Returns basic info about all sessions in the session store.
+	//   Used by debug endpoints to show CRS state across sessions.
+	//
+	// Outputs:
+	//   []*SessionSummary - List of session summaries.
+	//
+	// Thread Safety: This method is safe for concurrent use.
+	ListSessions() []*SessionSummary
+
 	// CloseSession permanently closes a session and releases all resources.
 	//
 	// Description:
@@ -701,6 +713,41 @@ func (l *DefaultAgentLoop) GetSession(sessionID string) (*Session, error) {
 	}
 
 	return session, nil
+}
+
+// ListSessions implements AgentLoop.
+//
+// Description:
+//
+//	Returns a summary of all active sessions for debug endpoints.
+//
+// Outputs:
+//
+//	[]*SessionSummary - List of session summaries.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (l *DefaultAgentLoop) ListSessions() []*SessionSummary {
+	sessionIDs := l.sessions.List()
+	summaries := make([]*SessionSummary, 0, len(sessionIDs))
+
+	for _, id := range sessionIDs {
+		session, ok := l.sessions.Get(id)
+		if !ok {
+			continue // Session was removed between List and Get
+		}
+
+		summary := &SessionSummary{
+			ID:                   session.ID,
+			State:                session.State,
+			TraceStepCount:       len(session.GetTraceSteps()),
+			CircuitBreakerActive: session.IsCircuitBreakerActive(),
+			CreatedAt:            session.CreatedAt,
+			ToolCalls:            session.GetMetric(MetricToolCalls),
+		}
+		summaries = append(summaries, summary)
+	}
+
+	return summaries
 }
 
 // validateRunInput validates inputs for Run.

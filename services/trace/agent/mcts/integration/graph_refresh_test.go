@@ -35,10 +35,15 @@ func TestCoordinator_HandleEvent_GraphRefreshed(t *testing.T) {
 	config.EnableTracing = false
 	coord := NewCoordinator(bridge, config)
 
-	// Register mock Awareness and Search activities
+	// Register mock activities - must include all dependencies
+	// Search depends on Learning and Constraint per DefaultActivityConfigs()
 	awarenessActivity := &mockGraphRefreshActivity{name: "awareness"}
+	learningActivity := &mockGraphRefreshActivity{name: "learning"}
+	constraintActivity := &mockGraphRefreshActivity{name: "constraint"}
 	searchActivity := &mockGraphRefreshActivity{name: "search"}
 	coord.Register(awarenessActivity)
+	coord.Register(learningActivity)
+	coord.Register(constraintActivity)
 	coord.Register(searchActivity)
 
 	// Handle EventGraphRefreshed

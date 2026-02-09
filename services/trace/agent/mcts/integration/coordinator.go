@@ -608,19 +608,19 @@ func (c *Coordinator) HandleEvent(
 		config := configs[activityName]
 
 		// CR-5 fix: Check dependencies with better distinction between missing and not-run
+		// Dependencies are checked against coordinator registration, not just this event's activities.
+		// A dependency is satisfied if:
+		// 1. It's registered with the coordinator (even if not triggered by this event), AND
+		// 2. It has completed in this execution cycle
+		// If a dependency is not triggered by this event but is registered, we skip silently
+		// (it may have run in a previous event or is simply not needed for this event type).
 		if config != nil && len(config.DependsOn) > 0 {
 			allDepsComplete := true
 			for _, dep := range config.DependsOn {
-				depRegistered := false
-				// Check if dependency is registered (in the toRun list or already completed)
-				for _, scheduled := range toRun {
-					if ActivityName(scheduled.activity.Name()) == dep {
-						depRegistered = true
-						break
-					}
-				}
-				if !depRegistered && !completedActivities[string(dep)] {
-					// Dependency is neither scheduled nor completed - it's missing
+				// Check if dependency is registered with the coordinator at all
+				_, depRegistered := c.Get(string(dep))
+				if !depRegistered {
+					// Dependency is not registered - this is a configuration error
 					c.logger.Warn("dependency activity not registered, skipping dependent",
 						slog.String("activity", string(activityName)),
 						slog.String("missing_dependency", string(dep)),
@@ -628,8 +628,16 @@ func (c *Coordinator) HandleEvent(
 					allDepsComplete = false
 					break
 				}
-				if !completedActivities[string(dep)] {
-					// Dependency is registered but not yet complete
+				// Dependency is registered. Check if it's in toRun for this event.
+				depScheduledForThisEvent := false
+				for _, scheduled := range toRun {
+					if ActivityName(scheduled.activity.Name()) == dep {
+						depScheduledForThisEvent = true
+						break
+					}
+				}
+				if depScheduledForThisEvent && !completedActivities[string(dep)] {
+					// Dependency is scheduled for this event but not yet complete - wait
 					c.logger.Debug("dependency not complete yet, skipping for now",
 						slog.String("activity", string(activityName)),
 						slog.String("dependency", string(dep)),
@@ -637,6 +645,8 @@ func (c *Coordinator) HandleEvent(
 					allDepsComplete = false
 					break
 				}
+				// If dependency is not scheduled for this event, we don't require it
+				// (it may have been satisfied by a previous event or is not relevant here)
 			}
 			if !allDepsComplete {
 				continue

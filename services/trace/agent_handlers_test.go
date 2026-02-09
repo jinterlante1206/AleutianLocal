@@ -35,6 +35,7 @@ type MockAgentLoop struct {
 	getStateFunc     func(sessionID string) (*agent.SessionState, error)
 	getSessionFunc   func(sessionID string) (*agent.Session, error)
 	closeSessionFunc func(sessionID string) error
+	listSessionsFunc func() []*agent.SessionSummary
 }
 
 func (m *MockAgentLoop) Run(ctx context.Context, session *agent.Session, query string) (*agent.RunResult, error) {
@@ -91,6 +92,13 @@ func (m *MockAgentLoop) CloseSession(sessionID string) error {
 		return m.closeSessionFunc(sessionID)
 	}
 	return nil
+}
+
+func (m *MockAgentLoop) ListSessions() []*agent.SessionSummary {
+	if m.listSessionsFunc != nil {
+		return m.listSessionsFunc()
+	}
+	return []*agent.SessionSummary{}
 }
 
 func setupAgentTestRouter(handlers *AgentHandlers) *gin.Engine {

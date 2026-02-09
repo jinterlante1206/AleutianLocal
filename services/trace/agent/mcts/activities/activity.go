@@ -352,11 +352,25 @@ func (a *BaseActivity) RunAlgorithms(
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 
-	// Build executions
+	// Build executions (skip algorithms with nil input - no data to process)
 	executions := make([]algorithms.Execution, 0, len(a.algorithms))
 	for _, algo := range a.algorithms {
 		input := makeInput(algo)
+		if input == nil {
+			// No data for this algorithm, skip it
+			continue
+		}
 		executions = append(executions, algorithms.NewExecution(algo, input))
+	}
+
+	// If no algorithms have data to process, return success (nothing to do)
+	if len(executions) == 0 {
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(startTime)
+		result.Success = true
+		result.Metrics["algorithms_total"] = float64(len(a.algorithms))
+		result.Metrics["algorithms_skipped"] = float64(len(a.algorithms))
+		return result, nil, nil
 	}
 
 	// Run in parallel

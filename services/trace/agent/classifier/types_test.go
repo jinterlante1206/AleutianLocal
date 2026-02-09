@@ -153,8 +153,10 @@ func TestClassifierConfig_Validate_AllFields(t *testing.T) {
 func TestDefaultClassifierConfig(t *testing.T) {
 	config := DefaultClassifierConfig()
 
-	if config.Temperature != 0.0 {
-		t.Errorf("expected Temperature=0.0, got %f", config.Temperature)
+	// GR-Phase1: Temperature changed from 0.0 to 0.1 to avoid empty responses
+	// from some models (e.g., glm-4.7-flash) that return empty with Temperature=0.0
+	if config.Temperature != 0.1 {
+		t.Errorf("expected Temperature=0.1, got %f", config.Temperature)
 	}
 	if config.MaxTokens != 256 {
 		t.Errorf("expected MaxTokens=256, got %d", config.MaxTokens)

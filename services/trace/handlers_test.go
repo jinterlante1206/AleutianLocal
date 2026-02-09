@@ -63,6 +63,10 @@ func TestHandlers_HandleReady(t *testing.T) {
 	svc := NewService(DefaultServiceConfig())
 	router := setupTestRouter(svc)
 
+	// Mark warmup as complete for this test
+	MarkWarmupComplete()
+	defer ResetWarmupStatus() // Clean up after test
+
 	req, _ := http.NewRequest("GET", "/v1/codebuddy/ready", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)

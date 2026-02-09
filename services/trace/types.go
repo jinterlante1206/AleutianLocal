@@ -993,3 +993,163 @@ type GraphStatsResponse struct {
 	// NodesByKind maps symbol kind name to count.
 	NodesByKind map[string]int `json:"nodes_by_kind"`
 }
+
+// =============================================================================
+// CRS DEBUG ENDPOINT TYPES (GR-Phase1 Issue 5)
+// =============================================================================
+
+// DebugCRSResponse is the response for GET /v1/codebuddy/debug/crs.
+//
+// Description:
+//
+//	Returns CRS (Code Reasoning State) debug information. When session_id is
+//	provided, returns detailed state for that session. Otherwise returns a
+//	summary of all active sessions.
+type DebugCRSResponse struct {
+	// ActiveSessions is the count of sessions with CRS state.
+	ActiveSessions int `json:"active_sessions"`
+
+	// TotalTraceSteps is the total trace steps across all sessions.
+	TotalTraceSteps int `json:"total_trace_steps"`
+
+	// CircuitBreakersActive is the count of sessions with active circuit breakers.
+	CircuitBreakersActive int `json:"circuit_breakers_active"`
+
+	// Sessions is a summary of each session (only in summary mode).
+	Sessions []DebugCRSSessionSummary `json:"sessions,omitempty"`
+
+	// Session is the detailed session state (only when session_id provided).
+	Session *DebugCRSSessionDetail `json:"session,omitempty"`
+}
+
+// DebugCRSSessionSummary is a brief summary of a session's CRS state.
+type DebugCRSSessionSummary struct {
+	// ID is the session identifier.
+	ID string `json:"id"`
+
+	// State is the current agent state (e.g., "EXECUTE", "COMPLETE").
+	State string `json:"state"`
+
+	// TraceSteps is the number of trace steps recorded.
+	TraceSteps int `json:"trace_steps"`
+
+	// CircuitBreakerActive indicates if circuit breaker has fired.
+	CircuitBreakerActive bool `json:"circuit_breaker_active"`
+
+	// CreatedAtMilli is the session creation time (Unix milliseconds).
+	CreatedAtMilli int64 `json:"created_at_milli"`
+}
+
+// DebugCRSSessionDetail is the detailed CRS state for a single session.
+type DebugCRSSessionDetail struct {
+	// SessionID is the session identifier.
+	SessionID string `json:"session_id"`
+
+	// State is the current agent state.
+	State string `json:"state"`
+
+	// TraceSteps is the list of recorded trace steps.
+	TraceSteps []DebugCRSTraceStep `json:"trace_steps"`
+
+	// CircuitBreaker contains circuit breaker state.
+	CircuitBreaker *DebugCRSCircuitBreaker `json:"circuit_breaker,omitempty"`
+
+	// Metrics contains session metrics.
+	Metrics DebugCRSMetrics `json:"metrics"`
+
+	// ToolCounts maps tool name to call count.
+	ToolCounts map[string]int `json:"tool_counts"`
+}
+
+// DebugCRSTraceStep is a trace step for debug output.
+type DebugCRSTraceStep struct {
+	// Action is the step action (e.g., "tool_call", "semantic_correction").
+	Action string `json:"action"`
+
+	// Tool is the tool name if applicable.
+	Tool string `json:"tool,omitempty"`
+
+	// Target is the target of the action.
+	Target string `json:"target,omitempty"`
+
+	// DurationMs is the duration in milliseconds.
+	DurationMs int64 `json:"duration_ms"`
+
+	// Error is the error message if the step failed.
+	Error string `json:"error,omitempty"`
+
+	// Metadata contains additional step metadata.
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// DebugCRSCircuitBreaker contains circuit breaker state.
+type DebugCRSCircuitBreaker struct {
+	// Active indicates if the circuit breaker has fired.
+	Active bool `json:"active"`
+
+	// Tool is the tool that triggered the circuit breaker.
+	Tool string `json:"tool,omitempty"`
+
+	// Count is the call count when circuit breaker fired.
+	Count int `json:"count,omitempty"`
+
+	// Threshold is the configured threshold.
+	Threshold int `json:"threshold"`
+}
+
+// DebugCRSMetrics contains session metrics for debug output.
+type DebugCRSMetrics struct {
+	// ToolCalls is the total number of tool calls.
+	ToolCalls int `json:"tool_calls"`
+
+	// TokensUsed is the estimated token count.
+	TokensUsed int `json:"tokens_used"`
+
+	// Steps is the number of agent steps.
+	Steps int `json:"steps"`
+}
+
+// =============================================================================
+// DEBUG HISTORY ENDPOINT TYPES (GR-Phase1 Issue 5b)
+// =============================================================================
+
+// DebugHistoryResponse is the response for GET /v1/codebuddy/agent/debug/history.
+//
+// Description:
+//
+//	Returns query history across all sessions or for a specific session.
+//	Used by integration tests to verify reasoning history and query flow.
+type DebugHistoryResponse struct {
+	// Count is the total number of history entries returned.
+	Count int `json:"count"`
+
+	// Sessions is the list of unique session IDs with history.
+	Sessions []string `json:"sessions"`
+
+	// History is the list of query history entries.
+	History []DebugHistoryEntry `json:"history"`
+
+	// Limit is the maximum entries that can be returned.
+	Limit int `json:"limit"`
+}
+
+// DebugHistoryEntry represents a single query in the history.
+type DebugHistoryEntry struct {
+	// SessionID is the session that processed this query.
+	SessionID string `json:"session_id"`
+
+	// Timestamp is when the query was received (Unix milliseconds).
+	Timestamp int64 `json:"timestamp"`
+
+	// Query is the user's question or task.
+	Query string `json:"query"`
+
+	// State is the final state of the query (e.g., "COMPLETE", "ERROR").
+	State string `json:"state"`
+
+	// ToolsUsed is the list of tools invoked for this query.
+	ToolsUsed []string `json:"tools_used"`
+
+	// DurationMs is how long the query took to process.
+	DurationMs int64 `json:"duration_ms"`
+}

@@ -937,3 +937,840 @@ func TestGraph_GetNodesByFile(t *testing.T) {
 		}
 	})
 }
+
+// =============================================================================
+// GR-06/07/08: Secondary Index Tests
+// =============================================================================
+
+func TestGraph_GetNodesByName(t *testing.T) {
+	t.Run("returns nodes with matching name", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		// Add multiple symbols with same name in different packages
+		sym1 := makeSymbol("pkg1/a.go:1:Setup", "Setup", ast.SymbolKindFunction, "pkg1/a.go")
+		sym2 := makeSymbol("pkg2/a.go:1:Setup", "Setup", ast.SymbolKindFunction, "pkg2/a.go")
+		sym3 := makeSymbol("pkg1/a.go:10:Other", "Other", ast.SymbolKindFunction, "pkg1/a.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		// Query by name
+		nodes := g.GetNodesByName("Setup")
+		if len(nodes) != 2 {
+			t.Errorf("len(nodes) = %d, expected 2", len(nodes))
+		}
+
+		// Verify both Setup nodes are returned
+		ids := make(map[string]bool)
+		for _, n := range nodes {
+			ids[n.ID] = true
+		}
+		if !ids[sym1.ID] || !ids[sym2.ID] {
+			t.Error("expected both Setup nodes")
+		}
+	})
+
+	t.Run("returns empty for non-existent name", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		g.AddNode(sym)
+
+		nodes := g.GetNodesByName("NonExistent")
+		if len(nodes) != 0 {
+			t.Errorf("len(nodes) = %d, expected 0", len(nodes))
+		}
+	})
+
+	t.Run("returns defensive copy", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		g.AddNode(sym)
+
+		nodes1 := g.GetNodesByName("funcA")
+		nodes2 := g.GetNodesByName("funcA")
+
+		// Slices should be different (defensive copy)
+		nodes1[0] = nil
+		if nodes2[0] == nil {
+			t.Error("modifying returned slice should not affect subsequent calls")
+		}
+	})
+
+	t.Run("handles empty name symbols", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym := &ast.Symbol{
+			ID:       "a.go:1:anon",
+			Name:     "", // Empty name
+			Kind:     ast.SymbolKindFunction,
+			FilePath: "a.go",
+		}
+		g.AddNode(sym)
+
+		// Empty name should not be indexed
+		nodes := g.GetNodesByName("")
+		if len(nodes) != 0 {
+			t.Errorf("empty name should not be indexed, got %d nodes", len(nodes))
+		}
+	})
+}
+
+func TestGraph_GetNodesByKind(t *testing.T) {
+	t.Run("returns nodes of matching kind", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("a.go:10:funcB", "funcB", ast.SymbolKindFunction, "a.go")
+		sym3 := makeSymbol("a.go:20:TypeC", "TypeC", ast.SymbolKindStruct, "a.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		functions := g.GetNodesByKind(ast.SymbolKindFunction)
+		if len(functions) != 2 {
+			t.Errorf("len(functions) = %d, expected 2", len(functions))
+		}
+
+		structs := g.GetNodesByKind(ast.SymbolKindStruct)
+		if len(structs) != 1 {
+			t.Errorf("len(structs) = %d, expected 1", len(structs))
+		}
+	})
+
+	t.Run("returns empty for non-existent kind", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		g.AddNode(sym)
+
+		nodes := g.GetNodesByKind(ast.SymbolKindInterface)
+		if len(nodes) != 0 {
+			t.Errorf("len(nodes) = %d, expected 0", len(nodes))
+		}
+	})
+
+	t.Run("returns defensive copy", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		g.AddNode(sym)
+
+		nodes1 := g.GetNodesByKind(ast.SymbolKindFunction)
+		nodes2 := g.GetNodesByKind(ast.SymbolKindFunction)
+
+		nodes1[0] = nil
+		if nodes2[0] == nil {
+			t.Error("modifying returned slice should not affect subsequent calls")
+		}
+	})
+}
+
+func TestGraph_GetEdgesByType(t *testing.T) {
+	t.Run("returns edges of matching type", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		sym3 := makeSymbol("c.go:1:TypeC", "TypeC", ast.SymbolKindStruct, "c.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 20)) // Second call site
+		g.AddEdge(sym1.ID, sym3.ID, EdgeTypeReferences, makeLocation("a.go", 15))
+
+		callEdges := g.GetEdgesByType(EdgeTypeCalls)
+		if len(callEdges) != 2 {
+			t.Errorf("len(callEdges) = %d, expected 2", len(callEdges))
+		}
+
+		refEdges := g.GetEdgesByType(EdgeTypeReferences)
+		if len(refEdges) != 1 {
+			t.Errorf("len(refEdges) = %d, expected 1", len(refEdges))
+		}
+	})
+
+	t.Run("returns empty for non-existent type", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		edges := g.GetEdgesByType(EdgeTypeImports)
+		if len(edges) != 0 {
+			t.Errorf("len(edges) = %d, expected 0", len(edges))
+		}
+	})
+
+	t.Run("returns defensive copy", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		edges1 := g.GetEdgesByType(EdgeTypeCalls)
+		edges2 := g.GetEdgesByType(EdgeTypeCalls)
+
+		edges1[0] = nil
+		if edges2[0] == nil {
+			t.Error("modifying returned slice should not affect subsequent calls")
+		}
+	})
+
+	t.Run("handles invalid edge type", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		edges := g.GetEdgesByType(EdgeType(-1))
+		if len(edges) != 0 {
+			t.Errorf("invalid edge type should return empty, got %d", len(edges))
+		}
+
+		edges = g.GetEdgesByType(EdgeType(999))
+		if len(edges) != 0 {
+			t.Errorf("out of range edge type should return empty, got %d", len(edges))
+		}
+	})
+}
+
+func TestGraph_IndexConsistency_RemoveFile(t *testing.T) {
+	t.Run("indexes updated after RemoveFile", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		// Add nodes from two files with same name
+		symA := makeSymbol("a.go:1:Setup", "Setup", ast.SymbolKindFunction, "a.go")
+		symB := makeSymbol("b.go:1:Setup", "Setup", ast.SymbolKindFunction, "b.go")
+		symC := makeSymbol("a.go:10:Helper", "Helper", ast.SymbolKindFunction, "a.go")
+
+		g.AddNode(symA)
+		g.AddNode(symB)
+		g.AddNode(symC)
+
+		// Add edges
+		g.AddEdge(symA.ID, symC.ID, EdgeTypeCalls, makeLocation("a.go", 5))
+		g.AddEdge(symB.ID, symA.ID, EdgeTypeCalls, makeLocation("b.go", 5))
+
+		// Remove file a.go
+		removed, err := g.RemoveFile("a.go")
+		if err != nil {
+			t.Fatalf("RemoveFile failed: %v", err)
+		}
+		if removed != 2 {
+			t.Errorf("removed = %d, expected 2", removed)
+		}
+
+		// Check nodesByName - "Setup" should only have 1 node now
+		setupNodes := g.GetNodesByName("Setup")
+		if len(setupNodes) != 1 {
+			t.Errorf("Setup nodes = %d, expected 1", len(setupNodes))
+		}
+		if setupNodes[0].ID != symB.ID {
+			t.Errorf("remaining Setup should be from b.go")
+		}
+
+		// Check nodesByName - "Helper" should be empty
+		helperNodes := g.GetNodesByName("Helper")
+		if len(helperNodes) != 0 {
+			t.Errorf("Helper nodes = %d, expected 0", len(helperNodes))
+		}
+
+		// Check nodesByKind - should only have 1 function
+		funcNodes := g.GetNodesByKind(ast.SymbolKindFunction)
+		if len(funcNodes) != 1 {
+			t.Errorf("function nodes = %d, expected 1", len(funcNodes))
+		}
+
+		// Check edgesByType - all call edges should be removed
+		callEdges := g.GetEdgesByType(EdgeTypeCalls)
+		if len(callEdges) != 0 {
+			t.Errorf("call edges = %d, expected 0", len(callEdges))
+		}
+	})
+}
+
+func TestGraph_IndexConsistency_Clone(t *testing.T) {
+	t.Run("indexes cloned correctly", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:Setup", "Setup", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:Setup", "Setup", ast.SymbolKindFunction, "b.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.Freeze()
+
+		clone := g.Clone()
+
+		// Check nodesByName in clone
+		setupNodes := clone.GetNodesByName("Setup")
+		if len(setupNodes) != 2 {
+			t.Errorf("clone Setup nodes = %d, expected 2", len(setupNodes))
+		}
+
+		// Verify cloned nodes are different pointers
+		origNodes := g.GetNodesByName("Setup")
+		for i, cn := range setupNodes {
+			if cn == origNodes[i] {
+				t.Error("cloned nodes should be different pointers")
+			}
+		}
+
+		// Check nodesByKind in clone
+		funcNodes := clone.GetNodesByKind(ast.SymbolKindFunction)
+		if len(funcNodes) != 2 {
+			t.Errorf("clone function nodes = %d, expected 2", len(funcNodes))
+		}
+
+		// Check edgesByType in clone
+		callEdges := clone.GetEdgesByType(EdgeTypeCalls)
+		if len(callEdges) != 1 {
+			t.Errorf("clone call edges = %d, expected 1", len(callEdges))
+		}
+
+		// Verify cloned edges are different pointers
+		origEdges := g.GetEdgesByType(EdgeTypeCalls)
+		if callEdges[0] == origEdges[0] {
+			t.Error("cloned edges should be different pointers")
+		}
+
+		// Modify clone and verify original is unchanged
+		sym3 := makeSymbol("c.go:1:NewFunc", "NewFunc", ast.SymbolKindFunction, "c.go")
+		clone.AddNode(sym3)
+
+		origFuncNodes := g.GetNodesByKind(ast.SymbolKindFunction)
+		if len(origFuncNodes) != 2 {
+			t.Errorf("original should still have 2 functions, got %d", len(origFuncNodes))
+		}
+	})
+}
+
+func TestGraph_IndexConsistency_MergeParseResult(t *testing.T) {
+	t.Run("indexes updated after MergeParseResult", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		// Add initial node
+		existing := makeSymbol("a.go:1:Setup", "Setup", ast.SymbolKindFunction, "a.go")
+		g.AddNode(existing)
+
+		// Merge new symbols
+		result := &ast.ParseResult{
+			FilePath: "b.go",
+			Language: "go",
+			Symbols: []*ast.Symbol{
+				makeSymbol("b.go:1:Setup", "Setup", ast.SymbolKindFunction, "b.go"),
+				makeSymbol("b.go:10:Helper", "Helper", ast.SymbolKindMethod, "b.go"),
+			},
+		}
+
+		added, err := g.MergeParseResult(result)
+		if err != nil {
+			t.Fatalf("MergeParseResult failed: %v", err)
+		}
+		if added != 2 {
+			t.Errorf("added = %d, expected 2", added)
+		}
+
+		// Check nodesByName
+		setupNodes := g.GetNodesByName("Setup")
+		if len(setupNodes) != 2 {
+			t.Errorf("Setup nodes = %d, expected 2", len(setupNodes))
+		}
+
+		helperNodes := g.GetNodesByName("Helper")
+		if len(helperNodes) != 1 {
+			t.Errorf("Helper nodes = %d, expected 1", len(helperNodes))
+		}
+
+		// Check nodesByKind
+		funcNodes := g.GetNodesByKind(ast.SymbolKindFunction)
+		if len(funcNodes) != 2 {
+			t.Errorf("function nodes = %d, expected 2", len(funcNodes))
+		}
+
+		methodNodes := g.GetNodesByKind(ast.SymbolKindMethod)
+		if len(methodNodes) != 1 {
+			t.Errorf("method nodes = %d, expected 1", len(methodNodes))
+		}
+	})
+}
+
+func TestGraph_Stats_UsesIndexes(t *testing.T) {
+	t.Run("Stats uses indexes for counts", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		sym3 := makeSymbol("c.go:1:TypeC", "TypeC", ast.SymbolKindStruct, "c.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.AddEdge(sym1.ID, sym3.ID, EdgeTypeReferences, makeLocation("a.go", 15))
+
+		stats := g.Stats()
+
+		// Verify NodesByKind
+		if stats.NodesByKind[ast.SymbolKindFunction] != 2 {
+			t.Errorf("NodesByKind[Function] = %d, expected 2", stats.NodesByKind[ast.SymbolKindFunction])
+		}
+		if stats.NodesByKind[ast.SymbolKindStruct] != 1 {
+			t.Errorf("NodesByKind[Struct] = %d, expected 1", stats.NodesByKind[ast.SymbolKindStruct])
+		}
+
+		// Verify EdgesByType
+		if stats.EdgesByType[EdgeTypeCalls] != 1 {
+			t.Errorf("EdgesByType[Calls] = %d, expected 1", stats.EdgesByType[EdgeTypeCalls])
+		}
+		if stats.EdgesByType[EdgeTypeReferences] != 1 {
+			t.Errorf("EdgesByType[References] = %d, expected 1", stats.EdgesByType[EdgeTypeReferences])
+		}
+	})
+}
+
+// Benchmarks for index operations
+func BenchmarkGetNodesByName_WithIndex(b *testing.B) {
+	g := NewGraph("/project")
+
+	// Add 1000 nodes with 100 unique names
+	for i := 0; i < 1000; i++ {
+		name := "func" + string(rune('A'+i%100))
+		id := "file.go:" + string(rune('0'+i)) + ":" + name
+		sym := makeSymbol(id, name, ast.SymbolKindFunction, "file.go")
+		g.AddNode(sym)
+	}
+	g.Freeze()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.GetNodesByName("funcA")
+	}
+}
+
+func BenchmarkGetNodesByKind_WithIndex(b *testing.B) {
+	g := NewGraph("/project")
+
+	// Add 1000 nodes with mixed kinds
+	for i := 0; i < 1000; i++ {
+		kind := ast.SymbolKindFunction
+		if i%3 == 0 {
+			kind = ast.SymbolKindStruct
+		} else if i%3 == 1 {
+			kind = ast.SymbolKindMethod
+		}
+		id := "file.go:" + string(rune('0'+i)) + ":sym"
+		sym := makeSymbol(id, "sym", kind, "file.go")
+		g.AddNode(sym)
+	}
+	g.Freeze()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.GetNodesByKind(ast.SymbolKindFunction)
+	}
+}
+
+func BenchmarkGetEdgesByType_WithIndex(b *testing.B) {
+	g := NewGraph("/project")
+
+	// Add nodes
+	nodes := make([]*ast.Symbol, 100)
+	for i := 0; i < 100; i++ {
+		id := "file.go:" + string(rune('0'+i)) + ":func"
+		nodes[i] = makeSymbol(id, "func", ast.SymbolKindFunction, "file.go")
+		g.AddNode(nodes[i])
+	}
+
+	// Add 1000 edges with mixed types
+	for i := 0; i < 1000; i++ {
+		edgeType := EdgeTypeCalls
+		if i%3 == 0 {
+			edgeType = EdgeTypeImports
+		} else if i%3 == 1 {
+			edgeType = EdgeTypeReferences
+		}
+		from := nodes[i%100]
+		to := nodes[(i+1)%100]
+		g.AddEdge(from.ID, to.ID, edgeType, makeLocation("file.go", i))
+	}
+	g.Freeze()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.GetEdgesByType(EdgeTypeCalls)
+	}
+}
+
+// =============================================================================
+// GR-06/07/08: Count Methods Tests
+// =============================================================================
+
+func TestGraph_GetEdgeCountByType(t *testing.T) {
+	t.Run("returns correct count", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		sym3 := makeSymbol("c.go:1:TypeC", "TypeC", ast.SymbolKindStruct, "c.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 20)) // Second call
+		g.AddEdge(sym1.ID, sym3.ID, EdgeTypeReferences, makeLocation("a.go", 15))
+
+		if count := g.GetEdgeCountByType(EdgeTypeCalls); count != 2 {
+			t.Errorf("GetEdgeCountByType(Calls) = %d, expected 2", count)
+		}
+		if count := g.GetEdgeCountByType(EdgeTypeReferences); count != 1 {
+			t.Errorf("GetEdgeCountByType(References) = %d, expected 1", count)
+		}
+		if count := g.GetEdgeCountByType(EdgeTypeImports); count != 0 {
+			t.Errorf("GetEdgeCountByType(Imports) = %d, expected 0", count)
+		}
+	})
+
+	t.Run("handles invalid type", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		if count := g.GetEdgeCountByType(EdgeType(-1)); count != 0 {
+			t.Errorf("invalid type should return 0, got %d", count)
+		}
+		if count := g.GetEdgeCountByType(EdgeType(999)); count != 0 {
+			t.Errorf("out of range type should return 0, got %d", count)
+		}
+	})
+}
+
+func TestGraph_GetNodeCountByName(t *testing.T) {
+	t.Run("returns correct count", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("pkg1/a.go:1:Setup", "Setup", ast.SymbolKindFunction, "pkg1/a.go")
+		sym2 := makeSymbol("pkg2/a.go:1:Setup", "Setup", ast.SymbolKindFunction, "pkg2/a.go")
+		sym3 := makeSymbol("pkg1/a.go:10:Other", "Other", ast.SymbolKindFunction, "pkg1/a.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		if count := g.GetNodeCountByName("Setup"); count != 2 {
+			t.Errorf("GetNodeCountByName(Setup) = %d, expected 2", count)
+		}
+		if count := g.GetNodeCountByName("Other"); count != 1 {
+			t.Errorf("GetNodeCountByName(Other) = %d, expected 1", count)
+		}
+		if count := g.GetNodeCountByName("NonExistent"); count != 0 {
+			t.Errorf("GetNodeCountByName(NonExistent) = %d, expected 0", count)
+		}
+	})
+}
+
+func TestGraph_GetNodeCountByKind(t *testing.T) {
+	t.Run("returns correct count", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("a.go:10:funcB", "funcB", ast.SymbolKindFunction, "a.go")
+		sym3 := makeSymbol("a.go:20:TypeC", "TypeC", ast.SymbolKindStruct, "a.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		if count := g.GetNodeCountByKind(ast.SymbolKindFunction); count != 2 {
+			t.Errorf("GetNodeCountByKind(Function) = %d, expected 2", count)
+		}
+		if count := g.GetNodeCountByKind(ast.SymbolKindStruct); count != 1 {
+			t.Errorf("GetNodeCountByKind(Struct) = %d, expected 1", count)
+		}
+		if count := g.GetNodeCountByKind(ast.SymbolKindInterface); count != 0 {
+			t.Errorf("GetNodeCountByKind(Interface) = %d, expected 0", count)
+		}
+	})
+}
+
+// =============================================================================
+// GR-09: edgesByFile Index Tests
+// =============================================================================
+
+func TestGraph_GetEdgesByFile(t *testing.T) {
+	t.Run("returns edges in matching file", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		sym3 := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		// Add edges from different files
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.AddEdge(sym1.ID, sym3.ID, EdgeTypeCalls, makeLocation("a.go", 20))
+		g.AddEdge(sym2.ID, sym3.ID, EdgeTypeCalls, makeLocation("b.go", 10))
+
+		// Query edges by file
+		aEdges := g.GetEdgesByFile("a.go")
+		if len(aEdges) != 2 {
+			t.Errorf("GetEdgesByFile(a.go) = %d, expected 2", len(aEdges))
+		}
+
+		bEdges := g.GetEdgesByFile("b.go")
+		if len(bEdges) != 1 {
+			t.Errorf("GetEdgesByFile(b.go) = %d, expected 1", len(bEdges))
+		}
+
+		cEdges := g.GetEdgesByFile("c.go")
+		if len(cEdges) != 0 {
+			t.Errorf("GetEdgesByFile(c.go) = %d, expected 0 (no edges originate from c.go)", len(cEdges))
+		}
+	})
+
+	t.Run("returns empty for non-existent file", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		edges := g.GetEdgesByFile("nonexistent.go")
+		if len(edges) != 0 {
+			t.Errorf("GetEdgesByFile(nonexistent.go) = %d, expected 0", len(edges))
+		}
+	})
+
+	t.Run("returns defensive copy", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		edges1 := g.GetEdgesByFile("a.go")
+		edges2 := g.GetEdgesByFile("a.go")
+
+		edges1[0] = nil
+		if edges2[0] == nil {
+			t.Error("modifying returned slice should not affect subsequent calls")
+		}
+	})
+}
+
+func TestGraph_GetEdgeCountByFile(t *testing.T) {
+	t.Run("returns correct count", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		sym3 := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.AddEdge(sym1.ID, sym3.ID, EdgeTypeCalls, makeLocation("a.go", 20))
+		g.AddEdge(sym2.ID, sym3.ID, EdgeTypeCalls, makeLocation("b.go", 10))
+
+		if count := g.GetEdgeCountByFile("a.go"); count != 2 {
+			t.Errorf("GetEdgeCountByFile(a.go) = %d, expected 2", count)
+		}
+		if count := g.GetEdgeCountByFile("b.go"); count != 1 {
+			t.Errorf("GetEdgeCountByFile(b.go) = %d, expected 1", count)
+		}
+		if count := g.GetEdgeCountByFile("c.go"); count != 0 {
+			t.Errorf("GetEdgeCountByFile(c.go) = %d, expected 0", count)
+		}
+	})
+}
+
+func TestGraph_EdgesByFile_RemoveFile(t *testing.T) {
+	t.Run("index updated after RemoveFile", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		sym3 := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+
+		// Edge from a.go calling b.go - location is a.go
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		// Edge from b.go calling c.go - location is b.go
+		g.AddEdge(sym2.ID, sym3.ID, EdgeTypeCalls, makeLocation("b.go", 10))
+		// Edge from a.go calling c.go - location is a.go
+		g.AddEdge(sym1.ID, sym3.ID, EdgeTypeCalls, makeLocation("a.go", 20))
+
+		// Before removal
+		if count := g.GetEdgeCountByFile("a.go"); count != 2 {
+			t.Errorf("before RemoveFile: a.go edges = %d, expected 2", count)
+		}
+
+		// Remove a.go - this removes sym1, and edges involving sym1
+		removed, err := g.RemoveFile("a.go")
+		if err != nil {
+			t.Fatalf("RemoveFile failed: %v", err)
+		}
+		if removed != 1 {
+			t.Errorf("removed = %d, expected 1", removed)
+		}
+
+		// After removal - edges from a.go should be removed
+		if count := g.GetEdgeCountByFile("a.go"); count != 0 {
+			t.Errorf("after RemoveFile: a.go edges = %d, expected 0", count)
+		}
+
+		// Edge from b.go -> c.go should still exist
+		if count := g.GetEdgeCountByFile("b.go"); count != 1 {
+			t.Errorf("after RemoveFile: b.go edges = %d, expected 1", count)
+		}
+	})
+}
+
+func TestGraph_EdgesByFile_Clone(t *testing.T) {
+	t.Run("index cloned correctly", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.Freeze()
+
+		clone := g.Clone()
+
+		// Check index in clone
+		if count := clone.GetEdgeCountByFile("a.go"); count != 1 {
+			t.Errorf("clone a.go edges = %d, expected 1", count)
+		}
+
+		// Verify cloned edges are different pointers
+		origEdges := g.GetEdgesByFile("a.go")
+		cloneEdges := clone.GetEdgesByFile("a.go")
+		if origEdges[0] == cloneEdges[0] {
+			t.Error("cloned edges should be different pointers")
+		}
+
+		// Modify clone - add new edge
+		sym3 := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+		clone.AddNode(sym3)
+		clone.AddEdge(sym2.ID, sym3.ID, EdgeTypeCalls, makeLocation("b.go", 10))
+
+		// Original should be unchanged
+		if count := g.GetEdgeCountByFile("b.go"); count != 0 {
+			t.Errorf("original b.go edges = %d, expected 0", count)
+		}
+		if count := clone.GetEdgeCountByFile("b.go"); count != 1 {
+			t.Errorf("clone b.go edges = %d, expected 1", count)
+		}
+	})
+}
+
+func BenchmarkGetEdgesByFile_WithIndex(b *testing.B) {
+	g := NewGraph("/project")
+
+	// Add nodes
+	nodes := make([]*ast.Symbol, 100)
+	for i := 0; i < 100; i++ {
+		file := "file" + string(rune('A'+i%10)) + ".go"
+		id := file + ":" + string(rune('0'+i)) + ":func"
+		nodes[i] = makeSymbol(id, "func", ast.SymbolKindFunction, file)
+		g.AddNode(nodes[i])
+	}
+
+	// Add 1000 edges across files
+	for i := 0; i < 1000; i++ {
+		from := nodes[i%100]
+		to := nodes[(i+1)%100]
+		file := "file" + string(rune('A'+i%10)) + ".go"
+		g.AddEdge(from.ID, to.ID, EdgeTypeCalls, makeLocation(file, i))
+	}
+	g.Freeze()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.GetEdgesByFile("fileA.go")
+	}
+}
+
+func TestGraph_ValidateIndexes_OnFreeze(t *testing.T) {
+	t.Run("freeze validates indexes", func(t *testing.T) {
+		g := NewGraph("/project")
+
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		// Freeze should complete without panic (validation passes)
+		g.Freeze()
+
+		// Verify graph is frozen
+		if !g.IsFrozen() {
+			t.Error("graph should be frozen")
+		}
+
+		// Verify indexes are consistent
+		if g.GetNodeCountByName("funcA") != 1 {
+			t.Error("nodesByName index should have funcA")
+		}
+		if g.GetNodeCountByKind(ast.SymbolKindFunction) != 2 {
+			t.Error("nodesByKind index should have 2 functions")
+		}
+		if g.GetEdgeCountByType(EdgeTypeCalls) != 1 {
+			t.Error("edgesByType index should have 1 call edge")
+		}
+	})
+}
+
+func BenchmarkStats_WithIndexes(b *testing.B) {
+	g := NewGraph("/project")
+
+	// Add 1000 nodes with mixed kinds
+	for i := 0; i < 1000; i++ {
+		kind := ast.SymbolKindFunction
+		if i%3 == 0 {
+			kind = ast.SymbolKindStruct
+		} else if i%3 == 1 {
+			kind = ast.SymbolKindMethod
+		}
+		id := "file.go:" + string(rune('0'+i)) + ":sym"
+		sym := makeSymbol(id, "sym", kind, "file.go")
+		g.AddNode(sym)
+	}
+
+	// Add edges between consecutive nodes
+	for i := 0; i < 999; i++ {
+		edgeType := EdgeTypeCalls
+		if i%2 == 0 {
+			edgeType = EdgeTypeReferences
+		}
+		fromID := "file.go:" + string(rune('0'+i)) + ":sym"
+		toID := "file.go:" + string(rune('0'+i+1)) + ":sym"
+		g.AddEdge(fromID, toID, edgeType, makeLocation("file.go", i))
+	}
+	g.Freeze()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.Stats()
+	}
+}

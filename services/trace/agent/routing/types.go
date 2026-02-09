@@ -356,6 +356,7 @@ const (
 	ErrCodeParseError       = "ROUTER_PARSE_ERROR"
 	ErrCodeModelUnavailable = "ROUTER_MODEL_UNAVAILABLE"
 	ErrCodeNoTools          = "ROUTER_NO_TOOLS"
+	ErrCodeEmptyResponse    = "ROUTER_EMPTY_RESPONSE" // GR-Phase1: Model returned empty response
 )
 
 // NewRouterError creates a new RouterError.

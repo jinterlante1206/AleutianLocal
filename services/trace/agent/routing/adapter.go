@@ -66,6 +66,8 @@ func (a *RouterAdapter) SelectTool(ctx context.Context, query string, availableT
 			BestFor:     spec.BestFor,
 			Params:      spec.Params,
 			Category:    spec.Category,
+			UseWhen:     spec.UseWhen,
+			AvoidWhen:   spec.AvoidWhen,
 		}
 	}
 

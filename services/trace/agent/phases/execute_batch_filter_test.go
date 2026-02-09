@@ -619,3 +619,303 @@ func findSubstringInBatchFilter(s, substr string) bool {
 	}
 	return false
 }
+
+// -----------------------------------------------------------------------------
+// Semantic Validation Tests (GR-Phase1)
+// -----------------------------------------------------------------------------
+
+func TestValidateToolQuerySemantics(t *testing.T) {
+	tests := []struct {
+		name         string
+		query        string
+		selectedTool string
+		wantTool     string
+		wantChanged  bool
+	}{
+		// Correctly selected tools - no change expected
+		{
+			name:         "find_callers_correct_who_calls",
+			query:        "who calls parseConfig?",
+			selectedTool: "find_callers",
+			wantTool:     "find_callers",
+			wantChanged:  false,
+		},
+		{
+			name:         "find_callers_correct_what_calls",
+			query:        "what calls parseConfig?",
+			selectedTool: "find_callers",
+			wantTool:     "find_callers",
+			wantChanged:  false,
+		},
+		{
+			name:         "find_callees_correct_what_does",
+			query:        "what does main call?",
+			selectedTool: "find_callees",
+			wantTool:     "find_callees",
+			wantChanged:  false,
+		},
+		{
+			name:         "find_callees_correct_what_functions_does",
+			query:        "what functions does main call?",
+			selectedTool: "find_callees",
+			wantTool:     "find_callees",
+			wantChanged:  false,
+		},
+		// Incorrectly selected tools - correction expected
+		{
+			name:         "should_be_callees_not_callers_what_does",
+			query:        "what does main call?",
+			selectedTool: "find_callers",
+			wantTool:     "find_callees",
+			wantChanged:  true,
+		},
+		{
+			name:         "should_be_callees_not_callers_what_functions",
+			query:        "what functions does parseConfig call?",
+			selectedTool: "find_callers",
+			wantTool:     "find_callees",
+			wantChanged:  true,
+		},
+		{
+			name:         "should_be_callers_not_callees_who_calls",
+			query:        "who calls parseConfig?",
+			selectedTool: "find_callees",
+			wantTool:     "find_callers",
+			wantChanged:  true,
+		},
+		{
+			name:         "should_be_callers_not_callees_callers_of",
+			query:        "find callers of main",
+			selectedTool: "find_callees",
+			wantTool:     "find_callers",
+			wantChanged:  true,
+		},
+		{
+			name:         "should_be_callers_not_callees_usages_of",
+			query:        "show me usages of handleRequest",
+			selectedTool: "find_callees",
+			wantTool:     "find_callers",
+			wantChanged:  true,
+		},
+		// Non-graph tools - no change expected
+		{
+			name:         "read_file_unaffected",
+			query:        "what does main call?",
+			selectedTool: "read_file",
+			wantTool:     "read_file",
+			wantChanged:  false,
+		},
+		{
+			name:         "grep_codebase_unaffected",
+			query:        "who calls parseConfig?",
+			selectedTool: "grep_codebase",
+			wantTool:     "grep_codebase",
+			wantChanged:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTool, gotChanged, _ := ValidateToolQuerySemantics(tt.query, tt.selectedTool)
+			if gotTool != tt.wantTool {
+				t.Errorf("ValidateToolQuerySemantics(%q, %q) tool = %q, want %q",
+					tt.query, tt.selectedTool, gotTool, tt.wantTool)
+			}
+			if gotChanged != tt.wantChanged {
+				t.Errorf("ValidateToolQuerySemantics(%q, %q) changed = %v, want %v",
+					tt.query, tt.selectedTool, gotChanged, tt.wantChanged)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// GR-Phase1: Parameter Extraction Tests
+// -----------------------------------------------------------------------------
+
+func TestExtractTopNFromQuery(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		defaultVal int
+		want       int
+	}{
+		{
+			name:       "top_5_hotspots",
+			query:      "Find the top 5 hotspots",
+			defaultVal: 10,
+			want:       5,
+		},
+		{
+			name:       "top_20_symbols",
+			query:      "Show me top 20 most important symbols",
+			defaultVal: 10,
+			want:       20,
+		},
+		{
+			name:       "top_with_hyphen",
+			query:      "List top-15 functions",
+			defaultVal: 10,
+			want:       10, // hyphen pattern not supported, use default
+		},
+		{
+			name:       "no_top_pattern",
+			query:      "Find all hotspots in the codebase",
+			defaultVal: 10,
+			want:       10,
+		},
+		{
+			name:       "top_exceeds_100",
+			query:      "Show top 200 symbols",
+			defaultVal: 10,
+			want:       10, // exceeds 100, use default
+		},
+		{
+			name:       "top_1_symbol",
+			query:      "Find top 1 most important function",
+			defaultVal: 10,
+			want:       1,
+		},
+		{
+			name:       "case_insensitive_TOP",
+			query:      "Find TOP 7 hotspots",
+			defaultVal: 10,
+			want:       7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractTopNFromQuery(tt.query, tt.defaultVal)
+			if got != tt.want {
+				t.Errorf("extractTopNFromQuery(%q, %d) = %d, want %d",
+					tt.query, tt.defaultVal, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractKindFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "function_keyword",
+			query: "Find the most important functions",
+			want:  "function",
+		},
+		{
+			name:  "type_keyword",
+			query: "Show me the hotspot types",
+			want:  "type",
+		},
+		{
+			name:  "method_keyword",
+			query: "List all methods with high connectivity",
+			want:  "function", // methods map to function
+		},
+		{
+			name:  "struct_keyword",
+			query: "Find hotspot structs",
+			want:  "type", // struct maps to type
+		},
+		{
+			name:  "interface_keyword",
+			query: "Show interface hotspots",
+			want:  "type", // interface maps to type
+		},
+		{
+			name:  "no_kind_specified",
+			query: "Find all hotspots",
+			want:  "all",
+		},
+		{
+			name:  "ambiguous_defaults_to_all",
+			query: "Find important symbols",
+			want:  "all",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractKindFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractKindFromQuery(%q) = %q, want %q",
+					tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractPathSymbolsFromQuery(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		wantFrom string
+		wantTo   string
+		wantOk   bool
+	}{
+		{
+			name:     "from_X_to_Y",
+			query:    "Find path from main to parseConfig",
+			wantFrom: "main",
+			wantTo:   "parseConfig",
+			wantOk:   true,
+		},
+		{
+			name:     "between_X_and_Y",
+			query:    "What's the path between Execute and handleRequest",
+			wantFrom: "Execute",
+			wantTo:   "handleRequest",
+			wantOk:   true,
+		},
+		{
+			name:     "quoted_symbols",
+			query:    "Find path from 'funcA' to 'funcB'",
+			wantFrom: "funcA",
+			wantTo:   "funcB",
+			wantOk:   true,
+		},
+		{
+			name:     "only_from_specified",
+			query:    "Find path from main",
+			wantFrom: "main",
+			wantTo:   "",
+			wantOk:   false,
+		},
+		{
+			name:     "no_path_pattern",
+			query:    "How are these connected",
+			wantFrom: "",
+			wantTo:   "",
+			wantOk:   false,
+		},
+		{
+			name:     "function_names_without_keywords",
+			query:    "Connection between getDatesToProcess and AnalyzeBeaconSessionData",
+			wantFrom: "getDatesToProcess",
+			wantTo:   "AnalyzeBeaconSessionData",
+			wantOk:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotFrom, gotTo, gotOk := extractPathSymbolsFromQuery(tt.query)
+			if gotFrom != tt.wantFrom {
+				t.Errorf("extractPathSymbolsFromQuery(%q) from = %q, want %q",
+					tt.query, gotFrom, tt.wantFrom)
+			}
+			if gotTo != tt.wantTo {
+				t.Errorf("extractPathSymbolsFromQuery(%q) to = %q, want %q",
+					tt.query, gotTo, tt.wantTo)
+			}
+			if gotOk != tt.wantOk {
+				t.Errorf("extractPathSymbolsFromQuery(%q) ok = %v, want %v",
+					tt.query, gotOk, tt.wantOk)
+			}
+		})
+	}
+}

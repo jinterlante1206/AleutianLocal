@@ -613,6 +613,344 @@ func (h *AgentHandlers) HandleGetCRSExport(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// HandleDebugCRS handles GET /v1/codebuddy/agent/debug/crs.
+//
+// Description:
+//
+//	Returns CRS debug information for all sessions or a specific session.
+//	Used by integration tests to verify CRS state and circuit breaker behavior.
+//	GR-Phase1 Issue 5: Debug endpoint for CRS observability.
+//
+// Query Parameters:
+//
+//	session_id: Optional session ID for detailed view
+//
+// Response:
+//
+//	200 OK: DebugCRSResponse (summary or detail depending on session_id)
+//	404 Not Found: Session not found (when session_id provided)
+//
+// Thread Safety: This method is safe for concurrent use.
+func (h *AgentHandlers) HandleDebugCRS(c *gin.Context) {
+	requestID := getOrCreateRequestID(c)
+	logger := slog.With("request_id", requestID, "handler", "HandleDebugCRS")
+
+	sessionID := c.Query("session_id")
+
+	if sessionID != "" {
+		// Detail mode: return specific session's CRS state
+		logger.Info("Getting CRS debug detail", "session_id", sessionID)
+
+		session, err := h.loop.GetSession(sessionID)
+		if err != nil {
+			if errors.Is(err, agent.ErrSessionNotFound) {
+				c.JSON(http.StatusNotFound, ErrorResponse{
+					Error: err.Error(),
+					Code:  "SESSION_NOT_FOUND",
+				})
+				return
+			}
+			logger.Error("Get session failed", "error", err)
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error: err.Error(),
+				Code:  "GET_SESSION_FAILED",
+			})
+			return
+		}
+
+		// Build detailed response
+		detail := h.buildCRSSessionDetail(session)
+
+		c.JSON(http.StatusOK, DebugCRSResponse{
+			ActiveSessions:        1,
+			TotalTraceSteps:       len(detail.TraceSteps),
+			CircuitBreakersActive: boolToInt(detail.CircuitBreaker != nil && detail.CircuitBreaker.Active),
+			Session:               detail,
+		})
+		return
+	}
+
+	// Summary mode: return all sessions
+	logger.Info("Getting CRS debug summary")
+
+	summaries := h.loop.ListSessions()
+
+	// Build response
+	totalSteps := 0
+	cbActive := 0
+	sessionSummaries := make([]DebugCRSSessionSummary, 0, len(summaries))
+
+	for _, s := range summaries {
+		totalSteps += s.TraceStepCount
+		if s.CircuitBreakerActive {
+			cbActive++
+		}
+		sessionSummaries = append(sessionSummaries, DebugCRSSessionSummary{
+			ID:                   s.ID,
+			State:                s.State.String(),
+			TraceSteps:           s.TraceStepCount,
+			CircuitBreakerActive: s.CircuitBreakerActive,
+			CreatedAtMilli:       s.CreatedAt,
+		})
+	}
+
+	logger.Info("Got CRS debug summary",
+		"session_count", len(summaries),
+		"total_steps", totalSteps,
+		"cb_active", cbActive)
+
+	c.JSON(http.StatusOK, DebugCRSResponse{
+		ActiveSessions:        len(summaries),
+		TotalTraceSteps:       totalSteps,
+		CircuitBreakersActive: cbActive,
+		Sessions:              sessionSummaries,
+	})
+}
+
+// buildCRSSessionDetail builds detailed CRS info for a session.
+func (h *AgentHandlers) buildCRSSessionDetail(session *agent.Session) *DebugCRSSessionDetail {
+	traceSteps := session.GetTraceSteps()
+	debugSteps := make([]DebugCRSTraceStep, 0, len(traceSteps))
+
+	for _, step := range traceSteps {
+		debugSteps = append(debugSteps, DebugCRSTraceStep{
+			Action:     step.Action,
+			Tool:       step.Tool,
+			Target:     step.Target,
+			DurationMs: step.Duration.Milliseconds(),
+			Error:      step.Error,
+			Metadata:   step.Metadata,
+		})
+	}
+
+	// Build tool counts from trace steps
+	toolCounts := make(map[string]int)
+	for _, step := range traceSteps {
+		if step.Action == "tool_call" && step.Tool != "" {
+			toolCounts[step.Tool]++
+		}
+	}
+
+	detail := &DebugCRSSessionDetail{
+		SessionID:  session.ID,
+		State:      session.State.String(),
+		TraceSteps: debugSteps,
+		ToolCounts: toolCounts,
+		Metrics: DebugCRSMetrics{
+			ToolCalls:  session.GetMetric(agent.MetricToolCalls),
+			TokensUsed: session.GetMetric(agent.MetricTokens),
+			Steps:      session.GetMetric(agent.MetricSteps),
+			// RouterCalls not tracked as separate metric yet
+		},
+	}
+
+	// Add circuit breaker info if active
+	if session.IsCircuitBreakerActive() {
+		detail.CircuitBreaker = &DebugCRSCircuitBreaker{
+			Active:    true,
+			Threshold: crs.DefaultCircuitBreakerThreshold,
+		}
+	}
+
+	return detail
+}
+
+// boolToInt converts bool to int (1 for true, 0 for false).
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// HandleDebugHistory handles GET /v1/codebuddy/agent/debug/history.
+//
+// Description:
+//
+//	Returns query history across all sessions or for a specific session.
+//	Used by integration tests to verify reasoning history and query flow.
+//	GR-Phase1 Issue 5b: Debug endpoint for query history.
+//
+// Query Parameters:
+//
+//	session_id: Optional session ID for filtering to one session
+//	limit: Optional max entries to return (default 100)
+//
+// Response:
+//
+//	200 OK: DebugHistoryResponse
+//	404 Not Found: Session not found (when session_id provided)
+//
+// Thread Safety: This method is safe for concurrent use.
+func (h *AgentHandlers) HandleDebugHistory(c *gin.Context) {
+	requestID := getOrCreateRequestID(c)
+	logger := slog.With("request_id", requestID, "handler", "HandleDebugHistory")
+
+	sessionID := c.Query("session_id")
+	limitStr := c.Query("limit")
+
+	// Parse limit with default
+	limit := 100
+	if limitStr != "" {
+		if parsed, err := parseIntParam(limitStr, 1, 1000); err == nil {
+			limit = parsed
+		}
+	}
+
+	if sessionID != "" {
+		// Single session mode
+		logger.Info("Getting history for specific session",
+			slog.String("session_id", sessionID),
+			slog.Int("limit", limit))
+
+		session, err := h.loop.GetSession(sessionID)
+		if err != nil {
+			if errors.Is(err, agent.ErrSessionNotFound) {
+				c.JSON(http.StatusNotFound, ErrorResponse{
+					Error: err.Error(),
+					Code:  "SESSION_NOT_FOUND",
+				})
+				return
+			}
+			logger.Error("Get session failed", slog.String("error", err.Error()))
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error: err.Error(),
+				Code:  "GET_SESSION_FAILED",
+			})
+			return
+		}
+
+		entries := h.buildHistoryEntriesForSession(session, limit)
+
+		c.JSON(http.StatusOK, DebugHistoryResponse{
+			Count:    len(entries),
+			Sessions: []string{sessionID},
+			History:  entries,
+			Limit:    limit,
+		})
+		return
+	}
+
+	// All sessions mode
+	logger.Info("Getting history for all sessions", slog.Int("limit", limit))
+
+	summaries := h.loop.ListSessions()
+	allEntries := make([]DebugHistoryEntry, 0)
+	sessionIDs := make([]string, 0, len(summaries))
+
+	for _, summary := range summaries {
+		sessionIDs = append(sessionIDs, summary.ID)
+
+		session, err := h.loop.GetSession(summary.ID)
+		if err != nil {
+			logger.Warn("Failed to get session for history",
+				slog.String("session_id", summary.ID),
+				slog.String("error", err.Error()))
+			continue
+		}
+
+		entries := h.buildHistoryEntriesForSession(session, limit-len(allEntries))
+		allEntries = append(allEntries, entries...)
+
+		if len(allEntries) >= limit {
+			break
+		}
+	}
+
+	// Trim to limit
+	if len(allEntries) > limit {
+		allEntries = allEntries[:limit]
+	}
+
+	logger.Info("Got history for all sessions",
+		slog.Int("session_count", len(sessionIDs)),
+		slog.Int("entry_count", len(allEntries)))
+
+	c.JSON(http.StatusOK, DebugHistoryResponse{
+		Count:    len(allEntries),
+		Sessions: sessionIDs,
+		History:  allEntries,
+		Limit:    limit,
+	})
+}
+
+// buildHistoryEntriesForSession extracts query history entries from a session.
+func (h *AgentHandlers) buildHistoryEntriesForSession(session *agent.Session, maxEntries int) []DebugHistoryEntry {
+	if maxEntries <= 0 {
+		return nil
+	}
+
+	history := session.GetHistory()
+	entries := make([]DebugHistoryEntry, 0)
+
+	// Extract query from plan entries
+	var currentQuery string
+	var queryTimestamp int64
+	var toolsUsed []string
+
+	for _, histEntry := range history {
+		if histEntry.Type == "plan" && histEntry.Query != "" {
+			// Found a new query
+			if currentQuery != "" {
+				// Save previous query entry
+				entry := DebugHistoryEntry{
+					SessionID:  session.ID,
+					Timestamp:  queryTimestamp,
+					Query:      currentQuery,
+					State:      string(session.State),
+					ToolsUsed:  toolsUsed,
+					DurationMs: histEntry.Timestamp - queryTimestamp,
+				}
+				entries = append(entries, entry)
+				if len(entries) >= maxEntries {
+					return entries
+				}
+			}
+			currentQuery = histEntry.Query
+			queryTimestamp = histEntry.Timestamp
+			toolsUsed = make([]string, 0)
+		} else if histEntry.Type == "tool_call" && histEntry.ToolName != "" {
+			// Record tool usage for current query
+			toolsUsed = append(toolsUsed, histEntry.ToolName)
+		}
+	}
+
+	// Add final query if exists
+	if currentQuery != "" {
+		durationMs := int64(0)
+		if queryTimestamp > 0 {
+			durationMs = time.Now().UnixMilli() - queryTimestamp
+		}
+		entry := DebugHistoryEntry{
+			SessionID:  session.ID,
+			Timestamp:  queryTimestamp,
+			Query:      currentQuery,
+			State:      string(session.State),
+			ToolsUsed:  toolsUsed,
+			DurationMs: durationMs,
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries
+}
+
+// parseIntParam parses an integer parameter with bounds checking.
+func parseIntParam(s string, min, max int) (int, error) {
+	var val int
+	_, err := fmt.Sscanf(s, "%d", &val)
+	if err != nil {
+		return 0, err
+	}
+	if val < min {
+		val = min
+	}
+	if val > max {
+		val = max
+	}
+	return val, nil
+}
+
 // initializeToolRouter sets up the micro-LLM tool router for a session.
 //
 // Description:
@@ -700,15 +1038,34 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		"model", routerConfig.Model,
 		"timeout", "60s")
 
+	warmupStart := time.Now()
 	if warmErr := router.WarmRouter(warmupCtx); warmErr != nil {
+		warmupDuration := time.Since(warmupStart)
 		logger.Error("initializeToolRouter: Model warmup failed",
 			"session_id", session.ID,
 			"error", warmErr,
 			"model", routerConfig.Model,
 			"error_type", fmt.Sprintf("%T", warmErr))
 		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "warmup_failed")
+
+		// C-1: Record warmup failure as TraceStep in CRS
+		session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now().UnixMilli(),
+			Action:    "model_warmup",
+			Target:    routerConfig.Model,
+			Tool:      "router",
+			Duration:  warmupDuration,
+			Error:     warmErr.Error(),
+			Metadata: map[string]string{
+				"success":  "false",
+				"endpoint": routerConfig.OllamaEndpoint,
+			},
+		})
+
 		return fmt.Errorf("failed to warm router: %w", warmErr)
 	}
+
+	warmupDuration := time.Since(warmupStart)
 
 	logger.Info("initializeToolRouter: Complete - Router fully initialized",
 		"session_id", session.ID,
@@ -717,6 +1074,20 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 
 	// Record successful initialization
 	routing.RecordRouterInit(session.Config.ToolRouterModel, true, "")
+
+	// C-1: Record warmup success as TraceStep in CRS
+	session.RecordTraceStep(crs.TraceStep{
+		Timestamp: time.Now().UnixMilli(),
+		Action:    "model_warmup",
+		Target:    routerConfig.Model,
+		Tool:      "router",
+		Duration:  warmupDuration,
+		Metadata: map[string]string{
+			"success":     "true",
+			"endpoint":    routerConfig.OllamaEndpoint,
+			"duration_ms": fmt.Sprintf("%d", warmupDuration.Milliseconds()),
+		},
+	})
 
 	return nil
 }

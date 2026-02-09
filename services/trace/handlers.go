@@ -453,18 +453,26 @@ func (h *Handlers) HandleHealth(c *gin.Context) {
 // Description:
 //
 //	Returns the readiness status of the service including dependency checks.
+//	Returns 503 Service Unavailable if model warmup has not completed.
 //
 // Response:
 //
-//	200 OK: ReadyResponse (Ready=true)
-//	503 Service Unavailable: ReadyResponse (Ready=false)
+//	200 OK: ReadyResponse (Ready=true) - Service is fully ready
+//	503 Service Unavailable: ReadyResponse (Ready=false) - Warmup in progress
 func (h *Handlers) HandleReady(c *gin.Context) {
-	// For now, we're always ready if running
-	// Future: add Weaviate health check
+	// Check warmup status - return 503 if still warming up
+	warmupComplete := IsWarmupComplete()
+
 	resp := ReadyResponse{
-		Ready:      true,
+		Ready:      warmupComplete,
 		GraphCount: h.svc.GraphCount(),
 		WeaviateOK: h.weaviate != nil,
+	}
+
+	if !warmupComplete {
+		c.Header("Retry-After", "30")
+		c.JSON(http.StatusServiceUnavailable, resp)
+		return
 	}
 
 	c.JSON(http.StatusOK, resp)
