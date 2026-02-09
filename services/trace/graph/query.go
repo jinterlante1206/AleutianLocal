@@ -367,14 +367,11 @@ func (g *Graph) FindReferencesByID(ctx context.Context, symbolID string, opts ..
 }
 
 // findSymbolsByName returns all symbols matching the given name.
+//
+// GR-06: Uses nodesByName secondary index for O(1) lookup instead of O(V) scan.
 func (g *Graph) findSymbolsByName(name string) []*Node {
-	matches := make([]*Node, 0)
-	for _, node := range g.nodes {
-		if node.Symbol != nil && node.Symbol.Name == name {
-			matches = append(matches, node)
-		}
-	}
-	return matches
+	// Use secondary index for O(1) lookup
+	return g.GetNodesByName(name)
 }
 
 // FindCallersByName returns callers for all symbols matching the given name.

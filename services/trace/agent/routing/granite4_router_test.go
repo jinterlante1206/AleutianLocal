@@ -464,3 +464,90 @@ func TestParseResponse_ExtraText(t *testing.T) {
 		t.Errorf("Tool = %s, want grep_codebase", selection.Tool)
 	}
 }
+
+// TestParseResponse_EmptyResponse tests GR-Phase1 empty response handling.
+func TestParseResponse_EmptyResponse(t *testing.T) {
+	config := DefaultRouterConfig()
+	modelManager := llm.NewMultiModelManager("http://localhost:11434")
+	router, err := NewGranite4Router(modelManager, config)
+	if err != nil {
+		t.Fatalf("NewGranite4Router failed: %v", err)
+	}
+
+	tools := []ToolSpec{
+		{Name: "find_symbol", Description: "Find a symbol"},
+	}
+
+	testCases := []struct {
+		name     string
+		response string
+	}{
+		{"empty string", ""},
+		{"whitespace only", "   "},
+		{"newlines only", "\n\n\n"},
+		{"tabs and spaces", "\t  \t  "},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := router.parseResponse(tc.response, tools)
+			if err == nil {
+				t.Fatal("Expected error for empty response")
+			}
+
+			routerErr, ok := err.(*RouterError)
+			if !ok {
+				t.Fatalf("Expected RouterError, got %T", err)
+			}
+			if routerErr.Code != ErrCodeEmptyResponse {
+				t.Errorf("Error code = %s, want %s", routerErr.Code, ErrCodeEmptyResponse)
+			}
+			if !routerErr.Retryable {
+				t.Error("Expected error to be retryable")
+			}
+		})
+	}
+}
+
+// TestGranite4Router_SelectTool_EmptyModelResponse tests handling of empty model response.
+func TestGranite4Router_SelectTool_EmptyModelResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Model returns empty content - simulates cold start or context issue
+		response := map[string]interface{}{
+			"model": "granite4:micro-h",
+			"message": map[string]interface{}{
+				"role":    "assistant",
+				"content": "", // Empty response
+			},
+			"done": true,
+		}
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	config := DefaultRouterConfig()
+	config.OllamaEndpoint = server.URL
+
+	modelManager := llm.NewMultiModelManager(server.URL)
+	router, err := NewGranite4Router(modelManager, config)
+	if err != nil {
+		t.Fatalf("NewGranite4Router failed: %v", err)
+	}
+
+	tools := []ToolSpec{
+		{Name: "find_symbol", Description: "Find a symbol"},
+	}
+
+	_, err = router.SelectTool(context.Background(), "test query", tools, nil)
+	if err == nil {
+		t.Fatal("Expected error for empty model response")
+	}
+
+	routerErr, ok := err.(*RouterError)
+	if !ok {
+		t.Fatalf("Expected RouterError, got %T: %v", err, err)
+	}
+	if routerErr.Code != ErrCodeEmptyResponse {
+		t.Errorf("Error code = %s, want %s", routerErr.Code, ErrCodeEmptyResponse)
+	}
+}

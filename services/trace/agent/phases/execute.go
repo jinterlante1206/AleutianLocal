@@ -917,17 +917,19 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 		// Record metric
 		config.RecordFallbackBlocked()
 
-		// C1: Record routing decision in CRS trace
+		// C-2: Record tool selection as TraceStep in CRS trace (low confidence path)
 		if deps.Session != nil && deps.Session.HasCRS() {
 			deps.Session.RecordTraceStep(crs.TraceStep{
 				Timestamp: time.Now().UnixMilli(),
-				Action:    "tool_routing_decision",
+				Action:    "tool_selection",
 				Target:    selection.Tool,
 				Tool:      "router",
+				Duration:  selection.Duration,
 				Metadata: map[string]string{
 					"source":           "low_confidence_fallback",
 					"confidence":       fmt.Sprintf("%.2f", selection.Confidence),
 					"fallback_blocked": "true",
+					"duration_ms":      fmt.Sprintf("%d", selection.Duration.Milliseconds()),
 				},
 			})
 		}
@@ -1089,45 +1091,49 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			)
 		}
 
-		// C1: Record routing decision in CRS trace
+		// C-2: Record tool selection as TraceStep in CRS trace
 		if deps.Session.HasCRS() {
 			deps.Session.RecordTraceStep(crs.TraceStep{
 				Timestamp: time.Now().UnixMilli(),
-				Action:    "tool_routing_decision",
+				Action:    "tool_selection",
 				Target:    ucb1Selection.Tool,
 				Tool:      "router",
+				Duration:  selection.Duration,
 				Metadata: map[string]string{
 					"source":           "router",
 					"confidence":       fmt.Sprintf("%.2f", ucb1Selection.Confidence),
 					"original_tool":    selection.Tool,
 					"ucb1_modified":    fmt.Sprintf("%t", modified),
 					"fallback_blocked": "false",
+					"duration_ms":      fmt.Sprintf("%d", selection.Duration.Milliseconds()),
 				},
 			})
 		}
 
-		// C1: Record routing decision metric
+		// C-2: Record routing decision metric
 		config.RecordRoutingDecision(ucb1Selection.Tool, "router")
 
 		return ucb1Selection, nil
 	}
 
-	// C1: Record answer routing decision in CRS trace
+	// C-2: Record tool selection as TraceStep in CRS trace (answer path)
 	if deps.Session != nil && deps.Session.HasCRS() {
 		deps.Session.RecordTraceStep(crs.TraceStep{
 			Timestamp: time.Now().UnixMilli(),
-			Action:    "tool_routing_decision",
+			Action:    "tool_selection",
 			Target:    selection.Tool,
 			Tool:      "router",
+			Duration:  selection.Duration,
 			Metadata: map[string]string{
 				"source":           "router",
 				"confidence":       fmt.Sprintf("%.2f", selection.Confidence),
 				"fallback_blocked": "false",
+				"duration_ms":      fmt.Sprintf("%d", selection.Duration.Milliseconds()),
 			},
 		})
 	}
 
-	// C1: Record answer routing decision metric
+	// C-2: Record routing decision metric
 	config.RecordRoutingDecision(selection.Tool, "router")
 
 	return selection, nil

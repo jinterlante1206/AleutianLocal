@@ -210,7 +210,30 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 //	v1 := router.Group("/v1")
 //	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
 func RegisterAgentRoutes(rg *gin.RouterGroup, handlers *AgentHandlers) {
-	agent := rg.Group("/codebuddy/agent")
+	RegisterAgentRoutesWithMiddleware(rg, handlers, nil)
+}
+
+// RegisterAgentRoutesWithMiddleware registers agent routes with optional middleware.
+//
+// Description:
+//
+//	Same as RegisterAgentRoutes but allows applying middleware (e.g., warmup guard)
+//	to all agent endpoints. If middleware is nil, no additional middleware is applied.
+//
+// Inputs:
+//
+//	rg - The router group to register routes under.
+//	handlers - The agent handlers.
+//	middleware - Optional middleware to apply to all agent routes. Can be nil.
+//
+// Thread Safety: This function is safe for concurrent use.
+func RegisterAgentRoutesWithMiddleware(rg *gin.RouterGroup, handlers *AgentHandlers, middleware gin.HandlerFunc) {
+	var agent *gin.RouterGroup
+	if middleware != nil {
+		agent = rg.Group("/codebuddy/agent", middleware)
+	} else {
+		agent = rg.Group("/codebuddy/agent")
+	}
 	{
 		// Session lifecycle
 		agent.POST("/run", handlers.HandleAgentRun)

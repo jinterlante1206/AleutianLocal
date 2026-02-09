@@ -224,6 +224,12 @@ func (a *CRSGraphAdapter) FindSymbolByID(ctx context.Context, id string) (*ast.S
 
 // FindSymbolsByName returns all symbols with the given name.
 //
+// Description:
+//
+//	GR-06: Uses nodesByName secondary index for O(1) lookup instead of
+//	O(V) scan. Multiple symbols can share a name (e.g., "Setup" in
+//	different packages).
+//
 // Inputs:
 //   - ctx: Context for cancellation. Must not be nil.
 //   - name: The symbol name to search for.
@@ -253,10 +259,12 @@ func (a *CRSGraphAdapter) FindSymbolsByName(ctx context.Context, name string) ([
 		return nil, err
 	}
 
-	// Search through all nodes for matching name
-	var results []*ast.Symbol
-	for _, node := range a.graph.Nodes() {
-		if node.Symbol != nil && node.Symbol.Name == name {
+	// GR-06: Use nodesByName secondary index for O(1) lookup instead of O(V) scan.
+	// GetNodesByName returns a defensive copy, so we can safely iterate.
+	nodes := a.graph.GetNodesByName(name)
+	results := make([]*ast.Symbol, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Symbol != nil {
 			results = append(results, node.Symbol)
 		}
 	}
@@ -558,6 +566,95 @@ func (a *CRSGraphAdapter) FindReferences(ctx context.Context, symbolID string) (
 	return results, nil
 }
 
+// GetEdgesByFile returns all edges with Location in the given file.
+//
+// Description:
+//
+//	GR-09: Uses edgesByFile secondary index for O(1) lookup instead of
+//	O(E) scan. Useful for file-scoped dependency analysis.
+//	Note: Returns edges by their Location.FilePath (where the edge is
+//	expressed in code), not by source or target node file.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - filePath: The file path to find edges for.
+//
+// Outputs:
+//   - []*Edge: Edges with Location in the file. Empty slice if none found.
+//   - error: Non-nil on context cancellation or adapter closed.
+//
+// Thread Safety: Safe for concurrent use.
+func (a *CRSGraphAdapter) GetEdgesByFile(ctx context.Context, filePath string) ([]*Edge, error) {
+	ctx, span := crsAdapterTracer.Start(ctx, "graph.CRSGraphAdapter.GetEdgesByFile",
+		trace.WithAttributes(
+			attribute.String("file_path", filePath),
+		),
+	)
+	defer span.End()
+
+	if err := a.checkClosed(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "context cancelled")
+		return nil, err
+	}
+
+	// GR-09: Use edgesByFile secondary index for O(1) lookup.
+	// GetEdgesByFile returns a defensive copy, so we can safely return it.
+	edges := a.graph.GetEdgesByFile(filePath)
+
+	span.SetAttributes(attribute.Int("count", len(edges)))
+	return edges, nil
+}
+
+// GetEdgeCountByFile returns the count of edges with Location in the given file.
+//
+// Description:
+//
+//	GR-09: Uses secondary index for O(1) count without copying edges.
+//	More efficient than len(GetEdgesByFile()) for just getting counts.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - filePath: The file path to count edges for.
+//
+// Outputs:
+//   - int: Number of edges with Location in the file.
+//   - error: Non-nil on context cancellation or adapter closed.
+//
+// Thread Safety: Safe for concurrent use.
+func (a *CRSGraphAdapter) GetEdgeCountByFile(ctx context.Context, filePath string) (int, error) {
+	ctx, span := crsAdapterTracer.Start(ctx, "graph.CRSGraphAdapter.GetEdgeCountByFile",
+		trace.WithAttributes(
+			attribute.String("file_path", filePath),
+		),
+	)
+	defer span.End()
+
+	if err := a.checkClosed(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return 0, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "context cancelled")
+		return 0, err
+	}
+
+	// GR-09: Use secondary index for O(1) count.
+	count := a.graph.GetEdgeCountByFile(filePath)
+
+	span.SetAttributes(attribute.Int("count", count))
+	return count, nil
+}
+
 // -----------------------------------------------------------------------------
 // Cycle Detection (GR-32)
 // -----------------------------------------------------------------------------
@@ -725,31 +822,9 @@ func (a *CRSGraphAdapter) CallEdgeCount(ctx context.Context) (int, error) {
 	}
 	cache.mu.RUnlock()
 
-	// Compute count
-	// GR-32 Code Review Fix: Check context in inner loop for better responsiveness
-	count := 0
-	edgeCounter := 0
-	for _, node := range a.graph.Nodes() {
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		default:
-		}
-		for _, edge := range node.Outgoing {
-			if edge.Type == EdgeTypeCalls {
-				count++
-			}
-			// Check context every 1000 edges for responsiveness
-			edgeCounter++
-			if edgeCounter%1000 == 0 {
-				select {
-				case <-ctx.Done():
-					return 0, ctx.Err()
-				default:
-				}
-			}
-		}
-	}
+	// GR-08: Use edgesByType secondary index for O(1) lookup instead of O(V+E) scan.
+	// This leverages the new GetEdgeCountByType method added in GR-08.
+	count := a.graph.GetEdgeCountByType(EdgeTypeCalls)
 
 	// Cache result
 	cache.mu.Lock()

@@ -700,15 +700,34 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		"model", routerConfig.Model,
 		"timeout", "60s")
 
+	warmupStart := time.Now()
 	if warmErr := router.WarmRouter(warmupCtx); warmErr != nil {
+		warmupDuration := time.Since(warmupStart)
 		logger.Error("initializeToolRouter: Model warmup failed",
 			"session_id", session.ID,
 			"error", warmErr,
 			"model", routerConfig.Model,
 			"error_type", fmt.Sprintf("%T", warmErr))
 		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "warmup_failed")
+
+		// C-1: Record warmup failure as TraceStep in CRS
+		session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now().UnixMilli(),
+			Action:    "model_warmup",
+			Target:    routerConfig.Model,
+			Tool:      "router",
+			Duration:  warmupDuration,
+			Error:     warmErr.Error(),
+			Metadata: map[string]string{
+				"success":  "false",
+				"endpoint": routerConfig.OllamaEndpoint,
+			},
+		})
+
 		return fmt.Errorf("failed to warm router: %w", warmErr)
 	}
+
+	warmupDuration := time.Since(warmupStart)
 
 	logger.Info("initializeToolRouter: Complete - Router fully initialized",
 		"session_id", session.ID,
@@ -717,6 +736,20 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 
 	// Record successful initialization
 	routing.RecordRouterInit(session.Config.ToolRouterModel, true, "")
+
+	// C-1: Record warmup success as TraceStep in CRS
+	session.RecordTraceStep(crs.TraceStep{
+		Timestamp: time.Now().UnixMilli(),
+		Action:    "model_warmup",
+		Target:    routerConfig.Model,
+		Tool:      "router",
+		Duration:  warmupDuration,
+		Metadata: map[string]string{
+			"success":     "true",
+			"endpoint":    routerConfig.OllamaEndpoint,
+			"duration_ms": fmt.Sprintf("%d", warmupDuration.Milliseconds()),
+		},
+	})
 
 	return nil
 }

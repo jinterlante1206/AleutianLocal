@@ -74,9 +74,9 @@ type Granite4Router struct {
 //	router, err := routing.NewGranite4Router(mgr, config)
 func NewGranite4Router(modelManager *llm.MultiModelManager, config RouterConfig) (*Granite4Router, error) {
 	slog.Info("NewGranite4Router: Creating router",
-		"model", config.Model,
-		"endpoint", config.OllamaEndpoint,
-		"has_model_manager", modelManager != nil)
+		slog.String("model", config.Model),
+		slog.String("endpoint", config.OllamaEndpoint),
+		slog.Bool("has_model_manager", modelManager != nil))
 
 	if modelManager == nil {
 		slog.Error("NewGranite4Router: modelManager is nil")
@@ -87,12 +87,12 @@ func NewGranite4Router(modelManager *llm.MultiModelManager, config RouterConfig)
 	promptBuilder, err := NewPromptBuilder()
 	if err != nil {
 		slog.Error("NewGranite4Router: Failed to create prompt builder",
-			"error", err)
+			slog.String("error", err.Error()))
 		return nil, fmt.Errorf("creating prompt builder: %w", err)
 	}
 
 	slog.Info("NewGranite4Router: Router created successfully",
-		"model", config.Model)
+		slog.String("model", config.Model))
 
 	return &Granite4Router{
 		modelManager:  modelManager,
@@ -389,6 +389,20 @@ func (r *Granite4Router) FilterBatch(ctx context.Context, prompt string) (string
 //   - *ToolSelection: Parsed selection.
 //   - error: Non-nil if parsing fails.
 func (r *Granite4Router) parseResponse(response string, availableTools []ToolSpec) (*ToolSelection, error) {
+	// GR-Phase1: Check for empty response before any processing.
+	// Empty responses indicate model warmup issues or context problems.
+	// Return specific error code for better debugging.
+	if len(strings.TrimSpace(response)) == 0 {
+		slog.Warn("Router received empty response from model",
+			slog.String("model", r.config.Model),
+		)
+		return nil, NewRouterError(
+			ErrCodeEmptyResponse,
+			"router model returned empty response",
+			true, // retryable - model may need warmup
+		)
+	}
+
 	// Clean up the response - remove markdown code blocks if present
 	response = strings.TrimSpace(response)
 	response = strings.TrimPrefix(response, "```json")
@@ -424,6 +438,15 @@ func (r *Granite4Router) parseResponse(response string, availableTools []ToolSpe
 		)
 	}
 
+	// I-2 Fix: Clamp confidence to valid range BEFORE any modifications.
+	// This ensures normalized confidence before tool validation penalty.
+	if result.Confidence < 0 {
+		result.Confidence = 0
+	}
+	if result.Confidence > 1 {
+		result.Confidence = 1
+	}
+
 	// Validate tool exists
 	toolValid := false
 	for _, t := range availableTools {
@@ -434,17 +457,14 @@ func (r *Granite4Router) parseResponse(response string, availableTools []ToolSpe
 	}
 
 	if !toolValid {
+		// I-4: Log when tool fallback occurs for debugging
+		slog.Warn("Router model returned invalid tool, using fallback",
+			slog.String("model", r.config.Model),
+			slog.String("invalid_tool", result.Tool),
+		)
 		// Try to find closest match
 		result.Tool = r.findClosestTool(result.Tool, availableTools)
 		result.Confidence *= 0.8 // Reduce confidence for corrected tool
-	}
-
-	// Clamp confidence to valid range
-	if result.Confidence < 0 {
-		result.Confidence = 0
-	}
-	if result.Confidence > 1 {
-		result.Confidence = 1
 	}
 
 	return &ToolSelection{
@@ -525,9 +545,9 @@ func (r *Granite4Router) Close() error {
 //   - error: Non-nil if warmup fails.
 func (r *Granite4Router) WarmRouter(ctx context.Context) error {
 	r.logger.Info("WarmRouter: Starting model warmup",
-		"model", r.config.Model,
-		"keep_alive", r.config.KeepAlive,
-		"has_model_manager", r.modelManager != nil)
+		slog.String("model", r.config.Model),
+		slog.String("keep_alive", r.config.KeepAlive),
+		slog.Bool("has_model_manager", r.modelManager != nil))
 
 	startTime := time.Now()
 	err := r.modelManager.WarmModel(ctx, r.config.Model, r.config.KeepAlive, r.config.NumCtx)
@@ -535,14 +555,14 @@ func (r *Granite4Router) WarmRouter(ctx context.Context) error {
 
 	if err != nil {
 		r.logger.Error("WarmRouter: Model warmup failed",
-			"model", r.config.Model,
-			"duration", duration,
-			"error", err,
-			"error_type", fmt.Sprintf("%T", err))
+			slog.String("model", r.config.Model),
+			slog.Duration("duration", duration),
+			slog.String("error", err.Error()),
+			slog.String("error_type", fmt.Sprintf("%T", err)))
 	} else {
 		r.logger.Info("WarmRouter: Model warmup succeeded",
-			"model", r.config.Model,
-			"duration", duration)
+			slog.String("model", r.config.Model),
+			slog.Duration("duration", duration))
 	}
 
 	RecordModelWarmup(r.config.Model, duration.Seconds(), err == nil)
