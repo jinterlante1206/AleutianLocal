@@ -444,7 +444,10 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 			attribute.Int("count", len(cached.Symbols)),
 			attribute.Bool("truncated", cached.Truncated),
 		)
-		return cached.Symbols, nil
+		// CRITICAL: Return defensive copy to prevent cache corruption
+		symbolsCopy := make([]*ast.Symbol, len(cached.Symbols))
+		copy(symbolsCopy, cached.Symbols)
+		return symbolsCopy, nil
 	}
 
 	// Use singleflight to prevent thundering herd on cache miss
@@ -473,7 +476,14 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 		return nil, fmt.Errorf("finding callers for %s: %w", symbolID, err)
 	}
 
-	result := resultI.(*QueryResult)
+	// Use comma-ok idiom for safer type assertion
+	result, ok := resultI.(*QueryResult)
+	if !ok {
+		err := fmt.Errorf("unexpected type from singleflight group 'callersGroup': got %T", resultI)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	span.SetAttributes(
 		attribute.Bool("cache_hit", false),
 		attribute.Int("count", len(result.Symbols)),
@@ -531,7 +541,10 @@ func (a *CRSGraphAdapter) FindCallees(ctx context.Context, symbolID string) ([]*
 			attribute.Int("count", len(cached.Symbols)),
 			attribute.Bool("truncated", cached.Truncated),
 		)
-		return cached.Symbols, nil
+		// CRITICAL: Return defensive copy to prevent cache corruption
+		symbolsCopy := make([]*ast.Symbol, len(cached.Symbols))
+		copy(symbolsCopy, cached.Symbols)
+		return symbolsCopy, nil
 	}
 
 	// Use singleflight to prevent thundering herd on cache miss
@@ -560,7 +573,14 @@ func (a *CRSGraphAdapter) FindCallees(ctx context.Context, symbolID string) ([]*
 		return nil, fmt.Errorf("finding callees for %s: %w", symbolID, err)
 	}
 
-	result := resultI.(*QueryResult)
+	// Use comma-ok idiom for safer type assertion
+	result, ok := resultI.(*QueryResult)
+	if !ok {
+		err := fmt.Errorf("unexpected type from singleflight group 'calleesGroup': got %T", resultI)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	span.SetAttributes(
 		attribute.Bool("cache_hit", false),
 		attribute.Int("count", len(result.Symbols)),
@@ -1154,7 +1174,10 @@ func (a *CRSGraphAdapter) ShortestPath(ctx context.Context, fromID, toID string)
 			attribute.Bool("cache_hit", true),
 			attribute.Int("path_length", cached.Length),
 		)
-		return cached.Path, nil
+		// CRITICAL: Return defensive copy to prevent cache corruption
+		pathCopy := make([]string, len(cached.Path))
+		copy(pathCopy, cached.Path)
+		return pathCopy, nil
 	}
 
 	// Use singleflight to prevent thundering herd on cache miss
@@ -1181,12 +1204,22 @@ func (a *CRSGraphAdapter) ShortestPath(ctx context.Context, fromID, toID string)
 		return nil, fmt.Errorf("finding shortest path from %s to %s: %w", fromID, toID, err)
 	}
 
-	result := resultI.(*PathResult)
+	// Use comma-ok idiom for safer type assertion
+	result, ok := resultI.(*PathResult)
+	if !ok {
+		err := fmt.Errorf("unexpected type from singleflight group 'pathsGroup': got %T", resultI)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	span.SetAttributes(
 		attribute.Bool("cache_hit", false),
 		attribute.Int("path_length", result.Length),
 	)
-	return result.Path, nil
+	// CRITICAL: Return defensive copy to prevent cache corruption
+	pathCopy := make([]string, len(result.Path))
+	copy(pathCopy, result.Path)
+	return pathCopy, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -1841,7 +1874,6 @@ type QueryCacheStats struct {
 // Limitations:
 //   - Stats are a point-in-time snapshot; may be slightly stale
 //   - Hit rate calculation uses integer counts, may lose precision
-//   - Does not track evictions (evicted entries counted in misses indirectly)
 //
 // Thread Safety: Safe for concurrent use. Returns atomic snapshot.
 func (a *CRSGraphAdapter) QueryCacheStats() QueryCacheStats {
