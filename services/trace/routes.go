@@ -124,6 +124,7 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		debug := codebuddy.Group("/debug")
 		{
 			debug.GET("/graph/stats", handlers.HandleGetGraphStats)
+			debug.GET("/cache", handlers.HandleGetCacheStats)
 		}
 
 		// =================================================================
