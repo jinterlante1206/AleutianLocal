@@ -436,9 +436,13 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 
-	// GR-10: Check cache first
+	// GR-10: Check cache first (with read lock to prevent race with InvalidateCache)
 	cacheKey := symbolID
-	if cached, ok := a.analyticsCache.callersCache.Get(cacheKey); ok {
+	a.analyticsCache.mu.RLock()
+	cached, cacheHit := a.analyticsCache.callersCache.Get(cacheKey)
+	a.analyticsCache.mu.RUnlock()
+
+	if cacheHit {
 		span.SetAttributes(
 			attribute.Bool("cache_hit", true),
 			attribute.Int("count", len(cached.Symbols)),
@@ -452,9 +456,17 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 
 	// Use singleflight to prevent thundering herd on cache miss
 	resultI, err, _ := a.callersGroup.Do(cacheKey, func() (any, error) {
-		// Double-check cache inside singleflight
-		if cached, ok := a.analyticsCache.callersCache.Get(cacheKey); ok {
+		// Double-check cache inside singleflight (with read lock)
+		a.analyticsCache.mu.RLock()
+		cached, ok := a.analyticsCache.callersCache.Get(cacheKey)
+		a.analyticsCache.mu.RUnlock()
+		if ok {
 			return cached, nil
+		}
+
+		// Check for cancellation before expensive operation
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
 		result, err := a.graph.Graph.FindCallersByID(ctx, symbolID)
@@ -489,7 +501,10 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 		attribute.Int("count", len(result.Symbols)),
 		attribute.Bool("truncated", result.Truncated),
 	)
-	return result.Symbols, nil
+	// CRITICAL: Return defensive copy to prevent cache corruption from callers.
+	symbolsCopy := make([]*ast.Symbol, len(result.Symbols))
+	copy(symbolsCopy, result.Symbols)
+	return symbolsCopy, nil
 }
 
 // FindCallees returns symbols that the given symbol calls.
@@ -533,9 +548,13 @@ func (a *CRSGraphAdapter) FindCallees(ctx context.Context, symbolID string) ([]*
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 
-	// GR-10: Check cache first
+	// GR-10: Check cache first (with read lock to prevent race with InvalidateCache)
 	cacheKey := symbolID
-	if cached, ok := a.analyticsCache.calleesCache.Get(cacheKey); ok {
+	a.analyticsCache.mu.RLock()
+	cached, cacheHit := a.analyticsCache.calleesCache.Get(cacheKey)
+	a.analyticsCache.mu.RUnlock()
+
+	if cacheHit {
 		span.SetAttributes(
 			attribute.Bool("cache_hit", true),
 			attribute.Int("count", len(cached.Symbols)),
@@ -549,9 +568,17 @@ func (a *CRSGraphAdapter) FindCallees(ctx context.Context, symbolID string) ([]*
 
 	// Use singleflight to prevent thundering herd on cache miss
 	resultI, err, _ := a.calleesGroup.Do(cacheKey, func() (any, error) {
-		// Double-check cache inside singleflight
-		if cached, ok := a.analyticsCache.calleesCache.Get(cacheKey); ok {
+		// Double-check cache inside singleflight (with read lock)
+		a.analyticsCache.mu.RLock()
+		cached, ok := a.analyticsCache.calleesCache.Get(cacheKey)
+		a.analyticsCache.mu.RUnlock()
+		if ok {
 			return cached, nil
+		}
+
+		// Check for cancellation before expensive operation
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
 		result, err := a.graph.Graph.FindCalleesByID(ctx, symbolID)
@@ -586,7 +613,10 @@ func (a *CRSGraphAdapter) FindCallees(ctx context.Context, symbolID string) ([]*
 		attribute.Int("count", len(result.Symbols)),
 		attribute.Bool("truncated", result.Truncated),
 	)
-	return result.Symbols, nil
+	// CRITICAL: Return defensive copy to prevent cache corruption from callers.
+	symbolsCopy := make([]*ast.Symbol, len(result.Symbols))
+	copy(symbolsCopy, result.Symbols)
+	return symbolsCopy, nil
 }
 
 // FindImplementations returns types that implement the given interface.
@@ -1143,7 +1173,7 @@ func (a *CRSGraphAdapter) reconstructPath(ctx context.Context, fromID, toID stri
 // Limitations:
 //   - GR-10 Review (I-1): Results may be cached. Callers MUST NOT mutate
 //     the returned slice, as this would corrupt the cache.
-//   - Returns error if source node does not exist.
+//   - Returns error if source or target node does not exist.
 //
 // Thread Safety: Safe for concurrent use.
 func (a *CRSGraphAdapter) ShortestPath(ctx context.Context, fromID, toID string) ([]string, error) {
@@ -1167,9 +1197,13 @@ func (a *CRSGraphAdapter) ShortestPath(ctx context.Context, fromID, toID string)
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 
-	// GR-10: Check cache first
+	// GR-10: Check cache first (with read lock to prevent race with InvalidateCache)
 	cacheKey := fromID + ":" + toID
-	if cached, ok := a.analyticsCache.pathsCache.Get(cacheKey); ok {
+	a.analyticsCache.mu.RLock()
+	cached, cacheHit := a.analyticsCache.pathsCache.Get(cacheKey)
+	a.analyticsCache.mu.RUnlock()
+
+	if cacheHit {
 		span.SetAttributes(
 			attribute.Bool("cache_hit", true),
 			attribute.Int("path_length", cached.Length),
@@ -1182,9 +1216,17 @@ func (a *CRSGraphAdapter) ShortestPath(ctx context.Context, fromID, toID string)
 
 	// Use singleflight to prevent thundering herd on cache miss
 	resultI, err, _ := a.pathsGroup.Do(cacheKey, func() (any, error) {
-		// Double-check cache inside singleflight
-		if cached, ok := a.analyticsCache.pathsCache.Get(cacheKey); ok {
+		// Double-check cache inside singleflight (with read lock)
+		a.analyticsCache.mu.RLock()
+		cached, ok := a.analyticsCache.pathsCache.Get(cacheKey)
+		a.analyticsCache.mu.RUnlock()
+		if ok {
 			return cached, nil
+		}
+
+		// Check for cancellation before expensive operation
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 
 		result, err := a.graph.Graph.ShortestPath(ctx, fromID, toID)
