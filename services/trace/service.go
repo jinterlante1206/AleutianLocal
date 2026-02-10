@@ -299,12 +299,38 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 		assembler = assembler.WithLibraryDocProvider(s.libDocProvider)
 	}
 
+	// GR-10: Create CRSGraphAdapter for query caching
+	builtAtMilli := time.Now().UnixMilli()
+	var adapter *graph.CRSGraphAdapter
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		slog.Warn("GR-10: Failed to create hierarchical graph for adapter",
+			slog.String("project_root", projectRoot),
+			slog.String("error", err.Error()),
+		)
+	} else {
+		adapter, err = graph.NewCRSGraphAdapter(hg, idx, 1, builtAtMilli, nil)
+		if err != nil {
+			slog.Warn("GR-10: Failed to create CRS graph adapter",
+				slog.String("project_root", projectRoot),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			slog.Info("GR-10: CRS graph adapter created successfully",
+				slog.String("project_root", projectRoot),
+				slog.Int("nodes", g.NodeCount()),
+				slog.Int("edges", g.EdgeCount()),
+			)
+		}
+	}
+
 	// Cache the graph
 	cached := &CachedGraph{
 		Graph:        g,
 		Index:        idx,
 		Assembler:    assembler,
-		BuiltAtMilli: time.Now().UnixMilli(),
+		Adapter:      adapter,
+		BuiltAtMilli: builtAtMilli,
 		ProjectRoot:  projectRoot,
 	}
 
@@ -600,6 +626,58 @@ func (s *Service) FindCallers(ctx context.Context, graphID, functionName string,
 		limit = 50
 	}
 
+	// GR-10: Use adapter for cached queries when available
+	if cached.Adapter != nil {
+		// Resolve function name to symbol IDs first using secondary index
+		matches := cached.Graph.GetNodesByName(functionName)
+		slog.Debug("GR-10: FindCallers using adapter",
+			slog.String("function", functionName),
+			slog.Int("matches", len(matches)),
+			slog.Bool("adapter_available", true),
+		)
+
+		var callers []*SymbolInfo
+		seen := make(map[string]bool)
+
+		for _, node := range matches {
+			if node.Symbol == nil {
+				continue
+			}
+			slog.Debug("GR-10: Querying callers for symbol",
+				slog.String("symbol_id", node.ID),
+				slog.String("symbol_name", node.Symbol.Name),
+			)
+			// Use cached FindCallers from adapter
+			symbols, err := cached.Adapter.FindCallers(ctx, node.ID)
+			if err != nil {
+				slog.Debug("GR-10: FindCallers error",
+					slog.String("symbol_id", node.ID),
+					slog.String("error", err.Error()),
+				)
+				continue // Skip on error, try other matches
+			}
+			slog.Debug("GR-10: FindCallers result",
+				slog.String("symbol_id", node.ID),
+				slog.Int("callers_found", len(symbols)),
+			)
+			for _, sym := range symbols {
+				if !seen[sym.ID] && len(callers) < limit {
+					seen[sym.ID] = true
+					callers = append(callers, SymbolInfoFromAST(sym))
+				}
+			}
+			if len(callers) >= limit {
+				break
+			}
+		}
+		return callers, nil
+	} else {
+		slog.Debug("GR-10: FindCallers adapter not available, using direct query",
+			slog.String("function", functionName),
+		)
+	}
+
+	// Fallback to direct graph query (no caching)
 	results, err := cached.Graph.FindCallersByName(ctx, functionName, graph.WithLimit(limit))
 	if err != nil {
 		return nil, err

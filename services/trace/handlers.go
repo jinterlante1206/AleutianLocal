@@ -575,6 +575,75 @@ func (h *Handlers) HandleGetGraphStats(c *gin.Context) {
 	})
 }
 
+// HandleGetCacheStats handles GET /v1/codebuddy/debug/cache.
+//
+// Description:
+//
+//	Returns query cache statistics from the CRSGraphAdapter.
+//	GR-10: Added to expose LRU cache hit/miss stats for monitoring.
+//
+// Query Parameters:
+//
+//	graph_id: ID of the graph to query (optional, uses first cached if not specified)
+//
+// Response:
+//
+//	200 OK: QueryCacheStats (callers/callees/paths cache stats)
+//	404 Not Found: No graphs cached or graph not found
+//	503 Service Unavailable: Graph has no adapter (cache not available)
+//
+// Thread Safety: This method is safe for concurrent use. Read-only access.
+func (h *Handlers) HandleGetCacheStats(c *gin.Context) {
+	requestID := getOrCreateRequestID(c)
+	logger := slog.With("request_id", requestID, "handler", "HandleGetCacheStats")
+
+	graphID := c.Query("graph_id")
+
+	var cached *CachedGraph
+	var err error
+
+	if graphID != "" {
+		cached, err = h.svc.GetGraph(graphID)
+		if err != nil {
+			logger.Warn("Graph not found", "graph_id", graphID, "error", err)
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error: "graph not found",
+				Code:  "GRAPH_NOT_FOUND",
+			})
+			return
+		}
+	} else {
+		cached = h.svc.getFirstGraph()
+		if cached == nil {
+			logger.Info("No graphs cached")
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Error: "no graphs cached",
+				Code:  "NO_GRAPHS",
+			})
+			return
+		}
+	}
+
+	if cached.Adapter == nil {
+		logger.Warn("Graph has no adapter for cache stats")
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
+			Error: "cache not available for this graph",
+			Code:  "CACHE_NOT_AVAILABLE",
+		})
+		return
+	}
+
+	stats := cached.Adapter.QueryCacheStats()
+
+	logger.Info("Returning cache stats",
+		slog.Int64("total_hits", stats.TotalHits),
+		slog.Int64("total_misses", stats.TotalMisses),
+		slog.Float64("hit_rate", stats.HitRate),
+	)
+
+	c.JSON(http.StatusOK, stats)
+}
+
 // HandleSeed handles POST /v1/codebuddy/seed.
 //
 // Description:

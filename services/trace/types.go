@@ -243,6 +243,10 @@ type CachedGraph struct {
 	// Assembler is the context assembler.
 	Assembler *cbcontext.Assembler
 
+	// Adapter is the CRS-enabled graph adapter with query caching.
+	// Created lazily on first use. Provides cache statistics via QueryCacheStats().
+	Adapter *graph.CRSGraphAdapter
+
 	// BuiltAtMilli is when the graph was built.
 	BuiltAtMilli int64
 

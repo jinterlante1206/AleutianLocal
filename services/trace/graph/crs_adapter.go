@@ -81,7 +81,18 @@ type CRSGraphAdapter struct {
 	// singleflight groups prevent thundering herd on cache misses.
 	pageRankGroup    singleflight.Group
 	communitiesGroup singleflight.Group
+
+	// Query singleflight groups (GR-10)
+	callersGroup singleflight.Group
+	calleesGroup singleflight.Group
+	pathsGroup   singleflight.Group
 }
+
+// Query cache configuration.
+const (
+	// DefaultQueryCacheSize is the default LRU cache size for query results.
+	DefaultQueryCacheSize = 1000
+)
 
 // crsAnalyticsCache stores cached analytics results.
 type crsAnalyticsCache struct {
@@ -98,6 +109,11 @@ type crsAnalyticsCache struct {
 	// Call edge count cache (GR-32)
 	callEdgeCount      int
 	callEdgeCountValid bool
+
+	// Query result caches (GR-10)
+	callersCache *LRUCache[string, *QueryResult]
+	calleesCache *LRUCache[string, *QueryResult]
+	pathsCache   *LRUCache[string, *PathResult]
 }
 
 // NewCRSGraphAdapter creates a new adapter for querying the graph from CRS.
@@ -148,13 +164,16 @@ func NewCRSGraphAdapter(g *HierarchicalGraph, idx *index.SymbolIndex, generation
 		lastRefreshTime: refreshTime,
 		config:          config,
 		analyticsCache: &crsAnalyticsCache{
-			pageRank:    make(map[string]float64),
-			communities: nil,
+			pageRank:     make(map[string]float64),
+			communities:  nil,
+			callersCache: NewLRUCache[string, *QueryResult](DefaultQueryCacheSize),
+			calleesCache: NewLRUCache[string, *QueryResult](DefaultQueryCacheSize),
+			pathsCache:   NewLRUCache[string, *PathResult](DefaultQueryCacheSize),
 		},
 	}, nil
 }
 
-// InvalidateCache clears all cached analytics results.
+// InvalidateCache clears all cached analytics and query results.
 //
 // Description:
 //
@@ -174,6 +193,17 @@ func (a *CRSGraphAdapter) InvalidateCache() {
 	cache.communitiesTimestamp = 0
 	cache.callEdgeCount = 0          // GR-32
 	cache.callEdgeCountValid = false // GR-32
+
+	// GR-10: Clear query caches
+	if cache.callersCache != nil {
+		cache.callersCache.Purge()
+	}
+	if cache.calleesCache != nil {
+		cache.calleesCache.Purge()
+	}
+	if cache.pathsCache != nil {
+		cache.pathsCache.Purge()
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -368,6 +398,7 @@ func (a *CRSGraphAdapter) FindSymbolsInFile(ctx context.Context, filePath string
 // Description:
 //
 //	Finds all symbols that have outgoing call edges to the target symbol.
+//	GR-10: Uses LRU cache to avoid recomputation for repeated queries.
 //	If SymbolIndex is available, uses O(1) lookup; otherwise falls back to
 //	graph traversal.
 //
@@ -378,6 +409,11 @@ func (a *CRSGraphAdapter) FindSymbolsInFile(ctx context.Context, filePath string
 // Outputs:
 //   - []*ast.Symbol: Caller symbols. Empty slice if none found.
 //   - error: Non-nil on graph query failure or adapter closed.
+//
+// Limitations:
+//   - GR-10 Review (I-1): Results may be cached. Callers MUST NOT mutate
+//     the returned slice or its elements, as this would corrupt the cache.
+//   - Truncated results (when limit is reached) are not cached.
 //
 // Thread Safety: Safe for concurrent use.
 func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*ast.Symbol, error) {
@@ -400,18 +436,75 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 
-	result, err := a.graph.Graph.FindCallersByID(ctx, symbolID)
+	// GR-10: Check cache first (with read lock to prevent race with InvalidateCache)
+	cacheKey := symbolID
+	a.analyticsCache.mu.RLock()
+	cached, cacheHit := a.analyticsCache.callersCache.Get(cacheKey)
+	a.analyticsCache.mu.RUnlock()
+
+	if cacheHit {
+		span.SetAttributes(
+			attribute.Bool("cache_hit", true),
+			attribute.Int("count", len(cached.Symbols)),
+			attribute.Bool("truncated", cached.Truncated),
+		)
+		// CRITICAL: Return defensive copy to prevent cache corruption
+		symbolsCopy := make([]*ast.Symbol, len(cached.Symbols))
+		copy(symbolsCopy, cached.Symbols)
+		return symbolsCopy, nil
+	}
+
+	// Use singleflight to prevent thundering herd on cache miss
+	resultI, err, _ := a.callersGroup.Do(cacheKey, func() (any, error) {
+		// Double-check cache inside singleflight (with read lock)
+		a.analyticsCache.mu.RLock()
+		cached, ok := a.analyticsCache.callersCache.Get(cacheKey)
+		a.analyticsCache.mu.RUnlock()
+		if ok {
+			return cached, nil
+		}
+
+		// Check for cancellation before expensive operation
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		result, err := a.graph.Graph.FindCallersByID(ctx, symbolID)
+		if err != nil {
+			return nil, err
+		}
+
+		// Only cache non-truncated results
+		if !result.Truncated {
+			a.analyticsCache.callersCache.Set(cacheKey, result)
+		}
+
+		return result, nil
+	})
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("finding callers for %s: %w", symbolID, err)
 	}
 
+	// Use comma-ok idiom for safer type assertion
+	result, ok := resultI.(*QueryResult)
+	if !ok {
+		err := fmt.Errorf("unexpected type from singleflight group 'callersGroup': got %T", resultI)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	span.SetAttributes(
+		attribute.Bool("cache_hit", false),
 		attribute.Int("count", len(result.Symbols)),
 		attribute.Bool("truncated", result.Truncated),
 	)
-	return result.Symbols, nil
+	// CRITICAL: Return defensive copy to prevent cache corruption from callers.
+	symbolsCopy := make([]*ast.Symbol, len(result.Symbols))
+	copy(symbolsCopy, result.Symbols)
+	return symbolsCopy, nil
 }
 
 // FindCallees returns symbols that the given symbol calls.
@@ -419,6 +512,7 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 // Description:
 //
 //	Finds all symbols that are called by the source symbol via outgoing call edges.
+//	GR-10: Uses LRU cache to avoid recomputation for repeated queries.
 //
 // Inputs:
 //   - ctx: Context for cancellation. Must not be nil.
@@ -427,6 +521,11 @@ func (a *CRSGraphAdapter) FindCallers(ctx context.Context, symbolID string) ([]*
 // Outputs:
 //   - []*ast.Symbol: Callee symbols. Empty slice if none found.
 //   - error: Non-nil on graph query failure or adapter closed.
+//
+// Limitations:
+//   - GR-10 Review (I-1): Results may be cached. Callers MUST NOT mutate
+//     the returned slice or its elements, as this would corrupt the cache.
+//   - Truncated results (when limit is reached) are not cached.
 //
 // Thread Safety: Safe for concurrent use.
 func (a *CRSGraphAdapter) FindCallees(ctx context.Context, symbolID string) ([]*ast.Symbol, error) {
@@ -449,18 +548,75 @@ func (a *CRSGraphAdapter) FindCallees(ctx context.Context, symbolID string) ([]*
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 
-	result, err := a.graph.Graph.FindCalleesByID(ctx, symbolID)
+	// GR-10: Check cache first (with read lock to prevent race with InvalidateCache)
+	cacheKey := symbolID
+	a.analyticsCache.mu.RLock()
+	cached, cacheHit := a.analyticsCache.calleesCache.Get(cacheKey)
+	a.analyticsCache.mu.RUnlock()
+
+	if cacheHit {
+		span.SetAttributes(
+			attribute.Bool("cache_hit", true),
+			attribute.Int("count", len(cached.Symbols)),
+			attribute.Bool("truncated", cached.Truncated),
+		)
+		// CRITICAL: Return defensive copy to prevent cache corruption
+		symbolsCopy := make([]*ast.Symbol, len(cached.Symbols))
+		copy(symbolsCopy, cached.Symbols)
+		return symbolsCopy, nil
+	}
+
+	// Use singleflight to prevent thundering herd on cache miss
+	resultI, err, _ := a.calleesGroup.Do(cacheKey, func() (any, error) {
+		// Double-check cache inside singleflight (with read lock)
+		a.analyticsCache.mu.RLock()
+		cached, ok := a.analyticsCache.calleesCache.Get(cacheKey)
+		a.analyticsCache.mu.RUnlock()
+		if ok {
+			return cached, nil
+		}
+
+		// Check for cancellation before expensive operation
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		result, err := a.graph.Graph.FindCalleesByID(ctx, symbolID)
+		if err != nil {
+			return nil, err
+		}
+
+		// Only cache non-truncated results
+		if !result.Truncated {
+			a.analyticsCache.calleesCache.Set(cacheKey, result)
+		}
+
+		return result, nil
+	})
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("finding callees for %s: %w", symbolID, err)
 	}
 
+	// Use comma-ok idiom for safer type assertion
+	result, ok := resultI.(*QueryResult)
+	if !ok {
+		err := fmt.Errorf("unexpected type from singleflight group 'calleesGroup': got %T", resultI)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	span.SetAttributes(
+		attribute.Bool("cache_hit", false),
 		attribute.Int("count", len(result.Symbols)),
 		attribute.Bool("truncated", result.Truncated),
 	)
-	return result.Symbols, nil
+	// CRITICAL: Return defensive copy to prevent cache corruption from callers.
+	symbolsCopy := make([]*ast.Symbol, len(result.Symbols))
+	copy(symbolsCopy, result.Symbols)
+	return symbolsCopy, nil
 }
 
 // FindImplementations returns types that implement the given interface.
@@ -1003,6 +1159,7 @@ func (a *CRSGraphAdapter) reconstructPath(ctx context.Context, fromID, toID stri
 //
 //	Finds the shortest path between two symbols considering all edge types.
 //	Uses BFS for unweighted shortest path.
+//	GR-10: Uses LRU cache to avoid recomputation for repeated queries.
 //
 // Inputs:
 //   - ctx: Context for cancellation. Must not be nil.
@@ -1012,6 +1169,11 @@ func (a *CRSGraphAdapter) reconstructPath(ctx context.Context, fromID, toID stri
 // Outputs:
 //   - []string: Symbol IDs in the path. Empty if no path found.
 //   - error: Non-nil on graph query failure or adapter closed.
+//
+// Limitations:
+//   - GR-10 Review (I-1): Results may be cached. Callers MUST NOT mutate
+//     the returned slice, as this would corrupt the cache.
+//   - Returns error if source or target node does not exist.
 //
 // Thread Safety: Safe for concurrent use.
 func (a *CRSGraphAdapter) ShortestPath(ctx context.Context, fromID, toID string) ([]string, error) {
@@ -1035,15 +1197,71 @@ func (a *CRSGraphAdapter) ShortestPath(ctx context.Context, fromID, toID string)
 		return nil, fmt.Errorf("context cancelled: %w", err)
 	}
 
-	result, err := a.graph.Graph.ShortestPath(ctx, fromID, toID)
+	// GR-10: Check cache first (with read lock to prevent race with InvalidateCache)
+	cacheKey := fromID + ":" + toID
+	a.analyticsCache.mu.RLock()
+	cached, cacheHit := a.analyticsCache.pathsCache.Get(cacheKey)
+	a.analyticsCache.mu.RUnlock()
+
+	if cacheHit {
+		span.SetAttributes(
+			attribute.Bool("cache_hit", true),
+			attribute.Int("path_length", cached.Length),
+		)
+		// CRITICAL: Return defensive copy to prevent cache corruption
+		pathCopy := make([]string, len(cached.Path))
+		copy(pathCopy, cached.Path)
+		return pathCopy, nil
+	}
+
+	// Use singleflight to prevent thundering herd on cache miss
+	resultI, err, _ := a.pathsGroup.Do(cacheKey, func() (any, error) {
+		// Double-check cache inside singleflight (with read lock)
+		a.analyticsCache.mu.RLock()
+		cached, ok := a.analyticsCache.pathsCache.Get(cacheKey)
+		a.analyticsCache.mu.RUnlock()
+		if ok {
+			return cached, nil
+		}
+
+		// Check for cancellation before expensive operation
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		result, err := a.graph.Graph.ShortestPath(ctx, fromID, toID)
+		if err != nil {
+			return nil, err
+		}
+
+		// Cache the result (paths are not truncated)
+		a.analyticsCache.pathsCache.Set(cacheKey, result)
+
+		return result, nil
+	})
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("finding shortest path from %s to %s: %w", fromID, toID, err)
 	}
 
-	span.SetAttributes(attribute.Int("path_length", result.Length))
-	return result.Path, nil
+	// Use comma-ok idiom for safer type assertion
+	result, ok := resultI.(*PathResult)
+	if !ok {
+		err := fmt.Errorf("unexpected type from singleflight group 'pathsGroup': got %T", resultI)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+	span.SetAttributes(
+		attribute.Bool("cache_hit", false),
+		attribute.Int("path_length", result.Length),
+	)
+	// CRITICAL: Return defensive copy to prevent cache corruption
+	pathCopy := make([]string, len(result.Path))
+	copy(pathCopy, result.Path)
+	return pathCopy, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -1625,6 +1843,124 @@ func (a *CRSGraphAdapter) checkClosed() error {
 		return crs.ErrGraphQueryClosed
 	}
 	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Cache Statistics (GR-10)
+// -----------------------------------------------------------------------------
+
+// QueryCacheStats contains statistics for query caches.
+//
+// Description:
+//
+//	Provides visibility into query cache performance for monitoring and
+//	debugging. All counts are since cache creation or last Purge.
+//
+// Thread Safety: Fields are atomic snapshots, safe for concurrent use.
+type QueryCacheStats struct {
+	// CallersHits is the number of callers cache hits.
+	CallersHits int64 `json:"callers_hits"`
+	// CallersMisses is the number of callers cache misses.
+	CallersMisses int64 `json:"callers_misses"`
+	// CallersEvictions is the number of callers cache evictions.
+	CallersEvictions int64 `json:"callers_evictions"`
+	// CallersSize is the current number of entries in the callers cache.
+	CallersSize int `json:"callers_size"`
+
+	// CalleesHits is the number of callees cache hits.
+	CalleesHits int64 `json:"callees_hits"`
+	// CalleesMisses is the number of callees cache misses.
+	CalleesMisses int64 `json:"callees_misses"`
+	// CalleesEvictions is the number of callees cache evictions.
+	CalleesEvictions int64 `json:"callees_evictions"`
+	// CalleesSize is the current number of entries in the callees cache.
+	CalleesSize int `json:"callees_size"`
+
+	// PathsHits is the number of paths cache hits.
+	PathsHits int64 `json:"paths_hits"`
+	// PathsMisses is the number of paths cache misses.
+	PathsMisses int64 `json:"paths_misses"`
+	// PathsEvictions is the number of paths cache evictions.
+	PathsEvictions int64 `json:"paths_evictions"`
+	// PathsSize is the current number of entries in the paths cache.
+	PathsSize int `json:"paths_size"`
+
+	// TotalHits is the sum of all cache hits.
+	TotalHits int64 `json:"total_hits"`
+	// TotalMisses is the sum of all cache misses.
+	TotalMisses int64 `json:"total_misses"`
+	// TotalEvictions is the sum of all cache evictions.
+	TotalEvictions int64 `json:"total_evictions"`
+	// HitRate is the cache hit rate (0.0 to 1.0). Zero if no queries.
+	HitRate float64 `json:"hit_rate"`
+}
+
+// QueryCacheStats returns statistics for the query caches.
+//
+// Description:
+//
+//	Returns hit/miss counts and sizes for all query caches (callers,
+//	callees, paths). Useful for monitoring cache effectiveness and
+//	sizing decisions.
+//
+// Outputs:
+//   - QueryCacheStats: Cache statistics snapshot.
+//
+// Example:
+//
+//	stats := adapter.QueryCacheStats()
+//	if stats.HitRate < 0.5 {
+//	    log.Warn("low cache hit rate", "rate", stats.HitRate)
+//	}
+//
+// Limitations:
+//   - Stats are a point-in-time snapshot; may be slightly stale
+//   - Hit rate calculation uses integer counts, may lose precision
+//
+// Thread Safety: Safe for concurrent use. Returns atomic snapshot.
+func (a *CRSGraphAdapter) QueryCacheStats() QueryCacheStats {
+	cache := a.analyticsCache
+
+	// GR-10 Review Fix (R-3): Hold read lock to prevent inconsistent reads
+	// during concurrent InvalidateCache() calls
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+
+	var stats QueryCacheStats
+
+	// Callers cache stats
+	if cache.callersCache != nil {
+		stats.CallersHits, stats.CallersMisses = cache.callersCache.Stats()
+		stats.CallersEvictions = cache.callersCache.Evictions()
+		stats.CallersSize = cache.callersCache.Len()
+	}
+
+	// Callees cache stats
+	if cache.calleesCache != nil {
+		stats.CalleesHits, stats.CalleesMisses = cache.calleesCache.Stats()
+		stats.CalleesEvictions = cache.calleesCache.Evictions()
+		stats.CalleesSize = cache.calleesCache.Len()
+	}
+
+	// Paths cache stats
+	if cache.pathsCache != nil {
+		stats.PathsHits, stats.PathsMisses = cache.pathsCache.Stats()
+		stats.PathsEvictions = cache.pathsCache.Evictions()
+		stats.PathsSize = cache.pathsCache.Len()
+	}
+
+	// Compute totals
+	stats.TotalHits = stats.CallersHits + stats.CalleesHits + stats.PathsHits
+	stats.TotalMisses = stats.CallersMisses + stats.CalleesMisses + stats.PathsMisses
+	stats.TotalEvictions = stats.CallersEvictions + stats.CalleesEvictions + stats.PathsEvictions
+
+	// Compute hit rate
+	total := stats.TotalHits + stats.TotalMisses
+	if total > 0 {
+		stats.HitRate = float64(stats.TotalHits) / float64(total)
+	}
+
+	return stats
 }
 
 // -----------------------------------------------------------------------------

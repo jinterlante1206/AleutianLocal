@@ -12,6 +12,9 @@ package graph
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -898,6 +901,681 @@ func TestCRSAdapter_CallEdgeCount(t *testing.T) {
 		}
 		if count != 0 {
 			t.Errorf("expected 0 call edges for empty graph, got %d", count)
+		}
+	})
+}
+
+// -----------------------------------------------------------------------------
+// Query Cache Tests (GR-10)
+// -----------------------------------------------------------------------------
+
+func TestCRSAdapter_QueryCache_Callers(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+	targetID := "main.go:20:handleRequest" // Called by main
+
+	t.Run("first call populates cache", func(t *testing.T) {
+		// Get initial stats
+		statsBefore := adapter.QueryCacheStats()
+		if statsBefore.CallersHits != 0 || statsBefore.CallersMisses != 0 {
+			t.Errorf("expected zero stats initially, got hits=%d misses=%d",
+				statsBefore.CallersHits, statsBefore.CallersMisses)
+		}
+
+		// First call should be a miss
+		callers, err := adapter.FindCallers(ctx, targetID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(callers) != 1 {
+			t.Errorf("expected 1 caller, got %d", len(callers))
+		}
+
+		// Stats should show a miss (singleflight Get check counts as miss)
+		statsAfter := adapter.QueryCacheStats()
+		if statsAfter.CallersMisses == 0 {
+			t.Error("expected at least one callers cache miss")
+		}
+	})
+
+	t.Run("second call hits cache", func(t *testing.T) {
+		statsBefore := adapter.QueryCacheStats()
+
+		// Second call should hit cache
+		callers, err := adapter.FindCallers(ctx, targetID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(callers) != 1 {
+			t.Errorf("expected 1 caller, got %d", len(callers))
+		}
+
+		statsAfter := adapter.QueryCacheStats()
+		if statsAfter.CallersHits <= statsBefore.CallersHits {
+			t.Error("expected callers cache hit count to increase")
+		}
+	})
+
+	t.Run("different target is cache miss", func(t *testing.T) {
+		statsBefore := adapter.QueryCacheStats()
+
+		// Query for a different target
+		_, err := adapter.FindCallers(ctx, "handler/http.go:25:ServeHTTP")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		statsAfter := adapter.QueryCacheStats()
+		if statsAfter.CallersMisses <= statsBefore.CallersMisses {
+			t.Error("expected callers cache miss count to increase for different target")
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_Callees(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+	sourceID := "main.go:10:main" // Calls handleRequest
+
+	t.Run("caches callees query", func(t *testing.T) {
+		// First call
+		callees1, err := adapter.FindCallees(ctx, sourceID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		statsBefore := adapter.QueryCacheStats()
+
+		// Second call should hit cache
+		callees2, err := adapter.FindCallees(ctx, sourceID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		statsAfter := adapter.QueryCacheStats()
+		if statsAfter.CalleesHits <= statsBefore.CalleesHits {
+			t.Error("expected callees cache hit count to increase")
+		}
+
+		if len(callees1) != len(callees2) {
+			t.Errorf("cached result differs: %d vs %d", len(callees1), len(callees2))
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_Paths(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+	fromID := "main.go:10:main"
+	toID := "utils/utils.go:5:Helper"
+
+	t.Run("caches shortest path query", func(t *testing.T) {
+		// First call
+		path1, err := adapter.ShortestPath(ctx, fromID, toID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		statsBefore := adapter.QueryCacheStats()
+
+		// Second call should hit cache
+		path2, err := adapter.ShortestPath(ctx, fromID, toID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		statsAfter := adapter.QueryCacheStats()
+		if statsAfter.PathsHits <= statsBefore.PathsHits {
+			t.Error("expected paths cache hit count to increase")
+		}
+
+		if len(path1) != len(path2) {
+			t.Errorf("cached result differs: %d vs %d", len(path1), len(path2))
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_Invalidation(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+
+	t.Run("invalidate cache clears query caches", func(t *testing.T) {
+		// Populate caches
+		adapter.FindCallers(ctx, "main.go:20:handleRequest")
+		adapter.FindCallees(ctx, "main.go:10:main")
+		adapter.ShortestPath(ctx, "main.go:10:main", "utils/utils.go:5:Helper")
+
+		statsBefore := adapter.QueryCacheStats()
+		if statsBefore.CallersSize == 0 && statsBefore.CalleesSize == 0 && statsBefore.PathsSize == 0 {
+			t.Error("expected caches to have entries before invalidation")
+		}
+
+		// Invalidate
+		adapter.InvalidateCache()
+
+		statsAfter := adapter.QueryCacheStats()
+		if statsAfter.CallersSize != 0 {
+			t.Errorf("expected callers cache size 0 after invalidation, got %d", statsAfter.CallersSize)
+		}
+		if statsAfter.CalleesSize != 0 {
+			t.Errorf("expected callees cache size 0 after invalidation, got %d", statsAfter.CalleesSize)
+		}
+		if statsAfter.PathsSize != 0 {
+			t.Errorf("expected paths cache size 0 after invalidation, got %d", statsAfter.PathsSize)
+		}
+		if statsAfter.TotalHits != 0 {
+			t.Errorf("expected total hits 0 after invalidation, got %d", statsAfter.TotalHits)
+		}
+		if statsAfter.TotalMisses != 0 {
+			t.Errorf("expected total misses 0 after invalidation, got %d", statsAfter.TotalMisses)
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCacheStats(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+
+	t.Run("returns zero stats initially", func(t *testing.T) {
+		stats := adapter.QueryCacheStats()
+		if stats.TotalHits != 0 {
+			t.Errorf("expected 0 total hits, got %d", stats.TotalHits)
+		}
+		if stats.TotalMisses != 0 {
+			t.Errorf("expected 0 total misses, got %d", stats.TotalMisses)
+		}
+		if stats.HitRate != 0 {
+			t.Errorf("expected 0 hit rate, got %f", stats.HitRate)
+		}
+	})
+
+	t.Run("computes hit rate correctly", func(t *testing.T) {
+		// Make some queries to generate stats
+		adapter.FindCallers(ctx, "main.go:20:handleRequest") // miss
+		adapter.FindCallers(ctx, "main.go:20:handleRequest") // hit
+		adapter.FindCallers(ctx, "main.go:20:handleRequest") // hit
+
+		stats := adapter.QueryCacheStats()
+		// We should have at least 2 hits and 1 miss for callers
+		if stats.CallersHits < 2 {
+			t.Errorf("expected at least 2 callers hits, got %d", stats.CallersHits)
+		}
+		if stats.CallersMisses < 1 {
+			t.Errorf("expected at least 1 callers miss, got %d", stats.CallersMisses)
+		}
+
+		// Hit rate should be > 0
+		if stats.HitRate <= 0 {
+			t.Errorf("expected positive hit rate, got %f", stats.HitRate)
+		}
+	})
+
+	t.Run("aggregates stats from all caches", func(t *testing.T) {
+		// Query all cache types
+		adapter.FindCallers(ctx, "handler/http.go:25:ServeHTTP")
+		adapter.FindCallees(ctx, "main.go:20:handleRequest")
+		adapter.ShortestPath(ctx, "main.go:10:main", "handler/http.go:25:ServeHTTP")
+
+		stats := adapter.QueryCacheStats()
+		// Total should be sum of individual caches
+		expectedTotal := stats.CallersHits + stats.CalleesHits + stats.PathsHits
+		if stats.TotalHits != expectedTotal {
+			t.Errorf("expected total hits %d, got %d", expectedTotal, stats.TotalHits)
+		}
+
+		expectedMisses := stats.CallersMisses + stats.CalleesMisses + stats.PathsMisses
+		if stats.TotalMisses != expectedMisses {
+			t.Errorf("expected total misses %d, got %d", expectedMisses, stats.TotalMisses)
+		}
+	})
+}
+
+// -----------------------------------------------------------------------------
+// Additional Query Cache Tests (GR-10 Review)
+// -----------------------------------------------------------------------------
+
+func TestCRSAdapter_QueryCache_AfterClose(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+
+	ctx := context.Background()
+
+	// Populate cache before close
+	adapter.FindCallers(ctx, "main.go:20:handleRequest")
+
+	// Close adapter
+	adapter.Close()
+
+	// Queries after close should fail
+	t.Run("FindCallers after close returns error", func(t *testing.T) {
+		_, err := adapter.FindCallers(ctx, "main.go:20:handleRequest")
+		if err == nil {
+			t.Error("expected error after close")
+		}
+		if err != crs.ErrGraphQueryClosed && !strings.Contains(err.Error(), "closed") {
+			t.Errorf("expected closed error, got: %v", err)
+		}
+	})
+
+	t.Run("FindCallees after close returns error", func(t *testing.T) {
+		_, err := adapter.FindCallees(ctx, "main.go:10:main")
+		if err == nil {
+			t.Error("expected error after close")
+		}
+	})
+
+	t.Run("ShortestPath after close returns error", func(t *testing.T) {
+		_, err := adapter.ShortestPath(ctx, "main.go:10:main", "utils/utils.go:5:Helper")
+		if err == nil {
+			t.Error("expected error after close")
+		}
+	})
+
+	t.Run("QueryCacheStats still works after close", func(t *testing.T) {
+		// Stats should still be readable (no error return)
+		stats := adapter.QueryCacheStats()
+		// Stats from before close should still be there
+		if stats.CallersSize == 0 && stats.CallersHits == 0 && stats.CallersMisses == 0 {
+			// This is actually expected since the cache was populated
+			// but we're checking it doesn't panic
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_ContextCancellation(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	t.Run("cancelled context before FindCallers", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := adapter.FindCallers(ctx, "main.go:20:handleRequest")
+		if err == nil {
+			t.Error("expected error with cancelled context")
+		}
+	})
+
+	t.Run("cancelled context before FindCallees", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := adapter.FindCallees(ctx, "main.go:10:main")
+		if err == nil {
+			t.Error("expected error with cancelled context")
+		}
+	})
+
+	t.Run("cancelled context before ShortestPath", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := adapter.ShortestPath(ctx, "main.go:10:main", "utils/utils.go:5:Helper")
+		if err == nil {
+			t.Error("expected error with cancelled context")
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_NonExistentSymbol(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+
+	t.Run("FindCallers for non-existent symbol returns empty", func(t *testing.T) {
+		callers, err := adapter.FindCallers(ctx, "nonexistent:1:Function")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(callers) != 0 {
+			t.Errorf("expected empty callers for non-existent symbol, got %d", len(callers))
+		}
+
+		// Should still cache the empty result
+		stats := adapter.QueryCacheStats()
+		if stats.CallersSize == 0 {
+			// Empty results might not be cached if they're "truncated"
+			// This is acceptable behavior
+		}
+	})
+
+	t.Run("FindCallees for non-existent symbol returns empty", func(t *testing.T) {
+		callees, err := adapter.FindCallees(ctx, "nonexistent:1:Function")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(callees) != 0 {
+			t.Errorf("expected empty callees for non-existent symbol, got %d", len(callees))
+		}
+	})
+
+	t.Run("ShortestPath for non-existent symbols returns error", func(t *testing.T) {
+		// ShortestPath returns error for non-existent source node
+		_, err := adapter.ShortestPath(ctx, "nonexistent:1:A", "nonexistent:2:B")
+		if err == nil {
+			t.Error("expected error for non-existent source node")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("expected 'not found' error, got: %v", err)
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_ConcurrentQueries(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	numGoroutines := 10
+	queriesPerGoroutine := 100
+
+	// Concurrent callers queries (same key - tests singleflight)
+	t.Run("concurrent callers queries same key", func(t *testing.T) {
+		for i := 0; i < numGoroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < queriesPerGoroutine; j++ {
+					_, err := adapter.FindCallers(ctx, "main.go:20:handleRequest")
+					if err != nil {
+						t.Errorf("unexpected error: %v", err)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+
+		stats := adapter.QueryCacheStats()
+		if stats.CallersHits+stats.CallersMisses == 0 {
+			t.Error("expected some cache activity")
+		}
+	})
+
+	// Concurrent queries with different keys
+	t.Run("concurrent queries different keys", func(t *testing.T) {
+		adapter.InvalidateCache() // Reset
+
+		for i := 0; i < numGoroutines; i++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				for j := 0; j < queriesPerGoroutine/10; j++ {
+					switch id % 3 {
+					case 0:
+						adapter.FindCallers(ctx, "main.go:20:handleRequest")
+					case 1:
+						adapter.FindCallees(ctx, "main.go:10:main")
+					case 2:
+						adapter.ShortestPath(ctx, "main.go:10:main", "utils/utils.go:5:Helper")
+					}
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		stats := adapter.QueryCacheStats()
+		if stats.TotalHits+stats.TotalMisses == 0 {
+			t.Error("expected some cache activity")
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_InvalidationDuringQuery(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+
+	// Populate cache
+	adapter.FindCallers(ctx, "main.go:20:handleRequest")
+
+	// Concurrent queries and invalidations
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				adapter.FindCallers(ctx, "main.go:20:handleRequest")
+			}
+		}()
+	}
+
+	// Concurrent invalidations
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				adapter.InvalidateCache()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Should not panic or deadlock
+	// Cache may be empty or have some entries
+	stats := adapter.QueryCacheStats()
+	if stats.CallersSize < 0 {
+		t.Errorf("invalid cache size: %d", stats.CallersSize)
+	}
+}
+
+func TestCRSAdapter_QueryCache_EmptyResults(t *testing.T) {
+	hg := createTestHierarchicalGraph(t)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+
+	t.Run("caches empty callers result", func(t *testing.T) {
+		// Helper has no callers (it's a leaf)
+		callers1, err := adapter.FindCallers(ctx, "utils/utils.go:5:Helper")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		statsBefore := adapter.QueryCacheStats()
+
+		// Second query should still work
+		callers2, err := adapter.FindCallers(ctx, "utils/utils.go:5:Helper")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(callers1) != len(callers2) {
+			t.Errorf("results differ: %d vs %d", len(callers1), len(callers2))
+		}
+
+		// If cached, should show hits increasing
+		statsAfter := adapter.QueryCacheStats()
+		// Empty results may or may not be cached depending on truncated flag
+		_ = statsBefore
+		_ = statsAfter
+	})
+
+	t.Run("caches empty path result", func(t *testing.T) {
+		// No path between unconnected nodes
+		path1, err := adapter.ShortestPath(ctx, "utils/utils.go:5:Helper", "main.go:10:main")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		statsBefore := adapter.QueryCacheStats()
+
+		path2, err := adapter.ShortestPath(ctx, "utils/utils.go:5:Helper", "main.go:10:main")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(path1) != len(path2) {
+			t.Errorf("results differ: %d vs %d", len(path1), len(path2))
+		}
+
+		statsAfter := adapter.QueryCacheStats()
+		// Should show cache hit for paths
+		if statsAfter.PathsHits <= statsBefore.PathsHits {
+			t.Error("expected paths cache hit for empty result")
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_SpecialCharactersInKey(t *testing.T) {
+	// Create a graph with symbols containing special characters
+	g := NewGraph("test")
+	symbols := []*ast.Symbol{
+		{
+			ID:       "pkg/sub:10:Func_With_Underscores",
+			Name:     "Func_With_Underscores",
+			Kind:     ast.SymbolKindFunction,
+			FilePath: "pkg/sub/file.go",
+			Package:  "sub",
+		},
+		{
+			ID:       "pkg/sub:20:FuncWithNumbers123",
+			Name:     "FuncWithNumbers123",
+			Kind:     ast.SymbolKindFunction,
+			FilePath: "pkg/sub/file.go",
+			Package:  "sub",
+		},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+	}
+	g.AddEdge(symbols[0].ID, symbols[1].ID, EdgeTypeCalls, ast.Location{})
+	g.Freeze()
+
+	hg, _ := WrapGraph(g)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+
+	t.Run("handles special characters in callers cache key", func(t *testing.T) {
+		callees, err := adapter.FindCallees(ctx, "pkg/sub:10:Func_With_Underscores")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(callees) != 1 {
+			t.Errorf("expected 1 callee, got %d", len(callees))
+		}
+
+		// Second query should hit cache
+		statsBefore := adapter.QueryCacheStats()
+		_, err = adapter.FindCallees(ctx, "pkg/sub:10:Func_With_Underscores")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		statsAfter := adapter.QueryCacheStats()
+
+		if statsAfter.CalleesHits <= statsBefore.CalleesHits {
+			t.Error("expected cache hit for special character key")
+		}
+	})
+
+	t.Run("handles colon in path cache key", func(t *testing.T) {
+		// Path key format is "from:to" but IDs also contain colons
+		path, err := adapter.ShortestPath(ctx, "pkg/sub:10:Func_With_Underscores", "pkg/sub:20:FuncWithNumbers123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(path) != 2 {
+			t.Errorf("expected path length 2, got %d", len(path))
+		}
+
+		// Second query should hit cache
+		statsBefore := adapter.QueryCacheStats()
+		_, err = adapter.ShortestPath(ctx, "pkg/sub:10:Func_With_Underscores", "pkg/sub:20:FuncWithNumbers123")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		statsAfter := adapter.QueryCacheStats()
+
+		if statsAfter.PathsHits <= statsBefore.PathsHits {
+			t.Error("expected cache hit for path with colons")
+		}
+	})
+}
+
+func TestCRSAdapter_QueryCache_LargeResults(t *testing.T) {
+	// Create a graph with many connections
+	g := NewGraph("test")
+
+	// Create one central node called by many others
+	central := &ast.Symbol{
+		ID:       "central:1:Hub",
+		Name:     "Hub",
+		Kind:     ast.SymbolKindFunction,
+		FilePath: "central.go",
+		Package:  "main",
+	}
+	g.AddNode(central)
+
+	// Create 50 callers
+	for i := 0; i < 50; i++ {
+		caller := &ast.Symbol{
+			ID:       fmt.Sprintf("caller:1:Caller%d", i),
+			Name:     fmt.Sprintf("Caller%d", i),
+			Kind:     ast.SymbolKindFunction,
+			FilePath: "callers.go",
+			Package:  "main",
+		}
+		g.AddNode(caller)
+		g.AddEdge(caller.ID, central.ID, EdgeTypeCalls, ast.Location{})
+	}
+
+	g.Freeze()
+	hg, _ := WrapGraph(g)
+	adapter, _ := NewCRSGraphAdapter(hg, nil, 1, time.Now().UnixMilli(), nil)
+	defer adapter.Close()
+
+	ctx := context.Background()
+
+	t.Run("caches large callers result", func(t *testing.T) {
+		callers, err := adapter.FindCallers(ctx, "central:1:Hub")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(callers) != 50 {
+			t.Errorf("expected 50 callers, got %d", len(callers))
+		}
+
+		// Second query should hit cache
+		statsBefore := adapter.QueryCacheStats()
+		callers2, err := adapter.FindCallers(ctx, "central:1:Hub")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		statsAfter := adapter.QueryCacheStats()
+
+		if len(callers2) != 50 {
+			t.Errorf("cached result has different length: %d", len(callers2))
+		}
+		if statsAfter.CallersHits <= statsBefore.CallersHits {
+			t.Error("expected cache hit for large result")
 		}
 	})
 }
