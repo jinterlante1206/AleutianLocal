@@ -1198,6 +1198,107 @@ func (a *GraphAnalytics) DominatorsWithCRS(ctx context.Context, entry string) (*
 	return result, builder.Build()
 }
 
+// DominatorsWithCache returns a cached dominator tree if available, computing
+// a fresh tree only when needed.
+//
+// Description:
+//
+//	Provides the same functionality as Dominators but caches the result to avoid
+//	recomputation when multiple tools request the dominator tree for the same
+//	entry point. The cache is automatically invalidated when:
+//	- A different entry point is requested
+//	- The underlying graph changes (detected via BuiltAtMilli)
+//
+// Inputs:
+//
+//   - ctx: Context for cancellation. Must not be nil.
+//   - entry: The entry node ID (must exist in graph).
+//
+// Outputs:
+//
+//   - *DominatorTree: The computed or cached dominator tree. Never nil.
+//   - crs.TraceStep: TraceStep for CRS recording (includes cache_hit metadata).
+//   - error: Non-nil if entry not found or context cancelled.
+//
+// Thread Safety: Safe for concurrent use via internal RWMutex.
+func (a *GraphAnalytics) DominatorsWithCache(ctx context.Context, entry string) (*DominatorTree, crs.TraceStep, error) {
+	start := time.Now()
+
+	// Early nil check
+	if a == nil || a.domTreeCache == nil {
+		tree, step := a.DominatorsWithCRS(ctx, entry)
+		return tree, step, nil
+	}
+
+	// Get current graph version for cache validation
+	graphVersion := int64(0)
+	if a.graph != nil && a.graph.Graph != nil {
+		graphVersion = a.graph.BuiltAtMilli
+	}
+
+	// Check cache with read lock
+	a.domTreeCache.mu.RLock()
+	if a.domTreeCache.tree != nil &&
+		a.domTreeCache.entry == entry &&
+		a.domTreeCache.graphVersion == graphVersion {
+		// Cache hit
+		tree := a.domTreeCache.tree
+		a.domTreeCache.mu.RUnlock()
+
+		step := crs.NewTraceStepBuilder().
+			WithAction("analytics_dominators_cached").
+			WithTarget(entry).
+			WithTool("DominatorsWithCache").
+			WithDuration(time.Since(start)).
+			WithMetadata("cache_hit", "true").
+			WithMetadata("entry", entry).
+			WithMetadata("max_depth", itoa(tree.MaxDepth())).
+			WithMetadata("reachable_nodes", itoa(tree.ReachableCount)).
+			Build()
+
+		return tree, step, nil
+	}
+	a.domTreeCache.mu.RUnlock()
+
+	// Cache miss - compute fresh
+	tree, err := a.Dominators(ctx, entry)
+	if err != nil {
+		step := crs.NewTraceStepBuilder().
+			WithAction("analytics_dominators_cached").
+			WithTarget(entry).
+			WithTool("DominatorsWithCache").
+			WithDuration(time.Since(start)).
+			WithMetadata("cache_hit", "false").
+			WithError(err.Error()).
+			Build()
+		return tree, step, err
+	}
+
+	// Update cache with write lock
+	a.domTreeCache.mu.Lock()
+	a.domTreeCache.tree = tree
+	a.domTreeCache.entry = entry
+	a.domTreeCache.graphVersion = graphVersion
+	a.domTreeCache.computedAt = time.Now().UnixMilli()
+	a.domTreeCache.mu.Unlock()
+
+	step := crs.NewTraceStepBuilder().
+		WithAction("analytics_dominators_cached").
+		WithTarget(entry).
+		WithTool("DominatorsWithCache").
+		WithDuration(time.Since(start)).
+		WithMetadata("cache_hit", "false").
+		WithMetadata("entry", entry).
+		WithMetadata("iterations", itoa(tree.Iterations)).
+		WithMetadata("converged", btoa(tree.Converged)).
+		WithMetadata("max_depth", itoa(tree.MaxDepth())).
+		WithMetadata("reachable_nodes", itoa(tree.ReachableCount)).
+		WithMetadata("node_count", itoa(tree.NodeCount)).
+		Build()
+
+	return tree, step, nil
+}
+
 // =============================================================================
 // Post-Dominator Trees (GR-16c)
 // =============================================================================
@@ -1512,6 +1613,43 @@ func (a *GraphAnalytics) detectExitNodes() []string {
 	return exits
 }
 
+// DetectEntryNodes finds nodes with no incoming edges.
+//
+// Description:
+//
+//	Identifies natural entry points in the call graph - functions that are not
+//	called by any other function. These are typically main, init, test functions,
+//	or other top-level entry points.
+//
+// Outputs:
+//
+//	[]string - Node IDs of entry points, prioritizing main/init names.
+//
+// Thread Safety: Safe for concurrent use (read-only on graph).
+func (a *GraphAnalytics) DetectEntryNodes(ctx context.Context) []string {
+	entries := make([]string, 0)
+	mainEntries := make([]string, 0) // Prioritize main/init
+
+	for _, node := range a.graph.Nodes() {
+		// Node is an entry if it has no incoming edges
+		if len(node.Incoming) == 0 {
+			// Check if this is a main or init function
+			if node.Symbol != nil {
+				name := node.Symbol.Name
+				if name == "main" || name == "init" || name == "Main" || name == "Init" {
+					mainEntries = append(mainEntries, node.ID)
+					continue
+				}
+			}
+			entries = append(entries, node.ID)
+		}
+	}
+
+	// Return main/init entries first, then others
+	result := append(mainEntries, entries...)
+	return result
+}
+
 // computeReversePostorderReversed computes reverse postorder on the reversed graph.
 //
 // In the reversed graph, outgoing edges become incoming edges.
@@ -1771,4 +1909,112 @@ func (a *GraphAnalytics) PostDominatorsWithCRS(ctx context.Context, exit string)
 	}
 
 	return result, builder.Build()
+}
+
+// PostDominatorsWithCache returns a cached post-dominator tree if available,
+// computing a fresh tree only when needed.
+//
+// Description:
+//
+//	Provides the same functionality as PostDominators but caches the result to
+//	avoid recomputation when multiple tools request the post-dominator tree for
+//	the same exit point. The cache is automatically invalidated when:
+//	- A different exit point is requested
+//	- The underlying graph changes (detected via BuiltAtMilli)
+//
+// Inputs:
+//
+//   - ctx: Context for cancellation. Must not be nil.
+//   - exit: The exit node ID. If empty, auto-detects exits.
+//
+// Outputs:
+//
+//   - *DominatorTree: The computed or cached post-dominator tree. Never nil.
+//   - crs.TraceStep: TraceStep for CRS recording (includes cache_hit metadata).
+//   - error: Non-nil if exit not found or context cancelled.
+//
+// Thread Safety: Safe for concurrent use via internal RWMutex.
+func (a *GraphAnalytics) PostDominatorsWithCache(ctx context.Context, exit string) (*DominatorTree, crs.TraceStep, error) {
+	start := time.Now()
+
+	// Early nil check
+	if a == nil || a.postDomTreeCache == nil {
+		tree, step := a.PostDominatorsWithCRS(ctx, exit)
+		return tree, step, nil
+	}
+
+	// Get current graph version for cache validation
+	graphVersion := int64(0)
+	if a.graph != nil && a.graph.Graph != nil {
+		graphVersion = a.graph.BuiltAtMilli
+	}
+
+	// Check cache with read lock
+	a.postDomTreeCache.mu.RLock()
+	if a.postDomTreeCache.tree != nil &&
+		a.postDomTreeCache.entry == exit &&
+		a.postDomTreeCache.graphVersion == graphVersion {
+		// Cache hit
+		tree := a.postDomTreeCache.tree
+		a.postDomTreeCache.mu.RUnlock()
+
+		step := crs.NewTraceStepBuilder().
+			WithAction("analytics_post_dominators_cached").
+			WithTarget(exit).
+			WithTool("PostDominatorsWithCache").
+			WithDuration(time.Since(start)).
+			WithMetadata("cache_hit", "true").
+			WithMetadata("exit", exit).
+			WithMetadata("max_depth", itoa(tree.MaxDepth())).
+			WithMetadata("reachable_nodes", itoa(tree.ReachableCount)).
+			Build()
+
+		return tree, step, nil
+	}
+	a.postDomTreeCache.mu.RUnlock()
+
+	// Cache miss - compute fresh
+	tree, err := a.PostDominators(ctx, exit)
+	if err != nil {
+		step := crs.NewTraceStepBuilder().
+			WithAction("analytics_post_dominators_cached").
+			WithTarget(exit).
+			WithTool("PostDominatorsWithCache").
+			WithDuration(time.Since(start)).
+			WithMetadata("cache_hit", "false").
+			WithError(err.Error()).
+			Build()
+		return tree, step, err
+	}
+
+	// Update cache with write lock
+	a.postDomTreeCache.mu.Lock()
+	a.postDomTreeCache.tree = tree
+	a.postDomTreeCache.entry = exit
+	a.postDomTreeCache.graphVersion = graphVersion
+	a.postDomTreeCache.computedAt = time.Now().UnixMilli()
+	a.postDomTreeCache.mu.Unlock()
+
+	exitUsed := tree.Entry
+	if exit == "" {
+		exitUsed = tree.Entry + " (auto-detected)"
+	}
+
+	step := crs.NewTraceStepBuilder().
+		WithAction("analytics_post_dominators_cached").
+		WithTarget(exit).
+		WithTool("PostDominatorsWithCache").
+		WithDuration(time.Since(start)).
+		WithMetadata("cache_hit", "false").
+		WithMetadata("exit", exitUsed).
+		WithMetadata("iterations", itoa(tree.Iterations)).
+		WithMetadata("converged", btoa(tree.Converged)).
+		WithMetadata("max_depth", itoa(tree.MaxDepth())).
+		WithMetadata("reachable_nodes", itoa(tree.ReachableCount)).
+		WithMetadata("node_count", itoa(tree.NodeCount)).
+		WithMetadata("exit_count", itoa(tree.ExitCount)).
+		WithMetadata("virtual_exit", btoa(tree.UsedVirtualExit)).
+		Build()
+
+	return tree, step, nil
 }

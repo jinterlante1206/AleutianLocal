@@ -575,6 +575,147 @@ tools:
     requires:
       - graph_initialized
 
+  - name: find_dominators
+    keywords:
+      - dominators
+      - must call
+      - required before
+      - mandatory
+      - prerequisites
+      - must go through
+      - instrumentation point
+      - what must be called
+      - mandatory path
+      - required initialization
+      - must precede
+    use_when: "User asks what functions MUST be called before reaching a target, or asks about mandatory prerequisites and dependencies"
+    avoid_when: "User asks about all possible callers (use find_callers). Use find_critical_path if asking about the exact mandatory sequence"
+    instead_of:
+      - tool: find_callers
+        when: "User specifically asks about MANDATORY callers, not all possible callers"
+    requires:
+      - graph_initialized
+
+  - name: find_loops
+    keywords:
+      - loops
+      - recursion
+      - recursive
+      - cyclic
+      - back edge
+      - self-call
+      - mutual recursion
+      - call cycle
+      - iteration
+      - repeated calls
+      - natural loops
+      - recursive functions
+      - self-recursion
+      - indirect recursion
+    use_when: "User asks about recursion patterns, loops in call graph, cyclic dependencies, or wants to find recursive functions"
+    avoid_when: "User asks about dependency cycles (use find_cycles) or articulation points (use find_articulation_points)"
+    instead_of:
+      - tool: find_cycles
+        when: "User specifically asks about recursion or self-calling functions"
+    requires:
+      - graph_initialized
+
+  - name: find_merge_points
+    keywords:
+      - merge point
+      - merge points
+      - convergence
+      - paths converge
+      - integration point
+      - coordination
+      - where paths meet
+      - dominance frontier
+      - control flow merge
+      - join point
+      - synchronization point
+      - where code paths join
+    use_when: "User asks where code paths converge, about integration points, or where different call chains meet"
+    avoid_when: "User asks about articulation points or bottlenecks (use find_articulation_points)"
+    requires:
+      - graph_initialized
+
+  - name: find_common_dependency
+    keywords:
+      - common dependency
+      - shared dependency
+      - lowest common dominator
+      - lcd
+      - common ancestor
+      - shared init
+      - shared setup
+      - common initialization
+      - what must be called
+      - mandatory dependency
+      - shared requirement
+      - common prerequisite
+    use_when: "User asks about shared dependencies, common initialization, or what must be called before multiple functions"
+    avoid_when: "User asks about callers/callees (use find_callers/find_callees) or merge points (use find_merge_points)"
+    requires:
+      - graph_initialized
+
+  - name: find_control_dependencies
+    keywords:
+      - control dependency
+      - control dependencies
+      - control flow
+      - conditional
+      - branch
+      - decision point
+      - controls execution
+      - determines whether
+      - if statement
+      - switch
+      - what controls
+      - execution control
+      - branch point
+    use_when: "User asks about what conditionals control a function's execution, or wants to understand decision points affecting code flow"
+    avoid_when: "User asks about call chains (use get_call_chain) or dominators (use find_dominators)"
+    requires:
+      - graph_initialized
+
+  - name: find_extractable_regions
+    keywords:
+      - extractable
+      - extract function
+      - extract method
+      - refactor
+      - SESE
+      - single entry
+      - single exit
+      - modularize
+      - break apart
+      - decompose
+      - refactoring opportunity
+      - safe to extract
+    use_when: "User asks about refactoring opportunities, code extraction, or wants to find functions that can be safely modularized"
+    avoid_when: "User asks about code structure (use find_communities) or dead code (use find_dead_code)"
+    requires:
+      - graph_initialized
+
+  - name: check_reducibility
+    keywords:
+      - reducible
+      - reducibility
+      - well-structured
+      - code quality
+      - spaghetti code
+      - irreducible
+      - complex control flow
+      - goto
+      - structure
+      - clean code
+      - structured code
+      - control flow quality
+    use_when: "User asks about code quality, control flow structure, or wants to identify poorly structured code regions"
+    avoid_when: "User asks about cycles (use find_cycles) or extractable regions (use find_extractable_regions)"
+    requires:
+      - graph_initialized
+
   # =============================================================================
   # SPECIAL TOOLS
   # =============================================================================

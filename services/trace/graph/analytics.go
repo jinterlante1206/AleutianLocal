@@ -13,11 +13,37 @@ package graph
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 )
+
+// =============================================================================
+// Dominator Tree Cache
+// =============================================================================
+
+// DominatorTreeCache provides session-level caching for dominator trees.
+//
+// Description:
+//
+//	Caches a single dominator tree to avoid recomputation when the same
+//	entry point is requested multiple times. The cache is automatically
+//	invalidated when:
+//	- A different entry point is requested
+//	- The underlying graph changes (detected via BuiltAtMilli)
+//
+// Thread Safety:
+//
+//	DominatorTreeCache is safe for concurrent use via RWMutex.
+type DominatorTreeCache struct {
+	mu           sync.RWMutex
+	entry        string         // Entry point used for computation
+	tree         *DominatorTree // Cached dominator tree
+	graphVersion int64          // Graph BuiltAtMilli when computed
+	computedAt   int64          // Unix milliseconds when cache was populated
+}
 
 // =============================================================================
 // GraphAnalytics
@@ -48,6 +74,14 @@ import (
 //	| PackageCoupling | O(P) where P = packages |
 type GraphAnalytics struct {
 	graph *HierarchicalGraph
+
+	// domTreeCache caches the dominator tree for a given entry point.
+	// Avoids recomputation when multiple tools request the same dominator tree.
+	domTreeCache *DominatorTreeCache
+
+	// postDomTreeCache caches the post-dominator tree for a given exit point.
+	// Avoids recomputation when multiple tools request the same post-dominator tree.
+	postDomTreeCache *DominatorTreeCache
 }
 
 // NewGraphAnalytics creates a new analytics instance for the given graph.
@@ -63,7 +97,11 @@ func NewGraphAnalytics(graph *HierarchicalGraph) *GraphAnalytics {
 	if graph == nil {
 		return nil
 	}
-	return &GraphAnalytics{graph: graph}
+	return &GraphAnalytics{
+		graph:            graph,
+		domTreeCache:     &DominatorTreeCache{},
+		postDomTreeCache: &DominatorTreeCache{},
+	}
 }
 
 // =============================================================================

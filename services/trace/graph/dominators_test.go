@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -9649,5 +9650,1008 @@ func TestSESE_RegionOfConsistency(t *testing.T) {
 			t.Errorf("node %s in RegionOf points to region %s->%s but is not in region's Nodes",
 				nodeID, region.Entry, region.Exit)
 		}
+	}
+}
+
+// =============================================================================
+// Check Reducibility Tests (GR-16i)
+// =============================================================================
+
+// TestCheckReducibility_ReducibleSimple tests a simple linear reducible graph.
+//
+// Graph: A → B → C → D (linear chain, trivially reducible)
+func TestCheckReducibility_ReducibleSimple(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "C"},
+		{"C", "D"},
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.IsReducible {
+		t.Error("expected linear graph to be reducible")
+	}
+	if result.Score != 1.0 {
+		t.Errorf("expected score 1.0, got %f", result.Score)
+	}
+	if len(result.IrreducibleRegions) != 0 {
+		t.Errorf("expected 0 irreducible regions, got %d", len(result.IrreducibleRegions))
+	}
+}
+
+// TestCheckReducibility_ReducibleWithLoop tests a reducible graph with a natural loop.
+//
+// Graph: A → B → C → D
+//
+//	↑   │
+//	└───┘ (C → B back edge, B dominates C → natural loop, reducible)
+func TestCheckReducibility_ReducibleWithLoop(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "C"},
+		{"C", "D"},
+		{"C", "B"}, // Back edge: C → B (B dominates C)
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.IsReducible {
+		t.Error("expected graph with natural loop to be reducible")
+	}
+	if result.Score != 1.0 {
+		t.Errorf("expected score 1.0, got %f", result.Score)
+	}
+}
+
+// TestCheckReducibility_ReducibleNested tests nested natural loops (reducible).
+//
+// Graph: A → B → C → D → E
+//
+//	↑   │   ↑   │
+//	└───┘   └───┘ (C → B and E → D back edges)
+func TestCheckReducibility_ReducibleNested(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "C"},
+		{"C", "D"},
+		{"D", "E"},
+		{"C", "B"}, // Back edge: inner loop
+		{"E", "D"}, // Back edge: outer loop
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.IsReducible {
+		t.Error("expected nested loops graph to be reducible")
+	}
+}
+
+// TestCheckReducibility_IrreducibleMultiEntry tests an irreducible graph with multi-entry loop.
+//
+// Graph: A → B → D
+//
+//	│   ↑   │
+//	└→ C ←──┘ (Both B and C can enter the B-C-D region from outside)
+//
+// This creates a multi-entry loop where the B-C-D region can be entered from A→B or D→C.
+func TestCheckReducibility_IrreducibleMultiEntry(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"D", "C"},
+		{"C", "B"}, // Creates cycle B → D → C → B
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.IsReducible {
+		t.Error("expected multi-entry loop graph to be irreducible")
+	}
+	if result.Score >= 1.0 {
+		t.Errorf("expected score < 1.0 for irreducible graph, got %f", result.Score)
+	}
+	if len(result.IrreducibleRegions) == 0 {
+		t.Error("expected at least one irreducible region")
+	}
+}
+
+// TestCheckReducibility_IrreducibleComplex tests a more complex irreducible graph.
+//
+// Classic irreducible pattern from compiler literature.
+func TestCheckReducibility_IrreducibleComplex(t *testing.T) {
+	// Entry → A
+	//         │\
+	//         ▼ \
+	//         B  C
+	//         │  │
+	//         ▼  ▼
+	//         D←─┘
+	//         │
+	//         ▼
+	//         E
+	//
+	// Add edges D→B and D→C to create irreducibility
+	nodes := []string{"entry", "A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"entry", "A"},
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"C", "D"},
+		{"D", "E"},
+		{"D", "B"}, // Cross edge creating irreducibility
+		{"D", "C"}, // Another cross edge
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "entry")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.IsReducible {
+		t.Error("expected complex irreducible graph to be irreducible")
+	}
+	if len(result.IrreducibleRegions) == 0 {
+		t.Error("expected at least one irreducible region")
+	}
+}
+
+// TestCheckReducibility_EmptyGraph tests that an empty graph is trivially reducible.
+func TestCheckReducibility_EmptyGraph(t *testing.T) {
+	g := NewGraph("/test/project")
+	g.Freeze()
+	hg, _ := WrapGraph(g)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	// Create a minimal domTree for empty graph
+	domTree := &DominatorTree{
+		Entry:        "",
+		ImmediateDom: make(map[string]string),
+		Children:     make(map[string][]string),
+		Depth:        make(map[string]int),
+		PostOrder:    []string{},
+		NodeCount:    0,
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.IsReducible {
+		t.Error("expected empty graph to be reducible")
+	}
+	if result.Score != 1.0 {
+		t.Errorf("expected score 1.0 for empty graph, got %f", result.Score)
+	}
+}
+
+// TestCheckReducibility_SingleNode tests that a single node graph is reducible.
+func TestCheckReducibility_SingleNode(t *testing.T) {
+	nodes := []string{"A"}
+	edges := [][2]string{} // No edges
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.IsReducible {
+		t.Error("expected single node graph to be reducible")
+	}
+	if result.Score != 1.0 {
+		t.Errorf("expected score 1.0, got %f", result.Score)
+	}
+}
+
+// TestCheckReducibility_SelfLoop tests that a self-loop is reducible.
+func TestCheckReducibility_SelfLoop(t *testing.T) {
+	nodes := []string{"A", "B"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "B"}, // Self-loop
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.IsReducible {
+		t.Error("expected self-loop graph to be reducible")
+	}
+}
+
+// TestCheckReducibility_ScoreCalculation verifies the score formula.
+func TestCheckReducibility_ScoreCalculation(t *testing.T) {
+	// Create an irreducible graph where some nodes are in irreducible region
+	// Score should be (total - irreducible) / total
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"C", "D"},
+		{"D", "B"}, // Creates irreducibility
+		{"D", "C"},
+		{"D", "E"},
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify score is between 0 and 1
+	if result.Score < 0.0 || result.Score > 1.0 {
+		t.Errorf("score should be between 0 and 1, got %f", result.Score)
+	}
+
+	// For irreducible graph, score should be < 1.0
+	if result.IsReducible && result.Score < 1.0 {
+		t.Error("if reducible, score should be 1.0")
+	}
+	if !result.IsReducible && result.Score == 1.0 {
+		t.Error("if irreducible, score should be < 1.0")
+	}
+
+	// Verify summary consistency
+	if result.Summary.TotalNodes != len(nodes) {
+		t.Errorf("expected TotalNodes=%d, got %d", len(nodes), result.Summary.TotalNodes)
+	}
+}
+
+// TestCheckReducibility_Recommendations verifies recommendation generation.
+func TestCheckReducibility_Recommendations(t *testing.T) {
+	t.Run("fully_reducible", func(t *testing.T) {
+		nodes := []string{"A", "B", "C"}
+		edges := [][2]string{{"A", "B"}, {"B", "C"}}
+		hg := buildArticulationTestGraph(t, nodes, edges)
+		analytics := NewGraphAnalytics(hg)
+		ctx := context.Background()
+
+		domTree, _ := analytics.Dominators(ctx, "A")
+		result, err := analytics.CheckReducibility(ctx, domTree)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if result.Recommendation == "" {
+			t.Error("expected non-empty recommendation")
+		}
+	})
+
+	t.Run("irreducible", func(t *testing.T) {
+		nodes := []string{"A", "B", "C", "D"}
+		edges := [][2]string{
+			{"A", "B"}, {"A", "C"}, {"B", "D"}, {"C", "D"},
+			{"D", "B"}, {"D", "C"},
+		}
+		hg := buildArticulationTestGraph(t, nodes, edges)
+		analytics := NewGraphAnalytics(hg)
+		ctx := context.Background()
+
+		domTree, _ := analytics.Dominators(ctx, "A")
+		result, err := analytics.CheckReducibility(ctx, domTree)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if result.Recommendation == "" {
+			t.Error("expected non-empty recommendation for irreducible graph")
+		}
+	})
+}
+
+// TestCheckReducibility_ContextCancellation verifies context is honored.
+func TestCheckReducibility_ContextCancellation(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"}, {"B", "C"}, {"C", "D"}, {"D", "E"},
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	domTree, _ := analytics.Dominators(context.Background(), "A")
+
+	_, err := analytics.CheckReducibility(ctx, domTree)
+	if err == nil {
+		t.Error("expected error for cancelled context")
+	}
+}
+
+// TestCheckReducibility_ConcurrentAccess verifies thread safety.
+func TestCheckReducibility_ConcurrentAccess(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"}, {"B", "C"}, {"C", "D"}, {"D", "E"},
+		{"C", "B"}, // Natural loop
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, _ := analytics.Dominators(ctx, "A")
+
+	// Run multiple concurrent reducibility checks
+	var wg sync.WaitGroup
+	errors := make(chan error, 10)
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := analytics.CheckReducibility(ctx, domTree)
+			if err != nil {
+				errors <- err
+				return
+			}
+			if !result.IsReducible {
+				errors <- fmt.Errorf("expected reducible, got irreducible")
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Errorf("concurrent check failed: %v", err)
+	}
+}
+
+// TestCheckReducibility_NilDomTree verifies error handling for nil domTree.
+func TestCheckReducibility_NilDomTree(t *testing.T) {
+	nodes := []string{"A", "B"}
+	edges := [][2]string{{"A", "B"}}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+
+	_, err := analytics.CheckReducibility(context.Background(), nil)
+	if err == nil {
+		t.Error("expected error for nil domTree")
+	}
+}
+
+// TestCheckReducibilityWithCRS_TraceStep verifies CRS TraceStep is populated.
+func TestCheckReducibilityWithCRS_TraceStep(t *testing.T) {
+	nodes := []string{"A", "B", "C"}
+	edges := [][2]string{{"A", "B"}, {"B", "C"}}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, _ := analytics.Dominators(ctx, "A")
+
+	result, traceStep := analytics.CheckReducibilityWithCRS(ctx, domTree)
+
+	// Verify result
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.IsReducible {
+		t.Error("expected reducible graph")
+	}
+
+	// Verify TraceStep
+	if traceStep.Action != "analytics_reducibility" {
+		t.Errorf("expected action 'analytics_reducibility', got '%s'", traceStep.Action)
+	}
+	if traceStep.Tool != "CheckReducibility" {
+		t.Errorf("expected tool 'CheckReducibility', got '%s'", traceStep.Tool)
+	}
+	if traceStep.Target != "graph" {
+		t.Errorf("expected target 'graph', got '%s'", traceStep.Target)
+	}
+
+	// Verify metadata
+	if traceStep.Metadata == nil {
+		t.Fatal("expected non-nil metadata")
+	}
+	if _, ok := traceStep.Metadata["is_reducible"]; !ok {
+		t.Error("expected 'is_reducible' in metadata")
+	}
+	if _, ok := traceStep.Metadata["score"]; !ok {
+		t.Error("expected 'score' in metadata")
+	}
+}
+
+// TestCheckReducibility_IrreducibleRegionEntryNodes verifies entry nodes are identified.
+func TestCheckReducibility_IrreducibleRegionEntryNodes(t *testing.T) {
+	// Create a graph with a clear multi-entry region
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"C", "D"},
+		{"D", "B"}, // D → B creates cross edge
+		{"D", "C"}, // D → C creates another cross edge
+		{"D", "E"},
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.IsReducible {
+		t.Fatal("expected irreducible graph")
+	}
+
+	// Check that regions have entry nodes identified
+	for _, region := range result.IrreducibleRegions {
+		if len(region.EntryNodes) == 0 {
+			t.Error("expected entry nodes to be identified for irreducible region")
+		}
+		if region.Size == 0 {
+			t.Error("expected region to have non-zero size")
+		}
+		if region.Reason == "" {
+			t.Error("expected reason to be provided")
+		}
+	}
+}
+
+// =============================================================================
+// IsReducible Fast-Path Tests
+// =============================================================================
+
+// TestIsReducible_FastPathReducible tests the fast-path method on reducible graphs.
+func TestIsReducible_FastPathReducible(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "C"},
+		{"C", "D"},
+		{"D", "B"}, // Back edge to dominator - reducible
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	isReducible, err := analytics.IsReducible(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !isReducible {
+		t.Error("expected IsReducible to return true for reducible graph")
+	}
+
+	// Verify consistency with full CheckReducibility
+	result, _ := analytics.CheckReducibility(ctx, domTree)
+	if result.IsReducible != isReducible {
+		t.Error("IsReducible and CheckReducibility should return same reducibility")
+	}
+}
+
+// TestIsReducible_FastPathIrreducible tests the fast-path method on irreducible graphs.
+func TestIsReducible_FastPathIrreducible(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"C", "D"},
+		{"D", "B"}, // Cross edge - irreducible
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	isReducible, err := analytics.IsReducible(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if isReducible {
+		t.Error("expected IsReducible to return false for irreducible graph")
+	}
+
+	// Verify consistency with full CheckReducibility
+	result, _ := analytics.CheckReducibility(ctx, domTree)
+	if result.IsReducible != isReducible {
+		t.Error("IsReducible and CheckReducibility should return same reducibility")
+	}
+}
+
+// TestIsReducible_NilInputs tests error handling for nil inputs.
+func TestIsReducible_NilInputs(t *testing.T) {
+	nodes := []string{"A", "B"}
+	edges := [][2]string{{"A", "B"}}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	// Nil context
+	_, err := analytics.IsReducible(nil, &DominatorTree{Entry: "A"})
+	if err == nil {
+		t.Error("expected error for nil context")
+	}
+
+	// Nil domTree
+	_, err = analytics.IsReducible(ctx, nil)
+	if err == nil {
+		t.Error("expected error for nil domTree")
+	}
+}
+
+// TestIsReducible_ContextCancellation tests context cancellation handling.
+func TestIsReducible_ContextCancellation(t *testing.T) {
+	nodes := []string{"A", "B", "C"}
+	edges := [][2]string{{"A", "B"}, {"B", "C"}}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+
+	domTree, _ := analytics.Dominators(context.Background(), "A")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	_, err := analytics.IsReducible(ctx, domTree)
+	if err == nil {
+		t.Error("expected error for cancelled context")
+	}
+}
+
+// =============================================================================
+// Score Precision Tests
+// =============================================================================
+
+// TestCheckReducibility_ScorePrecision verifies score is rounded to 4 decimal places.
+func TestCheckReducibility_ScorePrecision(t *testing.T) {
+	// Create graphs with different irreducible node counts to test score precision
+	testCases := []struct {
+		name          string
+		totalNodes    int
+		expectedScore float64
+	}{
+		{"fully_reducible", 10, 1.0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Build a simple reducible graph
+			nodes := make([]string, tc.totalNodes)
+			edges := make([][2]string, 0)
+			for i := 0; i < tc.totalNodes; i++ {
+				nodes[i] = string(rune('A' + i))
+				if i > 0 {
+					edges = append(edges, [2]string{nodes[i-1], nodes[i]})
+				}
+			}
+
+			hg := buildArticulationTestGraph(t, nodes, edges)
+			analytics := NewGraphAnalytics(hg)
+			ctx := context.Background()
+
+			domTree, _ := analytics.Dominators(ctx, nodes[0])
+			result, _ := analytics.CheckReducibility(ctx, domTree)
+
+			// Verify score precision (4 decimal places)
+			scoreStr := fmt.Sprintf("%.4f", result.Score)
+			parsedScore, _ := strconv.ParseFloat(scoreStr, 64)
+			if parsedScore != result.Score {
+				t.Errorf("score should be rounded to 4 decimal places, got %v", result.Score)
+			}
+
+			if result.Score != tc.expectedScore {
+				t.Errorf("expected score %f, got %f", tc.expectedScore, result.Score)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Edge Classification Tests
+// =============================================================================
+
+// TestCheckReducibility_TreeEdges tests that tree edges (non-back edges in dominator tree) don't affect reducibility.
+func TestCheckReducibility_TreeEdges(t *testing.T) {
+	// Simple DAG where all edges are tree edges in the dominator tree
+	// This graph has no cycles and no cross edges
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"C", "E"},
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A simple tree structure should always be reducible
+	if !result.IsReducible {
+		t.Error("expected tree-structured graph to be reducible")
+	}
+	if result.CrossEdgeCount != 0 {
+		t.Errorf("expected 0 cross edges in tree structure, got %d", result.CrossEdgeCount)
+	}
+}
+
+// TestCheckReducibility_NaturalLoopWithMultipleBackEdges tests multiple back edges to same header.
+func TestCheckReducibility_NaturalLoopWithMultipleBackEdges(t *testing.T) {
+	// Natural loop with multiple back edges (still reducible)
+	nodes := []string{"A", "B", "C", "D"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "C"},
+		{"B", "D"},
+		{"C", "B"}, // Back edge 1
+		{"D", "B"}, // Back edge 2
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, err := analytics.Dominators(ctx, "A")
+	if err != nil {
+		t.Fatalf("failed to compute dominator tree: %v", err)
+	}
+
+	result, err := analytics.CheckReducibility(ctx, domTree)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.IsReducible {
+		t.Error("expected natural loop with multiple back edges to be reducible")
+	}
+}
+
+// =============================================================================
+// Summary and Result Verification Tests
+// =============================================================================
+
+// TestCheckReducibility_SummaryConsistency verifies Summary fields are consistent.
+func TestCheckReducibility_SummaryConsistency(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"C", "D"},
+		{"D", "B"},
+		{"D", "E"},
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, _ := analytics.Dominators(ctx, "A")
+	result, _ := analytics.CheckReducibility(ctx, domTree)
+
+	// Verify summary consistency
+	if result.Summary.TotalNodes != len(nodes) {
+		t.Errorf("Summary.TotalNodes mismatch: expected %d, got %d",
+			len(nodes), result.Summary.TotalNodes)
+	}
+
+	if result.Summary.IrreducibleRegionCount != len(result.IrreducibleRegions) {
+		t.Errorf("Summary.IrreducibleRegionCount mismatch: expected %d, got %d",
+			len(result.IrreducibleRegions), result.Summary.IrreducibleRegionCount)
+	}
+
+	// Verify WellStructuredPercent matches score
+	expectedPercent := result.Score * 100.0
+	if result.Summary.WellStructuredPercent != expectedPercent {
+		t.Errorf("Summary.WellStructuredPercent mismatch: expected %f, got %f",
+			expectedPercent, result.Summary.WellStructuredPercent)
+	}
+
+	// Verify NodeCount and EdgeCount in result
+	if result.NodeCount != len(nodes) {
+		t.Errorf("NodeCount mismatch: expected %d, got %d", len(nodes), result.NodeCount)
+	}
+}
+
+// TestCheckReducibility_DomTreePreserved verifies DomTree is preserved in result.
+func TestCheckReducibility_DomTreePreserved(t *testing.T) {
+	nodes := []string{"A", "B", "C"}
+	edges := [][2]string{{"A", "B"}, {"B", "C"}}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, _ := analytics.Dominators(ctx, "A")
+	result, _ := analytics.CheckReducibility(ctx, domTree)
+
+	if result.DomTree != domTree {
+		t.Error("expected DomTree to be preserved in result")
+	}
+}
+
+// =============================================================================
+// CRS Integration Tests
+// =============================================================================
+
+// TestCheckReducibilityWithCRS_NilDomTree tests CRS wrapper with nil domTree.
+func TestCheckReducibilityWithCRS_NilDomTree(t *testing.T) {
+	nodes := []string{"A", "B"}
+	edges := [][2]string{{"A", "B"}}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	result, traceStep := analytics.CheckReducibilityWithCRS(ctx, nil)
+
+	// Should return a result (not crash)
+	if result == nil {
+		t.Fatal("expected non-nil result even with nil domTree")
+	}
+
+	// TraceStep should indicate error
+	if traceStep.Error == "" {
+		t.Error("expected error in TraceStep for nil domTree")
+	}
+}
+
+// TestCheckReducibilityWithCRS_CancelledContext tests CRS wrapper with cancelled context.
+func TestCheckReducibilityWithCRS_CancelledContext(t *testing.T) {
+	nodes := []string{"A", "B"}
+	edges := [][2]string{{"A", "B"}}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+
+	domTree, _ := analytics.Dominators(context.Background(), "A")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, traceStep := analytics.CheckReducibilityWithCRS(ctx, domTree)
+
+	// Should return a result (not crash)
+	if result == nil {
+		t.Fatal("expected non-nil result even with cancelled context")
+	}
+
+	// TraceStep should indicate error
+	if traceStep.Error == "" {
+		t.Error("expected error in TraceStep for cancelled context")
+	}
+}
+
+// TestCheckReducibilityWithCRS_IrreducibleMetadata tests CRS metadata for irreducible graphs.
+func TestCheckReducibilityWithCRS_IrreducibleMetadata(t *testing.T) {
+	nodes := []string{"A", "B", "C", "D"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"A", "C"},
+		{"B", "D"},
+		{"C", "D"},
+		{"D", "B"},
+	}
+	hg := buildArticulationTestGraph(t, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, _ := analytics.Dominators(ctx, "A")
+	result, traceStep := analytics.CheckReducibilityWithCRS(ctx, domTree)
+
+	if result.IsReducible {
+		t.Skip("test requires irreducible graph")
+	}
+
+	// Verify metadata contains irreducible info
+	if traceStep.Metadata == nil {
+		t.Fatal("expected metadata")
+	}
+
+	if v, ok := traceStep.Metadata["is_reducible"]; !ok || v != "false" {
+		t.Error("expected is_reducible=false in metadata")
+	}
+
+	if _, ok := traceStep.Metadata["irreducible_regions"]; !ok {
+		t.Error("expected irreducible_regions in metadata")
+	}
+
+	if _, ok := traceStep.Metadata["cross_edge_count"]; !ok {
+		t.Error("expected cross_edge_count in metadata")
+	}
+}
+
+// =============================================================================
+// Benchmark Tests
+// =============================================================================
+
+// buildBenchmarkGraph creates a graph for benchmarking (without testing.T).
+func buildBenchmarkGraph(b *testing.B, nodeIDs []string, edges [][2]string) *HierarchicalGraph {
+	b.Helper()
+
+	g := NewGraph("/bench/project")
+
+	// Create nodes
+	for _, id := range nodeIDs {
+		sym := &ast.Symbol{
+			ID:       id,
+			Name:     id,
+			Kind:     ast.SymbolKindFunction,
+			Package:  "pkg/bench",
+			FilePath: "pkg/bench/bench.go",
+			Exported: true,
+		}
+		_, err := g.AddNode(sym)
+		if err != nil {
+			b.Fatalf("failed to add node %s: %v", id, err)
+		}
+	}
+
+	// Create edges
+	for _, edge := range edges {
+		err := g.AddEdge(edge[0], edge[1], EdgeTypeCalls, ast.Location{})
+		if err != nil {
+			b.Fatalf("failed to add edge %s -> %s: %v", edge[0], edge[1], err)
+		}
+	}
+
+	g.Freeze()
+
+	hg, err := WrapGraph(g)
+	if err != nil {
+		b.Fatalf("failed to wrap graph: %v", err)
+	}
+
+	return hg
+}
+
+// BenchmarkCheckReducibility_Small benchmarks reducibility check on small graphs.
+func BenchmarkCheckReducibility_Small(b *testing.B) {
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "C"},
+		{"C", "D"},
+		{"D", "E"},
+		{"E", "B"}, // Natural loop
+	}
+
+	hg := buildBenchmarkGraph(b, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, _ := analytics.Dominators(ctx, "A")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = analytics.CheckReducibility(ctx, domTree)
+	}
+}
+
+// BenchmarkIsReducible_Small benchmarks fast-path reducibility check.
+func BenchmarkIsReducible_Small(b *testing.B) {
+	nodes := []string{"A", "B", "C", "D", "E"}
+	edges := [][2]string{
+		{"A", "B"},
+		{"B", "C"},
+		{"C", "D"},
+		{"D", "E"},
+		{"E", "B"},
+	}
+
+	hg := buildBenchmarkGraph(b, nodes, edges)
+	analytics := NewGraphAnalytics(hg)
+	ctx := context.Background()
+
+	domTree, _ := analytics.Dominators(ctx, "A")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = analytics.IsReducible(ctx, domTree)
 	}
 }

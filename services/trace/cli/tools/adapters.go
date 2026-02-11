@@ -78,9 +78,16 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 			registry.Register(NewFindHotspotsTool(analytics, idx))
 			registry.Register(NewFindDeadCodeTool(analytics, idx))
 			registry.Register(NewFindCyclesTool(analytics, idx))
-			registry.Register(NewFindImportantTool(analytics, idx))          // GR-13: PageRank
-			registry.Register(NewFindCommunitiesTool(analytics, idx))        // GR-15: Leiden
-			registry.Register(NewFindArticulationPointsTool(analytics, idx)) // GR-17a: Articulation points
+			registry.Register(NewFindImportantTool(analytics, idx))           // GR-13: PageRank
+			registry.Register(NewFindCommunitiesTool(analytics, idx))         // GR-15: Leiden
+			registry.Register(NewFindArticulationPointsTool(analytics, idx))  // GR-17a: Articulation points
+			registry.Register(NewFindDominatorsTool(analytics, idx))          // GR-17: Dominators
+			registry.Register(NewFindLoopsTool(analytics, idx))               // GR-17e: Natural loops
+			registry.Register(NewFindMergePointsTool(analytics, idx))         // GR-17d: Merge points
+			registry.Register(NewFindCommonDependencyTool(analytics, idx))    // GR-17f: Common dependency
+			registry.Register(NewFindControlDependenciesTool(analytics, idx)) // GR-17c: Control dependencies
+			registry.Register(NewFindExtractableRegionsTool(analytics, idx))  // GR-17g: Extractable regions
+			registry.Register(NewCheckReducibilityTool(analytics, idx))       // GR-17h: Check reducibility
 		}
 	}
 
@@ -1330,6 +1337,80 @@ func StaticToolDefinitions() []ToolDefinition {
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     60 * time.Second,
+		},
+		{
+			Name: "find_control_dependencies",
+			Description: "Find which conditionals control whether a function executes. " +
+				"Shows decision points that determine if code runs. " +
+				"Essential for understanding conditional execution paths.",
+			Parameters: map[string]ParamDef{
+				"target": {
+					Type:        ParamTypeString,
+					Description: "Target function to analyze",
+					Required:    true,
+				},
+				"depth": {
+					Type:        ParamTypeInt,
+					Description: "Maximum dependency chain depth (default: 5, max: 10)",
+					Required:    false,
+					Default:     5,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    83,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     45 * time.Second,
+		},
+		{
+			Name: "find_extractable_regions",
+			Description: "Find code regions that can be safely refactored into separate functions. " +
+				"Identifies Single-Entry Single-Exit (SESE) regions suitable for extraction. " +
+				"Use this to find refactoring opportunities.",
+			Parameters: map[string]ParamDef{
+				"min_size": {
+					Type:        ParamTypeInt,
+					Description: "Minimum region size to report (default: 3)",
+					Required:    false,
+					Default:     3,
+				},
+				"max_size": {
+					Type:        ParamTypeInt,
+					Description: "Maximum region size (default: 50)",
+					Required:    false,
+					Default:     50,
+				},
+				"top": {
+					Type:        ParamTypeInt,
+					Description: "Number of regions to return (default: 10, max: 100)",
+					Required:    false,
+					Default:     10,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    80,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     60 * time.Second,
+		},
+		{
+			Name: "check_reducibility",
+			Description: "Check if the call graph is reducible (well-structured). " +
+				"Reducible graphs have clean loop structures without 'goto spaghetti'. " +
+				"Non-reducible regions indicate complex or potentially problematic code.",
+			Parameters: map[string]ParamDef{
+				"show_irreducible": {
+					Type:        ParamTypeBool,
+					Description: "List specific irreducible regions (default: true)",
+					Required:    false,
+					Default:     true,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    79,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     30 * time.Second,
 		},
 	}
 }

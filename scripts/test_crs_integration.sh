@@ -79,6 +79,11 @@ while [[ $# -gt 0 ]]; do
             echo "  88-90: SESE Region Detection (GR-16h)"
             echo "  91-93: find_articulation_points Tool (GR-17a)"
             echo "  94-96: find_dominators Tool (GR-17b)"
+            echo "  97-99: Check Reducibility Algorithm (GR-16i)"
+            echo "  100-102: find_loops Tool (GR-17e)"
+            echo "  103-105: find_control_dependencies Tool (GR-17c)"
+            echo "  106-108: find_extractable_regions Tool (GR-17g)"
+            echo "  109-111: check_reducibility Tool (GR-17h)"
             echo ""
             echo "Environment Variables:"
             echo "  CRS_TEST_HOST    Remote host (default: 10.0.0.250)"
@@ -185,6 +190,9 @@ run_local_tests() {
             *94*|*95*|*96*)
                 test_args="$test_args -run TestFindDominatorsTool"
                 ;;
+            *97*|*98*|*99*)
+                test_args="$test_args -run TestCheckReducibility"
+                ;;
         esac
     fi
 
@@ -290,6 +298,74 @@ run_local_tests() {
             echo ""
             echo -e "${YELLOW}Running find_articulation_points benchmarks...${NC}"
             go test ./services/trace/cli/tools/... -bench=BenchmarkFindArticulationPoints -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 100-102 (find_loops Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (100|101|102) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running find_loops Tool tests (GR-17e)...${NC}"
+        echo ""
+
+        # Run find_loops tool tests with race detector
+        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindLoopsTool" -race; then
+            exit_code=1
+        fi
+
+        # Run underlying loop detection algorithm tests
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDetectLoops" -race; then
+            exit_code=1
+        fi
+    fi
+
+    # For tests 103-105 (find_control_dependencies Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (103|104|105) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running find_control_dependencies Tool tests (GR-17c)...${NC}"
+        echo ""
+
+        # Run find_control_dependencies tool tests with race detector
+        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindControlDependenciesTool" -race; then
+            exit_code=1
+        fi
+
+        # Run underlying control dependence algorithm tests
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestComputeControlDependence" -race; then
+            exit_code=1
+        fi
+    fi
+
+    # For tests 106-108 (find_extractable_regions Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (106|107|108) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running find_extractable_regions Tool tests (GR-17g)...${NC}"
+        echo ""
+
+        # Run find_extractable_regions tool tests with race detector
+        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindExtractableRegionsTool" -race; then
+            exit_code=1
+        fi
+
+        # Run underlying SESE region detection algorithm tests
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDetectSESERegions" -race; then
+            exit_code=1
+        fi
+    fi
+
+    # For tests 109-111 (check_reducibility Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (109|110|111) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running check_reducibility Tool tests (GR-17h)...${NC}"
+        echo ""
+
+        # Run check_reducibility tool tests with race detector
+        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestCheckReducibilityTool" -race; then
+            exit_code=1
+        fi
+
+        # Run underlying reducibility algorithm tests
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestCheckReducibility" -race; then
+            exit_code=1
         fi
     fi
 
@@ -442,6 +518,25 @@ run_local_tests() {
             echo ""
             echo -e "${YELLOW}Running find_dominators benchmarks...${NC}"
             go test ./services/trace/cli/tools/... -bench=BenchmarkFindDominators -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 97-99 (Check Reducibility Algorithm), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (97|98|99) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Check Reducibility Algorithm tests (GR-16i)...${NC}"
+        echo ""
+
+        # Run CheckReducibility tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestCheckReducibility" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running CheckReducibility benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkCheckReducibility -benchmem -count=1 -timeout 60s || true
         fi
     fi
 
@@ -835,6 +930,54 @@ declare -a CRS_TESTS=(
 
     # Test 96: CRS trace step recording for find_dominators tool
     "FIND_DOMINATORS|crs_trace|INTERNAL:verify_find_dominators_crs|COMPLETE"
+
+    # === GR-17e: find_loops TOOL ===
+    # These tests verify the find_loops tool detects natural loops and recursion patterns
+
+    # Test 100: Basic find_loops tool query
+    "FIND_LOOPS|basic|Find recursive functions and call loops in this codebase|COMPLETE|find_loops_tool_used"
+
+    # Test 101: find_loops with min_size parameter
+    "FIND_LOOPS|min_size|Find mutual recursion patterns with at least 2 functions involved|COMPLETE|find_loops_min_size"
+
+    # Test 102: CRS trace step recording for find_loops tool
+    "FIND_LOOPS|crs_trace|INTERNAL:verify_find_loops_crs|COMPLETE"
+
+    # === GR-17c: find_control_dependencies TOOL ===
+    # These tests verify the find_control_dependencies tool shows which conditionals control execution
+
+    # Test 103: Basic find_control_dependencies tool query
+    "FIND_CONTROL_DEPS|basic|What conditionals control whether HandleRequest executes|COMPLETE|find_control_deps_tool_used"
+
+    # Test 104: find_control_dependencies with depth parameter
+    "FIND_CONTROL_DEPS|depth|Show control dependencies for Process function with depth 3|COMPLETE|find_control_deps_depth"
+
+    # Test 105: CRS trace step recording for find_control_dependencies tool
+    "FIND_CONTROL_DEPS|crs_trace|INTERNAL:verify_find_control_deps_crs|COMPLETE"
+
+    # === GR-17g: find_extractable_regions TOOL ===
+    # These tests verify the find_extractable_regions tool identifies SESE regions for refactoring
+
+    # Test 106: Basic find_extractable_regions tool query
+    "FIND_EXTRACTABLE|basic|Find code regions that can be safely extracted into separate functions|COMPLETE|find_extractable_tool_used"
+
+    # Test 107: find_extractable_regions with size parameters
+    "FIND_EXTRACTABLE|size|Find extractable regions between 5 and 30 nodes in size|COMPLETE|find_extractable_size"
+
+    # Test 108: CRS trace step recording for find_extractable_regions tool
+    "FIND_EXTRACTABLE|crs_trace|INTERNAL:verify_find_extractable_crs|COMPLETE"
+
+    # === GR-17h: check_reducibility TOOL ===
+    # These tests verify the check_reducibility tool analyzes graph structure quality
+
+    # Test 109: Basic check_reducibility tool query
+    "CHECK_REDUCIBILITY|basic|Check if this codebase has well-structured control flow|COMPLETE|check_reducibility_tool_used"
+
+    # Test 110: check_reducibility with irreducible region details
+    "CHECK_REDUCIBILITY|details|Show any complex or poorly structured code regions|COMPLETE|check_reducibility_details"
+
+    # Test 111: CRS trace step recording for check_reducibility tool
+    "CHECK_REDUCIBILITY|crs_trace|INTERNAL:verify_check_reducibility_crs|COMPLETE"
 )
 
 # ==============================================================================
@@ -3001,6 +3144,343 @@ run_extra_check() {
                 echo -e "  ${YELLOW}⚠ GR-17a: No find_articulation_points tool CRS logs found${NC}"
                 echo -e "  ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
                 echo -e "  ${YELLOW}  → Post-GR-17a: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-17e: find_loops TOOL CHECKS
+        # ================================================================================
+
+        find_loops_tool_used)
+            # GR-17e: Verify find_loops tool was used for recursion/loop queries
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check if find_loops was used
+            local loops_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_loops")] | length' 2>/dev/null || echo "0")
+
+            if [ "$loops_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17e: find_loops tool was used: $loops_used calls${NC}"
+
+                # Check for loop count in response
+                local loop_count=$(echo "$agent_resp" | grep -oi "[0-9]* loop\|[0-9]* recursion\|[0-9]* recursive" | head -1)
+                if [ -n "$loop_count" ]; then
+                    echo -e "    ${BLUE}  $loop_count found${NC}"
+                fi
+
+                # Check for recursion type breakdown
+                local has_recursion_type=$(echo "$agent_resp" | grep -ci "direct recursion\|mutual recursion\|self-call")
+                if [ "$has_recursion_type" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17e: Response includes recursion type analysis${NC}"
+                fi
+            else
+                echo -e "    ${RED}✗ GR-17e: find_loops tool not used${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-17e: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-17e: Should use find_loops for recursion queries${NC}"
+            fi
+            ;;
+
+        find_loops_min_size)
+            # GR-17e: Verify find_loops with min_size parameter
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check for mutual recursion mentions (size >= 2)
+            local mutual_mentions=$(echo "$agent_resp" | grep -ci "mutual recursion\|A.*B.*A\|two functions")
+
+            if [ "$mutual_mentions" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17e: Mutual recursion patterns identified ($mutual_mentions mentions)${NC}"
+
+                # Extract specific pattern info if available
+                local pattern_line=$(echo "$agent_resp" | grep -i "mutual\|A.*B" | head -1)
+                if [ -n "$pattern_line" ]; then
+                    echo -e "    ${BLUE}  $pattern_line${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-17e: No mutual recursion patterns found${NC}"
+                echo -e "    ${YELLOW}  → May indicate no mutual recursion in codebase${NC}"
+                echo -e "    ${YELLOW}  → Or min_size filter correctly filtering self-loops${NC}"
+            fi
+            ;;
+
+        verify_find_loops_crs)
+            # GR-17e: Verify find_loops tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_loops tool (GR-17e)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_loops\|tool.*loops\|DetectLoops' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'analytics_loops\|loops.*trace\|DetectLoops.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17e: find_loops tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17e: No find_loops tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17e: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17e: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-17c: find_control_dependencies TOOL CHECKS
+        # ================================================================================
+
+        find_control_deps_tool_used)
+            # GR-17c: Verify find_control_dependencies tool was used for control flow queries
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check if find_control_dependencies was used
+            local ctrl_deps_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_control_dependencies")] | length' 2>/dev/null || echo "0")
+
+            if [ "$ctrl_deps_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17c: find_control_dependencies tool was used: $ctrl_deps_used calls${NC}"
+
+                # Check for control dependency info in response
+                local ctrl_info=$(echo "$agent_resp" | grep -oi "control.*depend\|conditionals\|branch\|decision point" | head -1)
+                if [ -n "$ctrl_info" ]; then
+                    echo -e "    ${BLUE}  Control flow information found${NC}"
+                fi
+
+                # Check for controller nodes
+                local has_controllers=$(echo "$agent_resp" | grep -ci "controls.*execution\|determines.*whether")
+                if [ "$has_controllers" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17c: Response includes controller analysis${NC}"
+                fi
+            else
+                echo -e "    ${RED}✗ GR-17c: find_control_dependencies tool not used${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-17c: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-17c: Should use find_control_dependencies for control flow queries${NC}"
+            fi
+            ;;
+
+        find_control_deps_depth)
+            # GR-17c: Verify find_control_dependencies with depth parameter
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check for depth-limited dependency analysis
+            local depth_info=$(echo "$agent_resp" | grep -ci "depth\|level\|chain")
+
+            if [ "$depth_info" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17c: Depth-limited control dependency analysis performed${NC}"
+
+                # Extract dependency chain info if available
+                local chain_line=$(echo "$agent_resp" | grep -i "dependency\|chain" | head -1)
+                if [ -n "$chain_line" ]; then
+                    echo -e "    ${BLUE}  $chain_line${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-17c: No depth-limited analysis found${NC}"
+                echo -e "    ${YELLOW}  → May indicate flat control structure${NC}"
+            fi
+            ;;
+
+        verify_find_control_deps_crs)
+            # GR-17c: Verify find_control_dependencies tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_control_dependencies tool (GR-17c)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_control_dependencies\|control.*dependenc\|ComputeControlDependence' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'analytics_control\|control.*trace\|ControlDependence.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17c: find_control_dependencies tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17c: No find_control_dependencies tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17c: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17c: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-17g: find_extractable_regions TOOL CHECKS
+        # ================================================================================
+
+        find_extractable_tool_used)
+            # GR-17g: Verify find_extractable_regions tool was used for refactoring queries
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check if find_extractable_regions was used
+            local extractable_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_extractable_regions")] | length' 2>/dev/null || echo "0")
+
+            if [ "$extractable_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17g: find_extractable_regions tool was used: $extractable_used calls${NC}"
+
+                # Check for SESE region info in response
+                local region_info=$(echo "$agent_resp" | grep -oi "region\|extractable\|refactor\|single.*entry\|single.*exit" | head -1)
+                if [ -n "$region_info" ]; then
+                    echo -e "    ${BLUE}  SESE region information found${NC}"
+                fi
+
+                # Check for region count
+                local region_count=$(echo "$agent_resp" | grep -oi "[0-9]* region\|[0-9]* extractable" | head -1)
+                if [ -n "$region_count" ]; then
+                    echo -e "    ${GREEN}✓ GR-17g: $region_count identified${NC}"
+                fi
+            else
+                echo -e "    ${RED}✗ GR-17g: find_extractable_regions tool not used${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-17g: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-17g: Should use find_extractable_regions for refactoring queries${NC}"
+            fi
+            ;;
+
+        find_extractable_size)
+            # GR-17g: Verify find_extractable_regions with size parameters
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check for size-filtered region analysis
+            local size_info=$(echo "$agent_resp" | grep -ci "size\|nodes\|between.*and")
+
+            if [ "$size_info" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17g: Size-filtered region analysis performed${NC}"
+
+                # Extract region size info if available
+                local size_line=$(echo "$agent_resp" | grep -i "size\|nodes" | head -1)
+                if [ -n "$size_line" ]; then
+                    echo -e "    ${BLUE}  $size_line${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-17g: No size-filtered results found${NC}"
+                echo -e "    ${YELLOW}  → May indicate no regions in requested size range${NC}"
+            fi
+            ;;
+
+        verify_find_extractable_crs)
+            # GR-17g: Verify find_extractable_regions tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_extractable_regions tool (GR-17g)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_extractable_regions\|extractable.*region\|DetectSESERegions' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'analytics_sese\|sese.*trace\|SESERegions.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17g: find_extractable_regions tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17g: No find_extractable_regions tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17g: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17g: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-17h: check_reducibility TOOL CHECKS
+        # ================================================================================
+
+        check_reducibility_tool_used)
+            # GR-17h: Verify check_reducibility tool was used for code quality queries
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check if check_reducibility was used
+            local reducibility_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "check_reducibility")] | length' 2>/dev/null || echo "0")
+
+            if [ "$reducibility_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17h: check_reducibility tool was used: $reducibility_used calls${NC}"
+
+                # Check for reducibility info in response
+                local reducibility_info=$(echo "$agent_resp" | grep -oi "reducible\|well-structured\|irreducible\|complex.*control" | head -1)
+                if [ -n "$reducibility_info" ]; then
+                    echo -e "    ${BLUE}  Reducibility analysis: $reducibility_info${NC}"
+                fi
+
+                # Check for score
+                local score=$(echo "$agent_resp" | grep -oi "[0-9]*\.*[0-9]*%\|score.*[0-9]" | head -1)
+                if [ -n "$score" ]; then
+                    echo -e "    ${GREEN}✓ GR-17h: Reducibility score provided: $score${NC}"
+                fi
+            else
+                echo -e "    ${RED}✗ GR-17h: check_reducibility tool not used${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-17h: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-17h: Should use check_reducibility for code quality queries${NC}"
+            fi
+            ;;
+
+        check_reducibility_details)
+            # GR-17h: Verify check_reducibility with irreducible region details
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check for irreducible region details
+            local region_details=$(echo "$agent_resp" | grep -ci "irreducible.*region\|entry.*node\|cross.*edge")
+
+            if [ "$region_details" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17h: Irreducible region details provided${NC}"
+
+                # Extract region info if available
+                local region_line=$(echo "$agent_resp" | grep -i "irreducible\|cross.*edge" | head -1)
+                if [ -n "$region_line" ]; then
+                    echo -e "    ${BLUE}  $region_line${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-17h: No irreducible regions found${NC}"
+                echo -e "    ${YELLOW}  → May indicate well-structured codebase${NC}"
+            fi
+            ;;
+
+        verify_check_reducibility_crs)
+            # GR-17h: Verify check_reducibility tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for check_reducibility tool (GR-17h)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'check_reducibility\|reducibility\|CheckReducibility' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'analytics_reducibility\|reducibility.*trace\|Reducibility.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17h: check_reducibility tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17h: No check_reducibility tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17h: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17h: Should record TraceStep with tool metadata${NC}"
                 result_message="No tool CRS logs (pre-implementation expected)"
             fi
             ;;

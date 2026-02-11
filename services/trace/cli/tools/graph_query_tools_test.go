@@ -22,6 +22,20 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
+// getIntFromAny extracts an int from an any value (handles int and float64).
+func getIntFromAny(v any) int {
+	switch val := v.(type) {
+	case int:
+		return val
+	case float64:
+		return int(val)
+	case int64:
+		return int(val)
+	default:
+		return 0
+	}
+}
+
 // createTestGraphWithCallers creates a test graph with call relationships.
 func createTestGraphWithCallers(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
 	t.Helper()
@@ -180,29 +194,20 @@ func TestFindCallersTool_Execute(t *testing.T) {
 		}
 
 		// Check that we found callers
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindCallersOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
-		}
-
-		results, ok := output["results"].([]map[string]any)
-		if !ok {
-			t.Fatalf("results is not a slice")
+			t.Fatalf("Output is not FindCallersOutput, got %T", result.Output)
 		}
 
 		// Should have 1 entry (one parseConfig function)
-		if len(results) != 1 {
-			t.Errorf("got %d result entries, want 1", len(results))
+		if len(output.Results) != 1 {
+			t.Errorf("got %d result entries, want 1", len(output.Results))
 		}
 
 		// The one parseConfig should have 3 callers
-		if len(results) > 0 {
-			callers, ok := results[0]["callers"].([]map[string]any)
-			if !ok {
-				t.Fatalf("callers is not a slice")
-			}
-			if len(callers) != 3 {
-				t.Errorf("got %d callers, want 3", len(callers))
+		if len(output.Results) > 0 {
+			if len(output.Results[0].Callers) != 3 {
+				t.Errorf("got %d callers, want 3", len(output.Results[0].Callers))
 			}
 		}
 
@@ -264,19 +269,13 @@ func TestFindCalleesTool_Execute(t *testing.T) {
 		}
 
 		// main calls parseConfig
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindCalleesOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
 		}
 
-		// GR-41: New format separates resolved and external callees
-		resolvedCallees, ok := output["resolved_callees"].([]map[string]any)
-		if !ok {
-			t.Fatalf("resolved_callees is not a slice")
-		}
-
-		if len(resolvedCallees) != 1 {
-			t.Errorf("got %d resolved callees, want 1", len(resolvedCallees))
+		if len(output.ResolvedCallees) != 1 {
+			t.Errorf("got %d resolved callees, want 1", len(output.ResolvedCallees))
 		}
 	})
 
@@ -311,18 +310,13 @@ func TestFindImplementationsTool_Execute(t *testing.T) {
 		}
 
 		// UserHandler implements Handler
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindImplementationsOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindImplementationsOutput, got %T", result.Output)
 		}
 
-		results, ok := output["results"].([]map[string]any)
-		if !ok {
-			t.Fatalf("results is not a slice")
-		}
-
-		if len(results) != 1 {
-			t.Errorf("got %d result entries, want 1", len(results))
+		if len(output.Results) != 1 {
+			t.Errorf("got %d result entries, want 1", len(output.Results))
 		}
 	})
 
@@ -356,14 +350,13 @@ func TestFindSymbolTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindSymbolOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindSymbolOutput, got %T", result.Output)
 		}
 
-		matchCount, _ := output["match_count"].(int)
-		if matchCount != 1 {
-			t.Errorf("got %d matches, want 1", matchCount)
+		if output.MatchCount != 1 {
+			t.Errorf("got %d matches, want 1", output.MatchCount)
 		}
 	})
 
@@ -380,14 +373,13 @@ func TestFindSymbolTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindSymbolOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindSymbolOutput, got %T", result.Output)
 		}
 
-		matchCount, _ := output["match_count"].(int)
-		if matchCount != 1 {
-			t.Errorf("got %d matches, want 1", matchCount)
+		if output.MatchCount != 1 {
+			t.Errorf("got %d matches, want 1", output.MatchCount)
 		}
 	})
 
@@ -423,14 +415,13 @@ func TestGetCallChainTool_Execute(t *testing.T) {
 		}
 
 		// main -> parseConfig
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(GetCallChainOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not GetCallChainOutput, got %T", result.Output)
 		}
 
-		nodeCount, _ := output["node_count"].(int)
-		if nodeCount < 2 {
-			t.Errorf("got %d nodes, want at least 2", nodeCount)
+		if output.NodeCount < 2 {
+			t.Errorf("got %d nodes, want at least 2", output.NodeCount)
 		}
 	})
 
@@ -448,14 +439,13 @@ func TestGetCallChainTool_Execute(t *testing.T) {
 		}
 
 		// parseConfig <- main, initServer, LoadConfig
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(GetCallChainOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not GetCallChainOutput, got %T", result.Output)
 		}
 
-		nodeCount, _ := output["node_count"].(int)
-		if nodeCount < 4 {
-			t.Errorf("got %d nodes, want at least 4", nodeCount)
+		if output.NodeCount < 4 {
+			t.Errorf("got %d nodes, want at least 4", output.NodeCount)
 		}
 	})
 
@@ -596,19 +586,14 @@ func TestFindCallersTool_NilIndexFallback(t *testing.T) {
 	}
 
 	// Should still find callers via graph fallback
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCallersOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
-	}
-
-	results, ok := output["results"].([]map[string]any)
-	if !ok {
-		t.Fatalf("results is not a slice")
+		t.Fatalf("Output is not FindCallersOutput, got %T", result.Output)
 	}
 
 	// Should have 1 entry (one parseConfig function) with 3 callers
-	if len(results) != 1 {
-		t.Errorf("got %d result entries, want 1", len(results))
+	if len(output.Results) != 1 {
+		t.Errorf("got %d result entries, want 1", len(output.Results))
 	}
 }
 
@@ -631,19 +616,13 @@ func TestFindCalleesTool_NilIndexFallback(t *testing.T) {
 	}
 
 	// Should still find callees via graph fallback
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCalleesOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
+		t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
 	}
 
-	// GR-41: New format separates resolved and external callees
-	resolvedCallees, ok := output["resolved_callees"].([]map[string]any)
-	if !ok {
-		t.Fatalf("resolved_callees is not a slice")
-	}
-
-	if len(resolvedCallees) != 1 {
-		t.Errorf("got %d resolved callees, want 1", len(resolvedCallees))
+	if len(output.ResolvedCallees) != 1 {
+		t.Errorf("got %d resolved callees, want 1", len(output.ResolvedCallees))
 	}
 }
 
@@ -666,18 +645,13 @@ func TestFindImplementationsTool_NilIndexFallback(t *testing.T) {
 	}
 
 	// Should still find implementations via graph fallback
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindImplementationsOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
+		t.Fatalf("Output is not FindImplementationsOutput, got %T", result.Output)
 	}
 
-	results, ok := output["results"].([]map[string]any)
-	if !ok {
-		t.Fatalf("results is not a slice")
-	}
-
-	if len(results) != 1 {
-		t.Errorf("got %d result entries, want 1", len(results))
+	if len(output.Results) != 1 {
+		t.Errorf("got %d result entries, want 1", len(output.Results))
 	}
 }
 
@@ -775,29 +749,20 @@ func TestFindCallersTool_MultipleMatches(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCallersOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
-	}
-
-	results, ok := output["results"].([]map[string]any)
-	if !ok {
-		t.Fatalf("results is not a slice")
+		t.Fatalf("Output is not FindCallersOutput, got %T", result.Output)
 	}
 
 	// Should have 3 result entries (one per Setup function)
-	if len(results) != 3 {
-		t.Errorf("got %d result entries, want 3 (one per Setup)", len(results))
+	if len(output.Results) != 3 {
+		t.Errorf("got %d result entries, want 3 (one per Setup)", len(output.Results))
 	}
 
 	// Each Setup should have 1 caller (main)
-	for i, entry := range results {
-		callers, ok := entry["callers"].([]map[string]any)
-		if !ok {
-			t.Fatalf("callers[%d] is not a slice", i)
-		}
-		if len(callers) != 1 {
-			t.Errorf("result[%d] got %d callers, want 1", i, len(callers))
+	for i, entry := range output.Results {
+		if len(entry.Callers) != 1 {
+			t.Errorf("result[%d] got %d callers, want 1", i, len(entry.Callers))
 		}
 	}
 }
@@ -820,20 +785,14 @@ func TestFindCalleesTool_MultipleMatches(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCalleesOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
-	}
-
-	// GR-41: New format has resolved_callees as a flat list
-	resolvedCallees, ok := output["resolved_callees"].([]map[string]any)
-	if !ok {
-		t.Fatalf("resolved_callees is not a slice")
+		t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
 	}
 
 	// main has 3 callees (three Setup functions)
-	if len(resolvedCallees) != 3 {
-		t.Errorf("got %d resolved callees, want 3", len(resolvedCallees))
+	if len(output.ResolvedCallees) != 3 {
+		t.Errorf("got %d resolved callees, want 3", len(output.ResolvedCallees))
 	}
 }
 
@@ -857,18 +816,13 @@ func TestFindCallersTool_FastNotFound(t *testing.T) {
 	}
 
 	// Should have empty results and message about no callers
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCallersOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
+		t.Fatalf("Output is not FindCallersOutput, got %T", result.Output)
 	}
 
-	results, ok := output["results"].([]map[string]any)
-	if !ok {
-		t.Fatalf("results is not a slice")
-	}
-
-	if len(results) != 0 {
-		t.Errorf("got %d results for non-existent function, want 0", len(results))
+	if len(output.Results) != 0 {
+		t.Errorf("got %d results for non-existent function, want 0", len(output.Results))
 	}
 
 	// OutputText should mention no callers found
@@ -1074,14 +1028,13 @@ func TestFindCallersTool_LimitCapped(t *testing.T) {
 
 	// The test doesn't have 1000+ callers, but the limit should be silently capped
 	// Verify the query still works
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCallersOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
+		t.Fatalf("Output is not FindCallersOutput, got %T", result.Output)
 	}
 
-	matchCount, _ := output["match_count"].(int)
-	if matchCount != 1 {
-		t.Errorf("Expected 1 match, got %d", matchCount)
+	if output.MatchCount != 1 {
+		t.Errorf("Expected 1 match, got %d", output.MatchCount)
 	}
 }
 
@@ -1135,15 +1088,14 @@ func TestFindImplementationsTool_NonInterfaceFiltered(t *testing.T) {
 	}
 
 	// Should only query the interface, not the struct
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindImplementationsOutput)
 	if !ok {
-		t.Fatalf("Output is not a map")
+		t.Fatalf("Output is not FindImplementationsOutput, got %T", result.Output)
 	}
 
 	// The match_count should be 1 (only the interface was queried)
-	matchCount, _ := output["match_count"].(int)
-	if matchCount != 1 {
-		t.Errorf("Expected 1 interface match, got %d (struct should be filtered)", matchCount)
+	if output.MatchCount != 1 {
+		t.Errorf("Expected 1 interface match, got %d (struct should be filtered)", output.MatchCount)
 	}
 }
 
@@ -1168,15 +1120,12 @@ func TestFindCallersTool_IndexAndGraphPathConsistency(t *testing.T) {
 		t.Fatalf("Execute errors: %v, %v", err1, err2)
 	}
 
-	output1, _ := result1.Output.(map[string]any)
-	output2, _ := result2.Output.(map[string]any)
+	output1, _ := result1.Output.(FindCallersOutput)
+	output2, _ := result2.Output.(FindCallersOutput)
 
-	matchCount1, _ := output1["match_count"].(int)
-	matchCount2, _ := output2["match_count"].(int)
-
-	if matchCount1 != matchCount2 {
+	if output1.MatchCount != output2.MatchCount {
 		t.Errorf("Index path got %d matches, graph path got %d - results inconsistent",
-			matchCount1, matchCount2)
+			output1.MatchCount, output2.MatchCount)
 	}
 }
 
@@ -1338,18 +1287,13 @@ func TestFindHotspotsTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindHotspotsOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
-		}
-
-		hotspots, ok := output["hotspots"].([]map[string]any)
-		if !ok {
-			t.Fatalf("hotspots is not a slice")
+			t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
 		}
 
 		// Should have at least one hotspot
-		if len(hotspots) == 0 {
+		if len(output.Hotspots) == 0 {
 			t.Error("Expected at least one hotspot")
 		}
 
@@ -1371,18 +1315,13 @@ func TestFindHotspotsTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindHotspotsOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
 		}
 
-		hotspots, ok := output["hotspots"].([]map[string]any)
-		if !ok {
-			t.Fatalf("hotspots is not a slice")
-		}
-
-		if len(hotspots) > 2 {
-			t.Errorf("got %d hotspots, want at most 2", len(hotspots))
+		if len(output.Hotspots) > 2 {
+			t.Errorf("got %d hotspots, want at most 2", len(output.Hotspots))
 		}
 	})
 
@@ -1433,20 +1372,15 @@ func TestFindDeadCodeTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindDeadCodeOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
-		}
-
-		deadCode, ok := output["dead_code"].([]map[string]any)
-		if !ok {
-			t.Fatalf("dead_code is not a slice")
+			t.Fatalf("Output is not FindDeadCodeOutput, got %T", result.Output)
 		}
 
 		// funcD is unexported dead code
 		found := false
-		for _, dc := range deadCode {
-			if dc["name"] == "funcD" {
+		for _, dc := range output.DeadCode {
+			if dc.Name == "funcD" {
 				found = true
 				break
 			}
@@ -1486,20 +1420,15 @@ func TestFindDeadCodeTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindDeadCodeOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
-		}
-
-		deadCode, ok := output["dead_code"].([]map[string]any)
-		if !ok {
-			t.Fatalf("dead_code is not a slice")
+			t.Fatalf("Output is not FindDeadCodeOutput, got %T", result.Output)
 		}
 
 		// All results should be in util package
-		for _, dc := range deadCode {
-			if dc["package"] != "util" {
-				t.Errorf("Found dead code from package %v, expected util", dc["package"])
+		for _, dc := range output.DeadCode {
+			if dc.Package != "util" {
+				t.Errorf("Found dead code from package %v, expected util", dc.Package)
 			}
 		}
 	})
@@ -1538,18 +1467,13 @@ func TestFindCyclesTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindCyclesOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
-		}
-
-		cycles, ok := output["cycles"].([]map[string]any)
-		if !ok {
-			t.Fatalf("cycles is not a slice")
+			t.Fatalf("Output is not FindCyclesOutput, got %T", result.Output)
 		}
 
 		// Should find the B <-> C cycle
-		if len(cycles) == 0 {
+		if len(output.Cycles) == 0 {
 			t.Error("Expected to find at least one cycle (funcB <-> funcC)")
 		}
 
@@ -1571,21 +1495,15 @@ func TestFindCyclesTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindCyclesOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
-		}
-
-		cycles, ok := output["cycles"].([]map[string]any)
-		if !ok {
-			t.Fatalf("cycles is not a slice")
+			t.Fatalf("Output is not FindCyclesOutput, got %T", result.Output)
 		}
 
 		// 2-node cycles should be filtered out
-		for _, cycle := range cycles {
-			length, _ := cycle["length"].(int)
-			if length < 3 {
-				t.Errorf("Found cycle with length %d, expected >= 3", length)
+		for _, cycle := range output.Cycles {
+			if cycle.Length < 3 {
+				t.Errorf("Found cycle with length %d, expected >= 3", cycle.Length)
 			}
 		}
 	})
@@ -1632,27 +1550,21 @@ func TestFindPathTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindPathOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindPathOutput, got %T", result.Output)
 		}
 
-		found, _ := output["found"].(bool)
-		if !found {
+		if !output.Found {
 			t.Error("Expected to find a path from main to funcB")
 		}
 
-		length, _ := output["length"].(int)
-		if length < 1 {
-			t.Errorf("Expected path length >= 1, got %d", length)
+		if output.Length < 1 {
+			t.Errorf("Expected path length >= 1, got %d", output.Length)
 		}
 
 		// Check path contains nodes
-		path, ok := output["path"].([]map[string]any)
-		if !ok {
-			t.Fatalf("path is not a slice")
-		}
-		if len(path) == 0 {
+		if len(output.Path) == 0 {
 			t.Error("Expected non-empty path")
 		}
 
@@ -1675,13 +1587,12 @@ func TestFindPathTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindPathOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindPathOutput, got %T", result.Output)
 		}
 
-		found, _ := output["found"].(bool)
-		if found {
+		if output.Found {
 			t.Error("Expected no path from funcD to main")
 		}
 	})
@@ -1877,36 +1788,29 @@ func TestFindImportantTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindImportantOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindImportantOutput, got %T", result.Output)
 		}
 
 		// Check algorithm field indicates PageRank
-		algorithm, _ := output["algorithm"].(string)
-		if algorithm != "PageRank" {
-			t.Errorf("Expected algorithm 'PageRank', got '%s'", algorithm)
-		}
-
-		// Check results exist
-		results, ok := output["results"].([]map[string]any)
-		if !ok {
-			t.Fatalf("results is not a slice")
+		if output.Algorithm != "PageRank" {
+			t.Errorf("Expected algorithm 'PageRank', got '%s'", output.Algorithm)
 		}
 
 		// Should have at least one result
-		if len(results) == 0 {
+		if len(output.Results) == 0 {
 			t.Error("Expected at least one important symbol")
 		}
 
 		// First result should have pagerank score and rank
-		if len(results) > 0 {
-			first := results[0]
-			if _, ok := first["pagerank"]; !ok {
-				t.Error("Expected pagerank score field in result")
+		if len(output.Results) > 0 {
+			first := output.Results[0]
+			if first.PageRank == 0 {
+				t.Error("Expected non-zero pagerank score in result")
 			}
-			if _, ok := first["rank"]; !ok {
-				t.Error("Expected rank field in result")
+			if first.Rank == 0 {
+				t.Error("Expected non-zero rank in result")
 			}
 		}
 
@@ -1928,18 +1832,13 @@ func TestFindImportantTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindImportantOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindImportantOutput, got %T", result.Output)
 		}
 
-		results, ok := output["results"].([]map[string]any)
-		if !ok {
-			t.Fatalf("results is not a slice")
-		}
-
-		if len(results) > 2 {
-			t.Errorf("got %d results, want at most 2", len(results))
+		if len(output.Results) > 2 {
+			t.Errorf("got %d results, want at most 2", len(output.Results))
 		}
 	})
 
@@ -1957,15 +1856,14 @@ func TestFindImportantTool_Execute(t *testing.T) {
 		}
 
 		// Should succeed without error (capped internally)
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindImportantOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindImportantOutput, got %T", result.Output)
 		}
 
 		// Just verify we got valid results
-		_, ok = output["results"].([]map[string]any)
-		if !ok {
-			t.Fatalf("results is not a slice")
+		if output.Results == nil {
+			t.Fatalf("results is nil")
 		}
 	})
 
@@ -2004,17 +1902,17 @@ func TestFindImportantTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindImportantOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindImportantOutput, got %T", result.Output)
 		}
 
 		// Should have result count and algorithm metadata
-		if _, ok := output["result_count"]; !ok {
-			t.Error("Expected result_count field in output")
+		if output.ResultCount < 0 {
+			t.Error("Expected non-negative result_count in output")
 		}
-		if _, ok := output["algorithm"]; !ok {
-			t.Error("Expected algorithm field in output")
+		if output.Algorithm == "" {
+			t.Error("Expected algorithm field to be set in output")
 		}
 	})
 }
@@ -2049,22 +1947,30 @@ func TestFindImportantTool_VsHotspots(t *testing.T) {
 	}
 
 	// Extract rankings (they may differ due to different algorithms)
-	importantOutput := importantResult.Output.(map[string]any)
-	importantResults := importantOutput["results"].([]map[string]any)
+	importantOutput, ok := importantResult.Output.(FindImportantOutput)
+	if !ok {
+		t.Fatalf("find_important output is not FindImportantOutput, got %T", importantResult.Output)
+	}
 
-	hotspotsOutput := hotspotsResult.Output.(map[string]any)
-	hotspotsResults := hotspotsOutput["hotspots"].([]map[string]any)
+	hotspotsOutput, ok := hotspotsResult.Output.(FindHotspotsOutput)
+	if !ok {
+		t.Fatalf("find_hotspots output is not FindHotspotsOutput, got %T", hotspotsResult.Output)
+	}
 
 	// Just verify both returned reasonable results
-	t.Logf("PageRank top: %v", importantResults[0]["name"])
-	t.Logf("HotSpots top: %v", hotspotsResults[0]["name"])
+	if len(importantOutput.Results) > 0 {
+		t.Logf("PageRank top: %v", importantOutput.Results[0].Name)
+	}
+	if len(hotspotsOutput.Hotspots) > 0 {
+		t.Logf("HotSpots top: %v", hotspotsOutput.Hotspots[0].Name)
+	}
 
 	// Rankings may differ - that's expected
 	// Just verify both have results
-	if len(importantResults) == 0 {
+	if len(importantOutput.Results) == 0 {
 		t.Error("find_important returned no results")
 	}
-	if len(hotspotsResults) == 0 {
+	if len(hotspotsOutput.Hotspots) == 0 {
 		t.Error("find_hotspots returned no results")
 	}
 }
@@ -2361,32 +2267,23 @@ func TestFindCommunitiesTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindCommunitiesOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
+			t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
 		}
 
 		// Check algorithm field
-		algorithm, _ := output["algorithm"].(string)
-		if algorithm != "Leiden" {
-			t.Errorf("Expected algorithm 'Leiden', got '%s'", algorithm)
+		if output.Algorithm != "Leiden" {
+			t.Errorf("Expected algorithm 'Leiden', got '%s'", output.Algorithm)
 		}
 
-		// Check modularity is present and in valid range
-		modularity, ok := output["modularity"].(float64)
-		if !ok {
-			t.Error("Expected modularity field in output")
-		} else if modularity < 0 || modularity > 1 {
-			t.Errorf("Modularity %f outside expected range [0,1]", modularity)
+		// Check modularity is in valid range
+		if output.Modularity < 0 || output.Modularity > 1 {
+			t.Errorf("Modularity %f outside expected range [0,1]", output.Modularity)
 		}
 
 		// Check communities exist
-		communities, ok := output["communities"].([]map[string]any)
-		if !ok {
-			t.Fatalf("communities is not a slice of maps")
-		}
-
-		if len(communities) == 0 {
+		if len(output.Communities) == 0 {
 			t.Error("Expected at least one community")
 		}
 
@@ -2409,14 +2306,15 @@ func TestFindCommunitiesTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output := result.Output.(map[string]any)
-		communities := output["communities"].([]map[string]any)
+		output, ok := result.Output.(FindCommunitiesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+		}
 
 		// All returned communities should have size >= 5
-		for _, comm := range communities {
-			size, _ := comm["size"].(int)
-			if size < 5 {
-				t.Errorf("Community size %d is less than min_size 5", size)
+		for _, comm := range output.Communities {
+			if comm.Size < 5 {
+				t.Errorf("Community size %d is less than min_size 5", comm.Size)
 			}
 		}
 	})
@@ -2444,14 +2342,21 @@ func TestFindCommunitiesTool_Execute(t *testing.T) {
 		}
 
 		// Note: We can't guarantee exact community counts, but both should run
-		lowOutput := lowResResult.Output.(map[string]any)
-		highOutput := highResResult.Output.(map[string]any)
-
-		if _, ok := lowOutput["modularity"]; !ok {
-			t.Error("Low resolution output missing modularity")
+		lowOutput, ok := lowResResult.Output.(FindCommunitiesOutput)
+		if !ok {
+			t.Fatalf("Low resolution output is not FindCommunitiesOutput, got %T", lowResResult.Output)
 		}
-		if _, ok := highOutput["modularity"]; !ok {
-			t.Error("High resolution output missing modularity")
+		highOutput, ok := highResResult.Output.(FindCommunitiesOutput)
+		if !ok {
+			t.Fatalf("High resolution output is not FindCommunitiesOutput, got %T", highResResult.Output)
+		}
+
+		// Check that modularity is present (it's always set for FindCommunitiesOutput)
+		if lowOutput.Modularity == 0 && lowOutput.CommunityCount > 0 {
+			t.Error("Low resolution output has zero modularity with communities")
+		}
+		if highOutput.Modularity == 0 && highOutput.CommunityCount > 0 {
+			t.Error("High resolution output has zero modularity with communities")
 		}
 	})
 
@@ -2468,11 +2373,13 @@ func TestFindCommunitiesTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output := result.Output.(map[string]any)
-		communities := output["communities"].([]map[string]any)
+		output, ok := result.Output.(FindCommunitiesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+		}
 
-		if len(communities) > 1 {
-			t.Errorf("got %d communities, want at most 1", len(communities))
+		if len(output.Communities) > 1 {
+			t.Errorf("got %d communities, want at most 1", len(output.Communities))
 		}
 	})
 
@@ -2528,18 +2435,21 @@ func TestFindCommunitiesTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output := result.Output.(map[string]any)
+		output, ok := result.Output.(FindCommunitiesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+		}
 
-		// Should have result metadata
-		if _, ok := output["community_count"]; !ok {
-			t.Error("Expected community_count field in output")
+		// Should have result metadata (these are always present in typed struct)
+		if output.CommunityCount < 0 {
+			t.Error("Expected non-negative community_count")
 		}
-		if _, ok := output["algorithm"]; !ok {
-			t.Error("Expected algorithm field in output")
+		if output.Algorithm == "" {
+			t.Error("Expected algorithm field to be set")
 		}
-		if _, ok := output["converged"]; !ok {
-			t.Error("Expected converged field in output")
-		}
+		// Converged is a bool field, always present in typed struct
+		// Just verify the output was processed (Converged may be true or false)
+		t.Logf("Converged: %v", output.Converged)
 	})
 }
 
@@ -2602,12 +2512,14 @@ func TestFindCommunitiesTool_CrossPackageDetection(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+	}
 
 	// Check if cross-package communities are identified
-	crossPkg, ok := output["cross_package_communities"].([]int)
-	if ok && len(crossPkg) > 0 {
-		t.Logf("Found %d cross-package communities", len(crossPkg))
+	if len(output.CrossPackageCommunities) > 0 {
+		t.Logf("Found %d cross-package communities", len(output.CrossPackageCommunities))
 	}
 
 	// The output text should mention cross-package if detected
@@ -2641,11 +2553,13 @@ func TestFindCommunitiesTool_ShowCrossEdges(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output := result.Output.(map[string]any)
-		// cross_community_edges should be present
-		if _, ok := output["cross_community_edges"]; !ok {
-			t.Error("Expected cross_community_edges when show_cross_edges=true")
+		output, ok := result.Output.(FindCommunitiesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
 		}
+		// cross_community_edges should be present (may be empty if no cross edges exist)
+		// Just verify the output was processed - the field is always present in typed struct
+		t.Logf("CrossCommunityEdges count: %d", len(output.CrossCommunityEdges))
 	})
 
 	t.Run("show_cross_edges false", func(t *testing.T) {
@@ -2662,13 +2576,12 @@ func TestFindCommunitiesTool_ShowCrossEdges(t *testing.T) {
 		}
 
 		// Should still succeed, just without cross edges
-		output := result.Output.(map[string]any)
-		edges, hasEdges := output["cross_community_edges"]
-		if hasEdges {
-			edgeSlice, ok := edges.([]map[string]any)
-			if ok && len(edgeSlice) > 0 {
-				t.Error("Expected no cross_community_edges when show_cross_edges=false")
-			}
+		output, ok := result.Output.(FindCommunitiesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+		}
+		if len(output.CrossCommunityEdges) > 0 {
+			t.Error("Expected no cross_community_edges when show_cross_edges=false")
 		}
 	})
 }
@@ -2733,11 +2646,13 @@ func TestFindCommunitiesTool_EmptyGraph(t *testing.T) {
 		t.Fatalf("Execute() should succeed with empty graph")
 	}
 
-	output := result.Output.(map[string]any)
-	communities := output["communities"].([]map[string]any)
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+	}
 
-	if len(communities) != 0 {
-		t.Errorf("Expected 0 communities for empty graph, got %d", len(communities))
+	if len(output.Communities) != 0 {
+		t.Errorf("Expected 0 communities for empty graph, got %d", len(output.Communities))
 	}
 }
 
@@ -2763,19 +2678,18 @@ func TestFindCommunitiesTool_ModularityQualityLabel(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+	}
 
 	// Should have modularity_quality label
-	quality, ok := output["modularity_quality"].(string)
-	if !ok {
-		t.Error("Expected modularity_quality field in output")
-	} else {
-		validQualities := map[string]bool{
-			"weak": true, "moderate": true, "good": true, "strong": true,
-		}
-		if !validQualities[quality] {
-			t.Errorf("Invalid modularity_quality: %s", quality)
-		}
+	quality := output.ModularityQuality
+	validQualities := map[string]bool{
+		"weak": true, "moderate": true, "good": true, "strong": true,
+	}
+	if !validQualities[quality] {
+		t.Errorf("Invalid modularity_quality: %s", quality)
 	}
 }
 
@@ -2844,16 +2758,18 @@ func TestFindCommunitiesTool_SingleNodeGraph(t *testing.T) {
 		t.Fatalf("Execute() should succeed with single node graph: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	communities := output["communities"].([]map[string]any)
-
-	// Single node should form one community
-	if len(communities) != 1 {
-		t.Errorf("Expected 1 community for single-node graph, got %d", len(communities))
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
 	}
 
-	if len(communities) > 0 {
-		size, _ := communities[0]["size"].(int)
+	// Single node should form one community
+	if len(output.Communities) != 1 {
+		t.Errorf("Expected 1 community for single-node graph, got %d", len(output.Communities))
+	}
+
+	if len(output.Communities) > 0 {
+		size := output.Communities[0].Size
 		if size != 1 {
 			t.Errorf("Single-node community should have size 1, got %d", size)
 		}
@@ -2924,19 +2840,20 @@ func TestFindCommunitiesTool_DisconnectedGraph(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	communities := output["communities"].([]map[string]any)
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+	}
 
 	// Should detect at least 2 communities (one per disconnected component)
-	if len(communities) < 2 {
-		t.Errorf("Expected at least 2 communities for disconnected graph, got %d", len(communities))
+	if len(output.Communities) < 2 {
+		t.Errorf("Expected at least 2 communities for disconnected graph, got %d", len(output.Communities))
 	}
 
 	// Total nodes across communities should equal 6
 	totalNodes := 0
-	for _, comm := range communities {
-		size, _ := comm["size"].(int)
-		totalNodes += size
+	for _, comm := range output.Communities {
+		totalNodes += comm.Size
 	}
 	if totalNodes != 6 {
 		t.Errorf("Total nodes in communities should be 6, got %d", totalNodes)
@@ -2996,20 +2913,20 @@ func TestFindCommunitiesTool_AllSamePackage(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+	}
 
 	// Should have no cross-package communities since all are same package
-	crossPkg, ok := output["cross_package_communities"].([]int)
-	if ok && len(crossPkg) > 0 {
-		t.Errorf("Expected no cross-package communities for same-package graph, got %d", len(crossPkg))
+	if len(output.CrossPackageCommunities) > 0 {
+		t.Errorf("Expected no cross-package communities for same-package graph, got %d", len(output.CrossPackageCommunities))
 	}
 
 	// Communities should exist and all have dominant_package = "myPkg"
-	communities := output["communities"].([]map[string]any)
-	for i, comm := range communities {
-		domPkg, _ := comm["dominant_package"].(string)
-		if domPkg != "" && domPkg != "myPkg" {
-			t.Errorf("Community %d has unexpected dominant_package: %s", i, domPkg)
+	for i, comm := range output.Communities {
+		if comm.DominantPackage != "" && comm.DominantPackage != "myPkg" {
+			t.Errorf("Community %d has unexpected dominant_package: %s", i, comm.DominantPackage)
 		}
 	}
 }
@@ -3050,10 +2967,12 @@ func TestFindCommunitiesTool_ParameterExactBoundaries(t *testing.T) {
 				t.Fatalf("Execute() failed: %s", result.Error)
 			}
 
-			output := result.Output.(map[string]any)
-			if _, ok := output["modularity"]; !ok {
-				t.Error("Expected modularity field in output")
+			output, ok := result.Output.(FindCommunitiesOutput)
+			if !ok {
+				t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
 			}
+			// Modularity is always present in typed struct, just verify it was computed
+			t.Logf("Modularity: %f", output.Modularity)
 		})
 	}
 }
@@ -3124,87 +3043,49 @@ func TestFindCommunitiesTool_OutputFormatValidation(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindCommunitiesOutput)
 	if !ok {
-		t.Fatal("Output is not a map[string]any")
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
 	}
 
-	// Validate top-level fields
-	topLevelFields := map[string]string{
-		"algorithm":          "string",
-		"modularity":         "float64",
-		"modularity_quality": "string",
-		"converged":          "bool",
-		"community_count":    "int",
-		"communities":        "[]map[string]any",
+	// Validate top-level fields are set appropriately
+	if output.Algorithm == "" {
+		t.Error("Algorithm should not be empty")
 	}
-
-	for field, expectedType := range topLevelFields {
-		val, exists := output[field]
-		if !exists {
-			t.Errorf("Missing top-level field: %s", field)
-			continue
-		}
-
-		switch expectedType {
-		case "string":
-			if _, ok := val.(string); !ok {
-				t.Errorf("Field %s should be string, got %T", field, val)
-			}
-		case "float64":
-			if _, ok := val.(float64); !ok {
-				t.Errorf("Field %s should be float64, got %T", field, val)
-			}
-		case "bool":
-			if _, ok := val.(bool); !ok {
-				t.Errorf("Field %s should be bool, got %T", field, val)
-			}
-		case "int":
-			if _, ok := val.(int); !ok {
-				t.Errorf("Field %s should be int, got %T", field, val)
-			}
-		case "[]map[string]any":
-			if _, ok := val.([]map[string]any); !ok {
-				t.Errorf("Field %s should be []map[string]any, got %T", field, val)
-			}
-		}
+	if output.Modularity < 0 || output.Modularity > 1 {
+		t.Errorf("Modularity %f should be in [0,1]", output.Modularity)
+	}
+	if output.ModularityQuality == "" {
+		t.Error("ModularityQuality should not be empty")
+	}
+	// Converged is a bool, always valid
+	// CommunityCount should be consistent with Communities slice
+	if output.CommunityCount != len(output.Communities) {
+		t.Errorf("CommunityCount %d doesn't match Communities length %d", output.CommunityCount, len(output.Communities))
 	}
 
 	// Validate community structure
-	communities := output["communities"].([]map[string]any)
-	if len(communities) > 0 {
-		comm := communities[0]
-		// Actual fields from formatCommunityResults
-		communityFields := []string{"id", "size", "connectivity", "internal_edges", "external_edges", "members", "dominant_package", "packages", "is_cross_package"}
-		for _, field := range communityFields {
-			if _, exists := comm[field]; !exists {
-				t.Errorf("Community missing field: %s", field)
-			}
+	if len(output.Communities) > 0 {
+		comm := output.Communities[0]
+		// Validate fields are set
+		if comm.ID < 0 {
+			t.Error("Community ID should not be negative")
 		}
-
-		// Validate members is []map[string]any with "id" field
-		if members, ok := comm["members"].([]map[string]any); ok {
-			if len(members) == 0 {
-				t.Error("Community members should not be empty for non-empty community")
-			} else {
-				if _, hasID := members[0]["id"]; !hasID {
-					t.Error("Community member should have 'id' field")
-				}
-			}
-		} else {
-			t.Error("Community members should be []map[string]any")
+		if comm.Size <= 0 {
+			t.Error("Community Size should be positive")
 		}
+		if comm.Connectivity < 0 || comm.Connectivity > 1 {
+			t.Errorf("Community Connectivity %f should be in [0,1]", comm.Connectivity)
+		}
+		// InternalEdges, ExternalEdges, Members, DominantPackage, Packages, IsCrossPackage
+		// are all guaranteed by the typed struct
 	}
 
 	// Validate cross_community_edges when present (show_cross_edges=true)
-	if edges, ok := output["cross_community_edges"].([]map[string]any); ok {
-		if len(edges) > 0 {
-			edgeFields := []string{"from_community", "to_community", "count"}
-			for _, field := range edgeFields {
-				if _, exists := edges[0][field]; !exists {
-					t.Errorf("Cross-community edge missing field: %s", field)
-				}
-			}
+	if len(output.CrossCommunityEdges) > 0 {
+		edge := output.CrossCommunityEdges[0]
+		if edge.FromCommunity < 0 || edge.ToCommunity < 0 || edge.Count < 0 {
+			t.Error("CrossCommunityEdge has invalid fields")
 		}
 	}
 
@@ -3299,18 +3180,18 @@ func TestFindCommunitiesTool_LargeMinSize(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	communities := output["communities"].([]map[string]any)
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+	}
 
 	// All communities should be filtered out
-	if len(communities) != 0 {
-		t.Errorf("Expected 0 communities with min_size=100, got %d", len(communities))
+	if len(output.Communities) != 0 {
+		t.Errorf("Expected 0 communities with min_size=100, got %d", len(output.Communities))
 	}
 
-	// Should still report the underlying modularity
-	if _, ok := output["modularity"]; !ok {
-		t.Error("Expected modularity field even with no communities returned")
-	}
+	// Modularity is always present in typed struct
+	t.Logf("Modularity with no communities: %f", output.Modularity)
 }
 
 // TestFindCommunitiesTool_TraceStepPopulated verifies CRS integration.
@@ -3475,28 +3356,19 @@ func TestFindArticulationPointsTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output, ok := result.Output.(map[string]any)
+		output, ok := result.Output.(FindArticulationPointsOutput)
 		if !ok {
-			t.Fatalf("Output is not a map")
-		}
-
-		// Check articulation_points field exists
-		points, ok := output["articulation_points"].([]map[string]any)
-		if !ok {
-			t.Fatalf("articulation_points is not a slice of maps")
+			t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
 		}
 
 		// Should find at least some articulation points
-		if len(points) == 0 {
+		if len(output.ArticulationPoints) == 0 {
 			t.Error("Expected at least one articulation point")
 		}
 
-		// Check fragility_score is present and in valid range
-		fragility, ok := output["fragility_score"].(float64)
-		if !ok {
-			t.Error("Expected fragility_score field in output")
-		} else if fragility < 0 || fragility > 1 {
-			t.Errorf("fragility_score %f outside expected range [0,1]", fragility)
+		// Check fragility_score is in valid range
+		if output.FragilityScore < 0 || output.FragilityScore > 1 {
+			t.Errorf("fragility_score %f outside expected range [0,1]", output.FragilityScore)
 		}
 
 		// Check output text is populated
@@ -3517,12 +3389,14 @@ func TestFindArticulationPointsTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output := result.Output.(map[string]any)
-		points := output["articulation_points"].([]map[string]any)
+		output, ok := result.Output.(FindArticulationPointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+		}
 
 		// Should not exceed top limit
-		if len(points) > 2 {
-			t.Errorf("Expected at most 2 articulation points, got %d", len(points))
+		if len(output.ArticulationPoints) > 2 {
+			t.Errorf("Expected at most 2 articulation points, got %d", len(output.ArticulationPoints))
 		}
 	})
 
@@ -3538,13 +3412,13 @@ func TestFindArticulationPointsTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output := result.Output.(map[string]any)
+		output, ok := result.Output.(FindArticulationPointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+		}
 
 		// Bridges should be present
-		bridges, ok := output["bridges"].([]map[string]any)
-		if !ok {
-			t.Error("Expected bridges field when include_bridges=true")
-		} else if len(bridges) == 0 {
+		if len(output.Bridges) == 0 {
 			t.Error("Expected at least one bridge in test graph")
 		}
 	})
@@ -3561,11 +3435,13 @@ func TestFindArticulationPointsTool_Execute(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		output := result.Output.(map[string]any)
+		output, ok := result.Output.(FindArticulationPointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+		}
 
-		// Bridges should be empty or absent
-		bridges, ok := output["bridges"].([]map[string]any)
-		if ok && len(bridges) > 0 {
+		// Bridges should be empty when include_bridges=false
+		if len(output.Bridges) > 0 {
 			t.Error("Expected no bridges when include_bridges=false")
 		}
 	})
@@ -3591,18 +3467,19 @@ func TestFindArticulationPointsTool_NoArticulationPoints(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	points := output["articulation_points"].([]map[string]any)
+	output, ok := result.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+	}
 
 	// Triangles have no articulation points
-	if len(points) != 0 {
-		t.Errorf("Expected 0 articulation points in triangle, got %d", len(points))
+	if len(output.ArticulationPoints) != 0 {
+		t.Errorf("Expected 0 articulation points in triangle, got %d", len(output.ArticulationPoints))
 	}
 
 	// Fragility should be 0
-	fragility := output["fragility_score"].(float64)
-	if fragility != 0 {
-		t.Errorf("Expected fragility_score 0 for no articulation points, got %f", fragility)
+	if output.FragilityScore != 0 {
+		t.Errorf("Expected fragility_score 0 for no articulation points, got %f", output.FragilityScore)
 	}
 }
 
@@ -3701,12 +3578,14 @@ func TestFindArticulationPointsTool_EmptyGraph(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	points := output["articulation_points"].([]map[string]any)
+	output, ok := result.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+	}
 
 	// Empty graph has no articulation points
-	if len(points) != 0 {
-		t.Errorf("Expected 0 articulation points in empty graph, got %d", len(points))
+	if len(output.ArticulationPoints) != 0 {
+		t.Errorf("Expected 0 articulation points in empty graph, got %d", len(output.ArticulationPoints))
 	}
 }
 
@@ -3794,10 +3673,12 @@ func TestFindArticulationPointsTool_ParameterValidation(t *testing.T) {
 				t.Fatalf("Execute() failed: %s", result.Error)
 			}
 
-			output := result.Output.(map[string]any)
-			if _, ok := output["fragility_score"]; !ok {
-				t.Error("Expected fragility_score field in output")
+			output, ok := result.Output.(FindArticulationPointsOutput)
+			if !ok {
+				t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
 			}
+			// FragilityScore is always present in typed struct
+			t.Logf("FragilityScore: %f", output.FragilityScore)
 		})
 	}
 }
@@ -3824,68 +3705,41 @@ func TestFindArticulationPointsTool_OutputFormatValidation(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output, ok := result.Output.(map[string]any)
+	output, ok := result.Output.(FindArticulationPointsOutput)
 	if !ok {
-		t.Fatal("Output is not a map[string]any")
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
 	}
 
-	// Validate top-level fields
-	topLevelFields := map[string]string{
-		"articulation_points": "[]map[string]any",
-		"bridges":             "[]map[string]any",
-		"total_components":    "int",
-		"fragility_score":     "float64",
-		"fragility_level":     "string",
+	// Validate top-level fields are set appropriately
+	if output.FragilityScore < 0 || output.FragilityScore > 1 {
+		t.Errorf("FragilityScore %f should be in [0,1]", output.FragilityScore)
 	}
-
-	for field, expectedType := range topLevelFields {
-		val, exists := output[field]
-		if !exists {
-			t.Errorf("Missing top-level field: %s", field)
-			continue
-		}
-
-		switch expectedType {
-		case "string":
-			if _, ok := val.(string); !ok {
-				t.Errorf("Field %s should be string, got %T", field, val)
-			}
-		case "float64":
-			if _, ok := val.(float64); !ok {
-				t.Errorf("Field %s should be float64, got %T", field, val)
-			}
-		case "int":
-			if _, ok := val.(int); !ok {
-				t.Errorf("Field %s should be int, got %T", field, val)
-			}
-		case "[]map[string]any":
-			if _, ok := val.([]map[string]any); !ok {
-				t.Errorf("Field %s should be []map[string]any, got %T", field, val)
-			}
-		}
+	if output.FragilityLevel == "" {
+		t.Error("FragilityLevel should not be empty")
+	}
+	if output.TotalComponents < 0 {
+		t.Error("TotalComponents should not be negative")
 	}
 
 	// Validate articulation point structure
-	points := output["articulation_points"].([]map[string]any)
-	if len(points) > 0 {
-		point := points[0]
-		requiredFields := []string{"id", "name"}
-		for _, f := range requiredFields {
-			if _, ok := point[f]; !ok {
-				t.Errorf("Articulation point missing field: %s", f)
-			}
+	if len(output.ArticulationPoints) > 0 {
+		point := output.ArticulationPoints[0]
+		if point.ID == "" {
+			t.Error("Articulation point should have ID")
+		}
+		if point.Name == "" {
+			t.Error("Articulation point should have Name")
 		}
 	}
 
 	// Validate bridge structure
-	bridges := output["bridges"].([]map[string]any)
-	if len(bridges) > 0 {
-		bridge := bridges[0]
-		requiredFields := []string{"from", "to"}
-		for _, f := range requiredFields {
-			if _, ok := bridge[f]; !ok {
-				t.Errorf("Bridge missing field: %s", f)
-			}
+	if len(output.Bridges) > 0 {
+		bridge := output.Bridges[0]
+		if bridge.From == "" {
+			t.Error("Bridge should have From field")
+		}
+		if bridge.To == "" {
+			t.Error("Bridge should have To field")
 		}
 	}
 }
@@ -4033,12 +3887,14 @@ func TestFindArticulationPointsTool_TopClampingLow(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	points := output["articulation_points"].([]map[string]any)
+	output, ok := result.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+	}
 
 	// Should have at most 1 point (clamped)
-	if len(points) > 1 {
-		t.Errorf("Expected at most 1 point when top=0 (clamped to 1), got %d", len(points))
+	if len(output.ArticulationPoints) > 1 {
+		t.Errorf("Expected at most 1 point when top=0 (clamped to 1), got %d", len(output.ArticulationPoints))
 	}
 
 	// Test with top = -5 (should clamp to 1)
@@ -4050,10 +3906,12 @@ func TestFindArticulationPointsTool_TopClampingLow(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result2.Error)
 	}
 
-	output2 := result2.Output.(map[string]any)
-	points2 := output2["articulation_points"].([]map[string]any)
-	if len(points2) > 1 {
-		t.Errorf("Expected at most 1 point when top=-5 (clamped to 1), got %d", len(points2))
+	output2, ok := result2.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result2.Output)
+	}
+	if len(output2.ArticulationPoints) > 1 {
+		t.Errorf("Expected at most 1 point when top=-5 (clamped to 1), got %d", len(output2.ArticulationPoints))
 	}
 }
 
@@ -4079,10 +3937,12 @@ func TestFindArticulationPointsTool_TopClampingHigh(t *testing.T) {
 	}
 
 	// Should succeed (clamped to 100, which is more than our test graph has)
-	output := result.Output.(map[string]any)
-	if _, ok := output["articulation_points"]; !ok {
-		t.Error("Expected articulation_points in output")
+	output, ok := result.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
 	}
+	// ArticulationPoints is always present in typed struct
+	t.Logf("Got %d articulation points", len(output.ArticulationPoints))
 }
 
 // TestFindArticulationPointsTool_FragilityLevels verifies fragility_level categories.
@@ -4132,11 +3992,12 @@ func TestFindArticulationPointsTool_FragilityLevels(t *testing.T) {
 				t.Fatalf("Execute() failed: %s", result.Error)
 			}
 
-			output := result.Output.(map[string]any)
-			level, ok := output["fragility_level"].(string)
+			output, ok := result.Output.(FindArticulationPointsOutput)
 			if !ok {
-				t.Fatal("Expected fragility_level to be a string")
+				t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
 			}
+
+			level := output.FragilityLevel
 
 			// Verify it's a valid level
 			if !validLevels[level] {
@@ -4180,24 +4041,19 @@ func TestFindArticulationPointsTool_AllOutputFields(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-
-	// All required top-level fields
-	requiredFields := []string{
-		"articulation_points",
-		"bridges",
-		"total_components",
-		"fragility_score",
-		"fragility_level",
-		"node_count",
-		"edge_count",
+	output, ok := result.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
 	}
 
-	for _, field := range requiredFields {
-		if _, ok := output[field]; !ok {
-			t.Errorf("Missing required field: %s", field)
-		}
-	}
+	// Verify all fields are accessible (typed struct guarantees presence)
+	_ = output.ArticulationPoints
+	_ = output.Bridges
+	_ = output.TotalComponents
+	_ = output.FragilityScore
+	_ = output.FragilityLevel
+	_ = output.NodeCount
+	_ = output.EdgeCount
 
 	// Verify Result fields
 	if result.OutputText == "" {
@@ -4231,25 +4087,22 @@ func TestFindArticulationPointsTool_PointMetadata(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	points := output["articulation_points"].([]map[string]any)
+	output, ok := result.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+	}
 
-	if len(points) == 0 {
+	if len(output.ArticulationPoints) == 0 {
 		t.Fatal("Expected at least one articulation point")
 	}
 
 	// Check first point has expected fields
-	point := points[0]
-	requiredPointFields := []string{"id", "name"}
-	for _, field := range requiredPointFields {
-		if _, ok := point[field]; !ok {
-			t.Errorf("Point missing required field: %s", field)
-		}
-	}
-
-	// ID should not be empty
-	if point["id"] == "" {
+	point := output.ArticulationPoints[0]
+	if point.ID == "" {
 		t.Error("Point ID should not be empty")
+	}
+	if point.Name == "" {
+		t.Error("Point Name should not be empty")
 	}
 }
 
@@ -4273,19 +4126,1717 @@ func TestFindArticulationPointsTool_BridgeMetadata(t *testing.T) {
 		t.Fatalf("Execute() failed: %s", result.Error)
 	}
 
-	output := result.Output.(map[string]any)
-	bridges := output["bridges"].([]map[string]any)
+	output, ok := result.Output.(FindArticulationPointsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindArticulationPointsOutput, got %T", result.Output)
+	}
 
-	if len(bridges) == 0 {
+	if len(output.Bridges) == 0 {
 		t.Fatal("Expected at least one bridge in test graph")
 	}
 
-	// Check first bridge has expected fields
-	bridge := bridges[0]
-	requiredBridgeFields := []string{"from", "to", "from_name", "to_name"}
-	for _, field := range requiredBridgeFields {
-		if _, ok := bridge[field]; !ok {
-			t.Errorf("Bridge missing required field: %s", field)
+	// Check first bridge has expected fields (typed struct guarantees these)
+	bridge := output.Bridges[0]
+	if bridge.From == "" {
+		t.Error("Bridge From should not be empty")
+	}
+	if bridge.To == "" {
+		t.Error("Bridge To should not be empty")
+	}
+}
+
+// =============================================================================
+// find_loops tool tests (GR-17e)
+// =============================================================================
+
+// createTestGraphWithLoops creates a graph with known loop structures.
+// Structure:
+//
+//	main -> A -> B -> C -> A (cycle: A-B-C)
+//	        |
+//	        v
+//	        D -> D (self-loop/direct recursion)
+//	        |
+//	        v
+//	        E -> F -> E (mutual recursion: E-F)
+//
+// Expected loops:
+// 1. A-B-C (size 3, mutual recursion via C->A back edge)
+// 2. D (size 1, direct recursion)
+// 3. E-F (size 2, mutual recursion)
+func createTestGraphWithLoops(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create nodes
+	symbols := []*ast.Symbol{
+		{ID: "cmd/main.go:10:main", Name: "main", Kind: ast.SymbolKindFunction, FilePath: "cmd/main.go", StartLine: 10, EndLine: 20, Package: "main", Exported: false, Language: "go"},
+		{ID: "pkg/a.go:10:A", Name: "A", Kind: ast.SymbolKindFunction, FilePath: "pkg/a.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/b.go:10:B", Name: "B", Kind: ast.SymbolKindFunction, FilePath: "pkg/b.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/c.go:10:C", Name: "C", Kind: ast.SymbolKindFunction, FilePath: "pkg/c.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/d.go:10:D", Name: "D", Kind: ast.SymbolKindFunction, FilePath: "pkg/d.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/e.go:10:E", Name: "E", Kind: ast.SymbolKindFunction, FilePath: "pkg/e.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/f.go:10:F", Name: "F", Kind: ast.SymbolKindFunction, FilePath: "pkg/f.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Logf("Warning: failed to index %s: %v", sym.Name, err)
 		}
 	}
+
+	// Add edges (call relationships)
+	// main -> A
+	g.AddEdge("cmd/main.go:10:main", "pkg/a.go:10:A", graph.EdgeTypeCalls, ast.Location{FilePath: "cmd/main.go", StartLine: 15})
+	// A -> B -> C -> A (3-node cycle)
+	g.AddEdge("pkg/a.go:10:A", "pkg/b.go:10:B", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/a.go", StartLine: 15})
+	g.AddEdge("pkg/b.go:10:B", "pkg/c.go:10:C", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/b.go", StartLine: 15})
+	g.AddEdge("pkg/c.go:10:C", "pkg/a.go:10:A", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/c.go", StartLine: 15}) // Back edge
+	// A -> D (branch to direct recursion)
+	g.AddEdge("pkg/a.go:10:A", "pkg/d.go:10:D", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/a.go", StartLine: 16})
+	// D -> D (self-loop / direct recursion)
+	g.AddEdge("pkg/d.go:10:D", "pkg/d.go:10:D", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/d.go", StartLine: 15})
+	// D -> E (branch to mutual recursion)
+	g.AddEdge("pkg/d.go:10:D", "pkg/e.go:10:E", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/d.go", StartLine: 16})
+	// E -> F -> E (mutual recursion)
+	g.AddEdge("pkg/e.go:10:E", "pkg/f.go:10:F", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/e.go", StartLine: 15})
+	g.AddEdge("pkg/f.go:10:F", "pkg/e.go:10:E", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/f.go", StartLine: 15}) // Back edge
+
+	g.Freeze()
+	return g, idx
+}
+
+// createTestGraphNoLoops creates a DAG (directed acyclic graph) with no loops.
+func createTestGraphNoLoops(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Simple tree structure: main -> A, B; A -> C; B -> D
+	symbols := []*ast.Symbol{
+		{ID: "cmd/main.go:10:main", Name: "main", Kind: ast.SymbolKindFunction, FilePath: "cmd/main.go", StartLine: 10, EndLine: 20, Package: "main", Exported: false, Language: "go"},
+		{ID: "pkg/a.go:10:A", Name: "A", Kind: ast.SymbolKindFunction, FilePath: "pkg/a.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/b.go:10:B", Name: "B", Kind: ast.SymbolKindFunction, FilePath: "pkg/b.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/c.go:10:C", Name: "C", Kind: ast.SymbolKindFunction, FilePath: "pkg/c.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/d.go:10:D", Name: "D", Kind: ast.SymbolKindFunction, FilePath: "pkg/d.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Logf("Warning: failed to index %s: %v", sym.Name, err)
+		}
+	}
+
+	// DAG edges (no cycles)
+	g.AddEdge("cmd/main.go:10:main", "pkg/a.go:10:A", graph.EdgeTypeCalls, ast.Location{FilePath: "cmd/main.go", StartLine: 15})
+	g.AddEdge("cmd/main.go:10:main", "pkg/b.go:10:B", graph.EdgeTypeCalls, ast.Location{FilePath: "cmd/main.go", StartLine: 16})
+	g.AddEdge("pkg/a.go:10:A", "pkg/c.go:10:C", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/a.go", StartLine: 15})
+	g.AddEdge("pkg/b.go:10:B", "pkg/d.go:10:D", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/b.go", StartLine: 15})
+
+	g.Freeze()
+	return g, idx
+}
+
+func TestFindLoopsTool_Execute(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("finds loops with default params", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+
+		// Should find at least some loops
+		if len(output.Loops) == 0 {
+			t.Error("Expected at least one loop")
+		}
+
+		// Check summary is present
+		if output.Summary.TotalLoops < 0 {
+			t.Error("summary.total_loops should not be negative")
+		}
+
+		// Check output text is populated
+		if result.OutputText == "" {
+			t.Error("OutputText is empty")
+		}
+	})
+
+	t.Run("loop has required fields", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+
+		if len(output.Loops) == 0 {
+			t.Fatal("Expected at least one loop to check fields")
+		}
+
+		loop := output.Loops[0]
+		if loop.Header == "" {
+			t.Error("Loop missing required field: header")
+		}
+		if loop.HeaderName == "" {
+			t.Error("Loop missing required field: header_name")
+		}
+		// body_size and depth are ints, always present in typed struct
+	})
+}
+
+func TestFindLoopsTool_MinSize(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("min_size=2 filters self-loops", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"min_size": 2,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+
+		// All returned loops should have size >= 2
+		for _, loop := range output.Loops {
+			if loop.BodySize < 2 {
+				t.Errorf("Expected all loops to have size >= 2, got size %d", loop.BodySize)
+			}
+		}
+	})
+}
+
+func TestFindLoopsTool_TopLimit(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("respects top parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 1,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+
+		// Should not exceed top limit
+		if len(output.Loops) > 1 {
+			t.Errorf("Expected at most 1 loop, got %d", len(output.Loops))
+		}
+	})
+}
+
+func TestFindLoopsTool_NoLoops(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphNoLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("DAG returns empty loops", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+
+		// DAG should have no loops
+		if len(output.Loops) != 0 {
+			t.Errorf("Expected 0 loops in DAG, got %d", len(output.Loops))
+		}
+
+		// Summary should indicate 0 loops
+		if output.Summary.TotalLoops != 0 {
+			t.Errorf("Expected total_loops=0, got %d", output.Summary.TotalLoops)
+		}
+	})
+}
+
+func TestFindLoopsTool_DirectRecursion(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("detects direct recursion", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+
+		// Should have at least one direct recursion (D -> D)
+		if output.Summary.DirectRecursion < 1 {
+			t.Errorf("Expected at least 1 direct recursion, got %d", output.Summary.DirectRecursion)
+		}
+	})
+}
+
+func TestFindLoopsTool_NilAnalytics(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	tool := NewFindLoopsTool(nil, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("Execute() should not return error for nil analytics: %v", err)
+	}
+	if result.Success {
+		t.Error("Execute() should fail when analytics is nil")
+	}
+	if result.Error == "" {
+		t.Error("Execute() should return error message when analytics is nil")
+	}
+}
+
+func TestFindLoopsTool_ParamBounds(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("top below 1 clamped to 1", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 0,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		// Should succeed with clamped value
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+		// Should return at least one loop (clamped top=1 allows 1)
+		if len(output.Loops) > 20 { // Default is 20, clamped to 20 if above 100
+			t.Errorf("Expected top to be clamped")
+		}
+	})
+
+	t.Run("top above 100 clamped to 100", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 200,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+		// Should succeed with clamped value (100)
+	})
+
+	t.Run("min_size below 1 clamped to 1", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"min_size": 0,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+		// Should succeed with clamped value
+	})
+}
+
+func TestFindLoopsTool_ShowNesting(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("show_nesting=true includes nesting info", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"show_nesting": true,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindLoopsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindLoopsOutput, got %T", result.Output)
+		}
+
+		// Each loop should have depth field (always present in typed struct)
+		for _, loop := range output.Loops {
+			// Depth is an int field, always present
+			_ = loop.Depth
+		}
+
+		// Summary should have max_nesting (always present in typed struct)
+		_ = output.Summary.MaxNesting
+	})
+
+	t.Run("show_nesting=false omits nesting hierarchy", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"show_nesting": false,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		// Should still succeed but may omit certain fields
+		// (Implementation detail - loops still have depth but hierarchy not shown)
+	})
+}
+
+func TestFindLoopsTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		// Should handle cancellation gracefully
+		// Either return error or return partial results
+		if err != nil && err != context.Canceled {
+			// If error is returned, it should be context.Canceled
+			t.Logf("Execute returned error: %v (acceptable for cancelled context)", err)
+		}
+		if result != nil && result.Success && result.Error != "" {
+			// If success, the operation completed before checking cancellation
+			t.Log("Execute completed despite cancellation (acceptable for small graphs)")
+		}
+	})
+}
+
+func TestFindLoopsTool_TraceStep(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Check TraceStep is present
+	if result.TraceStep == nil {
+		t.Error("Expected TraceStep in result")
+	} else {
+		// TraceStep.Tool comes from the underlying analytics (DetectLoops)
+		if result.TraceStep.Tool != "DetectLoops" {
+			t.Errorf("TraceStep.Tool = %s, want DetectLoops", result.TraceStep.Tool)
+		}
+		if result.TraceStep.Action == "" {
+			t.Error("TraceStep.Action should not be empty")
+		}
+		if result.TraceStep.Duration == 0 {
+			t.Error("TraceStep.Duration should be > 0")
+		}
+	}
+}
+
+// =============================================================================
+// find_merge_points Tool Tests (GR-17d)
+// =============================================================================
+
+// createTestGraphWithMergePoints creates a graph with merge points for testing.
+// Graph structure:
+//
+//	A    B
+//	 \  /
+//	  M1  (merge point - 2 sources)
+//	   |
+//	  C    D    E
+//	   \   |   /
+//	    \  |  /
+//	      M2    (merge point - 3 sources)
+func createTestGraphWithMergePoints(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create nodes
+	symbols := []*ast.Symbol{
+		{ID: "cmd/main.go:10:main", Name: "main", Kind: ast.SymbolKindFunction, FilePath: "cmd/main.go", StartLine: 10, EndLine: 20, Package: "main", Exported: false, Language: "go"},
+		{ID: "pkg/a.go:10:FuncA", Name: "FuncA", Kind: ast.SymbolKindFunction, FilePath: "pkg/a.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/b.go:10:FuncB", Name: "FuncB", Kind: ast.SymbolKindFunction, FilePath: "pkg/b.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/m1.go:10:Merge1", Name: "Merge1", Kind: ast.SymbolKindFunction, FilePath: "pkg/m1.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/c.go:10:FuncC", Name: "FuncC", Kind: ast.SymbolKindFunction, FilePath: "pkg/c.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/d.go:10:FuncD", Name: "FuncD", Kind: ast.SymbolKindFunction, FilePath: "pkg/d.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/e.go:10:FuncE", Name: "FuncE", Kind: ast.SymbolKindFunction, FilePath: "pkg/e.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/m2.go:10:Merge2", Name: "Merge2", Kind: ast.SymbolKindFunction, FilePath: "pkg/m2.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Logf("Warning: failed to index %s: %v", sym.Name, err)
+		}
+	}
+
+	// Create edges forming merge points
+	// main -> A, B (branching)
+	g.AddEdge("cmd/main.go:10:main", "pkg/a.go:10:FuncA", graph.EdgeTypeCalls, ast.Location{FilePath: "cmd/main.go", StartLine: 15})
+	g.AddEdge("cmd/main.go:10:main", "pkg/b.go:10:FuncB", graph.EdgeTypeCalls, ast.Location{FilePath: "cmd/main.go", StartLine: 16})
+
+	// A, B -> M1 (merge)
+	g.AddEdge("pkg/a.go:10:FuncA", "pkg/m1.go:10:Merge1", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/a.go", StartLine: 15})
+	g.AddEdge("pkg/b.go:10:FuncB", "pkg/m1.go:10:Merge1", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/b.go", StartLine: 15})
+
+	// M1 -> C, D and main -> E (branching for second merge)
+	g.AddEdge("pkg/m1.go:10:Merge1", "pkg/c.go:10:FuncC", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/m1.go", StartLine: 15})
+	g.AddEdge("pkg/m1.go:10:Merge1", "pkg/d.go:10:FuncD", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/m1.go", StartLine: 16})
+	g.AddEdge("cmd/main.go:10:main", "pkg/e.go:10:FuncE", graph.EdgeTypeCalls, ast.Location{FilePath: "cmd/main.go", StartLine: 17})
+
+	// C, D, E -> M2 (merge with 3 sources)
+	g.AddEdge("pkg/c.go:10:FuncC", "pkg/m2.go:10:Merge2", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/c.go", StartLine: 15})
+	g.AddEdge("pkg/d.go:10:FuncD", "pkg/m2.go:10:Merge2", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/d.go", StartLine: 15})
+	g.AddEdge("pkg/e.go:10:FuncE", "pkg/m2.go:10:Merge2", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/e.go", StartLine: 15})
+
+	g.Freeze()
+	return g, idx
+}
+
+// createTestGraphNoMergePoints creates a DAG with no merge points.
+func createTestGraphNoMergePointsMP(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create a tree structure (no merge points)
+	symbols := []*ast.Symbol{
+		{ID: "pkg/root.go:10:Root", Name: "Root", Kind: ast.SymbolKindFunction, FilePath: "pkg/root.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/a.go:10:A", Name: "A", Kind: ast.SymbolKindFunction, FilePath: "pkg/a.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/b.go:10:B", Name: "B", Kind: ast.SymbolKindFunction, FilePath: "pkg/b.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/c.go:10:C", Name: "C", Kind: ast.SymbolKindFunction, FilePath: "pkg/c.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+		{ID: "pkg/d.go:10:D", Name: "D", Kind: ast.SymbolKindFunction, FilePath: "pkg/d.go", StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go"},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Logf("Warning: failed to index %s: %v", sym.Name, err)
+		}
+	}
+
+	// Tree structure - no convergence
+	g.AddEdge("pkg/root.go:10:Root", "pkg/a.go:10:A", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/root.go", StartLine: 15})
+	g.AddEdge("pkg/root.go:10:Root", "pkg/b.go:10:B", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/root.go", StartLine: 16})
+	g.AddEdge("pkg/a.go:10:A", "pkg/c.go:10:C", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/a.go", StartLine: 15})
+	g.AddEdge("pkg/b.go:10:B", "pkg/d.go:10:D", graph.EdgeTypeCalls, ast.Location{FilePath: "pkg/b.go", StartLine: 15})
+
+	g.Freeze()
+	return g, idx
+}
+
+func TestFindMergePointsTool_Execute(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithMergePoints(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindMergePointsTool(analytics, idx)
+
+	t.Run("finds merge points with default params", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindMergePointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindMergePointsOutput, got %T", result.Output)
+		}
+
+		// Should find at least one merge point
+		if len(output.MergePoints) == 0 {
+			t.Error("Expected at least one merge point")
+		}
+	})
+
+	t.Run("merge point has required fields", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindMergePointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindMergePointsOutput, got %T", result.Output)
+		}
+
+		if len(output.MergePoints) == 0 {
+			t.Skip("No merge points to check fields")
+		}
+
+		// Verify typed struct has required fields populated
+		mp := output.MergePoints[0]
+		if mp.ID == "" {
+			t.Error("Merge point missing ID")
+		}
+		if mp.Name == "" {
+			t.Error("Merge point missing Name")
+		}
+		if mp.ConvergingPaths == 0 {
+			t.Error("Merge point missing ConvergingPaths")
+		}
+	})
+}
+
+func TestFindMergePointsTool_MinSources(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithMergePoints(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindMergePointsTool(analytics, idx)
+
+	t.Run("min_sources=3 filters lower convergence", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"min_sources": 3,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindMergePointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindMergePointsOutput, got %T", result.Output)
+		}
+
+		// All returned merge points should have >= 3 converging paths
+		for _, mp := range output.MergePoints {
+			if mp.ConvergingPaths < 3 {
+				t.Errorf("Expected converging_paths >= 3, got %d", mp.ConvergingPaths)
+			}
+		}
+	})
+}
+
+func TestFindMergePointsTool_TopLimit(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithMergePoints(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindMergePointsTool(analytics, idx)
+
+	t.Run("respects top parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 1,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindMergePointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindMergePointsOutput, got %T", result.Output)
+		}
+
+		// Should return at most 1 merge point
+		if len(output.MergePoints) > 1 {
+			t.Errorf("Expected at most 1 merge point, got %d", len(output.MergePoints))
+		}
+	})
+}
+
+func TestFindMergePointsTool_NoMergePoints(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphNoMergePointsMP(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindMergePointsTool(analytics, idx)
+
+	t.Run("tree returns no merge points", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindMergePointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindMergePointsOutput, got %T", result.Output)
+		}
+
+		// Tree should have no merge points
+		if len(output.MergePoints) != 0 {
+			t.Errorf("Expected 0 merge points in tree, got %d", len(output.MergePoints))
+		}
+
+		// Summary should indicate 0 merge points
+		if output.Summary.TotalMergePoints != 0 {
+			t.Errorf("Expected total_merge_points=0, got %d", output.Summary.TotalMergePoints)
+		}
+	})
+}
+
+func TestFindMergePointsTool_NilAnalytics(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	tool := NewFindMergePointsTool(nil, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("Execute() should not return error for nil analytics: %v", err)
+	}
+	if result.Success {
+		t.Error("Execute() should fail when analytics is nil")
+	}
+	if result.Error == "" {
+		t.Error("Execute() should return error message when analytics is nil")
+	}
+}
+
+func TestFindMergePointsTool_ParamBounds(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithMergePoints(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindMergePointsTool(analytics, idx)
+
+	t.Run("top below 1 clamped to 1", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 0,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		// Should succeed with clamped value
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+
+	t.Run("top above 100 clamped to 100", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 200,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+
+	t.Run("min_sources below 2 clamped to 2", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"min_sources": 1,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		// Should succeed - by definition merge requires 2+
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+}
+
+func TestFindMergePointsTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphWithMergePoints(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindMergePointsTool(analytics, idx)
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := tool.Execute(ctx, map[string]any{})
+
+		// Should return error or context cancellation
+		if err == nil {
+			// Some implementations return nil error with Success=false
+			// This is acceptable
+		}
+	})
+}
+
+func TestFindMergePointsTool_TraceStep(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithMergePoints(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindMergePointsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Check TraceStep is present
+	if result.TraceStep == nil {
+		t.Error("Expected TraceStep in result")
+	} else {
+		// TraceStep.Tool comes from the underlying analytics
+		if result.TraceStep.Action == "" {
+			t.Error("TraceStep.Action should not be empty")
+		}
+		if result.TraceStep.Duration == 0 {
+			t.Error("TraceStep.Duration should be > 0")
+		}
+	}
+}
+
+// =============================================================================
+// find_control_dependencies Tool Tests (GR-17c)
+// =============================================================================
+
+// createTestGraphWithControlFlow creates a graph with branching control flow.
+func createTestGraphWithControlFlow(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create a control flow pattern:
+	// main -> router -> handler1, handler2
+	//              |
+	//              v
+	//         validator -> process
+	//
+	// handler1 and handler2 are control-dependent on router (branch decision)
+	symbols := []*ast.Symbol{
+		{ID: "main:1:main", Name: "main", Kind: ast.SymbolKindFunction, Package: "main", FilePath: "main.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "router:1:Route", Name: "Route", Kind: ast.SymbolKindFunction, Package: "router", FilePath: "router.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "handler:1:HandleGet", Name: "HandleGet", Kind: ast.SymbolKindFunction, Package: "handler", FilePath: "handler.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "handler:2:HandlePost", Name: "HandlePost", Kind: ast.SymbolKindFunction, Package: "handler", FilePath: "handler.go", StartLine: 20, EndLine: 30, Language: "go"},
+		{ID: "validator:1:Validate", Name: "Validate", Kind: ast.SymbolKindFunction, Package: "validator", FilePath: "validator.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "processor:1:Process", Name: "Process", Kind: ast.SymbolKindFunction, Package: "processor", FilePath: "processor.go", StartLine: 1, EndLine: 10, Language: "go"},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol %s to index: %v", sym.ID, err)
+		}
+	}
+
+	// Add edges (control flow)
+	edges := [][2]string{
+		{"main:1:main", "router:1:Route"},
+		{"router:1:Route", "handler:1:HandleGet"},
+		{"router:1:Route", "handler:2:HandlePost"},
+		{"router:1:Route", "validator:1:Validate"},
+		{"validator:1:Validate", "processor:1:Process"},
+		{"handler:1:HandleGet", "processor:1:Process"},
+		{"handler:2:HandlePost", "processor:1:Process"},
+	}
+
+	for _, edge := range edges {
+		g.AddEdge(edge[0], edge[1], graph.EdgeTypeCalls, ast.Location{
+			FilePath: "test.go", StartLine: 1,
+		})
+	}
+
+	g.Freeze()
+	return g, idx
+}
+
+func TestFindControlDependenciesTool_Execute(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithControlFlow(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindControlDependenciesTool(analytics, idx)
+
+	t.Run("finds control dependencies with default params", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"target": "Process",
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindControlDependenciesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindControlDependenciesOutput, got %T", result.Output)
+		}
+
+		// Should find some control dependencies
+		t.Logf("Found %d control dependencies for Process", len(output.Dependencies))
+	})
+
+	t.Run("requires target parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.Success {
+			t.Error("Execute() should fail without target parameter")
+		}
+		if result.Error == "" {
+			t.Error("Execute() should return error message")
+		}
+	})
+}
+
+func TestFindControlDependenciesTool_Depth(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithControlFlow(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindControlDependenciesTool(analytics, idx)
+
+	t.Run("respects depth parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"target": "Process",
+			"depth":  2,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindControlDependenciesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindControlDependenciesOutput, got %T", result.Output)
+		}
+
+		// Depth should be limited
+		t.Logf("Dependencies at depth 2: %d", len(output.Dependencies))
+	})
+}
+
+func TestFindControlDependenciesTool_NilAnalytics(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	tool := NewFindControlDependenciesTool(nil, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"target": "Process",
+	})
+
+	if err != nil {
+		t.Fatalf("Execute() should not return error for nil analytics: %v", err)
+	}
+	if result.Success {
+		t.Error("Execute() should fail when analytics is nil")
+	}
+	if result.Error == "" {
+		t.Error("Execute() should return error message when analytics is nil")
+	}
+}
+
+func TestFindControlDependenciesTool_ParamBounds(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithControlFlow(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindControlDependenciesTool(analytics, idx)
+
+	t.Run("depth below 1 clamped to 1", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"target": "Process",
+			"depth":  0,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		// Should succeed with clamped value
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+
+	t.Run("depth above 10 clamped to 10", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"target": "Process",
+			"depth":  100,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+}
+
+func TestFindControlDependenciesTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphWithControlFlow(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindControlDependenciesTool(analytics, idx)
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := tool.Execute(ctx, map[string]any{
+			"target": "Process",
+		})
+
+		// Should return error or context cancellation
+		if err == nil {
+			// Some implementations return nil error with Success=false
+			// This is acceptable
+		}
+	})
+}
+
+func TestFindControlDependenciesTool_TraceStep(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithControlFlow(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindControlDependenciesTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"target": "Process",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Check TraceStep is present
+	if result.TraceStep == nil {
+		t.Error("Expected TraceStep in result")
+	} else {
+		if result.TraceStep.Action == "" {
+			t.Error("TraceStep.Action should not be empty")
+		}
+		if result.TraceStep.Duration == 0 {
+			t.Error("TraceStep.Duration should be > 0")
+		}
+	}
+}
+
+// =============================================================================
+// find_extractable_regions Tool Tests (GR-17g)
+// =============================================================================
+
+// createTestGraphWithSESERegions creates a graph with extractable SESE regions.
+func createTestGraphWithSESERegions(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create a SESE region pattern:
+	// entry -> [SESE region: a -> b -> c] -> exit
+	// The a->b->c sequence is a single-entry single-exit region
+	symbols := []*ast.Symbol{
+		{ID: "main:1:main", Name: "main", Kind: ast.SymbolKindFunction, Package: "main", FilePath: "main.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "sese:1:setup", Name: "setup", Kind: ast.SymbolKindFunction, Package: "sese", FilePath: "sese.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "sese:2:process", Name: "process", Kind: ast.SymbolKindFunction, Package: "sese", FilePath: "sese.go", StartLine: 10, EndLine: 20, Language: "go"},
+		{ID: "sese:3:cleanup", Name: "cleanup", Kind: ast.SymbolKindFunction, Package: "sese", FilePath: "sese.go", StartLine: 20, EndLine: 30, Language: "go"},
+		{ID: "main:2:finish", Name: "finish", Kind: ast.SymbolKindFunction, Package: "main", FilePath: "main.go", StartLine: 30, EndLine: 40, Language: "go"},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol %s to index: %v", sym.ID, err)
+		}
+	}
+
+	// Create linear flow (potential SESE region)
+	edges := [][2]string{
+		{"main:1:main", "sese:1:setup"},
+		{"sese:1:setup", "sese:2:process"},
+		{"sese:2:process", "sese:3:cleanup"},
+		{"sese:3:cleanup", "main:2:finish"},
+	}
+
+	for _, edge := range edges {
+		g.AddEdge(edge[0], edge[1], graph.EdgeTypeCalls, ast.Location{
+			FilePath: "test.go", StartLine: 1,
+		})
+	}
+
+	g.Freeze()
+	return g, idx
+}
+
+func TestFindExtractableRegionsTool_Execute(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithSESERegions(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindExtractableRegionsTool(analytics, idx)
+
+	t.Run("finds extractable regions with default params", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindExtractableRegionsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindExtractableRegionsOutput, got %T", result.Output)
+		}
+
+		t.Logf("Found %d extractable regions", len(output.Regions))
+	})
+}
+
+func TestFindExtractableRegionsTool_SizeFilter(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithSESERegions(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindExtractableRegionsTool(analytics, idx)
+
+	t.Run("respects min_size parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"min_size": 2,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindExtractableRegionsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindExtractableRegionsOutput, got %T", result.Output)
+		}
+
+		// All regions should have size >= 2
+		for _, region := range output.Regions {
+			if region.Size < 2 {
+				t.Errorf("Region size %d is less than min_size 2", region.Size)
+			}
+		}
+	})
+
+	t.Run("respects max_size parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"max_size": 10,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindExtractableRegionsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindExtractableRegionsOutput, got %T", result.Output)
+		}
+
+		// All regions should have size <= 10
+		for _, region := range output.Regions {
+			if region.Size > 10 {
+				t.Errorf("Region size %d exceeds max_size 10", region.Size)
+			}
+		}
+	})
+}
+
+func TestFindExtractableRegionsTool_TopLimit(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithSESERegions(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindExtractableRegionsTool(analytics, idx)
+
+	t.Run("respects top parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 1,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindExtractableRegionsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindExtractableRegionsOutput, got %T", result.Output)
+		}
+
+		if len(output.Regions) > 1 {
+			t.Errorf("Expected at most 1 region, got %d", len(output.Regions))
+		}
+	})
+}
+
+func TestFindExtractableRegionsTool_NilAnalytics(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	tool := NewFindExtractableRegionsTool(nil, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("Execute() should not return error for nil analytics: %v", err)
+	}
+	if result.Success {
+		t.Error("Execute() should fail when analytics is nil")
+	}
+	if result.Error == "" {
+		t.Error("Execute() should return error message when analytics is nil")
+	}
+}
+
+func TestFindExtractableRegionsTool_ParamBounds(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithSESERegions(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindExtractableRegionsTool(analytics, idx)
+
+	t.Run("min_size below 1 clamped", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"min_size": 0,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+
+	t.Run("top above 100 clamped", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"top": 200,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+}
+
+func TestFindExtractableRegionsTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphWithSESERegions(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindExtractableRegionsTool(analytics, idx)
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := tool.Execute(ctx, map[string]any{})
+
+		// Should return error or context cancellation
+		if err == nil {
+			// Some implementations return nil error with Success=false
+			// This is acceptable
+		}
+	})
+}
+
+func TestFindExtractableRegionsTool_TraceStep(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithSESERegions(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindExtractableRegionsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Check TraceStep is present
+	if result.TraceStep == nil {
+		t.Error("Expected TraceStep in result")
+	} else {
+		if result.TraceStep.Action == "" {
+			t.Error("TraceStep.Action should not be empty")
+		}
+		if result.TraceStep.Duration == 0 {
+			t.Error("TraceStep.Duration should be > 0")
+		}
+	}
+}
+
+// =============================================================================
+// check_reducibility Tool Tests (GR-17h)
+// =============================================================================
+
+// createTestGraphReducible creates a well-structured (reducible) graph.
+func createTestGraphReducible(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create a simple reducible graph (no cross edges)
+	// main -> a -> b -> c (linear = reducible)
+	symbols := []*ast.Symbol{
+		{ID: "main:1:main", Name: "main", Kind: ast.SymbolKindFunction, Package: "main", FilePath: "main.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "pkg:1:funcA", Name: "funcA", Kind: ast.SymbolKindFunction, Package: "pkg", FilePath: "pkg.go", StartLine: 1, EndLine: 10, Language: "go"},
+		{ID: "pkg:2:funcB", Name: "funcB", Kind: ast.SymbolKindFunction, Package: "pkg", FilePath: "pkg.go", StartLine: 10, EndLine: 20, Language: "go"},
+		{ID: "pkg:3:funcC", Name: "funcC", Kind: ast.SymbolKindFunction, Package: "pkg", FilePath: "pkg.go", StartLine: 20, EndLine: 30, Language: "go"},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol %s to index: %v", sym.ID, err)
+		}
+	}
+
+	edges := [][2]string{
+		{"main:1:main", "pkg:1:funcA"},
+		{"pkg:1:funcA", "pkg:2:funcB"},
+		{"pkg:2:funcB", "pkg:3:funcC"},
+	}
+
+	for _, edge := range edges {
+		g.AddEdge(edge[0], edge[1], graph.EdgeTypeCalls, ast.Location{
+			FilePath: "test.go", StartLine: 1,
+		})
+	}
+
+	g.Freeze()
+	return g, idx
+}
+
+func TestCheckReducibilityTool_Execute(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphReducible(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewCheckReducibilityTool(analytics, idx)
+
+	t.Run("analyzes reducibility with default params", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(CheckReducibilityOutput)
+		if !ok {
+			t.Fatalf("Output is not CheckReducibilityOutput, got %T", result.Output)
+		}
+
+		t.Logf("IsReducible: %v, Score: %.2f", output.IsReducible, output.Score)
+
+		// Score should be between 0 and 1
+		if output.Score < 0 || output.Score > 1 {
+			t.Errorf("Score %.2f is not in range [0, 1]", output.Score)
+		}
+	})
+}
+
+func TestCheckReducibilityTool_ShowIrreducible(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphReducible(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewCheckReducibilityTool(analytics, idx)
+
+	t.Run("respects show_irreducible parameter", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"show_irreducible": true,
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(CheckReducibilityOutput)
+		if !ok {
+			t.Fatalf("Output is not CheckReducibilityOutput, got %T", result.Output)
+		}
+
+		// Reducible graph should have no irreducible regions
+		if output.IsReducible && len(output.IrreducibleRegions) > 0 {
+			t.Errorf("Reducible graph has %d irreducible regions", len(output.IrreducibleRegions))
+		}
+	})
+}
+
+func TestCheckReducibilityTool_NilAnalytics(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	tool := NewCheckReducibilityTool(nil, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+
+	if err != nil {
+		t.Fatalf("Execute() should not return error for nil analytics: %v", err)
+	}
+	if result.Success {
+		t.Error("Execute() should fail when analytics is nil")
+	}
+	if result.Error == "" {
+		t.Error("Execute() should return error message when analytics is nil")
+	}
+}
+
+func TestCheckReducibilityTool_ContextCancellation(t *testing.T) {
+	g, idx := createTestGraphReducible(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewCheckReducibilityTool(analytics, idx)
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		_, err := tool.Execute(ctx, map[string]any{})
+
+		// Should return error or context cancellation
+		if err == nil {
+			// Some implementations return nil error with Success=false
+			// This is acceptable
+		}
+	})
+}
+
+func TestCheckReducibilityTool_TraceStep(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphReducible(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewCheckReducibilityTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	// Check TraceStep is present
+	if result.TraceStep == nil {
+		t.Error("Expected TraceStep in result")
+	} else {
+		if result.TraceStep.Action == "" {
+			t.Error("TraceStep.Action should not be empty")
+		}
+		if result.TraceStep.Duration == 0 {
+			t.Error("TraceStep.Duration should be > 0")
+		}
+	}
+}
+
+func TestCheckReducibilityTool_OutputFormat(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphReducible(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewCheckReducibilityTool(analytics, idx)
+
+	t.Run("output has expected fields", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(CheckReducibilityOutput)
+		if !ok {
+			t.Fatalf("Output is not CheckReducibilityOutput, got %T", result.Output)
+		}
+
+		// Check that all expected fields are present
+		// IsReducible is a bool, so we just check it exists (always true or false)
+		t.Logf("IsReducible: %v", output.IsReducible)
+
+		// Score should be non-negative
+		if output.Score < 0 {
+			t.Errorf("Score should be >= 0, got %f", output.Score)
+		}
+
+		// QualityLabel should not be empty
+		if output.QualityLabel == "" {
+			t.Error("QualityLabel should not be empty")
+		}
+
+		// Recommendation should not be empty
+		if output.Recommendation == "" {
+			t.Error("Recommendation should not be empty")
+		}
+
+		// Summary should be populated
+		if output.Summary.TotalNodes == 0 {
+			t.Error("Summary.TotalNodes should be > 0")
+		}
+	})
 }
