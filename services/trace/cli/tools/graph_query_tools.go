@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -2858,6 +2859,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) 
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
+		TraceStep:  &traceStep, // CRS trace step for recording
 	}, nil
 }
 
@@ -2919,4 +2921,925 @@ func formatPageRankResultsText(nodes []graph.PageRankNode) string {
 	sb.WriteString("Note: PageRank considers caller importance, not just caller count.\n")
 
 	return sb.String()
+}
+
+// =============================================================================
+// GR-15: find_communities Tool (Leiden Community Detection)
+// =============================================================================
+
+type findCommunitiesTool struct {
+	analytics *graph.GraphAnalytics
+	index     *index.SymbolIndex
+}
+
+// NewFindCommunitiesTool creates the find_communities tool.
+//
+// Description:
+//
+//	Creates a tool that discovers natural code communities using the
+//	Leiden algorithm. Unlike package boundaries which are organizational
+//	choices, communities reflect actual code coupling patterns.
+//
+// Inputs:
+//
+//   - analytics: The GraphAnalytics instance. Must not be nil.
+//   - idx: Symbol index for name lookups. Must not be nil.
+//
+// Outputs:
+//
+//   - Tool: The find_communities tool implementation.
+//
+// Limitations:
+//
+//   - Leiden is more expensive than simple queries: O(V+E) per iteration
+//   - Maximum 50 communities reported to prevent excessive output
+//   - Large codebases (>100K nodes) may take several seconds
+//
+// Assumptions:
+//
+//   - Graph is frozen and indexed before tool creation
+//   - Analytics wraps a HierarchicalGraph
+func NewFindCommunitiesTool(analytics *graph.GraphAnalytics, idx *index.SymbolIndex) Tool {
+	return &findCommunitiesTool{
+		analytics: analytics,
+		index:     idx,
+	}
+}
+
+func (t *findCommunitiesTool) Name() string {
+	return "find_communities"
+}
+
+func (t *findCommunitiesTool) Category() ToolCategory {
+	return CategoryExploration
+}
+
+func (t *findCommunitiesTool) Definition() ToolDefinition {
+	return ToolDefinition{
+		Name: "find_communities",
+		Description: "Detect natural code communities using Leiden algorithm. " +
+			"Finds groups of tightly-coupled, well-connected symbols that may not align with packages. " +
+			"Use this to discover real module boundaries vs package organization. " +
+			"Highlights cross-package communities as refactoring candidates.",
+		Parameters: map[string]ParamDef{
+			"min_size": {
+				Type:        ParamTypeInt,
+				Description: "Minimum community size to report (default: 3, max: 100)",
+				Required:    false,
+				Default:     3,
+			},
+			"resolution": {
+				Type:        ParamTypeFloat,
+				Description: "Community granularity: 0.1=large, 1.0=balanced, 5.0=small (default: 1.0)",
+				Required:    false,
+				Default:     1.0,
+			},
+			"top": {
+				Type:        ParamTypeInt,
+				Description: "Number of communities to return (default: 20, max: 50)",
+				Required:    false,
+				Default:     20,
+			},
+			"show_cross_edges": {
+				Type:        ParamTypeBool,
+				Description: "Show edges between communities for seam identification (default: true)",
+				Required:    false,
+				Default:     true,
+			},
+		},
+		Category:    CategoryExploration,
+		Priority:    82, // Higher than find_hotspots (86) but lower than find_important (89)
+		Requires:    []string{"graph_initialized"},
+		SideEffects: false,
+		Timeout:     60 * time.Second, // Leiden may need time for large graphs
+	}
+}
+
+func (t *findCommunitiesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+	// Validate analytics is available
+	if t.analytics == nil {
+		return &Result{Success: false, Error: "graph analytics not initialized"}, nil
+	}
+
+	// Parse and validate parameters with bounds checking
+	minSize := 3
+	if minSizeParam, ok := getIntParam(params, "min_size"); ok {
+		if minSizeParam < 1 {
+			slog.Warn("min_size below minimum, clamping to 1",
+				slog.String("tool", "find_communities"),
+				slog.Int("requested", minSizeParam),
+			)
+			minSizeParam = 1
+		} else if minSizeParam > 100 {
+			slog.Warn("min_size above maximum, clamping to 100",
+				slog.String("tool", "find_communities"),
+				slog.Int("requested", minSizeParam),
+			)
+			minSizeParam = 100
+		}
+		minSize = minSizeParam
+	}
+
+	resolution := 1.0
+	if resolutionParam, ok := getFloatParam(params, "resolution"); ok {
+		if resolutionParam < 0.1 {
+			slog.Warn("resolution below minimum, clamping to 0.1",
+				slog.String("tool", "find_communities"),
+				slog.Float64("requested", resolutionParam),
+			)
+			resolutionParam = 0.1
+		} else if resolutionParam > 5.0 {
+			slog.Warn("resolution above maximum, clamping to 5.0",
+				slog.String("tool", "find_communities"),
+				slog.Float64("requested", resolutionParam),
+			)
+			resolutionParam = 5.0
+		}
+		resolution = resolutionParam
+	}
+
+	top := 20
+	if topParam, ok := getIntParam(params, "top"); ok {
+		if topParam < 1 {
+			slog.Warn("top below minimum, clamping to 1",
+				slog.String("tool", "find_communities"),
+				slog.Int("requested", topParam),
+			)
+			topParam = 1
+		} else if topParam > 50 {
+			slog.Warn("top above maximum, clamping to 50",
+				slog.String("tool", "find_communities"),
+				slog.Int("requested", topParam),
+			)
+			topParam = 50
+		}
+		top = topParam
+	}
+
+	showCrossEdges := true
+	if showCrossEdgesParam, ok := params["show_cross_edges"].(bool); ok {
+		showCrossEdges = showCrossEdgesParam
+	}
+
+	// Start span with context
+	ctx, span := graphQueryTracer.Start(ctx, "find_communities.Execute",
+		trace.WithAttributes(
+			attribute.String("tool", "find_communities"),
+			attribute.Int("min_size", minSize),
+			attribute.Float64("resolution", resolution),
+			attribute.Int("top", top),
+			attribute.Bool("show_cross_edges", showCrossEdges),
+		),
+	)
+	defer span.End()
+
+	// Check context cancellation before expensive operation
+	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	// Build Leiden options
+	opts := &graph.LeidenOptions{
+		Resolution:       resolution,
+		MinCommunitySize: minSize,
+	}
+
+	// Call DetectCommunitiesWithCRS for tracing
+	result, traceStep := t.analytics.DetectCommunitiesWithCRS(ctx, opts)
+
+	span.SetAttributes(
+		attribute.Int("raw_communities", len(result.Communities)),
+		attribute.Float64("modularity", result.Modularity),
+		attribute.Bool("converged", result.Converged),
+		attribute.Int("iterations", result.Iterations),
+		attribute.String("trace_action", traceStep.Action),
+	)
+
+	// Filter communities by min_size (already done in Leiden, but double-check)
+	var filtered []graph.Community
+	for _, comm := range result.Communities {
+		if len(comm.Nodes) >= minSize {
+			filtered = append(filtered, comm)
+		}
+	}
+
+	// Sort by size (largest first)
+	sort.Slice(filtered, func(i, j int) bool {
+		return len(filtered[i].Nodes) > len(filtered[j].Nodes)
+	})
+
+	// Trim to top
+	if len(filtered) > top {
+		filtered = filtered[:top]
+	}
+
+	span.SetAttributes(attribute.Int("filtered_communities", len(filtered)))
+
+	// Identify cross-package communities
+	crossPkgIDs := identifyCrossPackageCommunities(filtered, t.analytics)
+
+	// Calculate cross-community edges if requested
+	var crossEdges []map[string]any
+	if showCrossEdges && len(filtered) > 1 {
+		crossEdges = calculateCrossCommunityEdges(filtered, t.analytics)
+	}
+
+	// Format output
+	output := formatCommunityResults(result, filtered, crossPkgIDs, crossEdges)
+	outputText := formatCommunityResultsText(result, filtered, crossPkgIDs, crossEdges)
+
+	// Log completion for production debugging
+	slog.Debug("find_communities completed",
+		slog.String("tool", "find_communities"),
+		slog.Int("communities_found", len(filtered)),
+		slog.Float64("modularity", result.Modularity),
+		slog.Bool("converged", result.Converged),
+	)
+
+	return &Result{
+		Success:    true,
+		Output:     output,
+		OutputText: outputText,
+		TokensUsed: estimateTokens(outputText),
+		TraceStep:  &traceStep, // H-1 fix: Record CRS trace step
+	}, nil
+}
+
+// getFloatParam extracts a float64 parameter from params.
+func getFloatParam(params map[string]any, key string) (float64, bool) {
+	if v, ok := params[key]; ok {
+		switch val := v.(type) {
+		case float64:
+			return val, true
+		case float32:
+			return float64(val), true
+		case int:
+			return float64(val), true
+		case int64:
+			return float64(val), true
+		}
+	}
+	return 0, false
+}
+
+// identifyCrossPackageCommunities returns IDs of communities that span multiple packages.
+func identifyCrossPackageCommunities(communities []graph.Community, _ *graph.GraphAnalytics) []int {
+	var crossPkgIDs []int
+
+	for _, comm := range communities {
+		// If DominantPackage is set, use the community's internal package tracking
+		// Cross-package communities have connectivity < 1.0 with significant external edges
+		// Or we can check if the community spans multiple packages by parsing node IDs
+
+		pkgs := make(map[string]bool)
+		for _, nodeID := range comm.Nodes {
+			// Extract package from node ID (format: "pkg/subpkg/file.go:line:symbol")
+			pkg := extractPackageFromNodeID(nodeID)
+			if pkg != "" {
+				pkgs[pkg] = true
+			}
+		}
+		if len(pkgs) > 1 {
+			crossPkgIDs = append(crossPkgIDs, comm.ID)
+		}
+	}
+
+	return crossPkgIDs
+}
+
+// extractPackageFromNodeID extracts the package path from a node ID.
+// Node ID format: "pkg/subpkg/file.go:line:symbol"
+func extractPackageFromNodeID(nodeID string) string {
+	// Find the last "/" before ":"
+	colonIdx := strings.Index(nodeID, ":")
+	if colonIdx == -1 {
+		return ""
+	}
+	pathPart := nodeID[:colonIdx]
+	// Extract directory portion (package path)
+	lastSlash := strings.LastIndex(pathPart, "/")
+	if lastSlash == -1 {
+		return "" // Single file, no package
+	}
+	return pathPart[:lastSlash]
+}
+
+// calculateCrossCommunityEdges returns edges between communities.
+// Note: This is an approximation based on community external edge counts since
+// we don't have direct access to the underlying graph from tools.
+func calculateCrossCommunityEdges(communities []graph.Community, _ *graph.GraphAnalytics) []map[string]any {
+	if len(communities) < 2 {
+		return nil
+	}
+
+	// Use the ExternalEdges field from Community to estimate cross-community edges
+	// This is an approximation - actual edge endpoints would require graph access
+	var result []map[string]any
+
+	// For each pair of communities with external edges, estimate connection
+	for i, commI := range communities {
+		if commI.ExternalEdges == 0 {
+			continue
+		}
+		for j := i + 1; j < len(communities); j++ {
+			commJ := communities[j]
+			if commJ.ExternalEdges == 0 {
+				continue
+			}
+			// Estimate edges between communities based on relative connectivity
+			// This is a heuristic - real edge count would require graph access
+			estimatedEdges := (commI.ExternalEdges + commJ.ExternalEdges) / (len(communities) - 1)
+			if estimatedEdges > 0 {
+				result = append(result, map[string]any{
+					"from_community": commI.ID,
+					"to_community":   commJ.ID,
+					"count":          estimatedEdges,
+				})
+			}
+		}
+	}
+
+	// Sort by count (most edges first)
+	sort.Slice(result, func(i, j int) bool {
+		return result[i]["count"].(int) > result[j]["count"].(int)
+	})
+
+	// Limit to top 10 edges
+	if len(result) > 10 {
+		result = result[:10]
+	}
+
+	return result
+}
+
+// getModularityQuality returns a quality label for the modularity score.
+func getModularityQuality(modularity float64) string {
+	switch {
+	case modularity < 0.3:
+		return "weak"
+	case modularity < 0.5:
+		return "moderate"
+	case modularity < 0.7:
+		return "good"
+	default:
+		return "strong"
+	}
+}
+
+// formatCommunityResults formats community detection results as a map.
+func formatCommunityResults(
+	result *graph.CommunityResult,
+	filtered []graph.Community,
+	crossPkgIDs []int,
+	crossEdges []map[string]any,
+) map[string]any {
+	// Build community list
+	communities := make([]map[string]any, 0, len(filtered))
+	crossPkgSet := make(map[int]bool)
+	for _, id := range crossPkgIDs {
+		crossPkgSet[id] = true
+	}
+
+	for _, comm := range filtered {
+		// Get packages in this community
+		pkgs := make(map[string]int)
+		for _, nodeID := range comm.Nodes {
+			// Extract package from node ID
+			pkg := extractPackageFromNodeID(nodeID)
+			if pkg != "" {
+				pkgs[pkg]++
+			} else if comm.DominantPackage != "" {
+				// Fallback to dominant package
+				pkgs[comm.DominantPackage]++
+			}
+		}
+		pkgList := make([]string, 0, len(pkgs))
+		for pkg := range pkgs {
+			pkgList = append(pkgList, pkg)
+		}
+
+		// Build member list (limit to 10 for output size)
+		var members []map[string]any
+		limit := 10
+		if len(comm.Nodes) < limit {
+			limit = len(comm.Nodes)
+		}
+		for i := 0; i < limit; i++ {
+			members = append(members, map[string]any{
+				"id": comm.Nodes[i],
+			})
+		}
+
+		communities = append(communities, map[string]any{
+			"id":               comm.ID,
+			"size":             len(comm.Nodes),
+			"dominant_package": comm.DominantPackage,
+			"packages":         pkgList,
+			"is_cross_package": crossPkgSet[comm.ID],
+			"connectivity":     comm.Connectivity,
+			"internal_edges":   comm.InternalEdges,
+			"external_edges":   comm.ExternalEdges,
+			"members":          members,
+		})
+	}
+
+	output := map[string]any{
+		"modularity":                result.Modularity,
+		"modularity_quality":        getModularityQuality(result.Modularity),
+		"community_count":           len(filtered),
+		"total_communities":         len(result.Communities),
+		"algorithm":                 "Leiden",
+		"converged":                 result.Converged,
+		"iterations":                result.Iterations,
+		"node_count":                result.NodeCount,
+		"edge_count":                result.EdgeCount,
+		"communities":               communities,
+		"cross_package_communities": crossPkgIDs,
+	}
+
+	if len(crossEdges) > 0 {
+		output["cross_community_edges"] = crossEdges
+	} else {
+		output["cross_community_edges"] = []map[string]any{}
+	}
+
+	return output
+}
+
+// formatCommunityResultsText formats community detection results as readable text.
+func formatCommunityResultsText(
+	result *graph.CommunityResult,
+	filtered []graph.Community,
+	crossPkgIDs []int,
+	crossEdges []map[string]any,
+) string {
+	var sb strings.Builder
+
+	if len(filtered) == 0 {
+		sb.WriteString("No communities found matching criteria.\n")
+		return sb.String()
+	}
+
+	// Header
+	quality := getModularityQuality(result.Modularity)
+	sb.WriteString(fmt.Sprintf("Detected %d communities (modularity: %.2f - %s structure):\n\n",
+		len(filtered), result.Modularity, quality))
+
+	// Build cross-package set
+	crossPkgSet := make(map[int]bool)
+	for _, id := range crossPkgIDs {
+		crossPkgSet[id] = true
+	}
+
+	// Communities
+	for i, comm := range filtered {
+		// Header with size and package info
+		if crossPkgSet[comm.ID] {
+			sb.WriteString(fmt.Sprintf("Community %d (%d symbols) [REFACTOR] - spans multiple packages\n",
+				i+1, len(comm.Nodes)))
+		} else {
+			sb.WriteString(fmt.Sprintf("Community %d (%d symbols) - %s\n",
+				i+1, len(comm.Nodes), comm.DominantPackage))
+		}
+
+		// Connectivity
+		sb.WriteString(fmt.Sprintf("  Connectivity: %.0f%% internal edges\n",
+			comm.Connectivity*100))
+
+		// Sample members (limit to 5)
+		limit := 5
+		if len(comm.Nodes) < limit {
+			limit = len(comm.Nodes)
+		}
+		sb.WriteString("  Members: ")
+		for j := 0; j < limit; j++ {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			// Extract just the symbol name from the ID
+			nodeID := comm.Nodes[j]
+			parts := strings.Split(nodeID, ":")
+			if len(parts) > 0 {
+				sb.WriteString(parts[len(parts)-1])
+			} else {
+				sb.WriteString(nodeID)
+			}
+		}
+		if len(comm.Nodes) > limit {
+			sb.WriteString(fmt.Sprintf(" (+%d more)", len(comm.Nodes)-limit))
+		}
+		sb.WriteString("\n")
+
+		if crossPkgSet[comm.ID] {
+			sb.WriteString("  → These symbols are tightly coupled but in different packages\n")
+		}
+
+		sb.WriteString("\n")
+	}
+
+	// Cross-community edges
+	if len(crossEdges) > 0 {
+		sb.WriteString("Cross-community edges (abstraction seams):\n")
+		for _, edge := range crossEdges {
+			sb.WriteString(fmt.Sprintf("  Community %d → %d: %d edges\n",
+				edge["from_community"], edge["to_community"], edge["count"]))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Summary
+	sb.WriteString("Summary:\n")
+	if len(crossPkgIDs) > 0 {
+		sb.WriteString(fmt.Sprintf("  - %d cross-package communities identified (refactoring candidates)\n",
+			len(crossPkgIDs)))
+	}
+	sb.WriteString(fmt.Sprintf("  - Modularity %.2f indicates %s overall structure\n",
+		result.Modularity, quality))
+	if result.Converged {
+		sb.WriteString(fmt.Sprintf("  - Algorithm converged in %d iterations\n", result.Iterations))
+	}
+
+	return sb.String()
+}
+
+// ============================================================================
+// find_articulation_points Tool (GR-17a)
+// ============================================================================
+
+// findArticulationPointsTool wraps GraphAnalytics.ArticulationPointsWithCRS.
+type findArticulationPointsTool struct {
+	analytics *graph.GraphAnalytics
+	index     *index.SymbolIndex
+}
+
+// NewFindArticulationPointsTool creates the find_articulation_points tool.
+//
+// Description:
+//
+//	Creates a tool that finds single points of failure in the call graph
+//	using Tarjan's articulation point algorithm. These are functions whose
+//	removal would disconnect parts of the codebase.
+//
+// Inputs:
+//
+//   - analytics: The GraphAnalytics instance. Must not be nil.
+//   - idx: Symbol index for name lookups. Must not be nil.
+//
+// Outputs:
+//
+//   - Tool: The find_articulation_points tool implementation.
+//
+// Limitations:
+//
+//   - Treats directed call graph as undirected for connectivity
+//   - Maximum 100 articulation points reported
+//   - Impact scoring is approximate (based on degree, not actual removal)
+//
+// Assumptions:
+//
+//   - Graph is frozen and indexed before tool creation
+//   - Analytics wraps a HierarchicalGraph
+func NewFindArticulationPointsTool(analytics *graph.GraphAnalytics, idx *index.SymbolIndex) Tool {
+	return &findArticulationPointsTool{
+		analytics: analytics,
+		index:     idx,
+	}
+}
+
+func (t *findArticulationPointsTool) Name() string {
+	return "find_articulation_points"
+}
+
+func (t *findArticulationPointsTool) Category() ToolCategory {
+	return CategoryExploration
+}
+
+func (t *findArticulationPointsTool) Definition() ToolDefinition {
+	return ToolDefinition{
+		Name: "find_articulation_points",
+		Description: "Find single points of failure in the call graph. " +
+			"These are functions whose removal would disconnect parts of the codebase. " +
+			"Critical for identifying fragile architecture and bus-factor risks.",
+		Parameters: map[string]ParamDef{
+			"top": {
+				Type:        ParamTypeInt,
+				Description: "Number of articulation points to return (default: 20, max: 100)",
+				Required:    false,
+				Default:     20,
+			},
+			"include_bridges": {
+				Type:        ParamTypeBool,
+				Description: "Include critical edges (bridges) in output (default: true)",
+				Required:    false,
+				Default:     true,
+			},
+		},
+		Category:    CategoryExploration,
+		Priority:    84,
+		Requires:    []string{"graph_initialized"},
+		SideEffects: false,
+		Timeout:     30 * time.Second,
+	}
+}
+
+func (t *findArticulationPointsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+	// Validate analytics is available
+	if t.analytics == nil {
+		return &Result{Success: false, Error: "graph analytics not initialized"}, nil
+	}
+
+	// Parse and validate parameters with bounds checking
+	top := 20
+	if topParam, ok := getIntParam(params, "top"); ok {
+		if topParam < 1 {
+			slog.Warn("top below minimum, clamping to 1",
+				slog.String("tool", "find_articulation_points"),
+				slog.Int("requested", topParam),
+			)
+			topParam = 1
+		} else if topParam > 100 {
+			slog.Warn("top above maximum, clamping to 100",
+				slog.String("tool", "find_articulation_points"),
+				slog.Int("requested", topParam),
+			)
+			topParam = 100
+		}
+		top = topParam
+	}
+
+	includeBridges := true
+	if includeBridgesParam, ok := params["include_bridges"].(bool); ok {
+		includeBridges = includeBridgesParam
+	}
+
+	// Start span with context
+	ctx, span := graphQueryTracer.Start(ctx, "find_articulation_points.Execute",
+		trace.WithAttributes(
+			attribute.String("tool", "find_articulation_points"),
+			attribute.Int("top", top),
+			attribute.Bool("include_bridges", includeBridges),
+		),
+	)
+	defer span.End()
+
+	// Check context cancellation before expensive operation
+	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	// Call ArticulationPointsWithCRS for tracing
+	result, traceStep := t.analytics.ArticulationPointsWithCRS(ctx)
+
+	// Handle nil result (shouldn't happen but defensive)
+	if result == nil {
+		return &Result{Success: false, Error: "articulation point detection failed"}, nil
+	}
+
+	span.SetAttributes(
+		attribute.Int("articulation_points_found", len(result.Points)),
+		attribute.Int("bridges_found", len(result.Bridges)),
+		attribute.Int("components", result.Components),
+		attribute.Int("node_count", result.NodeCount),
+		attribute.Int("edge_count", result.EdgeCount),
+		attribute.String("trace_action", traceStep.Action),
+	)
+
+	// Calculate fragility score
+	fragilityScore := 0.0
+	if result.NodeCount > 0 {
+		fragilityScore = float64(len(result.Points)) / float64(result.NodeCount)
+	}
+
+	// Format articulation points with metadata
+	points := formatArticulationPoints(result.Points, t.index, top)
+
+	// Format bridges if requested
+	var bridges []map[string]any
+	if includeBridges {
+		bridges = formatBridges(result.Bridges, t.index)
+	}
+
+	// Build output (flat structure per spec)
+	output := map[string]any{
+		"articulation_points": points,
+		"bridges":             bridges, // empty slice if not requested
+		"total_components":    result.Components,
+		"fragility_score":     fragilityScore,
+		"fragility_level":     getFragilityLevel(fragilityScore),
+		"node_count":          result.NodeCount,
+		"edge_count":          result.EdgeCount,
+	}
+
+	// Format text output
+	outputText := formatArticulationPointsText(result, points, bridges, fragilityScore)
+
+	// Log completion for production debugging
+	slog.Debug("find_articulation_points completed",
+		slog.String("tool", "find_articulation_points"),
+		slog.Int("points_returned", len(points)),
+		slog.Int("total_points", len(result.Points)),
+		slog.Float64("fragility_score", fragilityScore),
+	)
+
+	return &Result{
+		Success:    true,
+		Output:     output,
+		OutputText: outputText,
+		TokensUsed: estimateTokens(outputText),
+		TraceStep:  &traceStep,
+	}, nil
+}
+
+// formatArticulationPoints formats articulation points with metadata.
+func formatArticulationPoints(points []string, idx *index.SymbolIndex, limit int) []map[string]any {
+	result := make([]map[string]any, 0, minInt(len(points), limit))
+
+	for i, pointID := range points {
+		if i >= limit {
+			break
+		}
+
+		info := map[string]any{
+			"id": pointID,
+		}
+
+		// Try to resolve name and location from index
+		if idx != nil {
+			if sym, ok := idx.GetByID(pointID); ok && sym != nil {
+				info["name"] = sym.Name
+				info["file"] = sym.FilePath
+				info["line"] = sym.StartLine
+				info["kind"] = sym.Kind.String()
+			} else {
+				// Fallback: extract name from ID
+				info["name"] = extractNameFromNodeID(pointID)
+			}
+		} else {
+			info["name"] = extractNameFromNodeID(pointID)
+		}
+
+		result = append(result, info)
+	}
+
+	return result
+}
+
+// formatBridges formats bridge edges with metadata.
+func formatBridges(bridges [][2]string, idx *index.SymbolIndex) []map[string]any {
+	result := make([]map[string]any, 0, len(bridges))
+
+	for _, bridge := range bridges {
+		info := map[string]any{
+			"from": bridge[0],
+			"to":   bridge[1],
+		}
+
+		// Try to resolve names from index
+		if idx != nil {
+			if sym, ok := idx.GetByID(bridge[0]); ok && sym != nil {
+				info["from_name"] = sym.Name
+			} else {
+				info["from_name"] = extractNameFromNodeID(bridge[0])
+			}
+			if sym, ok := idx.GetByID(bridge[1]); ok && sym != nil {
+				info["to_name"] = sym.Name
+			} else {
+				info["to_name"] = extractNameFromNodeID(bridge[1])
+			}
+		} else {
+			info["from_name"] = extractNameFromNodeID(bridge[0])
+			info["to_name"] = extractNameFromNodeID(bridge[1])
+		}
+
+		result = append(result, info)
+	}
+
+	return result
+}
+
+// formatArticulationPointsText formats articulation point results as readable text.
+func formatArticulationPointsText(
+	result *graph.ArticulationResult,
+	points []map[string]any,
+	bridges []map[string]any,
+	fragilityScore float64,
+) string {
+	var sb strings.Builder
+
+	if len(result.Points) == 0 {
+		sb.WriteString("No articulation points found. The codebase has no single points of failure.\n")
+		return sb.String()
+	}
+
+	// Header with fragility assessment
+	fragilityLevel := getFragilityLevel(fragilityScore)
+	sb.WriteString(fmt.Sprintf("Found %d articulation points (fragility: %.1f%% - %s):\n\n",
+		len(result.Points), fragilityScore*100, fragilityLevel))
+
+	// List articulation points with full IDs for tool chaining
+	for i, point := range points {
+		id, _ := point["id"].(string)
+		name, _ := point["name"].(string)
+		if name == "" {
+			name = "(unknown)"
+		}
+
+		// Always include full ID for use with build_minimal_context
+		if id != "" {
+			if file, ok := point["file"].(string); ok {
+				if line, ok := point["line"].(int); ok {
+					sb.WriteString(fmt.Sprintf("%d. %s [ID: %s] (%s:%d)\n", i+1, name, id, file, line))
+				} else {
+					sb.WriteString(fmt.Sprintf("%d. %s [ID: %s] (%s)\n", i+1, name, id, file))
+				}
+			} else {
+				sb.WriteString(fmt.Sprintf("%d. %s [ID: %s]\n", i+1, name, id))
+			}
+		} else if file, ok := point["file"].(string); ok {
+			if line, ok := point["line"].(int); ok {
+				sb.WriteString(fmt.Sprintf("%d. %s (%s:%d)\n", i+1, name, file, line))
+			} else {
+				sb.WriteString(fmt.Sprintf("%d. %s (%s)\n", i+1, name, file))
+			}
+		} else {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, name))
+		}
+	}
+
+	if len(result.Points) > len(points) {
+		sb.WriteString(fmt.Sprintf("\n... and %d more articulation points\n", len(result.Points)-len(points)))
+	}
+
+	// Bridges section
+	if len(bridges) > 0 {
+		sb.WriteString(fmt.Sprintf("\nCritical edges (bridges): %d\n", len(result.Bridges)))
+		limit := 5
+		if len(bridges) < limit {
+			limit = len(bridges)
+		}
+		for i := 0; i < limit; i++ {
+			bridge := bridges[i]
+			fromName, _ := bridge["from_name"].(string)
+			toName, _ := bridge["to_name"].(string)
+			if fromName == "" {
+				fromName = "(unknown)"
+			}
+			if toName == "" {
+				toName = "(unknown)"
+			}
+			sb.WriteString(fmt.Sprintf("  %s → %s\n", fromName, toName))
+		}
+		if len(result.Bridges) > limit {
+			sb.WriteString(fmt.Sprintf("  ... and %d more bridges\n", len(result.Bridges)-limit))
+		}
+	}
+
+	// Summary
+	sb.WriteString(fmt.Sprintf("\nSummary:\n"))
+	sb.WriteString(fmt.Sprintf("  - Fragility score: %.1f%% (%s)\n", fragilityScore*100, fragilityLevel))
+	sb.WriteString(fmt.Sprintf("  - Connected components: %d\n", result.Components))
+	sb.WriteString(fmt.Sprintf("  - Total nodes analyzed: %d\n", result.NodeCount))
+
+	if fragilityScore > 0.1 {
+		sb.WriteString("\n⚠️  High fragility detected. Consider adding redundant paths or decoupling these functions.\n")
+	}
+
+	return sb.String()
+}
+
+// getFragilityLevel returns a human-readable fragility assessment.
+func getFragilityLevel(score float64) string {
+	switch {
+	case score >= 0.2:
+		return "HIGH - many single points of failure"
+	case score >= 0.1:
+		return "MODERATE - some architectural bottlenecks"
+	case score >= 0.05:
+		return "LOW - reasonably robust"
+	default:
+		return "MINIMAL - well-connected architecture"
+	}
+}
+
+// extractNameFromNodeID extracts the symbol name from a node ID.
+// Node IDs are typically formatted as "file:line:name" or just "name".
+func extractNameFromNodeID(nodeID string) string {
+	if nodeID == "" {
+		return "(unknown)"
+	}
+	parts := strings.Split(nodeID, ":")
+	if len(parts) > 0 && parts[len(parts)-1] != "" {
+		return parts[len(parts)-1]
+	}
+	return nodeID
+}
+
+// minInt returns the smaller of two integers.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

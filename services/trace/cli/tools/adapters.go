@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,7 +68,7 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	registry.Register(NewGetCallChainTool(g, idx))
 	registry.Register(NewFindReferencesTool(g, idx))
 
-	// Level 5: Graph analytics tools (GR-02 to GR-05, GR-12/GR-13)
+	// Level 5: Graph analytics tools (GR-02 to GR-05, GR-12/GR-13, GR-15)
 	// These wrap GraphAnalytics for code quality insights.
 	// Requires wrapping Graph into HierarchicalGraph for analytics.
 	if g.IsFrozen() {
@@ -77,7 +78,9 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 			registry.Register(NewFindHotspotsTool(analytics, idx))
 			registry.Register(NewFindDeadCodeTool(analytics, idx))
 			registry.Register(NewFindCyclesTool(analytics, idx))
-			registry.Register(NewFindImportantTool(analytics, idx)) // GR-13: PageRank
+			registry.Register(NewFindImportantTool(analytics, idx))          // GR-13: PageRank
+			registry.Register(NewFindCommunitiesTool(analytics, idx))        // GR-15: Leiden
+			registry.Register(NewFindArticulationPointsTool(analytics, idx)) // GR-17a: Articulation points
 		}
 	}
 
@@ -335,12 +338,14 @@ func (t *traceErrorFlowTool) Execute(ctx context.Context, params map[string]any)
 // buildMinimalContextTool wraps explore.MinimalContextBuilder.
 type buildMinimalContextTool struct {
 	builder *explore.MinimalContextBuilder
+	index   *index.SymbolIndex // GR-47: For partial symbol name resolution
 }
 
 // NewBuildMinimalContextTool creates the build_minimal_context tool.
 func NewBuildMinimalContextTool(g *graph.Graph, idx *index.SymbolIndex) Tool {
 	return &buildMinimalContextTool{
 		builder: explore.NewMinimalContextBuilder(g, idx),
+		index:   idx,
 	}
 }
 
@@ -388,9 +393,53 @@ func (t *buildMinimalContextTool) Execute(ctx context.Context, params map[string
 		opts = append(opts, explore.WithTokenBudget(tokenBudget))
 	}
 
-	result, err := t.builder.BuildMinimalContext(ctx, symbolID, opts...)
+	// GR-47 Fix: Try to resolve partial symbol names to full IDs
+	// If symbolID doesn't contain ":" (not a full ID), try to find matching symbols
+	resolvedID := symbolID
+	if t.index != nil && !strings.Contains(symbolID, ":") {
+		// This looks like a partial name (e.g., "SetupRoutes" instead of "pkg/routes.go:9:SetupRoutes")
+		matches := t.index.GetByName(symbolID)
+		if len(matches) == 1 {
+			// Exact single match - use it
+			resolvedID = matches[0].ID
+			slog.Debug("GR-47: resolved partial symbol name to full ID",
+				slog.String("partial", symbolID),
+				slog.String("resolved", resolvedID),
+			)
+		} else if len(matches) > 1 {
+			// Multiple matches - try to find the best one (prefer functions over types)
+			for _, m := range matches {
+				if m.Kind == ast.SymbolKindFunction || m.Kind == ast.SymbolKindMethod {
+					resolvedID = m.ID
+					slog.Debug("GR-47: resolved partial symbol name (multiple matches, chose function)",
+						slog.String("partial", symbolID),
+						slog.String("resolved", resolvedID),
+						slog.Int("total_matches", len(matches)),
+					)
+					break
+				}
+			}
+			// If no function found, use the first match
+			if resolvedID == symbolID && len(matches) > 0 {
+				resolvedID = matches[0].ID
+				slog.Debug("GR-47: resolved partial symbol name (multiple matches, chose first)",
+					slog.String("partial", symbolID),
+					slog.String("resolved", resolvedID),
+					slog.Int("total_matches", len(matches)),
+				)
+			}
+		}
+		// If no matches, we'll try with the original symbolID and let it fail naturally
+	}
+
+	result, err := t.builder.BuildMinimalContext(ctx, resolvedID, opts...)
 	if err != nil {
-		return &Result{Success: false, Error: err.Error()}, nil
+		// Include helpful error message with the attempted resolution
+		errMsg := err.Error()
+		if resolvedID != symbolID {
+			errMsg = fmt.Sprintf("%s (resolved %q to %q)", errMsg, symbolID, resolvedID)
+		}
+		return &Result{Success: false, Error: errMsg}, nil
 	}
 
 	output, _ := json.Marshal(result)
@@ -1243,6 +1292,44 @@ func StaticToolDefinitions() []ToolDefinition {
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     10 * time.Second,
+		},
+		{
+			Name: "find_communities",
+			Description: "Detect natural code communities using Leiden algorithm. " +
+				"Finds groups of tightly-coupled, well-connected symbols that may not align with packages. " +
+				"Use this to discover real module boundaries vs package organization. " +
+				"Highlights cross-package communities as refactoring candidates.",
+			Parameters: map[string]ParamDef{
+				"min_size": {
+					Type:        ParamTypeInt,
+					Description: "Minimum community size to report (default: 3, max: 100)",
+					Required:    false,
+					Default:     3,
+				},
+				"resolution": {
+					Type:        ParamTypeFloat,
+					Description: "Community granularity: 0.1=large, 1.0=balanced, 5.0=small (default: 1.0)",
+					Required:    false,
+					Default:     1.0,
+				},
+				"top": {
+					Type:        ParamTypeInt,
+					Description: "Number of communities to return (default: 20, max: 50)",
+					Required:    false,
+					Default:     20,
+				},
+				"show_cross_edges": {
+					Type:        ParamTypeBool,
+					Description: "Show edges between communities for seam identification (default: true)",
+					Required:    false,
+					Default:     true,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    82,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     60 * time.Second,
 		},
 	}
 }

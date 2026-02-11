@@ -1361,6 +1361,51 @@ func (p *ExecutePhase) extractToolParameters(
 		)
 		return params, nil
 
+	case "find_communities":
+		// GR-47 Fix: Extract resolution and top from query
+		// Resolution: "high" → 2.0, "fine-grained" → 2.0, "low" → 0.5, default 1.0
+		// Top: extract "top N" pattern, default 20
+		resolution := 1.0 // default medium
+		lowerQuery := strings.ToLower(query)
+		if strings.Contains(lowerQuery, "high") || strings.Contains(lowerQuery, "fine-grained") ||
+			strings.Contains(lowerQuery, "fine grained") || strings.Contains(lowerQuery, "detailed") {
+			resolution = 2.0
+		} else if strings.Contains(lowerQuery, "low") || strings.Contains(lowerQuery, "coarse") ||
+			strings.Contains(lowerQuery, "broad") {
+			resolution = 0.5
+		}
+		top := extractTopNFromQuery(query, 20)
+		slog.Debug("GR-47: extracted find_communities params",
+			slog.String("tool", toolName),
+			slog.Float64("resolution", resolution),
+			slog.Int("top", top),
+		)
+		return map[string]interface{}{
+			"resolution": resolution,
+			"top":        top,
+		}, nil
+
+	case "find_articulation_points":
+		// GR-47 Fix: Extract top and include_bridges from query
+		// Defaults: top=20, include_bridges=true
+		top := extractTopNFromQuery(query, 20)
+		includeBridges := true
+		lowerQuery := strings.ToLower(query)
+		// Only exclude bridges if explicitly asked for just points
+		if strings.Contains(lowerQuery, "no bridges") || strings.Contains(lowerQuery, "without bridges") ||
+			strings.Contains(lowerQuery, "only points") || strings.Contains(lowerQuery, "just points") {
+			includeBridges = false
+		}
+		slog.Debug("GR-47: extracted find_articulation_points params",
+			slog.String("tool", toolName),
+			slog.Int("top", top),
+			slog.Bool("include_bridges", includeBridges),
+		)
+		return map[string]interface{}{
+			"top":             top,
+			"include_bridges": includeBridges,
+		}, nil
+
 	default:
 		// For other tools, fallback to Main LLM
 		return nil, fmt.Errorf("parameter extraction not implemented for tool: %s", toolName)

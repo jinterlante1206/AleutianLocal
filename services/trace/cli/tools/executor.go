@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -197,6 +198,9 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 		return nil, fmt.Errorf("%w: %s", ErrToolNotFound, invocation.ToolName)
 	}
 
+	// Coerce parameters to expected types (handles LLM string-to-number conversion)
+	e.coerceParams(tool, invocation.Parameters)
+
 	// Validate parameters
 	if err := e.validateParams(tool, invocation.Parameters); err != nil {
 		logger.Warn("Parameter validation failed", "error", err)
@@ -323,6 +327,93 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 	)
 
 	return result, nil
+}
+
+// coerceParams attempts to convert parameter values to their expected types.
+//
+// Description:
+//
+//	LLMs sometimes pass numeric parameters as strings (e.g., "1.5" instead of 1.5)
+//	or use semantic values (e.g., "high" instead of 2.0). This method coerces
+//	these values to proper types before validation.
+//
+// Inputs:
+//
+//	tool - The tool whose parameters are being coerced
+//	params - The parameter map (modified in place)
+//
+// Coercion Rules:
+//
+//	For ParamTypeFloat and ParamTypeInt:
+//	- String numbers: "1.5" → 1.5, "10" → 10
+//	- Semantic values: "high" → 2.0, "medium" → 1.0, "low" → 0.5
+//	- Boolean-like: "true" → 1.0, "false" → 0.0 (for compatibility)
+//
+// Thread Safety: Modifies params in place; caller should not share params concurrently.
+func (e *Executor) coerceParams(tool Tool, params map[string]any) {
+	if params == nil {
+		return
+	}
+
+	def := tool.Definition()
+
+	for name, value := range params {
+		paramDef, ok := def.Parameters[name]
+		if !ok {
+			continue
+		}
+
+		// Only coerce string values for numeric types
+		strVal, isString := value.(string)
+		if !isString {
+			continue
+		}
+
+		switch paramDef.Type {
+		case ParamTypeFloat, ParamTypeInt:
+			// Try parsing as a number first
+			if f, err := strconv.ParseFloat(strVal, 64); err == nil {
+				params[name] = f
+				continue
+			}
+
+			// Map semantic values to numbers
+			// These cover common LLM outputs for resolution/granularity parameters
+			switch strings.ToLower(strings.TrimSpace(strVal)) {
+			case "high", "maximum", "max", "fine", "fine-grained", "fine_grained", "detailed", "granular", "small":
+				params[name] = 2.0
+			case "medium", "normal", "default", "balanced", "moderate", "standard":
+				params[name] = 1.0
+			case "low", "minimum", "min", "coarse", "broad", "large":
+				params[name] = 0.5
+			case "very_high", "veryhigh", "highest", "very_fine", "finest":
+				params[name] = 3.0
+			case "very_low", "verylow", "lowest", "very_coarse", "coarsest":
+				params[name] = 0.25
+			case "true", "yes", "on":
+				params[name] = 1.0
+			case "false", "no", "off":
+				params[name] = 0.0
+			default:
+				// Log unrecognized values for debugging (GR-47)
+				slog.Debug("coerceParams: unrecognized semantic value for numeric param",
+					slog.String("tool", tool.Name()),
+					slog.String("param", name),
+					slog.String("value", strVal),
+				)
+			}
+			// If no match, leave as string and let validation fail with clear error
+
+		case ParamTypeBool:
+			// Coerce string booleans
+			switch strings.ToLower(strings.TrimSpace(strVal)) {
+			case "true", "yes", "on", "1":
+				params[name] = true
+			case "false", "no", "off", "0":
+				params[name] = false
+			}
+		}
+	}
 }
 
 // validateParams validates tool parameters against the definition.

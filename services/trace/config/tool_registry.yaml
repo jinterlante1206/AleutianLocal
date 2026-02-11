@@ -529,6 +529,52 @@ tools:
     requires:
       - graph_initialized
 
+  - name: find_communities
+    keywords:
+      - communities
+      - modules
+      - module boundaries
+      - natural modules
+      - code clusters
+      - architecture analysis
+      - refactoring candidates
+      - coupled code
+      - tightly coupled
+      - package boundaries
+      - real modules
+      - cross-package
+      - leiden
+    use_when: "User wants to find natural code communities or module boundaries"
+    avoid_when: "User wants to find callers or callees of specific functions"
+    instead_of:
+      - tool: Grep
+        when: "Searching for module structure or code organization patterns"
+    requires:
+      - graph_initialized
+
+  - name: find_articulation_points
+    keywords:
+      - articulation points
+      - cut vertices
+      - single point of failure
+      - bottleneck
+      - fragile
+      - bus factor
+      - critical node
+      - disconnection
+      - bridges
+      - critical edges
+      - fragility
+      - architecture weakness
+      - single dependency
+    use_when: "User asks about single points of failure, fragile architecture, or critical bottleneck functions"
+    avoid_when: "User asks about dominators, control flow, or callers/callees of specific functions"
+    instead_of:
+      - tool: find_hotspots
+        when: "User specifically asks about single points of failure or fragility"
+    requires:
+      - graph_initialized
+
   # =============================================================================
   # SPECIAL TOOLS
   # =============================================================================

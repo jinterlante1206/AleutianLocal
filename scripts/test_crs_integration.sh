@@ -67,6 +67,18 @@ while [[ $# -gt 0 ]]; do
             echo "  45-49: Secondary Indexes (GR-06 to GR-09)"
             echo "  50-54: Query Cache LRU (GR-10)"
             echo "  55-59: Parallel BFS (GR-11)"
+            echo "  60-64: Louvain Community Detection (GR-14)"
+            echo "  65-69: find_communities Tool (GR-15)"
+            echo "  70-72: Articulation Points (GR-16a)"
+            echo "  73-76: Dominator Trees (GR-16b)"
+            echo "  77-78: Post-Dominator Trees (GR-16c)"
+            echo "  79-80: Dominance Frontier (GR-16d)"
+            echo "  81-82: Control Dependence (GR-16e)"
+            echo "  83-85: Natural Loop Detection (GR-16f)"
+            echo "  86-87: Lowest Common Dominator (GR-16g)"
+            echo "  88-90: SESE Region Detection (GR-16h)"
+            echo "  91-93: find_articulation_points Tool (GR-17a)"
+            echo "  94-96: find_dominators Tool (GR-17b)"
             echo ""
             echo "Environment Variables:"
             echo "  CRS_TEST_HOST    Remote host (default: 10.0.0.250)"
@@ -143,6 +155,36 @@ run_local_tests() {
             *55*|*56*|*57*|*58*|*59*)
                 test_args="$test_args -run TestParallelBFS"
                 ;;
+            *60*|*61*|*62*|*63*|*64*)
+                test_args="$test_args -run TestCommunity"
+                ;;
+            *65*|*66*|*67*|*68*|*69*)
+                test_args="$test_args -run TestFindCommunitiesTool"
+                ;;
+            *70*|*71*|*72*)
+                test_args="$test_args -run TestArticulationPoints"
+                ;;
+            *73*|*74*|*75*|*76*)
+                test_args="$test_args -run TestDominators"
+                ;;
+            *77*|*78*)
+                test_args="$test_args -run TestPostDominators"
+                ;;
+            *79*|*80*)
+                test_args="$test_args -run TestDominanceFrontier"
+                ;;
+            *81*|*82*)
+                test_args="$test_args -run TestControlDependence"
+                ;;
+            *83*|*84*|*85*)
+                test_args="$test_args -run TestDetectLoops"
+                ;;
+            *86*|*87*)
+                test_args="$test_args -run TestLCD"
+                ;;
+            *94*|*95*|*96*)
+                test_args="$test_args -run TestFindDominatorsTool"
+                ;;
         esac
     fi
 
@@ -172,6 +214,234 @@ run_local_tests() {
             echo ""
             echo -e "${YELLOW}Running Parallel BFS benchmarks...${NC}"
             go test ./services/trace/graph/... -bench=BenchmarkBFS -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 60-64 (Community Detection), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (60|61|62|63|64) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Community Detection tests (GR-14)...${NC}"
+        echo ""
+
+        # Run community detection tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestCommunity" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Louvain benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkLouvain -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 65-69 (find_communities Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (65|66|67|68|69) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running find_communities Tool tests (GR-15)...${NC}"
+        echo ""
+
+        # Run find_communities tool tests with race detector
+        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindCommunitiesTool" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running find_communities benchmarks...${NC}"
+            go test ./services/trace/cli/tools/... -bench=BenchmarkFindCommunities -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 70-72 (Articulation Points), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (70|71|72) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Articulation Points tests (GR-16a)...${NC}"
+        echo ""
+
+        # Run articulation points tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestArticulationPoints" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Articulation Points benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkArticulationPoints -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 91-93 (find_articulation_points Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (91|92|93) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running find_articulation_points Tool tests (GR-17a)...${NC}"
+        echo ""
+
+        # Run find_articulation_points tool tests with race detector
+        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindArticulationPointsTool" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running find_articulation_points benchmarks...${NC}"
+            go test ./services/trace/cli/tools/... -bench=BenchmarkFindArticulationPoints -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 73-76 (Dominator Trees), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (73|74|75|76) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Dominator Trees tests (GR-16b)...${NC}"
+        echo ""
+
+        # Run dominator tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDominators" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Dominator Trees benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkDominators -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 77-78 (Post-Dominator Trees), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (77|78) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Post-Dominator Trees tests (GR-16c)...${NC}"
+        echo ""
+
+        # Run post-dominator tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestPostDominators" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Post-Dominator Trees benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkPostDominators -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 79-80 (Dominance Frontier), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (79|80) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Dominance Frontier tests (GR-16d)...${NC}"
+        echo ""
+
+        # Run dominance frontier tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDominanceFrontier" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Dominance Frontier benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkDominanceFrontier -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 81-82 (Control Dependence), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (81|82) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Control Dependence tests (GR-16e)...${NC}"
+        echo ""
+
+        # Run control dependence tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestControlDependence" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Control Dependence benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkControlDependence -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 83-85 (Natural Loop Detection), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (83|84|85) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Natural Loop Detection tests (GR-16f)...${NC}"
+        echo ""
+
+        # Run loop detection tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDetectLoops" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Natural Loop Detection benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkDetectLoops -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 86-87 (Lowest Common Dominator), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (86|87) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running Lowest Common Dominator tests (GR-16g)...${NC}"
+        echo ""
+
+        # Run LCD tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestLCD" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running Lowest Common Dominator benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkLCD -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 88-90 (SESE Region Detection), run graph package tests
+    if [[ "$SPECIFIC_TESTS" =~ (88|89|90) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running SESE Region Detection tests (GR-16h)...${NC}"
+        echo ""
+
+        # Run SESE tests with race detector
+        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestSESE" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running SESE Region Detection benchmarks...${NC}"
+            go test ./services/trace/graph/... -bench=BenchmarkSESE -benchmem -count=1 -timeout 60s || true
+        fi
+    fi
+
+    # For tests 94-96 (find_dominators Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (94|95|96) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+        echo ""
+        echo -e "${YELLOW}Running find_dominators Tool tests (GR-17b)...${NC}"
+        echo ""
+
+        # Run find_dominators tool tests with race detector
+        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindDominatorsTool" -race; then
+            exit_code=1
+        fi
+
+        # Run benchmarks if no specific tests requested
+        if [ -z "$SPECIFIC_TESTS" ]; then
+            echo ""
+            echo -e "${YELLOW}Running find_dominators benchmarks...${NC}"
+            go test ./services/trace/cli/tools/... -bench=BenchmarkFindDominators -benchmem -count=1 -timeout 60s || true
         fi
     fi
 
@@ -417,6 +687,154 @@ declare -a CRS_TESTS=(
 
     # Test 59: Race detector verification (internal - run with -race flag)
     "PARALLEL_BFS|race_free|INTERNAL:verify_no_race_conditions|COMPLETE"
+
+    # === GR-14: LOUVAIN COMMUNITY DETECTION ===
+    # These tests verify community detection is working correctly
+    # TDD: Tests added BEFORE implementation
+
+    # Test 60: Basic community detection query - should find natural code modules
+    "COMMUNITY|basic|Find the natural communities or modules in this codebase|COMPLETE|communities_found"
+
+    # Test 61: find_communities tool should be used (not fallback to grep)
+    "COMMUNITY|tool_used|What are the main architectural modules in this code?|COMPLETE|find_communities_used"
+
+    # Test 62: Verify modularity score is calculated and reasonable (internal)
+    "COMMUNITY|modularity|INTERNAL:verify_community_modularity|COMPLETE"
+
+    # Test 63: CRS integration - community detection should record TraceStep
+    "COMMUNITY|crs_integration|INTERNAL:verify_community_crs_recording|COMPLETE"
+
+    # Test 64: Performance - community detection should complete in reasonable time
+    "COMMUNITY|perf_check|Detect all code communities and their relationships|COMPLETE|fast_community_detection"
+
+    # === GR-15: find_communities TOOL ===
+    # These tests verify the find_communities tool is properly exposed and integrated
+
+    # Test 65: Basic find_communities tool query
+    "FIND_COMMUNITIES|basic|What are the natural module boundaries in this codebase?|COMPLETE|find_communities_tool_used"
+
+    # Test 66: find_communities with resolution parameter
+    "FIND_COMMUNITIES|resolution|Find fine-grained code clusters using high resolution|COMPLETE|find_communities_params"
+
+    # Test 67: Cross-package community detection
+    "FIND_COMMUNITIES|cross_pkg|Which code communities span multiple packages?|COMPLETE|cross_package_found"
+
+    # Test 68: CRS trace step recording for tool
+    "FIND_COMMUNITIES|crs_trace|INTERNAL:verify_find_communities_crs|COMPLETE"
+
+    # Test 69: Modularity quality label in output
+    "FIND_COMMUNITIES|quality_label|INTERNAL:verify_modularity_quality_label|COMPLETE"
+
+    # === GR-16a: ARTICULATION POINTS ===
+    # These tests verify articulation point (cut vertex) detection using Tarjan's algorithm
+
+    # Test 70: Basic articulation point detection
+    "ARTICULATION|basic|Find the single points of failure in this codebase|COMPLETE|articulation_points_found"
+
+    # Test 71: CRS trace step recording for articulation points
+    "ARTICULATION|crs_trace|INTERNAL:verify_articulation_crs_recording|COMPLETE"
+
+    # Test 72: Performance check - should complete in reasonable time
+    "ARTICULATION|perf_check|Find architectural bottlenecks that are single points of failure|COMPLETE|fast_articulation_detection"
+
+    # === GR-16b: DOMINATOR TREES ===
+    # These tests verify dominator tree computation using Cooper-Harvey-Kennedy algorithm
+
+    # Test 73: Basic dominator query - find all dominators of a function
+    "DOMINATOR|basic|What functions must be called before reaching the main function?|COMPLETE|dominators_found"
+
+    # Test 74: CRS trace step recording for dominator analysis
+    "DOMINATOR|crs_trace|INTERNAL:verify_dominator_crs_recording|COMPLETE"
+
+    # Test 75: Convergence verification - algorithm should converge quickly for well-structured code
+    "DOMINATOR|convergence|INTERNAL:verify_dominator_convergence|COMPLETE"
+
+    # Test 76: Performance check - should complete in reasonable time
+    "DOMINATOR|perf_check|Find the mandatory call sequence from entry to the Handler|COMPLETE|fast_dominator_detection"
+
+    # === GR-16c: POST-DOMINATOR TREES ===
+    # These tests verify post-dominator tree computation (dual of dominators)
+
+    # Test 77: Basic post-dominator query - find what must happen after a function
+    "POST_DOMINATOR|basic|What functions must be called after the Handler function returns?|COMPLETE|post_dominators_found"
+
+    # Test 78: CRS trace step recording for post-dominator analysis
+    "POST_DOMINATOR|crs_trace|INTERNAL:verify_post_dominator_crs_recording|COMPLETE"
+
+    # === GR-16d: DOMINANCE FRONTIER ===
+    # These tests verify dominance frontier computation (merge points where control converges)
+
+    # Test 79: Basic dominance frontier query - find merge points
+    "DOMINANCE_FRONTIER|basic|Find the merge points in the control flow where different paths converge|COMPLETE|merge_points_found"
+
+    # Test 80: CRS trace step recording for dominance frontier analysis
+    "DOMINANCE_FRONTIER|crs_trace|INTERNAL:verify_dominance_frontier_crs_recording|COMPLETE"
+
+    # === GR-16e: CONTROL DEPENDENCE ===
+    # These tests verify control dependence computation (what conditionals control execution)
+
+    # Test 81: Basic control dependence query - find what controls a function's execution
+    "CONTROL_DEPENDENCE|basic|Find what conditionals control whether the Handler function executes|COMPLETE|control_dependencies_found"
+
+    # Test 82: CRS trace step recording for control dependence analysis
+    "CONTROL_DEPENDENCE|crs_trace|INTERNAL:verify_control_dependence_crs_recording|COMPLETE"
+
+    # === GR-16f: NATURAL LOOP DETECTION ===
+    # These tests verify natural loop detection via back edges and dominator analysis
+
+    # Test 83: Basic loop detection - find recursive patterns and back edges
+    "LOOP_DETECTION|basic|Find all recursive call patterns and loops in this codebase|COMPLETE|loops_found"
+
+    # Test 84: Loop nesting hierarchy - verify nested loops are detected correctly
+    "LOOP_DETECTION|nesting|What is the loop nesting structure in the main execution path?|COMPLETE|loop_nesting_found"
+
+    # Test 85: CRS trace step recording for loop detection
+    "LOOP_DETECTION|crs_trace|INTERNAL:verify_loop_detection_crs_recording|COMPLETE"
+
+    # === GR-16g: LOWEST COMMON DOMINATOR ===
+    # These tests verify LCD computation (finding shared mandatory dependencies)
+
+    # Test 86: Basic LCD query - find common dominator of two functions
+    "LCD|basic|What is the common dependency between the Handler and Middleware functions?|COMPLETE|lcd_found"
+
+    # Test 87: CRS trace step recording for LCD analysis
+    "LCD|crs_trace|INTERNAL:verify_lcd_crs_recording|COMPLETE"
+
+    # === GR-16h: SESE REGION DETECTION ===
+    # These tests verify SESE (Single-Entry Single-Exit) region detection for refactoring
+
+    # Test 88: Basic SESE detection - find extractable code regions
+    "SESE|basic|What code regions can be safely extracted into separate functions?|COMPLETE|sese_regions_found"
+
+    # Test 89: SESE hierarchy - verify nested region detection
+    "SESE|hierarchy|Show me the hierarchy of extractable code regions|COMPLETE|sese_hierarchy"
+
+    # Test 90: CRS trace step recording for SESE analysis
+    "SESE|crs_trace|INTERNAL:verify_sese_crs_recording|COMPLETE"
+
+    # === GR-17a: find_articulation_points TOOL ===
+    # These tests verify the find_articulation_points tool is properly exposed and integrated
+
+    # Test 91: Basic find_articulation_points tool query
+    "FIND_ARTICULATION|basic|What are the single points of failure in this codebase?|COMPLETE|find_articulation_points_tool_used"
+
+    # Test 92: find_articulation_points with include_bridges parameter
+    "FIND_ARTICULATION|bridges|Find critical bottleneck functions and the critical edges connecting them|COMPLETE|find_articulation_points_bridges"
+
+    # Test 93: CRS trace step recording for tool
+    "FIND_ARTICULATION|crs_trace|INTERNAL:verify_find_articulation_points_crs|COMPLETE"
+
+    # === GR-17b: find_dominators TOOL ===
+    # These tests verify the find_dominators tool is properly exposed and integrated
+
+    # Test 94: Basic find_dominators tool query
+    "FIND_DOMINATORS|basic|What functions dominate the Handler function?|COMPLETE|find_dominators_tool_used"
+
+    # Test 95: find_dominators with show_tree parameter
+    "FIND_DOMINATORS|tree|Show the dominator tree starting from main|COMPLETE|find_dominators_tree"
+
+    # Test 96: CRS trace step recording for find_dominators tool
+    "FIND_DOMINATORS|crs_trace|INTERNAL:verify_find_dominators_crs|COMPLETE"
 )
 
 # ==============================================================================
@@ -1774,6 +2192,112 @@ run_internal_test() {
             fi
             ;;
 
+        # ================================================================================
+        # GR-14: LOUVAIN COMMUNITY DETECTION VERIFICATION TESTS
+        # TDD: These tests define expected behavior BEFORE implementation
+        # ================================================================================
+
+        verify_community_modularity)
+            # GR-14: Verify modularity score is calculated and reasonable
+            echo -e "  ${BLUE}Checking community modularity score (GR-14)...${NC}"
+
+            # Query debug endpoint for community detection stats
+            local community_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "{}")
+            local modularity=$(echo "$community_stats" | jq '.communities.modularity // .community_modularity // -1' 2>/dev/null || echo "-1")
+            local community_count=$(echo "$community_stats" | jq '.communities.count // .community_count // 0' 2>/dev/null || echo "0")
+
+            if [ "$modularity" != "-1" ] && [ "$community_count" -gt 0 ]; then
+                echo -e "  ${GREEN}✓ GR-14: Modularity score available: $modularity${NC}"
+                echo -e "  ${BLUE}  Communities detected: $community_count${NC}"
+
+                # Check if modularity is in reasonable range [0, 1]
+                local mod_valid=$(echo "$modularity" | awk '{if ($1 >= 0 && $1 <= 1) print "yes"; else print "no"}')
+                if [ "$mod_valid" = "yes" ]; then
+                    result_message="Modularity: $modularity, Communities: $community_count"
+                else
+                    echo -e "  ${YELLOW}⚠ GR-14: Modularity out of expected range [0,1]: $modularity${NC}"
+                    result_message="Modularity out of range: $modularity"
+                fi
+            else
+                echo -e "  ${YELLOW}⚠ GR-14: Community stats not available${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-14: Expected (community detection not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-14: Should expose modularity via /debug/graph/stats${NC}"
+                result_message="Community stats not available (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_community_crs_recording)
+            # GR-14: Verify community detection records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for community detection (GR-14)...${NC}"
+
+            # Check server logs for CRS trace step recording
+            local crs_logs=$(ssh_cmd "grep -i 'analytics_communities\|community.*trace\|DetectCommunities.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Also check for trace step metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'communities_found\|modularity\|community_count' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-14: CRS recording detected for community detection${NC}"
+                if [ -n "$crs_logs" ]; then
+                    echo "$crs_logs" | sed 's/^/    /'
+                fi
+                result_message="CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-14: No CRS recording logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-14: Expected (community detection not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-14: Should record TraceStep with WithCRS methods${NC}"
+                result_message="No CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-15: find_communities TOOL VERIFICATION TESTS
+        # TDD: These tests define expected behavior BEFORE implementation
+        # ================================================================================
+
+        verify_find_communities_crs)
+            # GR-15: Verify find_communities tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_communities tool (GR-15)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_communities\|tool.*communities' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'find_communities.*action\|find_communities.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-15: find_communities tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-15: No find_communities tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-15: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_modularity_quality_label)
+            # GR-15: Verify modularity quality label is included in output
+            echo -e "  ${BLUE}Checking modularity quality label (GR-15)...${NC}"
+
+            # Check server logs for quality labels
+            local quality_logs=$(ssh_cmd "grep -i 'modularity_quality\|quality.*weak\|quality.*moderate\|quality.*good\|quality.*strong' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            if [ -n "$quality_logs" ]; then
+                echo -e "  ${GREEN}✓ GR-15: Modularity quality labels detected${NC}"
+                echo "$quality_logs" | sed 's/^/    /'
+                result_message="Quality labels present"
+            else
+                echo -e "  ${YELLOW}⚠ GR-15: No modularity quality labels found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-15: Should include quality labels (weak/moderate/good/strong)${NC}"
+                result_message="No quality labels (pre-implementation expected)"
+            fi
+            ;;
+
         *)
             echo -e "  ${YELLOW}⚠ Unknown internal test: $test_name${NC}"
             result_message="Unknown test"
@@ -2222,6 +2746,346 @@ run_extra_check() {
             if [ -n "$speedup_log" ]; then
                 echo -e "    ${BLUE}Speedup logs:${NC}"
                 echo "$speedup_log" | sed 's/^/      /'
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-14: LOUVAIN COMMUNITY DETECTION CHECKS
+        # TDD: These checks define expected behavior BEFORE implementation
+        # ================================================================================
+
+        communities_found)
+            # GR-14: Verify community detection found actual communities
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check if response mentions communities, modules, or clusters
+            local mentions_community=$(echo "$agent_resp" | grep -ci "communit\|module\|cluster\|group")
+            local community_count=$(echo "$agent_resp" | grep -oE '[0-9]+ communit' | head -1 | grep -oE '[0-9]+' || echo "0")
+
+            if [ "$mentions_community" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-14: Response mentions communities ($mentions_community references)${NC}"
+                if [ "$community_count" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-14: Found $community_count communities${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-14: Response does not mention communities${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-14: Expected (community detection not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-14: Should describe detected code communities${NC}"
+            fi
+
+            # Check for modularity score in response
+            local has_modularity=$(echo "$agent_resp" | grep -ci "modularity")
+            if [ "$has_modularity" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-14: Response includes modularity score${NC}"
+            fi
+            ;;
+
+        find_communities_used)
+            # GR-14: Verify find_communities tool was used (not grep fallback)
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+
+            # Check if find_communities was used
+            local fc_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_communities")] | length' 2>/dev/null || echo "0")
+
+            if [ "$fc_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-14: find_communities tool was used: $fc_used calls${NC}"
+
+                # Check for community detection metadata
+                local community_meta=$(echo "$trace" | jq -r '[.trace[] | select(.tool == "find_communities") | .metadata] | .[0]' 2>/dev/null || echo "{}")
+                local communities_found=$(echo "$community_meta" | jq '.communities_count // 0' 2>/dev/null || echo "0")
+                local modularity=$(echo "$community_meta" | jq '.modularity // 0' 2>/dev/null || echo "0")
+
+                if [ "$communities_found" -gt 0 ]; then
+                    echo -e "    ${BLUE}  Communities: $communities_found, Modularity: $modularity${NC}"
+                fi
+            else
+                echo -e "    ${RED}✗ GR-14: find_communities tool not used${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-14: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-14: Should use find_communities for module/community queries${NC}"
+
+                # Check if Grep was used as fallback
+                local grep_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "Grep")] | length' 2>/dev/null || echo "0")
+                if [ "$grep_used" -gt 0 ]; then
+                    echo -e "    ${YELLOW}  → Fell back to Grep: $grep_used calls${NC}"
+                fi
+            fi
+            ;;
+
+        fast_community_detection)
+            # GR-14: Verify community detection completed in reasonable time
+            # Louvain should be O(V+E) per pass, typically <5s for 100K nodes
+            local threshold=30000  # 30 seconds max for reasonable sized graphs
+
+            if [ "$duration" -lt "$threshold" ]; then
+                echo -e "    ${GREEN}✓ GR-14: Community detection completed in ${duration}ms (< ${threshold}ms threshold)${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-14: Community detection took ${duration}ms (threshold: ${threshold}ms)${NC}"
+                echo -e "    ${YELLOW}  → May need optimization for large graphs${NC}"
+            fi
+
+            # Check server logs for iteration count
+            local iteration_log=$(ssh_cmd "grep -i 'louvain.*iteration\|community.*converge' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+            if [ -n "$iteration_log" ]; then
+                echo -e "    ${BLUE}Louvain iteration logs:${NC}"
+                echo "$iteration_log" | sed 's/^/      /'
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-15: find_communities TOOL CHECKS
+        # TDD: These checks define expected behavior BEFORE implementation
+        # ================================================================================
+
+        find_communities_tool_used)
+            # GR-15: Verify find_communities tool was used for module boundary queries
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check if find_communities was used
+            local fc_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_communities")] | length' 2>/dev/null || echo "0")
+
+            if [ "$fc_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-15: find_communities tool was used: $fc_used calls${NC}"
+
+                # Check for algorithm info
+                local algorithm=$(echo "$agent_resp" | grep -oi "leiden" | head -1 || echo "")
+                if [ -n "$algorithm" ]; then
+                    echo -e "    ${GREEN}✓ GR-15: Response mentions Leiden algorithm${NC}"
+                fi
+
+                # Check for modularity score
+                local has_modularity=$(echo "$agent_resp" | grep -ci "modularity")
+                if [ "$has_modularity" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-15: Response includes modularity score${NC}"
+                fi
+            else
+                echo -e "    ${RED}✗ GR-15: find_communities tool not used${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-15: Should use find_communities for boundary queries${NC}"
+            fi
+            ;;
+
+        find_communities_params)
+            # GR-15: Verify find_communities tool respects parameters
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+
+            # Check if find_communities was used with parameters
+            local fc_calls=$(echo "$trace" | jq '[.trace[] | select(.tool == "find_communities")]' 2>/dev/null || echo "[]")
+            local has_resolution=$(echo "$fc_calls" | jq 'any(.[]; .params.resolution != null)' 2>/dev/null || echo "false")
+            local has_min_size=$(echo "$fc_calls" | jq 'any(.[]; .params.min_size != null)' 2>/dev/null || echo "false")
+
+            if [ "$has_resolution" = "true" ] || [ "$has_min_size" = "true" ]; then
+                echo -e "    ${GREEN}✓ GR-15: find_communities tool called with parameters${NC}"
+                if [ "$has_resolution" = "true" ]; then
+                    echo -e "    ${BLUE}  - resolution parameter used${NC}"
+                fi
+                if [ "$has_min_size" = "true" ]; then
+                    echo -e "    ${BLUE}  - min_size parameter used${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-15: find_communities called without custom parameters${NC}"
+                echo -e "    ${YELLOW}  → May use defaults, which is acceptable${NC}"
+            fi
+            ;;
+
+        cross_package_found)
+            # GR-15: Verify cross-package communities are identified
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check for cross-package indicators
+            local cross_pkg_mentions=$(echo "$agent_resp" | grep -ci "cross.package\|span.*package\|multiple package\|REFACTOR")
+
+            if [ "$cross_pkg_mentions" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-15: Cross-package communities identified ($cross_pkg_mentions mentions)${NC}"
+
+                # Extract specific cross-package info if available
+                local cross_pkg_line=$(echo "$agent_resp" | grep -i "cross.package\|span.*package" | head -1)
+                if [ -n "$cross_pkg_line" ]; then
+                    echo -e "    ${BLUE}  $cross_pkg_line${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-15: No cross-package communities mentioned${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-15: Should highlight [REFACTOR] for cross-package${NC}"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-17a: find_articulation_points TOOL CHECKS
+        # TDD: These checks define expected behavior BEFORE implementation
+        # ================================================================================
+
+        find_articulation_points_tool_used)
+            # GR-17a: Verify find_articulation_points tool was used for bottleneck queries
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check if find_articulation_points was used
+            local ap_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_articulation_points")] | length' 2>/dev/null || echo "0")
+
+            if [ "$ap_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17a: find_articulation_points tool was used: $ap_used calls${NC}"
+
+                # Check for articulation point count in response
+                local ap_count=$(echo "$agent_resp" | grep -oi "[0-9]* articulation\|[0-9]* single point\|[0-9]* bottleneck" | head -1)
+                if [ -n "$ap_count" ]; then
+                    echo -e "    ${BLUE}  $ap_count found${NC}"
+                fi
+
+                # Check for fragility score
+                local has_fragility=$(echo "$agent_resp" | grep -ci "fragility\|fragile")
+                if [ "$has_fragility" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17a: Response includes fragility analysis${NC}"
+                fi
+            else
+                echo -e "    ${RED}✗ GR-17a: find_articulation_points tool not used${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-17a: Should use find_articulation_points for bottleneck queries${NC}"
+            fi
+            ;;
+
+        find_articulation_points_bridges)
+            # GR-17a: Verify find_articulation_points returns bridge info
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+
+            # Check for bridge/critical edge mentions
+            local bridge_mentions=$(echo "$agent_resp" | grep -ci "bridge\|critical edge\|critical connection")
+
+            if [ "$bridge_mentions" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17a: Bridge information included ($bridge_mentions mentions)${NC}"
+
+                # Extract specific bridge info if available
+                local bridge_line=$(echo "$agent_resp" | grep -i "bridge\|critical edge" | head -1)
+                if [ -n "$bridge_line" ]; then
+                    echo -e "    ${BLUE}  $bridge_line${NC}"
+                fi
+            else
+                echo -e "    ${YELLOW}⚠ GR-17a: No bridge information in response${NC}"
+                echo -e "    ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
+                echo -e "    ${YELLOW}  → Post-GR-17a: Should include bridges when include_bridges=true${NC}"
+            fi
+            ;;
+
+        verify_find_articulation_points_crs)
+            # GR-17a: Verify find_articulation_points tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_articulation_points tool (GR-17a)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_articulation_points\|tool.*articulation' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'find_articulation_points.*action\|find_articulation_points.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17a: find_articulation_points tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17a: No find_articulation_points tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17a: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-16c: POST-DOMINATOR CRS VERIFICATION
+        # ================================================================================
+
+        verify_post_dominator_crs_recording)
+            # GR-16c: Verify post-dominator analysis records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for post-dominator analysis (GR-16c)...${NC}"
+
+            # Check server logs for CRS trace step recording
+            local crs_logs=$(ssh_cmd "grep -i 'analytics_post_dominators\|post.*dominator.*trace\|PostDominators.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with post-dominator metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'post_dominators\|exit_node\|post_dom_depth' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-16c: CRS recording detected for post-dominator analysis${NC}"
+                if [ -n "$crs_logs" ]; then
+                    echo "$crs_logs" | sed 's/^/    /'
+                fi
+                result_message="CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-16c: No CRS recording logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-16c: Expected (post-dominator not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-16c: Should record TraceStep with WithCRS methods${NC}"
+                result_message="No CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-16d: DOMINANCE FRONTIER CRS VERIFICATION
+        # ================================================================================
+
+        verify_dominance_frontier_crs_recording)
+            # GR-16d: Verify dominance frontier computation records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for dominance frontier (GR-16d)...${NC}"
+
+            # Check server logs for CRS trace step recording
+            local crs_logs=$(ssh_cmd "grep -i 'analytics_dominance_frontier\|dominance.*frontier.*trace\|ComputeDominanceFrontier.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with dominance frontier metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'merge_points_found\|frontier_size\|dominance_frontier' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-16d: CRS recording detected for dominance frontier${NC}"
+                if [ -n "$crs_logs" ]; then
+                    echo "$crs_logs" | sed 's/^/    /'
+                fi
+                result_message="CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-16d: No CRS recording logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-16d: Expected (dominance frontier not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-16d: Should record TraceStep with WithCRS methods${NC}"
+                result_message="No CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        # ================================================================================
+        # GR-16e: CONTROL DEPENDENCE CRS VERIFICATION
+        # ================================================================================
+
+        verify_control_dependence_crs_recording)
+            # GR-16e: Verify control dependence computation records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for control dependence (GR-16e)...${NC}"
+
+            # Check server logs for CRS trace step recording
+            local crs_logs=$(ssh_cmd "grep -i 'analytics_control_dependence\|control.*depend.*trace\|ComputeControlDependence.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with control dependence metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'dependency_count\|dependents_count\|control_dependence' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-16e: CRS recording detected for control dependence${NC}"
+                if [ -n "$crs_logs" ]; then
+                    echo "$crs_logs" | sed 's/^/    /'
+                fi
+                result_message="CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-16e: No CRS recording logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-16e: Expected (control dependence not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-16e: Should record TraceStep with WithCRS methods${NC}"
+                result_message="No CRS logs (pre-implementation expected)"
             fi
             ;;
 
