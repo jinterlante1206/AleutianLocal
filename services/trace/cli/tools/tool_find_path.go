@@ -1,0 +1,444 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
+package tools
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+)
+
+// =============================================================================
+// find_path Tool - Typed Implementation
+// =============================================================================
+
+var findPathTracer = otel.Tracer("tools.find_path")
+
+// FindPathParams contains the validated input parameters.
+type FindPathParams struct {
+	// From is the starting symbol name.
+	From string
+
+	// To is the target symbol name.
+	To string
+}
+
+// FindPathOutput contains the structured result.
+type FindPathOutput struct {
+	// From is the starting symbol name.
+	From string `json:"from"`
+
+	// To is the target symbol name.
+	To string `json:"to"`
+
+	// Length is the path length in hops (-1 if no path found).
+	Length int `json:"length"`
+
+	// Found indicates if a path was found.
+	Found bool `json:"found"`
+
+	// Path is the list of nodes in the path.
+	Path []PathNode `json:"path,omitempty"`
+
+	// Message is an optional status message.
+	Message string `json:"message,omitempty"`
+}
+
+// PathNode represents a node in the path.
+type PathNode struct {
+	// Hop is the position in the path (0-indexed).
+	Hop int `json:"hop"`
+
+	// ID is the node ID.
+	ID string `json:"id"`
+
+	// Name is the symbol name.
+	Name string `json:"name,omitempty"`
+
+	// File is the source file path.
+	File string `json:"file,omitempty"`
+
+	// Line is the line number.
+	Line int `json:"line,omitempty"`
+
+	// Kind is the symbol kind.
+	Kind string `json:"kind,omitempty"`
+}
+
+// findPathTool finds the shortest path between two symbols.
+type findPathTool struct {
+	graph  *graph.Graph
+	index  *index.SymbolIndex
+	logger *slog.Logger
+}
+
+// NewFindPathTool creates the find_path tool.
+//
+// Description:
+//
+//	Creates a tool that finds the shortest path between two symbols in the
+//	code graph. Uses BFS to find the minimum-hop path considering all edge types.
+//
+// Inputs:
+//
+//   - g: The code graph. Must not be nil.
+//   - idx: The symbol index for name-to-ID resolution. Must not be nil.
+//
+// Outputs:
+//
+//   - Tool: The find_path tool implementation.
+//
+// Limitations:
+//
+//   - Symbol names must match exactly (no fuzzy matching)
+//   - When multiple symbols share a name, uses first function/method found
+//   - Returns only one path even if multiple shortest paths exist
+//   - Path length is measured in hops, not weighted by call frequency
+//
+// Assumptions:
+//
+//   - Graph is frozen before tool creation
+//   - BFS runs in O(V+E) time
+//   - Caller handles disambiguation via package filter if needed
+func NewFindPathTool(g *graph.Graph, idx *index.SymbolIndex) Tool {
+	return &findPathTool{
+		graph:  g,
+		index:  idx,
+		logger: slog.Default(),
+	}
+}
+
+func (t *findPathTool) Name() string {
+	return "find_path"
+}
+
+func (t *findPathTool) Category() ToolCategory {
+	return CategoryExploration
+}
+
+func (t *findPathTool) Definition() ToolDefinition {
+	return ToolDefinition{
+		Name: "find_path",
+		Description: "Find the shortest path between two symbols. " +
+			"Uses BFS to find the minimum-hop path. " +
+			"Useful for understanding how two pieces of code are connected.",
+		Parameters: map[string]ParamDef{
+			"from": {
+				Type:        ParamTypeString,
+				Description: "Starting symbol name (e.g., 'main', 'parseConfig')",
+				Required:    true,
+			},
+			"to": {
+				Type:        ParamTypeString,
+				Description: "Target symbol name",
+				Required:    true,
+			},
+		},
+		Category:    CategoryExploration,
+		Priority:    83,
+		Requires:    []string{"graph_initialized"},
+		SideEffects: false,
+		Timeout:     10 * time.Second,
+	}
+}
+
+// Execute runs the find_path tool.
+func (t *findPathTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+	start := time.Now()
+
+	// Parse and validate parameters
+	p, err := t.parseParams(params)
+	if err != nil {
+		return &Result{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	// Validate graph is available
+	if t.graph == nil {
+		return &Result{
+			Success: false,
+			Error:   "graph not initialized",
+		}, nil
+	}
+
+	// Start span with context
+	ctx, span := findPathTracer.Start(ctx, "findPathTool.Execute",
+		trace.WithAttributes(
+			attribute.String("tool", "find_path"),
+			attribute.String("from", p.From),
+			attribute.String("to", p.To),
+		),
+	)
+	defer span.End()
+
+	// Resolve symbol names to IDs using index
+	fromID, fromPackage := t.resolveSymbol(p.From)
+	toID, toPackage := t.resolveSymbol(p.To)
+
+	// Handle not found cases
+	if fromID == "" {
+		output := FindPathOutput{
+			From:    p.From,
+			To:      p.To,
+			Found:   false,
+			Length:  -1,
+			Message: fmt.Sprintf("Symbol '%s' not found", p.From),
+		}
+		return &Result{
+			Success:    true,
+			Output:     output,
+			OutputText: fmt.Sprintf("Symbol '%s' not found in the codebase.", p.From),
+			TokensUsed: 10,
+			Duration:   time.Since(start),
+		}, nil
+	}
+
+	if toID == "" {
+		output := FindPathOutput{
+			From:    p.From,
+			To:      p.To,
+			Found:   false,
+			Length:  -1,
+			Message: fmt.Sprintf("Symbol '%s' not found", p.To),
+		}
+		return &Result{
+			Success:    true,
+			Output:     output,
+			OutputText: fmt.Sprintf("Symbol '%s' not found in the codebase.", p.To),
+			TokensUsed: 10,
+			Duration:   time.Since(start),
+		}, nil
+	}
+
+	span.SetAttributes(
+		attribute.String("from_id", fromID),
+		attribute.String("from_package", fromPackage),
+		attribute.String("to_id", toID),
+		attribute.String("to_package", toPackage),
+	)
+
+	// Check context cancellation
+	if err := ctx.Err(); err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	// Find shortest path
+	pathStart := time.Now()
+	pathResult, err := t.graph.ShortestPath(ctx, fromID, toID)
+	pathDuration := time.Since(pathStart)
+
+	// Create CRS TraceStep
+	var traceStep crs.TraceStep
+	if err != nil {
+		traceStep = crs.NewTraceStepBuilder().
+			WithAction("graph_shortest_path").
+			WithTarget(fmt.Sprintf("%s->%s", p.From, p.To)).
+			WithTool("ShortestPath").
+			WithDuration(pathDuration).
+			WithError(err.Error()).
+			Build()
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("trace_action", traceStep.Action))
+		return &Result{
+			Success:   false,
+			Error:     fmt.Sprintf("path search failed: %v", err),
+			TraceStep: &traceStep,
+			Duration:  time.Since(start),
+		}, nil
+	}
+
+	traceStep = crs.NewTraceStepBuilder().
+		WithAction("graph_shortest_path").
+		WithTarget(fmt.Sprintf("%s->%s", p.From, p.To)).
+		WithTool("ShortestPath").
+		WithDuration(pathDuration).
+		WithMetadata("path_length", fmt.Sprintf("%d", pathResult.Length)).
+		WithMetadata("from_id", fromID).
+		WithMetadata("to_id", toID).
+		Build()
+
+	span.SetAttributes(
+		attribute.Int("path_length", pathResult.Length),
+		attribute.Int("path_nodes", len(pathResult.Path)),
+		attribute.String("trace_action", traceStep.Action),
+	)
+
+	// Structured logging for edge cases
+	if pathResult.Length < 0 {
+		t.logger.Debug("no path found between symbols",
+			slog.String("tool", "find_path"),
+			slog.String("from", p.From),
+			slog.String("to", p.To),
+			slog.String("from_id", fromID),
+			slog.String("to_id", toID),
+		)
+	}
+
+	// Build typed output
+	output := t.buildOutput(p.From, p.To, pathResult)
+
+	// Format text output
+	outputText := t.formatText(p.From, p.To, pathResult)
+
+	return &Result{
+		Success:    true,
+		Output:     output,
+		OutputText: outputText,
+		TokensUsed: estimateTokens(outputText),
+		TraceStep:  &traceStep,
+		Duration:   time.Since(start),
+	}, nil
+}
+
+// parseParams validates and extracts typed parameters from the raw map.
+func (t *findPathTool) parseParams(params map[string]any) (FindPathParams, error) {
+	var p FindPathParams
+
+	// Extract from (required)
+	if fromRaw, ok := params["from"]; ok {
+		if from, ok := parseStringParam(fromRaw); ok && from != "" {
+			p.From = from
+		}
+	}
+	if p.From == "" {
+		return p, fmt.Errorf("from is required")
+	}
+
+	// Extract to (required)
+	if toRaw, ok := params["to"]; ok {
+		if to, ok := parseStringParam(toRaw); ok && to != "" {
+			p.To = to
+		}
+	}
+	if p.To == "" {
+		return p, fmt.Errorf("to is required")
+	}
+
+	return p, nil
+}
+
+// resolveSymbol resolves a symbol name to an ID.
+func (t *findPathTool) resolveSymbol(name string) (string, string) {
+	if t.index == nil {
+		return "", ""
+	}
+
+	symbols := t.index.GetByName(name)
+
+	// Prefer function/method
+	for _, sym := range symbols {
+		if sym != nil && (sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod) {
+			// Log disambiguation when multiple symbols match
+			if len(symbols) > 1 {
+				t.logger.Info("multiple symbols matched, using first function",
+					slog.String("tool", "find_path"),
+					slog.String("symbol_name", name),
+					slog.String("selected_package", sym.Package),
+					slog.String("selected_id", sym.ID),
+					slog.Int("total_matches", len(symbols)),
+				)
+			}
+			return sym.ID, sym.Package
+		}
+	}
+
+	// Fallback to any symbol
+	if len(symbols) > 0 && symbols[0] != nil {
+		return symbols[0].ID, symbols[0].Package
+	}
+
+	return "", ""
+}
+
+// buildOutput creates the typed output struct.
+func (t *findPathTool) buildOutput(fromName, toName string, result *graph.PathResult) FindPathOutput {
+	output := FindPathOutput{
+		From:   fromName,
+		To:     toName,
+		Length: result.Length,
+		Found:  result.Length >= 0,
+	}
+
+	if result.Length < 0 {
+		output.Message = fmt.Sprintf("No path found between '%s' and '%s'", fromName, toName)
+		return output
+	}
+
+	// Build path details
+	output.Path = make([]PathNode, 0, len(result.Path))
+	for i, nodeID := range result.Path {
+		node := PathNode{
+			Hop: i,
+			ID:  nodeID,
+		}
+		if t.index != nil {
+			if sym, ok := t.index.GetByID(nodeID); ok && sym != nil {
+				node.Name = sym.Name
+				node.File = sym.FilePath
+				node.Line = sym.StartLine
+				node.Kind = sym.Kind.String()
+			}
+		}
+		output.Path = append(output.Path, node)
+	}
+
+	return output
+}
+
+// formatText creates a human-readable text summary.
+func (t *findPathTool) formatText(fromName, toName string, result *graph.PathResult) string {
+	var sb strings.Builder
+
+	if result.Length < 0 {
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No path between '%s' and '%s'\n\n", fromName, toName))
+		sb.WriteString("These symbols are not connected through call relationships.\n")
+		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
+		return sb.String()
+	}
+
+	sb.WriteString(fmt.Sprintf("Path from %s to %s (%d hops):\n\n", fromName, toName, result.Length))
+
+	for i, nodeID := range result.Path {
+		nodeName := nodeID
+		nodeFile := ""
+
+		if t.index != nil {
+			if sym, ok := t.index.GetByID(nodeID); ok && sym != nil {
+				nodeName = fmt.Sprintf("%s()", sym.Name)
+				nodeFile = fmt.Sprintf(" (%s:%d)", sym.FilePath, sym.StartLine)
+			}
+		}
+
+		sb.WriteString(fmt.Sprintf("%d. %s%s\n", i+1, nodeName, nodeFile))
+
+		// Add arrow except for last node
+		if i < len(result.Path)-1 {
+			sb.WriteString("   -> calls\n")
+		}
+	}
+
+	return sb.String()
+}
