@@ -315,3 +315,270 @@ func recordImportEdgeMetrics(ctx context.Context, created, failed int) {
 	importEdgesCreated.Add(ctx, int64(created))
 	importEdgesFailed.Add(ctx, int64(failed))
 }
+
+// HLD-specific metrics (GR-19a)
+var (
+	hldConstructionDuration metric.Float64Histogram
+	hldNodeCount            metric.Float64Histogram
+	hldValidationErrors     metric.Int64Counter
+	hldHeavyPathCount       metric.Float64Histogram
+	hldLightEdgeCount       metric.Float64Histogram
+	hldMaxDepth             metric.Float64Histogram
+
+	hldMetricsOnce sync.Once
+	hldMetricsErr  error
+)
+
+// initHLDMetrics initializes HLD-specific metrics. Safe to call multiple times.
+func initHLDMetrics() error {
+	hldMetricsOnce.Do(func() {
+		var err error
+
+		hldConstructionDuration, err = meter.Float64Histogram(
+			"trace_hld_construction_duration_seconds",
+			metric.WithDescription("Time to construct HLD structure"),
+			metric.WithUnit("s"),
+		)
+		if err != nil {
+			hldMetricsErr = err
+			return
+		}
+
+		hldNodeCount, err = meter.Float64Histogram(
+			"trace_hld_node_count",
+			metric.WithDescription("Number of nodes in HLD tree"),
+		)
+		if err != nil {
+			hldMetricsErr = err
+			return
+		}
+
+		hldValidationErrors, err = meter.Int64Counter(
+			"trace_hld_validation_errors_total",
+			metric.WithDescription("Total HLD validation errors"),
+		)
+		if err != nil {
+			hldMetricsErr = err
+			return
+		}
+
+		hldHeavyPathCount, err = meter.Float64Histogram(
+			"trace_hld_heavy_path_count",
+			metric.WithDescription("Number of heavy paths in HLD decomposition"),
+		)
+		if err != nil {
+			hldMetricsErr = err
+			return
+		}
+
+		hldLightEdgeCount, err = meter.Float64Histogram(
+			"trace_hld_light_edge_count",
+			metric.WithDescription("Number of light edges in HLD decomposition"),
+		)
+		if err != nil {
+			hldMetricsErr = err
+			return
+		}
+
+		hldMaxDepth, err = meter.Float64Histogram(
+			"trace_hld_max_depth",
+			metric.WithDescription("Maximum depth of tree in HLD decomposition"),
+		)
+		if err != nil {
+			hldMetricsErr = err
+			return
+		}
+	})
+	return hldMetricsErr
+}
+
+// recordHLDMetrics records metrics for HLD construction.
+//
+// Description:
+//
+//	Records HLD construction duration, node count, heavy path count,
+//	light edge count, and max depth. Called after successful HLD construction.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - stats: HLD statistics from Stats() method.
+//
+// Thread Safety: Safe for concurrent use.
+func recordHLDMetrics(ctx context.Context, stats HLDStats) {
+	if err := initHLDMetrics(); err != nil {
+		return
+	}
+
+	hldConstructionDuration.Record(ctx, stats.ConstructionTime.Seconds())
+	hldNodeCount.Record(ctx, float64(stats.NodeCount))
+	hldHeavyPathCount.Record(ctx, float64(stats.HeavyPathCount))
+	hldLightEdgeCount.Record(ctx, float64(stats.LightEdgeCount))
+	hldMaxDepth.Record(ctx, float64(stats.MaxPathLength))
+}
+
+// recordHLDValidationError increments the HLD validation error counter.
+func recordHLDValidationError(ctx context.Context) {
+	if err := initHLDMetrics(); err != nil {
+		return
+	}
+	hldValidationErrors.Add(ctx, 1)
+}
+
+// Segment Tree metrics (GR-19b)
+var (
+	segTreeBuildDuration       metric.Float64Histogram
+	segTreeQueryDuration       metric.Float64Histogram
+	segTreeUpdateDuration      metric.Float64Histogram
+	segTreeRangeUpdateDuration metric.Float64Histogram
+	segTreeSize                metric.Float64Histogram
+	segTreeValidationErrors    metric.Int64Counter
+	segTreeLazyPushCount       metric.Int64Counter
+	segTreeQueryNodesVisited   metric.Float64Histogram
+
+	segTreeMetricsOnce sync.Once
+	segTreeMetricsErr  error
+)
+
+// initSegTreeMetrics initializes segment tree metrics. Safe to call multiple times.
+func initSegTreeMetrics() error {
+	segTreeMetricsOnce.Do(func() {
+		var err error
+
+		segTreeBuildDuration, err = meter.Float64Histogram(
+			"trace_segment_tree_build_duration_seconds",
+			metric.WithDescription("Time to build segment tree"),
+			metric.WithUnit("s"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+
+		segTreeQueryDuration, err = meter.Float64Histogram(
+			"trace_segment_tree_query_duration_seconds",
+			metric.WithDescription("Time to query segment tree"),
+			metric.WithUnit("s"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+
+		segTreeUpdateDuration, err = meter.Float64Histogram(
+			"trace_segment_tree_update_duration_seconds",
+			metric.WithDescription("Time to update single element in segment tree"),
+			metric.WithUnit("s"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+
+		segTreeRangeUpdateDuration, err = meter.Float64Histogram(
+			"trace_segment_tree_range_update_duration_seconds",
+			metric.WithDescription("Time to perform range update in segment tree"),
+			metric.WithUnit("s"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+
+		segTreeSize, err = meter.Float64Histogram(
+			"trace_segment_tree_size",
+			metric.WithDescription("Segment tree array size"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+
+		segTreeValidationErrors, err = meter.Int64Counter(
+			"trace_segment_tree_validation_errors_total",
+			metric.WithDescription("Total segment tree validation errors"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+
+		segTreeLazyPushCount, err = meter.Int64Counter(
+			"trace_segment_tree_lazy_push_total",
+			metric.WithDescription("Total lazy propagation push operations"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+
+		segTreeQueryNodesVisited, err = meter.Float64Histogram(
+			"trace_segment_tree_query_nodes_visited",
+			metric.WithDescription("Number of tree nodes visited during query"),
+		)
+		if err != nil {
+			segTreeMetricsErr = err
+			return
+		}
+	})
+	return segTreeMetricsErr
+}
+
+// recordSegTreeMetrics records metrics for segment tree construction.
+//
+// Description:
+//
+//	Records segment tree build duration, size, and other statistics.
+//	Called after successful segment tree construction.
+//
+// Inputs:
+//   - ctx: Context for metric recording.
+//   - stats: Segment tree statistics from Stats() method.
+//
+// Thread Safety: Safe for concurrent use.
+func recordSegTreeMetrics(ctx context.Context, stats SegmentTreeStats) {
+	if err := initSegTreeMetrics(); err != nil {
+		return
+	}
+
+	attrs := metric.WithAttributes(
+		attribute.String("agg_func", stats.AggFunc.String()),
+	)
+
+	segTreeBuildDuration.Record(ctx, stats.BuildTime.Seconds(), attrs)
+	segTreeSize.Record(ctx, float64(stats.Size), attrs)
+}
+
+// recordSegTreeValidationError increments the segment tree validation error counter.
+func recordSegTreeValidationError(ctx context.Context) {
+	if err := initSegTreeMetrics(); err != nil {
+		return
+	}
+	segTreeValidationErrors.Add(ctx, 1)
+}
+
+// recordSegTreeQueryDuration records segment tree query duration.
+func recordSegTreeQueryDuration(ctx context.Context, duration time.Duration, aggFunc AggregateFunc) {
+	if err := initSegTreeMetrics(); err != nil {
+		return
+	}
+	segTreeQueryDuration.Record(ctx, duration.Seconds(),
+		metric.WithAttributes(attribute.String("agg_func", aggFunc.String())))
+}
+
+// recordSegTreeUpdateDuration records segment tree update duration.
+func recordSegTreeUpdateDuration(ctx context.Context, duration time.Duration, aggFunc AggregateFunc) {
+	if err := initSegTreeMetrics(); err != nil {
+		return
+	}
+	segTreeUpdateDuration.Record(ctx, duration.Seconds(),
+		metric.WithAttributes(attribute.String("agg_func", aggFunc.String())))
+}
+
+// recordSegTreeRangeUpdateDuration records segment tree range update duration.
+func recordSegTreeRangeUpdateDuration(ctx context.Context, duration time.Duration, aggFunc AggregateFunc) {
+	if err := initSegTreeMetrics(); err != nil {
+		return
+	}
+	segTreeRangeUpdateDuration.Record(ctx, duration.Seconds(),
+		metric.WithAttributes(attribute.String("agg_func", aggFunc.String())))
+}

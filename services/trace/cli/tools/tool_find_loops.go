@@ -424,7 +424,11 @@ func (t *findLoopsTool) classifyRecursionTypes(loops []*graph.Loop, loopNest *gr
 	}
 
 	for _, loop := range loops {
-		// Classify by loop size
+		// Classify by loop size.
+		// Note: loop.Size includes the header node itself, so:
+		//   Size=1 means just the header (direct self-call)
+		//   Size=2 means header + 1 other node (mutual recursion A<->B)
+		//   Size>=3 means complex cycle with multiple nodes
 		switch loop.Size {
 		case 1:
 			summary.DirectRecursion++ // Self-loop
@@ -444,12 +448,13 @@ func (t *findLoopsTool) classifyRecursionTypes(loops []*graph.Loop, loopNest *gr
 }
 
 // classifyLoopRecursion returns a human-readable recursion type for a single loop.
+// Note: loop.Size includes the header node itself.
 func (t *findLoopsTool) classifyLoopRecursion(loop *graph.Loop) string {
 	switch loop.Size {
 	case 1:
-		return "direct recursion"
+		return "direct recursion" // Self-call
 	case 2:
-		return "mutual recursion"
+		return "mutual recursion" // A<->B pattern
 	default:
 		return fmt.Sprintf("complex cycle (%d nodes)", loop.Size)
 	}

@@ -716,6 +716,66 @@ tools:
     requires:
       - graph_initialized
 
+  - name: find_critical_path
+    keywords:
+      - critical path
+      - mandatory path
+      - must call
+      - required sequence
+      - essential calls
+      - cannot bypass
+      - mandatory functions
+      - critical sequence
+      - dominator path
+      - call path
+      - execution path
+      - mandatory sequence
+      - required calls
+    use_when: "User asks about the mandatory or essential call sequence to reach a target, or what functions cannot be bypassed"
+    avoid_when: "User asks about any possible path (use find_path). Use find_dominators if only asking about prerequisites without the path"
+    instead_of:
+      - tool: find_path
+        when: "User asks about MANDATORY path, not just ANY path"
+      - tool: find_dominators
+        when: "User wants to see the path sequence, not just the dominator list"
+    requires:
+      - graph_initialized
+
+  - name: find_module_api
+    keywords:
+      - module API
+      - public API
+      - module interface
+      - module boundary
+      - entry points
+      - how to use module
+      - module surface
+      - API surface
+      - module entry
+      - public functions
+      - module interface
+    use_when: "User asks about module interfaces, public APIs, or how to interact with different parts of the codebase"
+    avoid_when: "User asks about all entry points globally (use find_entry_points)"
+    requires:
+      - graph_initialized
+
+  - name: find_weighted_criticality
+    keywords:
+      - critical functions
+      - most important
+      - highest risk
+      - weighted criticality
+      - combined importance
+      - risk assessment
+      - key functions
+      - critical nodes
+      - risky functions
+      - high impact
+    use_when: "User asks about most critical or risky functions considering both structural importance and dependency relationships"
+    avoid_when: "User asks only about dominators or only about importance (use find_dominators or find_important)"
+    requires:
+      - graph_initialized
+
   # =============================================================================
   # SPECIAL TOOLS
   # =============================================================================

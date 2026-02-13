@@ -1406,6 +1406,204 @@ func (p *ExecutePhase) extractToolParameters(
 			"include_bridges": includeBridges,
 		}, nil
 
+	case "find_dominators":
+		// CB-31d: Extract target function and optional entry point
+		// Patterns: "dominators of X", "what dominates X", "must call before X"
+		target := extractFunctionNameFromQuery(query)
+		if target == "" && ctx != nil {
+			target = extractFunctionNameFromContext(ctx)
+		}
+		if target == "" {
+			slog.Debug("CB-31d: find_dominators extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			return nil, fmt.Errorf("could not extract target function from query for find_dominators")
+		}
+		params := map[string]interface{}{
+			"target": target,
+		}
+		// Try to extract entry point if specified (e.g., "dominators from main to X")
+		from, _, ok := extractPathSymbolsFromQuery(query)
+		if ok && from != "" && from != target {
+			params["entry_point"] = from
+		}
+		slog.Debug("CB-31d: extracted find_dominators params",
+			slog.String("tool", toolName),
+			slog.String("target", target),
+		)
+		return params, nil
+
+	case "find_common_dependency":
+		// CB-31d: Extract two function names
+		// Patterns: "common dependency between X and Y", "shared by X and Y", "LCD of X and Y"
+		from, to, ok := extractPathSymbolsFromQuery(query)
+		if !ok || from == "" || to == "" {
+			slog.Debug("CB-31d: find_common_dependency extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+				slog.String("from", from),
+				slog.String("to", to),
+			)
+			return nil, fmt.Errorf("could not extract two function names from query for find_common_dependency")
+		}
+		slog.Debug("CB-31d: extracted find_common_dependency params",
+			slog.String("tool", toolName),
+			slog.String("function_a", from),
+			slog.String("function_b", to),
+		)
+		return map[string]interface{}{
+			"function_a": from,
+			"function_b": to,
+		}, nil
+
+	case "find_critical_path":
+		// CB-31d: Extract target and optional entry point
+		// Patterns: "critical path to X", "mandatory path to X", "from Y to X"
+		target := extractFunctionNameFromQuery(query)
+		if target == "" && ctx != nil {
+			target = extractFunctionNameFromContext(ctx)
+		}
+		// If still no target, try extracting from path symbols (might be "to" symbol)
+		if target == "" {
+			_, to, ok := extractPathSymbolsFromQuery(query)
+			if ok && to != "" {
+				target = to
+			}
+		}
+		if target == "" {
+			slog.Debug("CB-31d: find_critical_path extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			return nil, fmt.Errorf("could not extract target function from query for find_critical_path")
+		}
+		params := map[string]interface{}{
+			"target": target,
+		}
+		// Try to extract entry point
+		from, _, ok := extractPathSymbolsFromQuery(query)
+		if ok && from != "" && from != target {
+			params["entry_point"] = from
+		}
+		slog.Debug("CB-31d: extracted find_critical_path params",
+			slog.String("tool", toolName),
+			slog.String("target", target),
+		)
+		return params, nil
+
+	case "find_merge_points":
+		// CB-31d: Extract source functions (usually 2+)
+		// Patterns: "merge points for X and Y", "where do X and Y converge"
+		from, to, ok := extractPathSymbolsFromQuery(query)
+		if !ok || from == "" {
+			// Try single function extraction as fallback
+			funcName := extractFunctionNameFromQuery(query)
+			if funcName != "" {
+				from = funcName
+			}
+		}
+		sources := []string{}
+		if from != "" {
+			sources = append(sources, from)
+		}
+		if to != "" && to != from {
+			sources = append(sources, to)
+		}
+		if len(sources) == 0 {
+			slog.Debug("CB-31d: find_merge_points extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			// Return defaults - find merge points for all entry points
+			return map[string]interface{}{}, nil
+		}
+		slog.Debug("CB-31d: extracted find_merge_points params",
+			slog.String("tool", toolName),
+			slog.Int("source_count", len(sources)),
+		)
+		return map[string]interface{}{
+			"sources": sources,
+		}, nil
+
+	case "find_control_dependencies":
+		// CB-31d: Extract target function
+		// Patterns: "control dependencies of X", "what controls X"
+		target := extractFunctionNameFromQuery(query)
+		if target == "" && ctx != nil {
+			target = extractFunctionNameFromContext(ctx)
+		}
+		if target == "" {
+			slog.Debug("CB-31d: find_control_dependencies extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			return nil, fmt.Errorf("could not extract target function from query for find_control_dependencies")
+		}
+		slog.Debug("CB-31d: extracted find_control_dependencies params",
+			slog.String("tool", toolName),
+			slog.String("target", target),
+		)
+		return map[string]interface{}{
+			"target": target,
+		}, nil
+
+	case "find_extractable_regions":
+		// CB-31d: Use defaults - no parameters required
+		// Analyzes entire codebase for SESE regions
+		slog.Debug("CB-31d: extracted find_extractable_regions params (defaults)",
+			slog.String("tool", toolName),
+		)
+		return map[string]interface{}{}, nil
+
+	case "find_loops":
+		// CB-31d: Optional entry point, otherwise finds all natural loops
+		// Patterns: "loops in X", "recursive calls in X"
+		params := map[string]interface{}{}
+		funcName := extractFunctionNameFromQuery(query)
+		if funcName != "" {
+			params["entry_point"] = funcName
+		}
+		slog.Debug("CB-31d: extracted find_loops params",
+			slog.String("tool", toolName),
+		)
+		return params, nil
+
+	case "find_weighted_criticality":
+		// CB-31d: Extract top N parameter
+		// Patterns: "top 10 critical functions", "most critical functions"
+		top := extractTopNFromQuery(query, 20)
+		slog.Debug("CB-31d: extracted find_weighted_criticality params",
+			slog.String("tool", toolName),
+			slog.Int("top", top),
+		)
+		return map[string]interface{}{
+			"top": top,
+		}, nil
+
+	case "find_module_api":
+		// CB-31d: Extract module/package name
+		// Patterns: "API of X", "public API for X module"
+		moduleName := extractPackageNameFromQuery(query)
+		if moduleName == "" {
+			// Try function name extraction as fallback
+			moduleName = extractFunctionNameFromQuery(query)
+		}
+		if moduleName == "" {
+			slog.Debug("CB-31d: find_module_api extraction failed",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			return nil, fmt.Errorf("could not extract module name from query for find_module_api")
+		}
+		slog.Debug("CB-31d: extracted find_module_api params",
+			slog.String("tool", toolName),
+			slog.String("module", moduleName),
+		)
+		return map[string]interface{}{
+			"module": moduleName,
+		}, nil
+
 	default:
 		// For other tools, fallback to Main LLM
 		return nil, fmt.Errorf("parameter extraction not implemented for tool: %s", toolName)
