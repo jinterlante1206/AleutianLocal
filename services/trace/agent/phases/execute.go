@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
@@ -80,6 +81,11 @@ type ExecutePhase struct {
 	// qualityValidator validates response quality (hedging, citations).
 	// Checks for evidence-based claims in analytical responses.
 	qualityValidator *classifier.QualityValidator
+
+	// symbolCache caches symbol resolutions per session (CB-31d).
+	// Key: "sessionID:symbolName", Value: SymbolResolution
+	// Thread Safety: sync.Map is safe for concurrent use.
+	symbolCache sync.Map
 }
 
 // ExecutePhaseOption configures an ExecutePhase.
@@ -435,7 +441,8 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		}
 
 		// TR-1 Fix: Extract tool parameters from query/context
-		params, paramErr := p.extractToolParameters(deps.Query, hardForcing.Tool, toolDefs, deps.Context)
+		// CB-31d: Pass deps for symbol resolution
+		params, paramErr := p.extractToolParameters(deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
 		if paramErr != nil {
 			// TR-7 Fix: Fallback to Main LLM on parameter extraction failure
 			slog.Warn("Parameter extraction failed, falling back to Main LLM (CB-31d)",

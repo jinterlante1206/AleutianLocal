@@ -321,8 +321,8 @@ run_local_tests() {
         fi
     fi
 
-    # For tests 103-105 (find_control_dependencies Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (103|104|105) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+    # For tests 106-108 (find_control_dependencies Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (106|107|108) ]] || [ -z "$SPECIFIC_TESTS" ]; then
         echo ""
         echo -e "${YELLOW}Running find_control_dependencies Tool tests (GR-17c)...${NC}"
         echo ""
@@ -338,8 +338,8 @@ run_local_tests() {
         fi
     fi
 
-    # For tests 106-108 (find_extractable_regions Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (106|107|108) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+    # For tests 109-111 (find_extractable_regions Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (109|110|111) ]] || [ -z "$SPECIFIC_TESTS" ]; then
         echo ""
         echo -e "${YELLOW}Running find_extractable_regions Tool tests (GR-17g)...${NC}"
         echo ""
@@ -355,8 +355,8 @@ run_local_tests() {
         fi
     fi
 
-    # For tests 109-111 (check_reducibility Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (109|110|111) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+    # For tests 112-114 (check_reducibility Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (112|113|114) ]] || [ -z "$SPECIFIC_TESTS" ]; then
         echo ""
         echo -e "${YELLOW}Running check_reducibility Tool tests (GR-17h)...${NC}"
         echo ""
@@ -372,8 +372,8 @@ run_local_tests() {
         fi
     fi
 
-    # For tests 112-114 (find_critical_path Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (112|113|114) ]] || [ -z "$SPECIFIC_TESTS" ]; then
+    # For tests 115-117 (find_critical_path Tool), run tool tests
+    if [[ "$SPECIFIC_TESTS" =~ (115|116|117) ]] || [ -z "$SPECIFIC_TESTS" ]; then
         echo ""
         echo -e "${YELLOW}Running find_critical_path Tool tests (GR-18a)...${NC}"
         echo ""
@@ -1007,49 +1007,49 @@ declare -a CRS_TESTS=(
     # === GR-17c: find_control_dependencies TOOL ===
     # These tests verify the find_control_dependencies tool shows which conditionals control execution
 
-    # Test 103: Basic find_control_dependencies tool query
+    # Test 106: Basic find_control_dependencies tool query
     "FIND_CONTROL_DEPS|basic|What conditionals control whether HandleRequest executes|COMPLETE|find_control_deps_tool_used"
 
-    # Test 104: find_control_dependencies with depth parameter
+    # Test 107: find_control_dependencies with depth parameter
     "FIND_CONTROL_DEPS|depth|Show control dependencies for Process function with depth 3|COMPLETE|find_control_deps_depth"
 
-    # Test 105: CRS trace step recording for find_control_dependencies tool
+    # Test 108: CRS trace step recording for find_control_dependencies tool
     "FIND_CONTROL_DEPS|crs_trace|INTERNAL:verify_find_control_deps_crs|COMPLETE"
 
     # === GR-17g: find_extractable_regions TOOL ===
     # These tests verify the find_extractable_regions tool identifies SESE regions for refactoring
 
-    # Test 106: Basic find_extractable_regions tool query
+    # Test 109: Basic find_extractable_regions tool query
     "FIND_EXTRACTABLE|basic|Find code regions that can be safely extracted into separate functions|COMPLETE|find_extractable_tool_used"
 
-    # Test 107: find_extractable_regions with size parameters
+    # Test 110: find_extractable_regions with size parameters
     "FIND_EXTRACTABLE|size|Find extractable regions between 5 and 30 nodes in size|COMPLETE|find_extractable_size"
 
-    # Test 108: CRS trace step recording for find_extractable_regions tool
+    # Test 111: CRS trace step recording for find_extractable_regions tool
     "FIND_EXTRACTABLE|crs_trace|INTERNAL:verify_find_extractable_crs|COMPLETE"
 
     # === GR-17h: check_reducibility TOOL ===
     # These tests verify the check_reducibility tool analyzes graph structure quality
 
-    # Test 109: Basic check_reducibility tool query
+    # Test 112: Basic check_reducibility tool query
     "CHECK_REDUCIBILITY|basic|Check if this codebase has well-structured control flow|COMPLETE|check_reducibility_tool_used"
 
-    # Test 110: check_reducibility with irreducible region details
+    # Test 113: check_reducibility with irreducible region details
     "CHECK_REDUCIBILITY|details|Show any complex or poorly structured code regions|COMPLETE|check_reducibility_details"
 
-    # Test 111: CRS trace step recording for check_reducibility tool
+    # Test 114: CRS trace step recording for check_reducibility tool
     "CHECK_REDUCIBILITY|crs_trace|INTERNAL:verify_check_reducibility_crs|COMPLETE"
 
     # === GR-18a: find_critical_path TOOL ===
     # These tests verify the find_critical_path tool shows mandatory call sequences
 
-    # Test 112: Basic find_critical_path tool query
+    # Test 115: Basic find_critical_path tool query
     "FIND_CRITICAL_PATH|basic|What is the mandatory call sequence to reach ExecuteQuery|COMPLETE|find_critical_path_tool_used"
 
-    # Test 113: find_critical_path with entry point
+    # Test 116: find_critical_path with entry point
     "FIND_CRITICAL_PATH|entry|Show the critical path from StartServer to HandleRequest|COMPLETE|find_critical_path_entry"
 
-    # Test 114: CRS trace step recording for find_critical_path tool
+    # Test 117: CRS trace step recording for find_critical_path tool
     "FIND_CRITICAL_PATH|crs_trace|INTERNAL:verify_find_critical_path_crs|COMPLETE"
 
     # === GR-19a: Heavy-Light Decomposition Construction ===

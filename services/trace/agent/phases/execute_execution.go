@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
@@ -1057,6 +1058,20 @@ func (p *ExecutePhase) invalidateGraphCaches(ctx context.Context, deps *Dependen
 		)
 		span.SetAttributes(attribute.Bool("event_handled", true))
 	}
+
+	// CB-31d: Clear symbol resolution cache after graph refresh
+	// All cached symbol resolutions are now potentially stale
+	cacheSize := 0
+	p.symbolCache.Range(func(key, value interface{}) bool {
+		cacheSize++
+		return true
+	})
+	p.symbolCache = sync.Map{} // Reset to empty map
+	logger.Debug("CB-31d: cleared symbol resolution cache after graph refresh",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("entries_cleared", cacheSize),
+	)
+	span.SetAttributes(attribute.Int("symbol_cache_entries_cleared", cacheSize))
 }
 
 // trackModifiedFiles marks files modified by a tool result as dirty.
@@ -1124,6 +1139,7 @@ func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
 //	Uses rule-based extraction to determine tool parameters without calling
 //	the Main LLM. This enables direct tool execution for router selections.
 //	TR-12 Fix: Tool-specific parameter extraction logic.
+//	CB-31d: Added deps parameter for symbol resolution support.
 //
 // Inputs:
 //
@@ -1131,6 +1147,7 @@ func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
 //	toolName - The name of the tool to extract parameters for.
 //	toolDefs - Available tool definitions.
 //	ctx - Assembled context with current file, symbols, etc.
+//	deps - Dependencies with graph and index for symbol resolution (CB-31d).
 //
 // Outputs:
 //
@@ -1141,6 +1158,7 @@ func (p *ExecutePhase) extractToolParameters(
 	toolName string,
 	toolDefs []tools.ToolDefinition,
 	ctx *agent.AssembledContext,
+	deps *Dependencies,
 ) (map[string]interface{}, error) {
 	// Find tool definition
 	var toolDef *tools.ToolDefinition
@@ -1420,12 +1438,51 @@ func (p *ExecutePhase) extractToolParameters(
 			)
 			return nil, fmt.Errorf("could not extract target function from query for find_dominators")
 		}
+
+		// CB-31d: Resolve target symbol if possible
+		if deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+			if err == nil {
+				slog.Debug("CB-31d: resolved target symbol for find_dominators",
+					slog.String("raw", target),
+					slog.String("resolved", resolvedTarget),
+					slog.Float64("confidence", confidence),
+				)
+				target = resolvedTarget
+			} else {
+				slog.Debug("CB-31d: symbol resolution failed, using raw name",
+					slog.String("target", target),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+
 		params := map[string]interface{}{
 			"target": target,
 		}
 		// Try to extract entry point if specified (e.g., "dominators from main to X")
 		from, _, ok := extractPathSymbolsFromQuery(query)
 		if ok && from != "" && from != target {
+			// CB-31d: Resolve entry_point symbol if possible
+			if deps != nil && deps.SymbolIndex != nil {
+				sessionID := ""
+				if deps.Session != nil {
+					sessionID = deps.Session.ID
+				}
+				resolvedFrom, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, from, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved entry_point symbol for find_dominators",
+						slog.String("raw", from),
+						slog.String("resolved", resolvedFrom),
+						slog.Float64("confidence", confidence),
+					)
+					from = resolvedFrom
+				}
+			}
 			params["entry_point"] = from
 		}
 		slog.Debug("CB-31d: extracted find_dominators params",
@@ -1447,6 +1504,35 @@ func (p *ExecutePhase) extractToolParameters(
 			)
 			return nil, fmt.Errorf("could not extract two function names from query for find_common_dependency")
 		}
+
+		// CB-31d: Resolve both symbols if possible
+		if deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			// Resolve function_a
+			resolvedFrom, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, from, deps)
+			if err == nil {
+				slog.Debug("CB-31d: resolved function_a symbol for find_common_dependency",
+					slog.String("raw", from),
+					slog.String("resolved", resolvedFrom),
+					slog.Float64("confidence", confidence),
+				)
+				from = resolvedFrom
+			}
+			// Resolve function_b
+			resolvedTo, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, to, deps)
+			if err == nil {
+				slog.Debug("CB-31d: resolved function_b symbol for find_common_dependency",
+					slog.String("raw", to),
+					slog.String("resolved", resolvedTo),
+					slog.Float64("confidence", confidence),
+				)
+				to = resolvedTo
+			}
+		}
+
 		slog.Debug("CB-31d: extracted find_common_dependency params",
 			slog.String("tool", toolName),
 			slog.String("function_a", from),
@@ -1478,12 +1564,46 @@ func (p *ExecutePhase) extractToolParameters(
 			)
 			return nil, fmt.Errorf("could not extract target function from query for find_critical_path")
 		}
+
+		// CB-31d: Resolve target symbol if possible
+		if deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+			if err == nil {
+				slog.Debug("CB-31d: resolved target symbol for find_critical_path",
+					slog.String("raw", target),
+					slog.String("resolved", resolvedTarget),
+					slog.Float64("confidence", confidence),
+				)
+				target = resolvedTarget
+			}
+		}
+
 		params := map[string]interface{}{
 			"target": target,
 		}
 		// Try to extract entry point
 		from, _, ok := extractPathSymbolsFromQuery(query)
 		if ok && from != "" && from != target {
+			// CB-31d: Resolve entry_point symbol if possible
+			if deps != nil && deps.SymbolIndex != nil {
+				sessionID := ""
+				if deps.Session != nil {
+					sessionID = deps.Session.ID
+				}
+				resolvedFrom, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, from, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved entry_point symbol for find_critical_path",
+						slog.String("raw", from),
+						slog.String("resolved", resolvedFrom),
+						slog.Float64("confidence", confidence),
+					)
+					from = resolvedFrom
+				}
+			}
 			params["entry_point"] = from
 		}
 		slog.Debug("CB-31d: extracted find_critical_path params",
@@ -1518,6 +1638,31 @@ func (p *ExecutePhase) extractToolParameters(
 			// Return defaults - find merge points for all entry points
 			return map[string]interface{}{}, nil
 		}
+
+		// CB-31d: Resolve all source symbols if possible
+		if deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			resolvedSources := make([]string, 0, len(sources))
+			for _, source := range sources {
+				resolvedSource, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, source, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved source symbol for find_merge_points",
+						slog.String("raw", source),
+						slog.String("resolved", resolvedSource),
+						slog.Float64("confidence", confidence),
+					)
+					resolvedSources = append(resolvedSources, resolvedSource)
+				} else {
+					// Fall back to raw name on resolution failure
+					resolvedSources = append(resolvedSources, source)
+				}
+			}
+			sources = resolvedSources
+		}
+
 		slog.Debug("CB-31d: extracted find_merge_points params",
 			slog.String("tool", toolName),
 			slog.Int("source_count", len(sources)),
@@ -1540,6 +1685,24 @@ func (p *ExecutePhase) extractToolParameters(
 			)
 			return nil, fmt.Errorf("could not extract target function from query for find_control_dependencies")
 		}
+
+		// CB-31d: Resolve target symbol if possible
+		if deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+			if err == nil {
+				slog.Debug("CB-31d: resolved target symbol for find_control_dependencies",
+					slog.String("raw", target),
+					slog.String("resolved", resolvedTarget),
+					slog.Float64("confidence", confidence),
+				)
+				target = resolvedTarget
+			}
+		}
+
 		slog.Debug("CB-31d: extracted find_control_dependencies params",
 			slog.String("tool", toolName),
 			slog.String("target", target),
@@ -1562,6 +1725,22 @@ func (p *ExecutePhase) extractToolParameters(
 		params := map[string]interface{}{}
 		funcName := extractFunctionNameFromQuery(query)
 		if funcName != "" {
+			// CB-31d: Resolve entry_point symbol if possible
+			if deps != nil && deps.SymbolIndex != nil {
+				sessionID := ""
+				if deps.Session != nil {
+					sessionID = deps.Session.ID
+				}
+				resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved entry_point symbol for find_loops",
+						slog.String("raw", funcName),
+						slog.String("resolved", resolvedFunc),
+						slog.Float64("confidence", confidence),
+					)
+					funcName = resolvedFunc
+				}
+			}
 			params["entry_point"] = funcName
 		}
 		slog.Debug("CB-31d: extracted find_loops params",
@@ -1582,27 +1761,25 @@ func (p *ExecutePhase) extractToolParameters(
 		}, nil
 
 	case "find_module_api":
-		// CB-31d: Extract module/package name
-		// Patterns: "API of X", "public API for X module"
-		moduleName := extractPackageNameFromQuery(query)
-		if moduleName == "" {
-			// Try function name extraction as fallback
-			moduleName = extractFunctionNameFromQuery(query)
+		// CB-31d: Extract optional top N and min_community_size parameters
+		// Patterns: "top 5 module APIs", "module APIs with at least 10 functions"
+		// Note: Tool analyzes communities detected by community detection, not specific modules
+		params := map[string]interface{}{}
+
+		// Try to extract top N
+		top := extractTopNFromQuery(query, 10)
+		if top != 10 {
+			params["top"] = top
 		}
-		if moduleName == "" {
-			slog.Debug("CB-31d: find_module_api extraction failed",
-				slog.String("tool", toolName),
-				slog.String("query_preview", truncateForLog(query, 100)),
-			)
-			return nil, fmt.Errorf("could not extract module name from query for find_module_api")
-		}
+
+		// Could extract min_community_size if patterns like "with at least X functions" exist
+		// For now, use defaults
+
 		slog.Debug("CB-31d: extracted find_module_api params",
 			slog.String("tool", toolName),
-			slog.String("module", moduleName),
+			slog.Int("top", top),
 		)
-		return map[string]interface{}{
-			"module": moduleName,
-		}, nil
+		return params, nil
 
 	default:
 		// For other tools, fallback to Main LLM
