@@ -12,12 +12,18 @@ package graph
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
+	"github.com/dgraph-io/badger/v4"
 )
 
 // =============================================================================
@@ -46,6 +52,55 @@ type DominatorTreeCache struct {
 }
 
 // =============================================================================
+// GraphAnalytics Options
+// =============================================================================
+
+// GraphAnalyticsOptions configures GraphAnalytics behavior.
+type GraphAnalyticsOptions struct {
+	// AutoSession enables automatic session management.
+	// When true, CRS-aware queries automatically start a session on first use.
+	// User must still call EndSession() to finalize and free resources.
+	// Default: false (manual session management required)
+	AutoSession bool
+
+	// SessionTimeout defines the maximum inactivity duration before a session expires.
+	// When set, if a CRS-aware query is called and the session has been inactive
+	// for longer than SessionTimeout, the old session is automatically ended and
+	// a new session is started.
+	// A value of 0 disables timeout (sessions never expire from inactivity).
+	// Default: 0 (no timeout)
+	SessionTimeout time.Duration
+
+	// EnableBadgerQueryCache enables cross-session path query caching via BadgerDB.
+	// When true, path query results are persisted to BadgerDB and reused across sessions
+	// if the graph hash matches (graph unchanged).
+	// Cache invalidation: automatic on graph hash change.
+	// Default: false (no persistent caching)
+	EnableBadgerQueryCache bool
+
+	// BadgerDB is the BadgerDB instance for persistent caching.
+	// Required if EnableBadgerQueryCache is true, otherwise ignored.
+	// Must be opened and managed by caller.
+	BadgerDB *badger.DB
+}
+
+// =============================================================================
+// Session State
+// =============================================================================
+
+// sessionState holds the state of a CRS session for stacking.
+type sessionState struct {
+	// SessionID is the unique session identifier.
+	SessionID string
+
+	// StepCount is the number of steps recorded in this session so far.
+	StepCount int64
+
+	// LastActivityTime is when the session was last active (Unix milliseconds).
+	LastActivityTime int64
+}
+
+// =============================================================================
 // GraphAnalytics
 // =============================================================================
 
@@ -59,10 +114,12 @@ type DominatorTreeCache struct {
 //	- Dead code detection (unreachable symbols)
 //	- Cyclic dependency detection (using Tarjan's SCC)
 //	- Package coupling metrics
+//	- HLD query wrappers with CRS integration
 //
 // Thread Safety:
 //
 //	GraphAnalytics is safe for concurrent use (read-only queries).
+//	Session management is protected by RWMutex.
 //
 // Performance:
 //
@@ -72,6 +129,7 @@ type DominatorTreeCache struct {
 //	| DeadCode | O(V) |
 //	| CyclicDependencies | O(V + E) |
 //	| PackageCoupling | O(P) where P = packages |
+//	| HLD Queries | O(log V) |
 type GraphAnalytics struct {
 	graph *HierarchicalGraph
 
@@ -82,6 +140,31 @@ type GraphAnalytics struct {
 	// postDomTreeCache caches the post-dominator tree for a given exit point.
 	// Avoids recomputation when multiple tools request the same post-dominator tree.
 	postDomTreeCache *DominatorTreeCache
+
+	// CRS integration (optional) - for HLD query recording
+	crs              crs.CRS
+	hld              *HLDecomposition
+	currentSessionID string
+	stepCounter      atomic.Int64
+	autoSessionSeq   atomic.Int64   // Sequence number for auto-generated session IDs
+	lastActivityTime atomic.Int64   // Unix milliseconds of last CRS query activity
+	sessionStack     []sessionState // Stack of suspended sessions (for nested sessions)
+	autoSession      bool           // If true, auto-start session on first CRS query
+	sessionTimeout   time.Duration  // Max inactivity before session expires (0 = no timeout)
+	mu               sync.RWMutex   // Protects session fields
+
+	// Path query engines (GR-19d) - one per aggregation function
+	pathQueryEngines map[AggregateFunc]*PathQueryEngine
+	pqeMu            sync.RWMutex // Protects pathQueryEngines map
+
+	// BadgerDB integration (C-IMPL-2)
+	db                *badger.DB // Optional BadgerDB for cross-session caching
+	enableBadgerCache bool       // If true, use BadgerDB for path query caching
+	badgerCacheHits   atomic.Int64
+	badgerCacheMisses atomic.Int64
+	badgerCacheErrors atomic.Int64
+
+	logger *slog.Logger
 }
 
 // NewGraphAnalytics creates a new analytics instance for the given graph.
@@ -101,6 +184,49 @@ func NewGraphAnalytics(graph *HierarchicalGraph) *GraphAnalytics {
 		graph:            graph,
 		domTreeCache:     &DominatorTreeCache{},
 		postDomTreeCache: &DominatorTreeCache{},
+		logger:           slog.Default().With(slog.String("component", "graph_analytics")),
+	}
+}
+
+// NewGraphAnalyticsWithCRS creates an analytics instance with CRS integration.
+//
+// Description:
+//
+//	Creates a GraphAnalytics instance that records HLD query operations to CRS.
+//	Use this when you want query tracing and replay capabilities.
+//
+// Inputs:
+//   - graph: The hierarchical graph to analyze. Must not be nil.
+//   - hld: The HLD instance for LCA queries. Must not be nil.
+//   - crsInstance: The CRS instance for recording. Must not be nil.
+//   - opts: Configuration options. If nil, uses defaults (no auto-session).
+//
+// Outputs:
+//   - *GraphAnalytics: The analytics instance with CRS enabled. Never nil if inputs valid.
+//
+// Thread Safety: Safe for concurrent use.
+func NewGraphAnalyticsWithCRS(graph *HierarchicalGraph, hld *HLDecomposition, crsInstance crs.CRS, opts *GraphAnalyticsOptions) *GraphAnalytics {
+	if graph == nil || hld == nil {
+		return nil
+	}
+
+	// Default options if not provided
+	if opts == nil {
+		opts = &GraphAnalyticsOptions{AutoSession: false}
+	}
+
+	return &GraphAnalytics{
+		graph:             graph,
+		hld:               hld,
+		crs:               crsInstance, // Can be nil
+		autoSession:       opts.AutoSession,
+		sessionTimeout:    opts.SessionTimeout,
+		domTreeCache:      &DominatorTreeCache{},
+		postDomTreeCache:  &DominatorTreeCache{},
+		pathQueryEngines:  make(map[AggregateFunc]*PathQueryEngine),
+		db:                opts.BadgerDB, // Can be nil
+		enableBadgerCache: opts.EnableBadgerQueryCache,
+		logger:            slog.Default().With(slog.String("component", "graph_analytics")),
 	}
 }
 
@@ -757,4 +883,1504 @@ func (a *GraphAnalytics) GetCouplingForPackage(pkg string) *CouplingMetrics {
 		ConcreteTypes: concreteCount,
 		Abstractness:  abstractness,
 	}
+}
+
+// =============================================================================
+// CRS Session Management (GR-19c)
+// =============================================================================
+
+// StartSession initializes a new CRS session for query recording.
+//
+// Description:
+//
+//	Sets the session ID in CRS and resets the step counter. All subsequent
+//	CRS-aware queries (LCAWithCRS, etc.) will record StepRecords to this session.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - sessionID: Unique session identifier. Must not be empty.
+//
+// Outputs:
+//   - error: Non-nil if CRS is not configured or session ID is empty.
+//
+// Thread Safety: Safe for concurrent use (protected by mutex).
+func (ga *GraphAnalytics) StartSession(ctx context.Context, sessionID string) error {
+	if ctx == nil {
+		return errors.New("context must not be nil")
+	}
+	if sessionID == "" {
+		return errors.New("sessionID must not be empty")
+	}
+
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	if ga.crs == nil {
+		return errors.New("CRS not configured")
+	}
+
+	// Set session ID in CRS
+	ga.crs.SetSessionID(sessionID)
+
+	// Reset step counter and set current session
+	ga.stepCounter.Store(0)
+	ga.currentSessionID = sessionID
+
+	// Reset last activity time
+	ga.lastActivityTime.Store(time.Now().UnixMilli())
+
+	ga.logger.Info("CRS session started",
+		slog.String("session_id", sessionID),
+	)
+
+	return nil
+}
+
+// EndSession finalizes the current CRS session and clears history.
+//
+// Description:
+//
+//	Clears the step history for the current session and resets session state.
+//	Call this when the session is complete to free memory.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//
+// Outputs:
+//   - error: Non-nil if CRS is not configured or no active session.
+//
+// Thread Safety: Safe for concurrent use (protected by mutex).
+func (ga *GraphAnalytics) EndSession(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context must not be nil")
+	}
+
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	if ga.crs == nil {
+		return errors.New("CRS not configured")
+	}
+
+	if ga.currentSessionID == "" {
+		return errors.New("no active session")
+	}
+
+	sessionID := ga.currentSessionID
+	stepCount := ga.stepCounter.Load()
+
+	// Clear session history in CRS
+	ga.crs.ClearStepHistory(sessionID)
+
+	// Reset session state
+	ga.currentSessionID = ""
+	ga.stepCounter.Store(0)
+
+	ga.logger.Info("CRS session ended",
+		slog.String("session_id", sessionID),
+		slog.Int64("steps", stepCount),
+	)
+
+	return nil
+}
+
+// PushSession suspends the current session and starts a new nested session.
+//
+// Description:
+//
+//	Saves the current session state onto a stack and starts a new session with
+//	the given sessionID. This allows nested/hierarchical session tracking.
+//	Use PopSession() to end the nested session and restore the previous one.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - sessionID: Unique session identifier for the nested session. Must not be empty.
+//
+// Outputs:
+//   - error: Non-nil if CRS is not configured, session ID is empty, or no active session to push.
+//
+// Thread Safety: Safe for concurrent use (protected by mutex).
+//
+// Example:
+//
+//	// Outer operation
+//	analytics.StartSession(ctx, "outer-session")
+//	_, _ = analytics.LCAWithCRS(ctx, "node1", "node2")
+//
+//	// Start nested operation
+//	analytics.PushSession(ctx, "inner-session")
+//	_, _ = analytics.LCAWithCRS(ctx, "node3", "node4")
+//	analytics.PopSession(ctx)
+//
+//	// Back to outer operation
+//	_, _ = analytics.LCAWithCRS(ctx, "node5", "node6")
+//	analytics.EndSession(ctx)
+func (ga *GraphAnalytics) PushSession(ctx context.Context, sessionID string) error {
+	if ctx == nil {
+		return errors.New("context must not be nil")
+	}
+	if sessionID == "" {
+		return errors.New("sessionID must not be empty")
+	}
+
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	if ga.crs == nil {
+		return errors.New("CRS not configured")
+	}
+
+	if ga.currentSessionID == "" {
+		return errors.New("no active session to push - call StartSession first")
+	}
+
+	// Save current session state
+	currentState := sessionState{
+		SessionID:        ga.currentSessionID,
+		StepCount:        ga.stepCounter.Load(),
+		LastActivityTime: ga.lastActivityTime.Load(),
+	}
+	ga.sessionStack = append(ga.sessionStack, currentState)
+
+	// Start new nested session
+	ga.crs.SetSessionID(sessionID)
+	ga.stepCounter.Store(0)
+	ga.currentSessionID = sessionID
+	ga.lastActivityTime.Store(time.Now().UnixMilli())
+
+	ga.logger.Info("CRS session pushed (nested session started)",
+		slog.String("new_session_id", sessionID),
+		slog.String("suspended_session_id", currentState.SessionID),
+		slog.Int("stack_depth", len(ga.sessionStack)),
+	)
+
+	return nil
+}
+
+// PopSession ends the current nested session and restores the previous session from the stack.
+//
+// Description:
+//
+//	Ends the current session, clears its history, and restores the previous session
+//	state from the stack. This is the counterpart to PushSession().
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//
+// Outputs:
+//   - error: Non-nil if CRS is not configured, no active session, or stack is empty.
+//
+// Thread Safety: Safe for concurrent use (protected by mutex).
+func (ga *GraphAnalytics) PopSession(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context must not be nil")
+	}
+
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	if ga.crs == nil {
+		return errors.New("CRS not configured")
+	}
+
+	if ga.currentSessionID == "" {
+		return errors.New("no active session")
+	}
+
+	if len(ga.sessionStack) == 0 {
+		return errors.New("session stack is empty - no session to pop")
+	}
+
+	// End current nested session
+	currentSessionID := ga.currentSessionID
+	currentStepCount := ga.stepCounter.Load()
+
+	ga.crs.ClearStepHistory(currentSessionID)
+
+	// Pop previous session from stack
+	stackLen := len(ga.sessionStack)
+	previousState := ga.sessionStack[stackLen-1]
+	ga.sessionStack = ga.sessionStack[:stackLen-1]
+
+	// Restore previous session state
+	ga.crs.SetSessionID(previousState.SessionID)
+	ga.currentSessionID = previousState.SessionID
+	ga.stepCounter.Store(previousState.StepCount)
+	ga.lastActivityTime.Store(previousState.LastActivityTime)
+
+	ga.logger.Info("CRS session popped (nested session ended)",
+		slog.String("ended_session_id", currentSessionID),
+		slog.Int64("ended_steps", currentStepCount),
+		slog.String("restored_session_id", previousState.SessionID),
+		slog.Int("stack_depth", len(ga.sessionStack)),
+	)
+
+	return nil
+}
+
+// ensureSession automatically starts a session if auto-session is enabled and no session is active.
+//
+// Description:
+//
+//	This is an internal helper called by CRS-aware queries. If autoSession is true
+//	and no session is active, generates a session ID and starts a session.
+//	If sessionTimeout is configured and the current session has been inactive beyond
+//	the timeout, automatically ends the old session and starts a new one.
+//	If a session is already active and not timed out, does nothing.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//
+// Outputs:
+//   - error: Non-nil if session auto-start fails (e.g., CRS not configured).
+//
+// Thread Safety: Safe for concurrent use (protected by mutex).
+//
+// Assumptions:
+//   - Called by CRS-aware queries before recording steps
+//   - Session ID format: "auto_<unix_milliseconds>_<sequence>"
+func (ga *GraphAnalytics) ensureSession(ctx context.Context) error {
+	// Fast path: check session state (read lock)
+	ga.mu.RLock()
+	hasSession := ga.currentSessionID != ""
+	autoEnabled := ga.autoSession
+	timeout := ga.sessionTimeout
+	lastActivity := ga.lastActivityTime.Load()
+	ga.mu.RUnlock()
+
+	// Check if session has timed out
+	sessionTimedOut := false
+	if hasSession && timeout > 0 && lastActivity > 0 {
+		inactivity := time.Duration(time.Now().UnixMilli()-lastActivity) * time.Millisecond
+		if inactivity > timeout {
+			sessionTimedOut = true
+		}
+	}
+
+	// If session exists and not timed out, nothing to do
+	if hasSession && !sessionTimedOut {
+		return nil
+	}
+
+	// If auto-session disabled and no timeout, nothing to do
+	if !autoEnabled && !sessionTimedOut {
+		return nil
+	}
+
+	// Need to handle timeout or start session - acquire write lock
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	hasSession = ga.currentSessionID != ""
+	lastActivity = ga.lastActivityTime.Load()
+	sessionTimedOut = false
+	if hasSession && timeout > 0 && lastActivity > 0 {
+		inactivity := time.Duration(time.Now().UnixMilli()-lastActivity) * time.Millisecond
+		if inactivity > timeout {
+			sessionTimedOut = true
+		}
+	}
+
+	// If session exists and timed out, end it first
+	if hasSession && sessionTimedOut {
+		oldSessionID := ga.currentSessionID
+		stepCount := ga.stepCounter.Load()
+
+		// Clear session history in CRS
+		if ga.crs != nil {
+			ga.crs.ClearStepHistory(oldSessionID)
+		}
+
+		// Reset session state
+		ga.currentSessionID = ""
+		ga.stepCounter.Store(0)
+
+		ga.logger.Info("CRS session timed out and ended",
+			slog.String("session_id", oldSessionID),
+			slog.Int64("steps", stepCount),
+			slog.Duration("timeout", timeout),
+		)
+
+		// Fall through to start new session
+		hasSession = false
+	}
+
+	// If session exists (not timed out) or auto-session disabled, nothing more to do
+	if hasSession || !autoEnabled {
+		return nil
+	}
+
+	// Check CRS is configured
+	if ga.crs == nil {
+		return errors.New("CRS not configured - cannot auto-start session")
+	}
+
+	// Generate auto session ID using timestamp + sequence number for uniqueness
+	seq := ga.autoSessionSeq.Add(1)
+	sessionID := fmt.Sprintf("auto_%d_%d", time.Now().UnixMilli(), seq)
+
+	// Set session ID in CRS
+	ga.crs.SetSessionID(sessionID)
+
+	// Reset step counter and set current session
+	ga.stepCounter.Store(0)
+	ga.currentSessionID = sessionID
+
+	// Set last activity time
+	ga.lastActivityTime.Store(time.Now().UnixMilli())
+
+	ga.logger.Info("CRS session auto-started",
+		slog.String("session_id", sessionID),
+		slog.Bool("auto_session", true),
+	)
+
+	return nil
+}
+
+// updateActivity updates the last activity timestamp for session timeout tracking.
+//
+// Description:
+//
+//	Sets lastActivityTime to the current time in Unix milliseconds.
+//	Called by CRS-aware queries after successful execution to reset the inactivity timer.
+//
+// Thread Safety: Safe for concurrent use (uses atomic operations).
+func (ga *GraphAnalytics) updateActivity() {
+	ga.lastActivityTime.Store(time.Now().UnixMilli())
+}
+
+// nextStepNumber returns the next step number and increments the counter.
+//
+// Description:
+//
+//	Step numbers are 1-indexed and sequential within a session.
+//	Thread-safe via atomic operations.
+//
+// Outputs:
+//   - int: The next step number (1-indexed).
+//
+// Thread Safety: Safe for concurrent use (atomic increment).
+func (ga *GraphAnalytics) nextStepNumber() int {
+	return int(ga.stepCounter.Add(1))
+}
+
+// =============================================================================
+// HLD Query Wrappers with CRS Integration (GR-19c)
+// =============================================================================
+
+// LCAWithCRS computes LCA and records a StepRecord to CRS.
+//
+// Description:
+//
+//	Wraps HLD.LCA() to provide CRS integration. Records the operation
+//	as a StepRecord with timing, outcome, and result summary.
+//
+//	If CRS is not configured or no active session, falls through to raw HLD call.
+//
+// Inputs:
+//   - ctx: Context for cancellation and tracing. Must not be nil.
+//   - u, v: Node IDs. Must not be empty.
+//
+// Outputs:
+//   - string: LCA node ID.
+//   - error: Non-nil on failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) LCAWithCRS(ctx context.Context, u, v string) (string, error) {
+	// Auto-start session if enabled and no session active
+	if err := ga.ensureSession(ctx); err != nil {
+		return "", fmt.Errorf("auto-start session: %w", err)
+	}
+
+	// Check if CRS integration is enabled
+	ga.mu.RLock()
+	hasCRS := ga.crs != nil && ga.currentSessionID != "" && ga.hld != nil
+	sessionID := ga.currentSessionID
+	ga.mu.RUnlock()
+
+	if !hasCRS {
+		// No CRS or session - fall through to raw HLD call
+		if ga.hld == nil {
+			return "", errors.New("HLD not initialized")
+		}
+		return ga.hld.LCA(ctx, u, v)
+	}
+
+	// Execute HLD query with timing
+	start := time.Now()
+	lca, err := ga.hld.LCA(ctx, u, v)
+	duration := time.Since(start)
+
+	// Determine outcome
+	outcome := crs.OutcomeSuccess
+	errorCategory := crs.ErrorCategoryNone
+	errorMsg := ""
+	if err != nil {
+		outcome = crs.OutcomeFailure
+		errorCategory = classifyHLDError(err)
+		errorMsg = err.Error()
+	}
+
+	// Build StepRecord
+	step := crs.StepRecord{
+		SessionID:  sessionID,
+		StepNumber: ga.nextStepNumber(),
+		Timestamp:  time.Now().UnixMilli(),
+		Actor:      crs.ActorSystem,
+		Decision:   crs.DecisionExecuteTool,
+		Tool:       "LCA",
+		ToolParams: &crs.ToolParams{
+			Target: u,
+			Query:  v,
+		},
+		Outcome:       outcome,
+		ErrorCategory: errorCategory,
+		ErrorMessage:  errorMsg,
+		DurationMs:    duration.Milliseconds(),
+		ResultSummary: fmt.Sprintf("LCA(%s,%s)=%s", u, v, lca),
+		Propagate:     false, // Internal system operation
+		Terminal:      false,
+	}
+
+	// Validate and record
+	if err := step.Validate(); err != nil {
+		ga.logger.Error("invalid step record",
+			slog.String("error", err.Error()),
+			slog.String("tool", "LCA"),
+		)
+	} else {
+		if err := ga.crs.RecordStep(ctx, step); err != nil {
+			ga.logger.Warn("failed to record step",
+				slog.String("error", err.Error()),
+				slog.String("tool", "LCA"),
+			)
+		}
+	}
+
+	// Update activity timestamp for timeout tracking
+	ga.updateActivity()
+
+	return lca, err
+}
+
+// DistanceWithCRS computes distance and records a StepRecord to CRS.
+//
+// Description:
+//
+//	Wraps HLD.Distance() to provide CRS integration. Records the operation
+//	as a StepRecord with timing, outcome, and result summary.
+//
+// Inputs:
+//   - ctx: Context for cancellation and tracing. Must not be nil.
+//   - u, v: Node IDs. Must not be empty.
+//
+// Outputs:
+//   - int: Distance between nodes.
+//   - error: Non-nil on failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) DistanceWithCRS(ctx context.Context, u, v string) (int, error) {
+	// Auto-start session if enabled and no session active
+	if err := ga.ensureSession(ctx); err != nil {
+		return 0, fmt.Errorf("auto-start session: %w", err)
+	}
+
+	// Check if CRS integration is enabled
+	ga.mu.RLock()
+	hasCRS := ga.crs != nil && ga.currentSessionID != "" && ga.hld != nil
+	sessionID := ga.currentSessionID
+	ga.mu.RUnlock()
+
+	if !hasCRS {
+		// No CRS or session - fall through to raw HLD call
+		if ga.hld == nil {
+			return 0, errors.New("HLD not initialized")
+		}
+		return ga.hld.Distance(ctx, u, v)
+	}
+
+	// Execute HLD query with timing
+	start := time.Now()
+	dist, err := ga.hld.Distance(ctx, u, v)
+	duration := time.Since(start)
+
+	// Determine outcome
+	outcome := crs.OutcomeSuccess
+	errorCategory := crs.ErrorCategoryNone
+	errorMsg := ""
+	if err != nil {
+		outcome = crs.OutcomeFailure
+		errorCategory = classifyHLDError(err)
+		errorMsg = err.Error()
+	}
+
+	// Build StepRecord
+	step := crs.StepRecord{
+		SessionID:  sessionID,
+		StepNumber: ga.nextStepNumber(),
+		Timestamp:  time.Now().UnixMilli(),
+		Actor:      crs.ActorSystem,
+		Decision:   crs.DecisionExecuteTool,
+		Tool:       "Distance",
+		ToolParams: &crs.ToolParams{
+			Target: u,
+			Query:  v,
+		},
+		Outcome:       outcome,
+		ErrorCategory: errorCategory,
+		ErrorMessage:  errorMsg,
+		DurationMs:    duration.Milliseconds(),
+		ResultSummary: fmt.Sprintf("Distance(%s,%s)=%d", u, v, dist),
+		Propagate:     false,
+		Terminal:      false,
+	}
+
+	// Validate and record
+	if err := step.Validate(); err != nil {
+		ga.logger.Error("invalid step record",
+			slog.String("error", err.Error()),
+			slog.String("tool", "Distance"),
+		)
+	} else {
+		if err := ga.crs.RecordStep(ctx, step); err != nil {
+			ga.logger.Warn("failed to record step",
+				slog.String("error", err.Error()),
+				slog.String("tool", "Distance"),
+			)
+		}
+	}
+
+	// Update activity timestamp for timeout tracking
+	ga.updateActivity()
+
+	return dist, err
+}
+
+// DecomposePathWithCRS decomposes path and records a StepRecord to CRS.
+//
+// Description:
+//
+//	Wraps HLD.DecomposePath() to provide CRS integration. Records the operation
+//	as a StepRecord with timing, outcome, and result summary.
+//
+// Inputs:
+//   - ctx: Context for cancellation and tracing. Must not be nil.
+//   - u, v: Node IDs. Must not be empty.
+//
+// Outputs:
+//   - []PathSegment: Path segments (O(log V) segments).
+//   - error: Non-nil on failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) DecomposePathWithCRS(ctx context.Context, u, v string) ([]PathSegment, error) {
+	// Auto-start session if enabled and no session active
+	if err := ga.ensureSession(ctx); err != nil {
+		return nil, fmt.Errorf("auto-start session: %w", err)
+	}
+
+	// Check if CRS integration is enabled
+	ga.mu.RLock()
+	hasCRS := ga.crs != nil && ga.currentSessionID != "" && ga.hld != nil
+	sessionID := ga.currentSessionID
+	ga.mu.RUnlock()
+
+	if !hasCRS {
+		// No CRS or session - fall through to raw HLD call
+		if ga.hld == nil {
+			return nil, errors.New("HLD not initialized")
+		}
+		return ga.hld.DecomposePath(ctx, u, v)
+	}
+
+	// Execute HLD query with timing
+	start := time.Now()
+	segments, err := ga.hld.DecomposePath(ctx, u, v)
+	duration := time.Since(start)
+
+	// Determine outcome
+	outcome := crs.OutcomeSuccess
+	errorCategory := crs.ErrorCategoryNone
+	errorMsg := ""
+	if err != nil {
+		outcome = crs.OutcomeFailure
+		errorCategory = classifyHLDError(err)
+		errorMsg = err.Error()
+	}
+
+	// Count total positions
+	totalPositions := 0
+	for _, seg := range segments {
+		totalPositions += (seg.End - seg.Start + 1)
+	}
+
+	// Build StepRecord
+	step := crs.StepRecord{
+		SessionID:  sessionID,
+		StepNumber: ga.nextStepNumber(),
+		Timestamp:  time.Now().UnixMilli(),
+		Actor:      crs.ActorSystem,
+		Decision:   crs.DecisionExecuteTool,
+		Tool:       "DecomposePath",
+		ToolParams: &crs.ToolParams{
+			Target: u,
+			Query:  v,
+		},
+		Outcome:       outcome,
+		ErrorCategory: errorCategory,
+		ErrorMessage:  errorMsg,
+		DurationMs:    duration.Milliseconds(),
+		ResultSummary: fmt.Sprintf("DecomposePath(%s,%s) segments=%d positions=%d", u, v, len(segments), totalPositions),
+		Propagate:     false,
+		Terminal:      false,
+	}
+
+	// Validate and record
+	if err := step.Validate(); err != nil {
+		ga.logger.Error("invalid step record",
+			slog.String("error", err.Error()),
+			slog.String("tool", "DecomposePath"),
+		)
+	} else {
+		if err := ga.crs.RecordStep(ctx, step); err != nil {
+			ga.logger.Warn("failed to record step",
+				slog.String("error", err.Error()),
+				slog.String("tool", "DecomposePath"),
+			)
+		}
+	}
+
+	// Update activity timestamp for timeout tracking
+	ga.updateActivity()
+
+	return segments, err
+}
+
+// BatchLCAWithCRS computes batch LCA and records a StepRecord to CRS.
+//
+// Description:
+//
+//	Wraps HLD.BatchLCA() to provide CRS integration. Records a single StepRecord
+//	for the entire batch operation with aggregate statistics.
+//
+// Inputs:
+//   - ctx: Context for cancellation and tracing. Must not be nil.
+//   - pairs: Array of node ID pairs. Must not be empty.
+//
+// Outputs:
+//   - []string: LCA results (one per pair).
+//   - []error: Errors (one per pair, nil on success).
+//   - error: Non-nil on total failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) BatchLCAWithCRS(ctx context.Context, pairs [][2]string) ([]string, []error, error) {
+	// Auto-start session if enabled and no session active
+	if err := ga.ensureSession(ctx); err != nil {
+		return nil, nil, fmt.Errorf("auto-start session: %w", err)
+	}
+
+	// Check if CRS integration is enabled
+	ga.mu.RLock()
+	hasCRS := ga.crs != nil && ga.currentSessionID != "" && ga.hld != nil
+	sessionID := ga.currentSessionID
+	ga.mu.RUnlock()
+
+	if !hasCRS {
+		// No CRS or session - fall through to raw HLD call
+		if ga.hld == nil {
+			return nil, nil, errors.New("HLD not initialized")
+		}
+		return ga.hld.BatchLCA(ctx, pairs)
+	}
+
+	// Execute HLD batch query with timing
+	start := time.Now()
+	results, errs, batchErr := ga.hld.BatchLCA(ctx, pairs)
+	duration := time.Since(start)
+
+	// Count successes and errors
+	successCount := 0
+	errorCount := 0
+	for _, err := range errs {
+		if err == nil {
+			successCount++
+		} else {
+			errorCount++
+		}
+	}
+
+	// Determine outcome
+	// Note: CRS doesn't have OutcomePartial, so use Success with error details in summary
+	outcome := crs.OutcomeSuccess
+	if errorCount == len(pairs) {
+		outcome = crs.OutcomeFailure
+	}
+
+	errorCategory := crs.ErrorCategoryNone
+	errorMsg := ""
+	if batchErr != nil {
+		errorCategory = classifyHLDError(batchErr)
+		errorMsg = batchErr.Error()
+	}
+
+	// Build StepRecord
+	step := crs.StepRecord{
+		SessionID:  sessionID,
+		StepNumber: ga.nextStepNumber(),
+		Timestamp:  time.Now().UnixMilli(),
+		Actor:      crs.ActorSystem,
+		Decision:   crs.DecisionExecuteTool,
+		Tool:       "BatchLCA",
+		ToolParams: &crs.ToolParams{
+			Limit: len(pairs),
+		},
+		Outcome:       outcome,
+		ErrorCategory: errorCategory,
+		ErrorMessage:  errorMsg,
+		DurationMs:    duration.Milliseconds(),
+		ResultSummary: fmt.Sprintf("BatchLCA pairs=%d success=%d errors=%d", len(pairs), successCount, errorCount),
+		Propagate:     false,
+		Terminal:      false,
+	}
+
+	// Validate and record
+	if err := step.Validate(); err != nil {
+		ga.logger.Error("invalid step record",
+			slog.String("error", err.Error()),
+			slog.String("tool", "BatchLCA"),
+		)
+	} else {
+		if err := ga.crs.RecordStep(ctx, step); err != nil {
+			ga.logger.Warn("failed to record step",
+				slog.String("error", err.Error()),
+				slog.String("tool", "BatchLCA"),
+			)
+		}
+	}
+
+	// Update activity timestamp for timeout tracking
+	ga.updateActivity()
+
+	return results, errs, batchErr
+}
+
+// =============================================================================
+// Error Classification Helper (GR-19c)
+// =============================================================================
+
+// classifyHLDError maps HLD errors to typed ErrorCategory.
+//
+// Description:
+//
+//	Converts HLD-specific errors to CRS ErrorCategory enums for consistent
+//	error tracking and analytics.
+//
+// Inputs:
+//   - err: The error to classify.
+//
+// Outputs:
+//   - crs.ErrorCategory: Typed error classification.
+//
+// Thread Safety: Safe for concurrent use (pure function).
+func classifyHLDError(err error) crs.ErrorCategory {
+	if err == nil {
+		return crs.ErrorCategoryNone
+	}
+
+	switch {
+	case errors.Is(err, ErrNodeNotFound):
+		return crs.ErrorCategoryToolNotFound
+	case errors.Is(err, ErrHLDNotInitialized):
+		return crs.ErrorCategoryInternal
+	case errors.Is(err, ErrNodesInDifferentTrees):
+		return crs.ErrorCategoryInvalidParams
+	case errors.Is(err, context.DeadlineExceeded):
+		return crs.ErrorCategoryTimeout
+	case errors.Is(err, context.Canceled):
+		return crs.ErrorCategoryInternal
+	default:
+		return crs.ErrorCategoryInternal
+	}
+}
+
+// =============================================================================
+// Path Aggregate Queries (GR-19d)
+// =============================================================================
+
+// getOrCreatePathQueryEngine gets or creates a PathQueryEngine for the given aggregation function.
+//
+// Description:
+//
+//	Lazily creates and caches PathQueryEngine instances per aggregation function.
+//	Builds segment tree on-demand using the provided value function.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) getOrCreatePathQueryEngine(ctx context.Context, aggFunc AggregateFunc, valueFunc func(string) int64) (*PathQueryEngine, error) {
+	// Fast path: check if engine exists
+	ga.pqeMu.RLock()
+	engine, ok := ga.pathQueryEngines[aggFunc]
+	ga.pqeMu.RUnlock()
+
+	if ok {
+		return engine, nil
+	}
+
+	// Slow path: create new engine
+	ga.pqeMu.Lock()
+	defer ga.pqeMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if engine, ok := ga.pathQueryEngines[aggFunc]; ok {
+		return engine, nil
+	}
+
+	// Build value array in HLD position order
+	valueArr := make([]int64, ga.hld.NodeCount())
+	for i := 0; i < ga.hld.NodeCount(); i++ {
+		nodeIdx := ga.hld.NodeAtPos(i)
+		nodeID, err := ga.hld.IdxToNode(nodeIdx)
+		if err != nil {
+			return nil, fmt.Errorf("getting node ID at position %d: %w", i, err)
+		}
+		valueArr[i] = valueFunc(nodeID)
+	}
+
+	// Build segment tree
+	segTree, err := NewSegmentTree(ctx, valueArr, aggFunc)
+	if err != nil {
+		return nil, fmt.Errorf("building segment tree: %w", err)
+	}
+
+	// Create path query engine with CRS context (H-IMPL-3)
+	opts := DefaultPathQueryEngineOptions()
+	ga.mu.RLock()
+	sessionID := ga.currentSessionID
+	ga.mu.RUnlock()
+	engine, err = NewPathQueryEngineWithCRS(ga.hld, segTree, aggFunc, &opts, ga.crs, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("creating path query engine: %w", err)
+	}
+
+	// Cache for reuse
+	ga.pathQueryEngines[aggFunc] = engine
+	return engine, nil
+}
+
+// pathQueryCacheKey generates a BadgerDB cache key for path queries.
+//
+// Format: pathquery:{graphHash}:{u}:{v}:{aggFunc}
+//
+// Thread Safety: Safe for concurrent use (read-only).
+func (ga *GraphAnalytics) pathQueryCacheKey(u, v string, aggFunc AggregateFunc) string {
+	graphHash := ga.hld.GraphHash()
+	return fmt.Sprintf("pathquery:%s:%s:%s:%s", graphHash, u, v, aggFunc.String())
+}
+
+// getCachedPathQueryResult attempts to retrieve a cached path query result from BadgerDB.
+//
+// Returns (result, true) if cache hit, (0, false) if cache miss or error.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) getCachedPathQueryResult(ctx context.Context, u, v string, aggFunc AggregateFunc) (int64, bool) {
+	if !ga.enableBadgerCache || ga.db == nil {
+		return 0, false
+	}
+
+	key := ga.pathQueryCacheKey(u, v, aggFunc)
+
+	var result int64
+	err := ga.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(key))
+		if err != nil {
+			return err
+		}
+
+		return item.Value(func(val []byte) error {
+			if len(val) != 8 {
+				return fmt.Errorf("invalid cached value length: %d", len(val))
+			}
+			result = int64(binary.BigEndian.Uint64(val))
+			return nil
+		})
+	})
+
+	if err != nil {
+		if err != badger.ErrKeyNotFound {
+			// Log unexpected errors
+			ga.badgerCacheErrors.Add(1)
+			ga.logger.Warn("badger cache read error",
+				slog.String("key", key),
+				slog.String("error", err.Error()),
+			)
+		}
+		ga.badgerCacheMisses.Add(1)
+		return 0, false
+	}
+
+	ga.badgerCacheHits.Add(1)
+	return result, true
+}
+
+// setCachedPathQueryResult stores a path query result to BadgerDB.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) setCachedPathQueryResult(ctx context.Context, u, v string, aggFunc AggregateFunc, result int64) {
+	if !ga.enableBadgerCache || ga.db == nil {
+		return
+	}
+
+	key := ga.pathQueryCacheKey(u, v, aggFunc)
+	value := make([]byte, 8)
+	binary.BigEndian.PutUint64(value, uint64(result))
+
+	err := ga.db.Update(func(txn *badger.Txn) error {
+		// No TTL - cache persists until graph hash changes
+		return txn.Set([]byte(key), value)
+	})
+
+	if err != nil {
+		ga.badgerCacheErrors.Add(1)
+		ga.logger.Warn("badger cache write error",
+			slog.String("key", key),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+// PathSumWithCRS computes sum of values on path from u to v with CRS recording.
+//
+// Description:
+//
+//	Computes the sum of node values along the path from u to v using HLD and segment tree.
+//	Records operation to CRS for traceability and replay.
+//	If BadgerDB caching is enabled, checks cache before computing.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - u: Start node ID. Must exist in graph.
+//   - v: End node ID. Must exist in graph.
+//   - valueFunc: Function that returns value for each node. Must not be nil.
+//
+// Outputs:
+//   - int64: Sum of values on path u → v.
+//   - error: Non-nil if nodes don't exist or query fails.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) PathSumWithCRS(ctx context.Context, u, v string, valueFunc func(string) int64) (int64, error) {
+	// Auto-start session if enabled
+	if err := ga.ensureSession(ctx); err != nil {
+		return 0, fmt.Errorf("auto-start session: %w", err)
+	}
+
+	startTime := time.Now()
+
+	// Check BadgerDB cache (C-IMPL-2)
+	if cachedResult, found := ga.getCachedPathQueryResult(ctx, u, v, AggregateSUM); found {
+		duration := time.Since(startTime)
+
+		// Record CRS trace step for cache hit
+		if ga.crs != nil {
+			ga.mu.RLock()
+			sessionID := ga.currentSessionID
+			ga.mu.RUnlock()
+
+			step := crs.StepRecord{
+				SessionID:  sessionID,
+				StepNumber: ga.nextStepNumber(),
+				Timestamp:  time.Now().UnixMilli(),
+				Actor:      crs.ActorSystem,
+				Decision:   crs.DecisionExecuteTool,
+				Tool:       "PathSum",
+				ToolParams: &crs.ToolParams{
+					Target: u,
+					Query:  v,
+				},
+				Outcome:       crs.OutcomeSuccess,
+				ErrorCategory: crs.ErrorCategoryNone,
+				DurationMs:    duration.Milliseconds(),
+				ResultSummary: fmt.Sprintf("PathSum(%s,%s)=%d [cached]", u, v, cachedResult),
+				Propagate:     false,
+				Terminal:      false,
+			}
+
+			if err := step.Validate(); err != nil {
+				ga.logger.Error("invalid step record",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathSum"),
+				)
+			} else {
+				if err := ga.crs.RecordStep(ctx, step); err != nil {
+					ga.logger.Warn("failed to record step",
+						slog.String("error", err.Error()),
+						slog.String("tool", "PathSum"),
+					)
+				}
+			}
+		}
+
+		ga.updateActivity()
+		return cachedResult, nil
+	}
+
+	// Get or create path query engine for SUM
+	engine, err := ga.getOrCreatePathQueryEngine(ctx, AggregateSUM, valueFunc)
+	if err != nil {
+		return 0, fmt.Errorf("getting path query engine: %w", err)
+	}
+
+	// Execute query
+	result, err := engine.PathQuery(ctx, u, v, ga.logger)
+	if err != nil {
+		return 0, fmt.Errorf("path sum query %s->%s: %w", u, v, err)
+	}
+
+	// Store to BadgerDB cache (C-IMPL-2)
+	ga.setCachedPathQueryResult(ctx, u, v, AggregateSUM, result)
+
+	duration := time.Since(startTime)
+
+	// Record CRS trace step (cache miss)
+	if ga.crs != nil {
+		ga.mu.RLock()
+		sessionID := ga.currentSessionID
+		ga.mu.RUnlock()
+
+		outcome := crs.OutcomeSuccess
+		errorCategory := crs.ErrorCategoryNone
+		errorMsg := ""
+		if err != nil {
+			outcome = crs.OutcomeFailure
+			errorCategory = classifyHLDError(err)
+			errorMsg = err.Error()
+		}
+
+		step := crs.StepRecord{
+			SessionID:  sessionID,
+			StepNumber: ga.nextStepNumber(),
+			Timestamp:  time.Now().UnixMilli(),
+			Actor:      crs.ActorSystem,
+			Decision:   crs.DecisionExecuteTool,
+			Tool:       "PathSum",
+			ToolParams: &crs.ToolParams{
+				Target: u,
+				Query:  v,
+			},
+			Outcome:       outcome,
+			ErrorCategory: errorCategory,
+			ErrorMessage:  errorMsg,
+			DurationMs:    duration.Milliseconds(),
+			ResultSummary: fmt.Sprintf("PathSum(%s,%s)=%d", u, v, result),
+			Propagate:     false,
+			Terminal:      false,
+		}
+
+		if err := step.Validate(); err != nil {
+			ga.logger.Error("invalid step record",
+				slog.String("error", err.Error()),
+				slog.String("tool", "PathSum"),
+			)
+		} else {
+			if err := ga.crs.RecordStep(ctx, step); err != nil {
+				ga.logger.Warn("failed to record step",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathSum"),
+				)
+			}
+		}
+	}
+
+	// Update activity timestamp
+	ga.updateActivity()
+
+	return result, nil
+}
+
+// PathMinWithCRS computes minimum value on path from u to v with CRS recording.
+//
+// Description:
+//
+//	Computes the minimum of node values along the path from u to v using HLD and segment tree.
+//	If BadgerDB caching is enabled, checks cache before computing.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) PathMinWithCRS(ctx context.Context, u, v string, valueFunc func(string) int64) (int64, error) {
+	if err := ga.ensureSession(ctx); err != nil {
+		return 0, fmt.Errorf("auto-start session: %w", err)
+	}
+
+	startTime := time.Now()
+
+	// Check BadgerDB cache (C-IMPL-2)
+	if cachedResult, found := ga.getCachedPathQueryResult(ctx, u, v, AggregateMIN); found {
+		duration := time.Since(startTime)
+
+		if ga.crs != nil {
+			ga.mu.RLock()
+			sessionID := ga.currentSessionID
+			ga.mu.RUnlock()
+
+			step := crs.StepRecord{
+				SessionID:  sessionID,
+				StepNumber: ga.nextStepNumber(),
+				Timestamp:  time.Now().UnixMilli(),
+				Actor:      crs.ActorSystem,
+				Decision:   crs.DecisionExecuteTool,
+				Tool:       "PathMin",
+				ToolParams: &crs.ToolParams{
+					Target: u,
+					Query:  v,
+				},
+				Outcome:       crs.OutcomeSuccess,
+				ErrorCategory: crs.ErrorCategoryNone,
+				DurationMs:    duration.Milliseconds(),
+				ResultSummary: fmt.Sprintf("PathMin(%s,%s)=%d [cached]", u, v, cachedResult),
+				Propagate:     false,
+				Terminal:      false,
+			}
+
+			if err := step.Validate(); err != nil {
+				ga.logger.Error("invalid step record",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathMin"),
+				)
+			} else {
+				if err := ga.crs.RecordStep(ctx, step); err != nil {
+					ga.logger.Warn("failed to record step",
+						slog.String("error", err.Error()),
+						slog.String("tool", "PathMin"),
+					)
+				}
+			}
+		}
+
+		ga.updateActivity()
+		return cachedResult, nil
+	}
+
+	engine, err := ga.getOrCreatePathQueryEngine(ctx, AggregateMIN, valueFunc)
+	if err != nil {
+		return 0, fmt.Errorf("getting path query engine: %w", err)
+	}
+
+	result, err := engine.PathQuery(ctx, u, v, ga.logger)
+	if err != nil {
+		return 0, fmt.Errorf("path min query %s->%s: %w", u, v, err)
+	}
+
+	// Store to BadgerDB cache (C-IMPL-2)
+	ga.setCachedPathQueryResult(ctx, u, v, AggregateMIN, result)
+
+	duration := time.Since(startTime)
+
+	if ga.crs != nil {
+		ga.mu.RLock()
+		sessionID := ga.currentSessionID
+		ga.mu.RUnlock()
+
+		outcome := crs.OutcomeSuccess
+		errorCategory := crs.ErrorCategoryNone
+		errorMsg := ""
+		if err != nil {
+			outcome = crs.OutcomeFailure
+			errorCategory = classifyHLDError(err)
+			errorMsg = err.Error()
+		}
+
+		step := crs.StepRecord{
+			SessionID:  sessionID,
+			StepNumber: ga.nextStepNumber(),
+			Timestamp:  time.Now().UnixMilli(),
+			Actor:      crs.ActorSystem,
+			Decision:   crs.DecisionExecuteTool,
+			Tool:       "PathMin",
+			ToolParams: &crs.ToolParams{
+				Target: u,
+				Query:  v,
+			},
+			Outcome:       outcome,
+			ErrorCategory: errorCategory,
+			ErrorMessage:  errorMsg,
+			DurationMs:    duration.Milliseconds(),
+			ResultSummary: fmt.Sprintf("PathMin(%s,%s)=%d", u, v, result),
+			Propagate:     false,
+			Terminal:      false,
+		}
+
+		if err := step.Validate(); err != nil {
+			ga.logger.Error("invalid step record",
+				slog.String("error", err.Error()),
+				slog.String("tool", "PathMin"),
+			)
+		} else {
+			if err := ga.crs.RecordStep(ctx, step); err != nil {
+				ga.logger.Warn("failed to record step",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathMin"),
+				)
+			}
+		}
+	}
+
+	ga.updateActivity()
+	return result, nil
+}
+
+// PathMaxWithCRS computes maximum value on path from u to v with CRS recording.
+//
+// Description:
+//
+//	Computes the maximum of node values along the path from u to v using HLD and segment tree.
+//	If BadgerDB caching is enabled, checks cache before computing.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) PathMaxWithCRS(ctx context.Context, u, v string, valueFunc func(string) int64) (int64, error) {
+	if err := ga.ensureSession(ctx); err != nil {
+		return 0, fmt.Errorf("auto-start session: %w", err)
+	}
+
+	startTime := time.Now()
+
+	// Check BadgerDB cache (C-IMPL-2)
+	if cachedResult, found := ga.getCachedPathQueryResult(ctx, u, v, AggregateMAX); found {
+		duration := time.Since(startTime)
+
+		if ga.crs != nil {
+			ga.mu.RLock()
+			sessionID := ga.currentSessionID
+			ga.mu.RUnlock()
+
+			step := crs.StepRecord{
+				SessionID:  sessionID,
+				StepNumber: ga.nextStepNumber(),
+				Timestamp:  time.Now().UnixMilli(),
+				Actor:      crs.ActorSystem,
+				Decision:   crs.DecisionExecuteTool,
+				Tool:       "PathMax",
+				ToolParams: &crs.ToolParams{
+					Target: u,
+					Query:  v,
+				},
+				Outcome:       crs.OutcomeSuccess,
+				ErrorCategory: crs.ErrorCategoryNone,
+				DurationMs:    duration.Milliseconds(),
+				ResultSummary: fmt.Sprintf("PathMax(%s,%s)=%d [cached]", u, v, cachedResult),
+				Propagate:     false,
+				Terminal:      false,
+			}
+
+			if err := step.Validate(); err != nil {
+				ga.logger.Error("invalid step record",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathMax"),
+				)
+			} else {
+				if err := ga.crs.RecordStep(ctx, step); err != nil {
+					ga.logger.Warn("failed to record step",
+						slog.String("error", err.Error()),
+						slog.String("tool", "PathMax"),
+					)
+				}
+			}
+		}
+
+		ga.updateActivity()
+		return cachedResult, nil
+	}
+
+	engine, err := ga.getOrCreatePathQueryEngine(ctx, AggregateMAX, valueFunc)
+	if err != nil {
+		return 0, fmt.Errorf("getting path query engine: %w", err)
+	}
+
+	result, err := engine.PathQuery(ctx, u, v, ga.logger)
+	if err != nil {
+		return 0, fmt.Errorf("path max query %s->%s: %w", u, v, err)
+	}
+
+	// Store to BadgerDB cache (C-IMPL-2)
+	ga.setCachedPathQueryResult(ctx, u, v, AggregateMAX, result)
+
+	duration := time.Since(startTime)
+
+	if ga.crs != nil {
+		ga.mu.RLock()
+		sessionID := ga.currentSessionID
+		ga.mu.RUnlock()
+
+		outcome := crs.OutcomeSuccess
+		errorCategory := crs.ErrorCategoryNone
+		errorMsg := ""
+		if err != nil {
+			outcome = crs.OutcomeFailure
+			errorCategory = classifyHLDError(err)
+			errorMsg = err.Error()
+		}
+
+		step := crs.StepRecord{
+			SessionID:  sessionID,
+			StepNumber: ga.nextStepNumber(),
+			Timestamp:  time.Now().UnixMilli(),
+			Actor:      crs.ActorSystem,
+			Decision:   crs.DecisionExecuteTool,
+			Tool:       "PathMax",
+			ToolParams: &crs.ToolParams{
+				Target: u,
+				Query:  v,
+			},
+			Outcome:       outcome,
+			ErrorCategory: errorCategory,
+			ErrorMessage:  errorMsg,
+			DurationMs:    duration.Milliseconds(),
+			ResultSummary: fmt.Sprintf("PathMax(%s,%s)=%d", u, v, result),
+			Propagate:     false,
+			Terminal:      false,
+		}
+
+		if err := step.Validate(); err != nil {
+			ga.logger.Error("invalid step record",
+				slog.String("error", err.Error()),
+				slog.String("tool", "PathMax"),
+			)
+		} else {
+			if err := ga.crs.RecordStep(ctx, step); err != nil {
+				ga.logger.Warn("failed to record step",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathMax"),
+				)
+			}
+		}
+	}
+
+	ga.updateActivity()
+	return result, nil
+}
+
+// PathGCDWithCRS computes GCD of values on path from u to v with CRS recording.
+//
+// Description:
+//
+//	Computes the GCD of node values along the path from u to v using HLD and segment tree.
+//	If BadgerDB caching is enabled, checks cache before computing.
+//
+// Thread Safety: Safe for concurrent use.
+func (ga *GraphAnalytics) PathGCDWithCRS(ctx context.Context, u, v string, valueFunc func(string) int64) (int64, error) {
+	if err := ga.ensureSession(ctx); err != nil {
+		return 0, fmt.Errorf("auto-start session: %w", err)
+	}
+
+	startTime := time.Now()
+
+	// Check BadgerDB cache (C-IMPL-2)
+	if cachedResult, found := ga.getCachedPathQueryResult(ctx, u, v, AggregateGCD); found {
+		duration := time.Since(startTime)
+
+		if ga.crs != nil {
+			ga.mu.RLock()
+			sessionID := ga.currentSessionID
+			ga.mu.RUnlock()
+
+			step := crs.StepRecord{
+				SessionID:  sessionID,
+				StepNumber: ga.nextStepNumber(),
+				Timestamp:  time.Now().UnixMilli(),
+				Actor:      crs.ActorSystem,
+				Decision:   crs.DecisionExecuteTool,
+				Tool:       "PathGCD",
+				ToolParams: &crs.ToolParams{
+					Target: u,
+					Query:  v,
+				},
+				Outcome:       crs.OutcomeSuccess,
+				ErrorCategory: crs.ErrorCategoryNone,
+				DurationMs:    duration.Milliseconds(),
+				ResultSummary: fmt.Sprintf("PathGCD(%s,%s)=%d [cached]", u, v, cachedResult),
+				Propagate:     false,
+				Terminal:      false,
+			}
+
+			if err := step.Validate(); err != nil {
+				ga.logger.Error("invalid step record",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathGCD"),
+				)
+			} else {
+				if err := ga.crs.RecordStep(ctx, step); err != nil {
+					ga.logger.Warn("failed to record step",
+						slog.String("error", err.Error()),
+						slog.String("tool", "PathGCD"),
+					)
+				}
+			}
+		}
+
+		ga.updateActivity()
+		return cachedResult, nil
+	}
+
+	engine, err := ga.getOrCreatePathQueryEngine(ctx, AggregateGCD, valueFunc)
+	if err != nil {
+		return 0, fmt.Errorf("getting path query engine: %w", err)
+	}
+
+	result, err := engine.PathQuery(ctx, u, v, ga.logger)
+	if err != nil {
+		return 0, fmt.Errorf("path gcd query %s->%s: %w", u, v, err)
+	}
+
+	// Store to BadgerDB cache (C-IMPL-2)
+	ga.setCachedPathQueryResult(ctx, u, v, AggregateGCD, result)
+
+	duration := time.Since(startTime)
+
+	if ga.crs != nil {
+		ga.mu.RLock()
+		sessionID := ga.currentSessionID
+		ga.mu.RUnlock()
+
+		outcome := crs.OutcomeSuccess
+		errorCategory := crs.ErrorCategoryNone
+		errorMsg := ""
+		if err != nil {
+			outcome = crs.OutcomeFailure
+			errorCategory = classifyHLDError(err)
+			errorMsg = err.Error()
+		}
+
+		step := crs.StepRecord{
+			SessionID:  sessionID,
+			StepNumber: ga.nextStepNumber(),
+			Timestamp:  time.Now().UnixMilli(),
+			Actor:      crs.ActorSystem,
+			Decision:   crs.DecisionExecuteTool,
+			Tool:       "PathGCD",
+			ToolParams: &crs.ToolParams{
+				Target: u,
+				Query:  v,
+			},
+			Outcome:       outcome,
+			ErrorCategory: errorCategory,
+			ErrorMessage:  errorMsg,
+			DurationMs:    duration.Milliseconds(),
+			ResultSummary: fmt.Sprintf("PathGCD(%s,%s)=%d", u, v, result),
+			Propagate:     false,
+			Terminal:      false,
+		}
+
+		if err := step.Validate(); err != nil {
+			ga.logger.Error("invalid step record",
+				slog.String("error", err.Error()),
+				slog.String("tool", "PathGCD"),
+			)
+		} else {
+			if err := ga.crs.RecordStep(ctx, step); err != nil {
+				ga.logger.Warn("failed to record step",
+					slog.String("error", err.Error()),
+					slog.String("tool", "PathGCD"),
+				)
+			}
+		}
+	}
+
+	ga.updateActivity()
+	return result, nil
 }

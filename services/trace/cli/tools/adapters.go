@@ -88,6 +88,9 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 			registry.Register(NewFindControlDependenciesTool(analytics, idx)) // GR-17c: Control dependencies
 			registry.Register(NewFindExtractableRegionsTool(analytics, idx))  // GR-17g: Extractable regions
 			registry.Register(NewCheckReducibilityTool(analytics, idx))       // GR-17h: Check reducibility
+			registry.Register(NewFindCriticalPathTool(analytics, idx))        // GR-18a: Critical path
+			registry.Register(NewFindModuleAPITool(analytics, g, idx))        // GR-18b: Module API surface
+			registry.Register(NewFindWeightedCriticalityTool(analytics, idx)) // GR-18c: Weighted criticality
 		}
 	}
 

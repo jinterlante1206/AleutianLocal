@@ -12,6 +12,8 @@ package graph
 
 import (
 	"fmt"
+	"hash/fnv"
+	"sort"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
@@ -1321,4 +1323,95 @@ func (g *Graph) GetEdgesByFile(filePath string) []*Edge {
 //	Safe for concurrent use on frozen graphs.
 func (g *Graph) GetEdgeCountByFile(filePath string) int {
 	return len(g.edgesByFile[filePath])
+}
+
+// Hash returns a deterministic hash of the graph structure.
+//
+// Description:
+//
+//	Computes a hash over all nodes and edges in the graph. The hash is
+//	deterministic (same graph structure always produces same hash) and
+//	can be used to detect graph changes for cache invalidation.
+//
+//	The hash includes:
+//	  - All node IDs (sorted)
+//	  - All edge tuples (from, to, type) sorted
+//
+//	Uses FNV-1a hash for speed and good distribution.
+//
+// Outputs:
+//
+//   - string: Hex-encoded hash (16 characters). Empty string if graph is nil.
+//
+// Example:
+//
+//	hash1 := graph.Hash()
+//	// ... modify graph ...
+//	hash2 := graph.Hash()
+//	if hash1 != hash2 {
+//	    log.Info("graph changed, invalidating caches")
+//	}
+//
+// Complexity:
+//
+//	O(V log V + E log E) - Sorting nodes and edges
+//	O(V + E) if already sorted (frozen graphs)
+//
+// Thread Safety:
+//
+//	Safe for concurrent use on frozen graphs.
+func (g *Graph) Hash() string {
+	if g == nil {
+		return ""
+	}
+
+	h := fnv.New64a()
+
+	// Hash node IDs (sorted for determinism)
+	nodeIDs := make([]string, 0, len(g.nodes))
+	for id := range g.nodes {
+		nodeIDs = append(nodeIDs, id)
+	}
+	sort.Strings(nodeIDs)
+
+	for _, id := range nodeIDs {
+		h.Write([]byte(id))
+		h.Write([]byte{0}) // Separator
+	}
+
+	// Hash edges (sorted for determinism)
+	type edgeTuple struct {
+		from     string
+		to       string
+		edgeType EdgeType
+	}
+	edgeTuples := make([]edgeTuple, 0, len(g.edges))
+	for _, edge := range g.edges {
+		edgeTuples = append(edgeTuples, edgeTuple{
+			from:     edge.FromID,
+			to:       edge.ToID,
+			edgeType: edge.Type,
+		})
+	}
+
+	sort.Slice(edgeTuples, func(i, j int) bool {
+		if edgeTuples[i].from != edgeTuples[j].from {
+			return edgeTuples[i].from < edgeTuples[j].from
+		}
+		if edgeTuples[i].to != edgeTuples[j].to {
+			return edgeTuples[i].to < edgeTuples[j].to
+		}
+		return edgeTuples[i].edgeType < edgeTuples[j].edgeType
+	})
+
+	for _, tuple := range edgeTuples {
+		h.Write([]byte(tuple.from))
+		h.Write([]byte{0})
+		h.Write([]byte(tuple.to))
+		h.Write([]byte{0})
+		h.Write([]byte{byte(tuple.edgeType)})
+		h.Write([]byte{0})
+	}
+
+	return fmt.Sprintf("%016x", h.Sum64())
 }

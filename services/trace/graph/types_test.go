@@ -1774,3 +1774,211 @@ func BenchmarkStats_WithIndexes(b *testing.B) {
 		g.Stats()
 	}
 }
+
+// =============================================================================
+// GR-19c: Graph.Hash() Tests
+// =============================================================================
+
+func TestGraph_Hash(t *testing.T) {
+	t.Run("nil graph returns empty hash", func(t *testing.T) {
+		var g *Graph
+		hash := g.Hash()
+		if hash != "" {
+			t.Errorf("nil graph Hash() = %q, expected empty string", hash)
+		}
+	})
+
+	t.Run("empty graph returns consistent hash", func(t *testing.T) {
+		g := NewGraph("/project")
+		hash1 := g.Hash()
+		hash2 := g.Hash()
+
+		if hash1 == "" {
+			t.Error("empty graph should have non-empty hash")
+		}
+		if hash1 != hash2 {
+			t.Errorf("empty graph hash not consistent: %q != %q", hash1, hash2)
+		}
+	})
+
+	t.Run("same structure produces same hash", func(t *testing.T) {
+		// Build graph 1
+		g1 := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g1.AddNode(sym1)
+		g1.AddNode(sym2)
+		g1.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		// Build identical graph 2
+		g2 := NewGraph("/project")
+		sym1b := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2b := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g2.AddNode(sym1b)
+		g2.AddNode(sym2b)
+		g2.AddEdge(sym1b.ID, sym2b.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		hash1 := g1.Hash()
+		hash2 := g2.Hash()
+
+		if hash1 != hash2 {
+			t.Errorf("identical graphs have different hashes: %q != %q", hash1, hash2)
+		}
+	})
+
+	t.Run("hash changes when node added", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		g.AddNode(sym1)
+
+		hash1 := g.Hash()
+
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g.AddNode(sym2)
+
+		hash2 := g.Hash()
+
+		if hash1 == hash2 {
+			t.Error("hash should change when node is added")
+		}
+	})
+
+	t.Run("hash changes when edge added", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+
+		hash1 := g.Hash()
+
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		hash2 := g.Hash()
+
+		if hash1 == hash2 {
+			t.Error("hash should change when edge is added")
+		}
+	})
+
+	t.Run("hash is deterministic with multiple calls", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym1 := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		sym2 := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		sym3 := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+		g.AddNode(sym1)
+		g.AddNode(sym2)
+		g.AddNode(sym3)
+		g.AddEdge(sym1.ID, sym2.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g.AddEdge(sym2.ID, sym3.ID, EdgeTypeCalls, makeLocation("b.go", 10))
+
+		// Call Hash() multiple times - should always return same value
+		hashes := make([]string, 10)
+		for i := 0; i < 10; i++ {
+			hashes[i] = g.Hash()
+		}
+
+		for i := 1; i < 10; i++ {
+			if hashes[i] != hashes[0] {
+				t.Errorf("hash call %d returned %q, expected %q", i, hashes[i], hashes[0])
+			}
+		}
+	})
+
+	t.Run("node insertion order does not affect hash", func(t *testing.T) {
+		// Graph 1: Add nodes in order A, B, C
+		g1 := NewGraph("/project")
+		symA := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		symB := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		symC := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+		g1.AddNode(symA)
+		g1.AddNode(symB)
+		g1.AddNode(symC)
+
+		// Graph 2: Add nodes in order C, A, B
+		g2 := NewGraph("/project")
+		symAb := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		symBb := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		symCb := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+		g2.AddNode(symCb)
+		g2.AddNode(symAb)
+		g2.AddNode(symBb)
+
+		hash1 := g1.Hash()
+		hash2 := g2.Hash()
+
+		if hash1 != hash2 {
+			t.Errorf("node insertion order affected hash: %q != %q", hash1, hash2)
+		}
+	})
+
+	t.Run("edge insertion order does not affect hash", func(t *testing.T) {
+		symA := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		symB := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+		symC := makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go")
+
+		// Graph 1: Add edges A->B, B->C
+		g1 := NewGraph("/project")
+		g1.AddNode(makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go"))
+		g1.AddNode(makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go"))
+		g1.AddNode(makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go"))
+		g1.AddEdge(symA.ID, symB.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+		g1.AddEdge(symB.ID, symC.ID, EdgeTypeCalls, makeLocation("b.go", 10))
+
+		// Graph 2: Add edges B->C, A->B
+		g2 := NewGraph("/project")
+		g2.AddNode(makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go"))
+		g2.AddNode(makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go"))
+		g2.AddNode(makeSymbol("c.go:1:funcC", "funcC", ast.SymbolKindFunction, "c.go"))
+		g2.AddEdge(symB.ID, symC.ID, EdgeTypeCalls, makeLocation("b.go", 10))
+		g2.AddEdge(symA.ID, symB.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		hash1 := g1.Hash()
+		hash2 := g2.Hash()
+
+		if hash1 != hash2 {
+			t.Errorf("edge insertion order affected hash: %q != %q", hash1, hash2)
+		}
+	})
+
+	t.Run("different edge types produce different hashes", func(t *testing.T) {
+		symA := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		symB := makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go")
+
+		g1 := NewGraph("/project")
+		g1.AddNode(makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go"))
+		g1.AddNode(makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go"))
+		g1.AddEdge(symA.ID, symB.ID, EdgeTypeCalls, makeLocation("a.go", 10))
+
+		g2 := NewGraph("/project")
+		g2.AddNode(makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go"))
+		g2.AddNode(makeSymbol("b.go:1:funcB", "funcB", ast.SymbolKindFunction, "b.go"))
+		g2.AddEdge(symA.ID, symB.ID, EdgeTypeReferences, makeLocation("a.go", 10))
+
+		hash1 := g1.Hash()
+		hash2 := g2.Hash()
+
+		if hash1 == hash2 {
+			t.Error("different edge types should produce different hashes")
+		}
+	})
+
+	t.Run("hash format is 16-character hex", func(t *testing.T) {
+		g := NewGraph("/project")
+		sym := makeSymbol("a.go:1:funcA", "funcA", ast.SymbolKindFunction, "a.go")
+		g.AddNode(sym)
+
+		hash := g.Hash()
+
+		if len(hash) != 16 {
+			t.Errorf("hash length = %d, expected 16", len(hash))
+		}
+
+		// Verify it's all hex characters
+		for _, ch := range hash {
+			if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+				t.Errorf("hash contains non-hex character: %c in %q", ch, hash)
+			}
+		}
+	})
+}
