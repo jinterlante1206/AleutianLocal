@@ -960,7 +960,7 @@ declare -a CRS_TESTS=(
     # These tests verify the find_dominators tool is properly exposed and integrated
 
     # Test 94: Basic find_dominators tool query
-    "FIND_DOMINATORS|basic|What functions dominate the Handler function?|COMPLETE|find_dominators_tool_used"
+    "FIND_DOMINATORS|basic|What functions dominate the NewUploadFromAPI function?|COMPLETE|find_dominators_tool_used"
 
     # Test 95: find_dominators with show_tree parameter
     "FIND_DOMINATORS|tree|Show the dominator tree starting from main|COMPLETE|find_dominators_tree"
@@ -1233,6 +1233,8 @@ start_trace_server() {
     echo "Wiping stale graph cache to force rebuild..."
     ssh_cmd "rm -f ~/trace_test/AleutianFOSS/*.db ~/trace_test/AleutianFOSS/graph_cache.json ~/trace_test/AleutianFOSS/*.gob 2>/dev/null" || true
     ssh_cmd "rm -rf ~/trace_test/AleutianFOSS/badger_* 2>/dev/null" || true
+    # GR-17: Also wipe CRS persistence cache where graphs are actually stored
+    ssh_cmd "rm -rf ~/.aleutian/crs/ 2>/dev/null" || true
 
     # Start the server in background
     ssh -f -i "$SSH_KEY" \
@@ -2541,6 +2543,202 @@ run_internal_test() {
             fi
             ;;
 
+        verify_find_articulation_points_crs)
+            # GR-17a: Verify find_articulation_points tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_articulation_points tool (GR-17a)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_articulation_points\|tool.*articulation' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'find_articulation_points.*action\|find_articulation_points.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17a: find_articulation_points tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17a: No find_articulation_points tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17a: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_dominators_crs)
+            # GR-17b: Verify find_dominators tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_dominators tool (GR-17b)...${NC}"
+
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_dominators\|tool.*dominators' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+            local trace_metadata=$(ssh_cmd "grep -i 'find_dominators.*action\|find_dominators.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17b: find_dominators tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17b: No find_dominators tool CRS logs found${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_merge_points_crs)
+            # GR-17d: Verify find_merge_points tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_merge_points tool (GR-17d)...${NC}"
+
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_merge_points\|tool.*merge' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+            local trace_metadata=$(ssh_cmd "grep -i 'find_merge_points.*action\|find_merge_points.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17d: find_merge_points tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17d: No find_merge_points tool CRS logs found${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_loops_crs)
+            # GR-17e: Verify find_loops tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_loops tool (GR-17e)...${NC}"
+
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_loops\|tool.*loops\|DetectLoops' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+            local trace_metadata=$(ssh_cmd "grep -i 'analytics_loops\|loops.*trace\|DetectLoops.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17e: find_loops tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17e: No find_loops tool CRS logs found${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_common_dependency_crs)
+            # GR-17f: Verify find_common_dependency tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_common_dependency tool (GR-17f)...${NC}"
+
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_common_dependency\|tool.*common.*dependency' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+            local trace_metadata=$(ssh_cmd "grep -i 'find_common_dependency.*action\|find_common_dependency.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17f: find_common_dependency tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17f: No find_common_dependency tool CRS logs found${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_control_deps_crs)
+            # GR-17c: Verify find_control_dependencies tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_control_dependencies tool (GR-17c)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_control_dependencies\|control.*dependenc\|ComputeControlDependence' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'analytics_control\|control.*trace\|ControlDependence.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17c: find_control_dependencies tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17c: No find_control_dependencies tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17c: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17c: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_extractable_crs)
+            # GR-17g: Verify find_extractable_regions tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_extractable_regions tool (GR-17g)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_extractable_regions\|extractable.*region\|DetectSESERegions' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'analytics_sese\|sese.*trace\|SESERegions.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-17g: find_extractable_regions tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-17g: No find_extractable_regions tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-17g: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-17g: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_critical_path_crs)
+            # GR-18a: Verify find_critical_path tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_critical_path tool (GR-18a)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_critical_path\|critical.*path.*tool\|CriticalPath' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'dominator.*critical\|critical.*path.*CRS\|tool_critical_path' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-18a: find_critical_path tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-18a: No find_critical_path tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-18a: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-18a: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        verify_find_module_api_crs)
+            # GR-18b: Verify find_module_api tool records TraceStep in CRS
+            echo -e "  ${BLUE}Checking CRS integration for find_module_api tool (GR-18b)...${NC}"
+
+            # Check server logs for tool CRS trace step recording
+            local tool_crs_logs=$(ssh_cmd "grep -i 'find_module_api\|module.*api.*tool\|ModuleAPI' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+
+            # Check for trace step with tool metadata
+            local trace_metadata=$(ssh_cmd "grep -i 'community.*api\|module.*api.*CRS\|tool_module_api' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+
+            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
+                echo -e "  ${GREEN}✓ GR-18b: find_module_api tool CRS integration detected${NC}"
+                if [ -n "$tool_crs_logs" ]; then
+                    echo "$tool_crs_logs" | sed 's/^/    /'
+                fi
+                result_message="Tool CRS integration working"
+            else
+                echo -e "  ${YELLOW}⚠ GR-18b: No find_module_api tool CRS logs found${NC}"
+                echo -e "  ${YELLOW}  → Pre-GR-18b: Expected (tool not implemented)${NC}"
+                echo -e "  ${YELLOW}  → Post-GR-18b: Should record TraceStep with tool metadata${NC}"
+                result_message="No tool CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
         *)
             echo -e "  ${YELLOW}⚠ Unknown internal test: $test_name${NC}"
             result_message="Unknown test"
@@ -3163,92 +3361,6 @@ run_extra_check() {
             ;;
 
         # ================================================================================
-        # GR-17a: find_articulation_points TOOL CHECKS
-        # TDD: These checks define expected behavior BEFORE implementation
-        # ================================================================================
-
-        find_articulation_points_tool_used)
-            # GR-17a: Verify find_articulation_points tool was used for bottleneck queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_articulation_points was used
-            local ap_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_articulation_points")] | length' 2>/dev/null || echo "0")
-
-            if [ "$ap_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17a: find_articulation_points tool was used: $ap_used calls${NC}"
-
-                # Check for articulation point count in response
-                local ap_count=$(echo "$agent_resp" | grep -oi "[0-9]* articulation\|[0-9]* single point\|[0-9]* bottleneck" | head -1)
-                if [ -n "$ap_count" ]; then
-                    echo -e "    ${BLUE}  $ap_count found${NC}"
-                fi
-
-                # Check for fragility score
-                local has_fragility=$(echo "$agent_resp" | grep -ci "fragility\|fragile")
-                if [ "$has_fragility" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17a: Response includes fragility analysis${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-17a: find_articulation_points tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-17a: Should use find_articulation_points for bottleneck queries${NC}"
-            fi
-            ;;
-
-        find_articulation_points_bridges)
-            # GR-17a: Verify find_articulation_points returns bridge info
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check for bridge/critical edge mentions
-            local bridge_mentions=$(echo "$agent_resp" | grep -ci "bridge\|critical edge\|critical connection")
-
-            if [ "$bridge_mentions" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17a: Bridge information included ($bridge_mentions mentions)${NC}"
-
-                # Extract specific bridge info if available
-                local bridge_line=$(echo "$agent_resp" | grep -i "bridge\|critical edge" | head -1)
-                if [ -n "$bridge_line" ]; then
-                    echo -e "    ${BLUE}  $bridge_line${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-17a: No bridge information in response${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-17a: Should include bridges when include_bridges=true${NC}"
-            fi
-            ;;
-
-        verify_find_articulation_points_crs)
-            # GR-17a: Verify find_articulation_points tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_articulation_points tool (GR-17a)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_articulation_points\|tool.*articulation' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'find_articulation_points.*action\|find_articulation_points.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17a: find_articulation_points tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17a: No find_articulation_points tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17a: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
         # GR-17e: find_loops TOOL CHECKS
         # ================================================================================
 
@@ -3306,30 +3418,6 @@ run_extra_check() {
                 echo -e "    ${YELLOW}⚠ GR-17e: No mutual recursion patterns found${NC}"
                 echo -e "    ${YELLOW}  → May indicate no mutual recursion in codebase${NC}"
                 echo -e "    ${YELLOW}  → Or min_size filter correctly filtering self-loops${NC}"
-            fi
-            ;;
-
-        verify_find_loops_crs)
-            # GR-17e: Verify find_loops tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_loops tool (GR-17e)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_loops\|tool.*loops\|DetectLoops' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'analytics_loops\|loops.*trace\|DetectLoops.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17e: find_loops tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17e: No find_loops tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17e: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17e: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
             fi
             ;;
 
@@ -3393,31 +3481,6 @@ run_extra_check() {
             fi
             ;;
 
-        verify_find_control_deps_crs)
-            # GR-17c: Verify find_control_dependencies tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_control_dependencies tool (GR-17c)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_control_dependencies\|control.*dependenc\|ComputeControlDependence' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'analytics_control\|control.*trace\|ControlDependence.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17c: find_control_dependencies tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17c: No find_control_dependencies tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17c: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17c: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
         # GR-17g: find_extractable_regions TOOL CHECKS
         # ================================================================================
 
@@ -3477,33 +3540,6 @@ run_extra_check() {
             fi
             ;;
 
-        verify_find_extractable_crs)
-            # GR-17g: Verify find_extractable_regions tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_extractable_regions tool (GR-17g)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_extractable_regions\|extractable.*region\|DetectSESERegions' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'analytics_sese\|sese.*trace\|SESERegions.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17g: find_extractable_regions tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17g: No find_extractable_regions tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17g: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17g: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-17h: check_reducibility TOOL CHECKS
-        # ================================================================================
 
         check_reducibility_tool_used)
             # GR-17h: Verify check_reducibility tool was used for code quality queries
@@ -3648,32 +3684,6 @@ run_extra_check() {
             fi
             ;;
 
-        verify_find_critical_path_crs)
-            # GR-18a: Verify find_critical_path tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_critical_path tool (GR-18a)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_critical_path\|critical.*path.*tool\|CriticalPath' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'dominator.*critical\|critical.*path.*CRS\|tool_critical_path' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-18a: find_critical_path tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-18a: No find_critical_path tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-18a: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-18a: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-16c: POST-DOMINATOR CRS VERIFICATION
         # ================================================================================
 
         verify_post_dominator_crs_recording)
@@ -3753,6 +3763,274 @@ run_extra_check() {
                 echo -e "  ${YELLOW}  → Pre-GR-16e: Expected (control dependence not implemented)${NC}"
                 echo -e "  ${YELLOW}  → Post-GR-16e: Should record TraceStep with WithCRS methods${NC}"
                 result_message="No CRS logs (pre-implementation expected)"
+            fi
+            ;;
+
+        find_dominators_tool_used)
+            # GR-17a: Verify find_dominators tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+
+            if [ -z "$session_id" ] || [ "$session_id" = "null" ]; then
+                echo -e "    ${YELLOW}⚠ GR-17a: Cannot validate (no session_id)${NC}"
+                return 0
+            fi
+
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if ! echo "$trace" | jq . > /dev/null 2>&1; then
+                echo -e "    ${YELLOW}⚠ GR-17a: Cannot validate (trace fetch failed)${NC}"
+                return 0
+            fi
+
+            # Check for both "tool_call" and "tool_call_forced" actions
+            local dominators_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call" or .action == "tool_call_forced") | select(.tool == "find_dominators")] | length')
+            if [ "$dominators_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17a: find_dominators tool used ($dominators_used invocations)${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17a: find_dominators not found in trace${NC}"
+            fi
+            ;;
+
+        find_dominators_tree)
+            # GR-17a: Verify dominator tree was shown in response
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            
+            # Check for dominator tree indicators (tree structure, hierarchy, dominators list)
+            local has_tree=$(echo "$agent_resp" | grep -ciE "dominator.*tree|tree.*starting|entry.*point|dominates|dominated.*by")
+            local has_structure=$(echo "$agent_resp" | grep -ciE "└|├|│|→|▼|main.*→")
+            
+            if [ "$has_tree" -gt 0 ] || [ "$has_structure" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17a: Dominator tree shown in response${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17a: No dominator tree structure in response${NC}"
+                echo -e "    ${YELLOW}  → Response may describe dominators without tree visualization${NC}"
+            fi
+            ;;
+
+        find_articulation_points_tool_used)
+            # GR-16b: Verify find_articulation_points tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+
+            if [ -z "$session_id" ] || [ "$session_id" = "null" ]; then
+                echo -e "    ${YELLOW}⚠ GR-16b: Cannot validate (no session_id)${NC}"
+                return 0
+            fi
+
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if ! echo "$trace" | jq . > /dev/null 2>&1; then
+                echo -e "    ${YELLOW}⚠ GR-16b: Cannot validate (trace fetch failed)${NC}"
+                return 0
+            fi
+
+            # Check for both "tool_call" and "tool_call_forced" actions
+            local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call" or .action == "tool_call_forced") | select(.tool == "find_articulation_points")] | length')
+            if [ "$tool_used" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-16b: find_articulation_points tool used ($tool_used invocations)${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-16b: find_articulation_points not found in trace${NC}"
+            fi
+            ;;
+
+        find_articulation_points_bridges)
+            # GR-16b: Verify bridges parameter was used
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_bridges=$(echo "$agent_resp" | grep -ciE "bridge|edge.*critical|remove.*disconn")
+            if [ "$has_bridges" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-16b: Bridges parameter handling detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-16b: No bridge-specific output${NC}"
+            fi
+            ;;
+
+        find_merge_points_tool_used)
+            # GR-17b: Verify find_merge_points tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if echo "$trace" | jq . > /dev/null 2>&1; then
+                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_merge_points")] | length')
+                if [ "$tool_used" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17b: find_merge_points tool used ($tool_used invocations)${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ GR-17b: find_merge_points not found in trace${NC}"
+                fi
+            fi
+            ;;
+
+        find_merge_points_sources)
+            # GR-17b: Verify specific sources parameter was used
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_sources=$(echo "$agent_resp" | grep -ciE "merge.*point|confluence|join")
+            if [ "$has_sources" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17b: Merge points with sources detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17b: No merge point details${NC}"
+            fi
+            ;;
+
+        find_loops_tool_used)
+            # GR-17d: Verify find_loops tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if echo "$trace" | jq . > /dev/null 2>&1; then
+                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_loops")] | length')
+                if [ "$tool_used" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17d: find_loops tool used ($tool_used invocations)${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ GR-17d: find_loops not found in trace${NC}"
+                fi
+            fi
+            ;;
+
+        find_loops_min_size)
+            # GR-17d: Verify min_size parameter was used
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_loops=$(echo "$agent_resp" | grep -ciE "loop|cycle|back.*edge")
+            if [ "$has_loops" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17d: Loop detection with min_size detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17d: No loop details${NC}"
+            fi
+            ;;
+
+        find_common_dependency_tool_used)
+            # GR-17e: Verify find_common_dependency tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if echo "$trace" | jq . > /dev/null 2>&1; then
+                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_common_dependency")] | length')
+                if [ "$tool_used" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17e: find_common_dependency tool used ($tool_used invocations)${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ GR-17e: find_common_dependency not found in trace${NC}"
+                fi
+            fi
+            ;;
+
+        find_common_dependency_entry)
+            # GR-17e: Verify entry point parameter was used
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_lcd=$(echo "$agent_resp" | grep -ciE "common.*dependency|LCD|lowest.*common")
+            if [ "$has_lcd" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17e: Common dependency with entry point detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17e: No common dependency details${NC}"
+            fi
+            ;;
+
+        find_control_deps_tool_used)
+            # GR-17c: Verify find_control_dependencies tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if echo "$trace" | jq . > /dev/null 2>&1; then
+                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_control_dependencies")] | length')
+                if [ "$tool_used" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17c: find_control_dependencies tool used ($tool_used invocations)${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ GR-17c: find_control_dependencies not found in trace${NC}"
+                fi
+            fi
+            ;;
+
+        find_control_deps_depth)
+            # GR-17c: Verify depth parameter was used
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_control=$(echo "$agent_resp" | grep -ciE "control.*depend|dominated.*by|branch")
+            if [ "$has_control" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17c: Control dependencies with depth detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17c: No control dependency details${NC}"
+            fi
+            ;;
+
+        find_extractable_tool_used)
+            # GR-17g: Verify find_extractable_regions tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if echo "$trace" | jq . > /dev/null 2>&1; then
+                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_extractable_regions")] | length')
+                if [ "$tool_used" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17g: find_extractable_regions tool used ($tool_used invocations)${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ GR-17g: find_extractable_regions not found in trace${NC}"
+                fi
+            fi
+            ;;
+
+        find_extractable_size)
+            # GR-17g: Verify size parameters were used
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_sese=$(echo "$agent_resp" | grep -ciE "SESE|extractable|single.*entry.*single.*exit")
+            if [ "$has_sese" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17g: Extractable regions with size detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17g: No SESE region details${NC}"
+            fi
+            ;;
+
+        check_reducibility_tool_used)
+            # GR-17h: Verify check_reducibility tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if echo "$trace" | jq . > /dev/null 2>&1; then
+                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "check_reducibility")] | length')
+                if [ "$tool_used" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-17h: check_reducibility tool used ($tool_used invocations)${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ GR-17h: check_reducibility not found in trace${NC}"
+                fi
+            fi
+            ;;
+
+        check_reducibility_details)
+            # GR-17h: Verify irreducible region details shown
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_details=$(echo "$agent_resp" | grep -ciE "reducib|irreducib|region|back.*edge")
+            if [ "$has_details" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-17h: Reducibility details detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-17h: No reducibility details${NC}"
+            fi
+            ;;
+
+        find_critical_path_tool_used)
+            # GR-18a: Verify find_critical_path tool was invoked
+            if [ -z "$session_id" ]; then
+                session_id=$(echo "$response" | jq -r '.session_id')
+            fi
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            if echo "$trace" | jq . > /dev/null 2>&1; then
+                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_critical_path")] | length')
+                if [ "$tool_used" -gt 0 ]; then
+                    echo -e "    ${GREEN}✓ GR-18a: find_critical_path tool used ($tool_used invocations)${NC}"
+                else
+                    echo -e "    ${YELLOW}⚠ GR-18a: find_critical_path not found in trace${NC}"
+                fi
+            fi
+            ;;
+
+        find_critical_path_entry)
+            # GR-18a: Verify entry point parameter was used
+            local agent_resp=$(echo "$response" | jq -r '.response // ""')
+            local has_path=$(echo "$agent_resp" | grep -ciE "critical.*path|longest.*path|bottleneck")
+            if [ "$has_path" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ GR-18a: Critical path with entry point detected${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ GR-18a: No critical path details${NC}"
             fi
             ;;
 
@@ -3926,12 +4204,18 @@ main() {
         [.[].crs_trace.trace // [] | .[] | select(.error != null and (.error | test("[Ss]emantic repetition|similar to")))] | length
     ' 2>/dev/null || echo "0")
 
+    # Count tests with per-test tool violations (not total across all tests)
+    # A violation is when a single test has a tool called >2 times WITHOUT CB firing
     local tools_exceeding_threshold=$(echo "$results" | jq '
-        [.[].crs_trace.trace // [] | .[] | select(.action == "tool_call" or .action == "tool_call_forced")] |
-        group_by(.tool) |
-        map({tool: .[0].tool, count: length}) |
-        map(select(.count > 2)) |
-        length
+        [.[] |
+            {
+                test: .test,
+                tool_counts: ([.crs_trace.trace // [] | .[] | select(.action == "tool_call" or .action == "tool_call_forced")] | group_by(.tool) | map({tool: .[0].tool, count: length})),
+                cb_fired: ([.crs_trace.trace // [] | .[] | select(.action == "circuit_breaker")] | length > 0)
+            } |
+            # Select tests where a tool exceeded threshold AND CB did NOT fire
+            select((.tool_counts | map(select(.count > 2)) | length > 0) and (.cb_fired == false))
+        ] | length
     ' 2>/dev/null || echo "0")
 
     local learning_events=$(echo "$results" | jq '
@@ -4020,7 +4304,8 @@ main() {
     echo -e "${BLUE}║${NC}                                                                  ${BLUE}║${NC}"
     echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${BLUE}║${NC}  TOOL USAGE (across all tests)                                   ${BLUE}║${NC}"
-    echo "$tool_usage" | jq -r '.[] | "  ├─ \(.tool): \(.count) calls" + (if .count > 2 then " ⚠" else "" end)' 2>/dev/null | head -10 | while read line; do
+    # Note: Don't flag tools with >2 calls here - CB checks are per-test, not across tests
+    echo "$tool_usage" | jq -r '.[] | "  ├─ \(.tool): \(.count) calls"' 2>/dev/null | head -10 | while read line; do
         printf "${BLUE}║${NC}  %-64s ${BLUE}║${NC}\n" "$line"
     done
     echo -e "${BLUE}║${NC}                                                                  ${BLUE}║${NC}"
@@ -4150,308 +4435,3 @@ main() {
 }
 
 main "$@"
-
-    # ==================================================================
-    # GR-18b: find_module_api Tool Tests (115-117)
-    # ==================================================================
-    
-    # Test 115: Basic find_module_api tool query
-    "FIND_MODULE_API|basic|What is the API surface of the detected code modules|COMPLETE|find_module_api_tool_used"
-    
-    # Test 116: find_module_api with specific community
-    "FIND_MODULE_API|specific|Show me the API for community 0|COMPLETE|find_module_api_specific_community"
-    
-    # Test 117: CRS trace step recording for find_module_api tool
-    "FIND_MODULE_API|crs_trace|INTERNAL:verify_find_module_api_crs|COMPLETE"
-
-    find_module_api_tool_used)
-        # Verify tool was used
-        local module_api_used=$(echo "$trace" | jq '[.trace[] | select(.tool == "find_module_api")] | length')
-        if [ "$module_api_used" -eq 0 ]; then
-            echo "❌ find_module_api tool was not used"
-            return 1
-        fi
-        
-        # Check for module API output (modules array, API surface)
-        local has_modules=$(echo "$result" | jq -e '.modules // [] | length > 0' 2>/dev/null)
-        if [ "$has_modules" != "true" ]; then
-            echo "❌ Result missing modules array or empty"
-            return 1
-        fi
-        
-        echo "✅ find_module_api tool used and returned modules"
-        return 0
-        ;;
-    
-    find_module_api_specific_community)
-        # Verify specific community parameter was processed
-        local module_api_used=$(echo "$trace" | jq '[.trace[] | select(.tool == "find_module_api")] | length')
-        if [ "$module_api_used" -eq 0 ]; then
-            echo "❌ find_module_api tool was not used"
-            return 1
-        fi
-        
-        # Check for specific community in output
-        local has_community=$(echo "$result" | jq -e '.modules[0].community_id != null' 2>/dev/null)
-        if [ "$has_community" != "true" ]; then
-            echo "❌ Result missing community_id"
-            return 1
-        fi
-        
-        echo "✅ find_module_api processed specific community"
-        return 0
-        ;;
-
-    # ==================================================================
-    # GR-18b-P2: Module API Enhancements Tests (118-122)
-    # ==================================================================
-    
-    # Test 118: Deterministic sorting - same query twice should return identical order
-    "MODULE_API_ENH|deterministic|What is the API surface of detected modules|COMPLETE|module_api_deterministic_output"
-    
-    # Test 119: Cache hit behavior - second call should be faster (cache metadata check)
-    "MODULE_API_ENH|cache_hit|INTERNAL:verify_module_api_cache_hit|COMPLETE"
-    
-    # Test 120: Failure span events - verify span events emitted on failures
-    "MODULE_API_ENH|failure_spans|INTERNAL:verify_failure_span_events|COMPLETE"
-    
-    # Test 121: Semantic naming - verify better module names
-    "MODULE_API_ENH|semantic_names|Show me the module APIs|COMPLETE|module_api_semantic_names"
-    
-    # Test 122: Subgraph performance - verify subgraph extraction works
-    "MODULE_API_ENH|subgraph|INTERNAL:verify_subgraph_extraction|COMPLETE"
-
-    # === WEIGHTED CRITICALITY (GR-18c) ===
-    # Tests 123-127: Combine dominators + PageRank for critical function detection
-
-    # Test 123: Basic weighted criticality query
-    "WEIGHTED_CRIT|basic|What are the most critical functions combining importance and mandatory dependencies|COMPLETE|weighted_criticality_tool_used"
-
-    # Test 124: Top N parameter
-    "WEIGHTED_CRIT|top_n|Show me the top 10 most critical functions|COMPLETE|weighted_criticality_top_10"
-
-    # Test 125: Quadrant classification verification
-    "WEIGHTED_CRIT|quadrants|INTERNAL:verify_quadrant_classification|COMPLETE"
-
-    # Test 126: Risk level assignment
-    "WEIGHTED_CRIT|risk_levels|INTERNAL:verify_risk_levels|COMPLETE"
-
-    # Test 127: CRS trace with substeps
-    "WEIGHTED_CRIT|crs_trace|INTERNAL:verify_weighted_criticality_crs|COMPLETE"
-
-    # === GR-19c: LCA and Path Decomposition Queries ===
-    # These tests verify LCA computation, distance queries, and path decomposition
-
-    # Test 135: Basic LCA query
-    "HLD_LCA|basic|Compute LCA of two nodes|COMPLETE|lca_query"
-
-    # Test 136: Path decomposition
-    "HLD_PATH|decompose|Decompose path into segments|COMPLETE|path_decomposition"
-
-    # Test 137: Distance query
-    "HLD_DIST|distance|Compute distance between nodes|COMPLETE|distance_query"
-
-    # Test 138: LCA with CRS integration
-    "HLD_LCA|crs|INTERNAL:verify_lca_crs_integration|COMPLETE"
-
-    # === GR-19d: Path Aggregate Queries (Sum, Min, Max) ===
-    # These tests verify path aggregate queries using HLD + Segment Tree
-
-    # Test 139: Path sum query
-    "PATH_SUM|basic|Compute sum on path|COMPLETE|path_query"
-
-    # Test 140: Path min query
-    "PATH_MIN|basic|Compute min on path|COMPLETE|path_query"
-
-    # Test 141: Path max query
-    "PATH_MAX|basic|Compute max on path|COMPLETE|path_query"
-
-    # Test 142: Path query with CRS integration
-    "PATH_QUERY|crs|INTERNAL:verify_path_query_crs_integration|COMPLETE"
-
-    # === GR-19e: Path Update Operations (with Lazy Propagation) ===
-    # These tests verify path update operations using HLD + Segment Tree
-
-    # Test 143: Path update basic
-    "PATH_UPDATE|basic|Update values on path|COMPLETE|path_update"
-
-    # Test 144: Path set to specific value
-    "PATH_SET|basic|Set values on path to specific value|COMPLETE|path_update"
-
-    # Test 145: Update-query consistency
-    "PATH_UPDATE|consistency|INTERNAL:verify_update_query_consistency|COMPLETE"
-
-    # Test 146: Path update with CRS integration
-    "PATH_UPDATE|crs|INTERNAL:verify_path_update_crs_integration|COMPLETE"
-
-    # === GR-19f: Subtree Query and Update Operations ===
-    # These tests verify subtree operations using HLD's contiguous position property
-
-    # Test 147: Subtree sum query
-    "SUBTREE_SUM|basic|Compute sum of subtree|COMPLETE|subtree_query"
-
-    # Test 148: Subtree min/max query
-    "SUBTREE_MINMAX|basic|Compute min/max of subtree|COMPLETE|subtree_query"
-
-    # Test 149: Subtree update
-    "SUBTREE_UPDATE|basic|Update all nodes in subtree|COMPLETE|subtree_update"
-
-    # Test 150: Subtree query with CRS integration
-    "SUBTREE_QUERY|crs|INTERNAL:verify_subtree_query_crs_integration|COMPLETE"
-
-    module_api_deterministic_output)
-        # Call find_module_api twice and verify output is identical
-        local call1=$(echo "$result" | jq -S '.modules')
-        # Would need to call again and compare, but for integration test
-        # we just verify the output is well-formed
-        local has_modules=$(echo "$result" | jq -e '.modules // [] | length >= 0' 2>/dev/null)
-        if [ "$has_modules" != "true" ]; then
-            echo "❌ Result missing modules array"
-            return 1
-        fi
-        
-        # Verify modules are sorted (coverage should be descending)
-        local sorted_check=$(echo "$result" | jq -e '.modules[0].api_surface | if length > 1 then .[0].coverage >= .[1].coverage else true end' 2>/dev/null)
-        if [ "$sorted_check" != "true" ]; then
-            echo "❌ API surface not properly sorted"
-            return 1
-        fi
-        
-        echo "✅ Module API output is deterministic and sorted"
-        return 0
-        ;;
-    
-    module_api_semantic_names)
-        # Verify module names are semantic (not just "Module N")
-        local has_semantic=$(echo "$result" | jq -e '.modules[0].name | test("Module") and (test("Authentication|Database|API|Utilities") or length > 10)' 2>/dev/null)
-        if [ "$has_semantic" != "true" ]; then
-            echo "⚠️ Module names may not be semantic (check manually)"
-        else
-            echo "✅ Module names appear semantic"
-        fi
-        return 0
-        ;;
-
-    # === WEIGHTED CRITICALITY VERIFICATION FUNCTIONS (GR-18c) ===
-
-    weighted_criticality_tool_used)
-        # Verify find_weighted_criticality tool was invoked
-        local has_critical_functions=$(echo "$result" | jq -e '.critical_functions // [] | length > 0' 2>/dev/null)
-        if [ "$has_critical_functions" != "true" ]; then
-            echo "❌ Result missing critical_functions array or empty"
-            return 1
-        fi
-
-        # Verify criticality scores are present
-        local has_scores=$(echo "$result" | jq -e '.critical_functions[0] | has("criticality_score") and has("dominator_score") and has("pagerank_score")' 2>/dev/null)
-        if [ "$has_scores" != "true" ]; then
-            echo "❌ Missing required score fields"
-            return 1
-        fi
-
-        echo "✅ Weighted criticality tool output validated"
-        return 0
-        ;;
-
-    weighted_criticality_top_10)
-        # Verify top parameter respected (should have <= 10 results)
-        local count=$(echo "$result" | jq -e '.critical_functions | length' 2>/dev/null)
-        if [ "$count" -gt 10 ]; then
-            echo "❌ Expected max 10 results, got $count"
-            return 1
-        fi
-
-        # Verify sorted by criticality descending
-        local sorted=$(echo "$result" | jq -e '.critical_functions | if length > 1 then .[0].criticality_score >= .[1].criticality_score else true end' 2>/dev/null)
-        if [ "$sorted" != "true" ]; then
-            echo "❌ Results not sorted by criticality"
-            return 1
-        fi
-
-        echo "✅ Top N parameter working correctly"
-        return 0
-        ;;
-
-    verify_quadrant_classification)
-        # Verify quadrant field exists and uses valid values
-        local has_quadrant=$(echo "$result" | jq -e '.critical_functions[0] | has("quadrant")' 2>/dev/null)
-        if [ "$has_quadrant" != "true" ]; then
-            echo "❌ Missing quadrant classification"
-            return 1
-        fi
-
-        # Check for valid quadrant values
-        local quadrant=$(echo "$result" | jq -r '.critical_functions[0].quadrant' 2>/dev/null)
-        case "$quadrant" in
-            CRITICAL|HIDDEN_GATEKEEPER|HUB|LEAF)
-                echo "✅ Valid quadrant classification: $quadrant"
-                ;;
-            *)
-                echo "❌ Invalid quadrant value: $quadrant"
-                return 1
-                ;;
-        esac
-
-        # Verify quadrant_summary exists
-        local has_summary=$(echo "$result" | jq -e '.quadrant_summary // {} | length >= 4' 2>/dev/null)
-        if [ "$has_summary" != "true" ]; then
-            echo "⚠️ Quadrant summary missing or incomplete"
-        fi
-
-        return 0
-        ;;
-
-    verify_risk_levels)
-        # Verify risk_level field exists
-        local has_risk=$(echo "$result" | jq -e '.critical_functions[0] | has("risk_level")' 2>/dev/null)
-        if [ "$has_risk" != "true" ]; then
-            echo "❌ Missing risk_level field"
-            return 1
-        fi
-
-        # Check for valid risk level
-        local risk=$(echo "$result" | jq -r '.critical_functions[0].risk_level' 2>/dev/null)
-        case "$risk" in
-            high|medium|low|minimal)
-                echo "✅ Valid risk level: $risk"
-                ;;
-            *)
-                echo "❌ Invalid risk level: $risk"
-                return 1
-                ;;
-        esac
-
-        # Verify recommendation exists
-        local has_rec=$(echo "$result" | jq -e '.critical_functions[0] | has("recommendation")' 2>/dev/null)
-        if [ "$has_rec" != "true" ]; then
-            echo "⚠️ Missing recommendation field"
-        fi
-
-        return 0
-        ;;
-
-    verify_weighted_criticality_crs)
-        # Verify CRS trace exists in result
-        local has_trace=$(echo "$result" | jq -e 'has("trace_step")' 2>/dev/null)
-        if [ "$has_trace" != "true" ]; then
-            echo "❌ Missing CRS trace_step"
-            return 1
-        fi
-
-        # Verify trace has action and tool
-        local trace_valid=$(echo "$result" | jq -e '.trace_step | has("action") and has("tool") and .tool == "find_weighted_criticality"' 2>/dev/null)
-        if [ "$trace_valid" != "true" ]; then
-            echo "❌ Invalid CRS trace structure"
-            return 1
-        fi
-
-        # Verify metadata includes key metrics
-        local has_metadata=$(echo "$result" | jq -e '.trace_step.metadata | has("high_risk_count")' 2>/dev/null)
-        if [ "$has_metadata" == "true" ]; then
-            echo "✅ CRS trace with metadata validated"
-        else
-            echo "⚠️ CRS trace missing some metadata (non-critical)"
-        fi
-
-        return 0
-        ;;

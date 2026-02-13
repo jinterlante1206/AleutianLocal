@@ -128,11 +128,19 @@ FORBIDDEN TOOLS (DO NOT suggest these):
 
 NEXT STEP LOGIC:
 1. Review what information was successfully gathered above
-2. Identify what is STILL MISSING to answer the user's query
-3. Select a DIFFERENT tool NOT in the forbidden list
-4. If enough information gathered → select "answer" to synthesize response
+2. Check if this information FULLY answers the query (including negative results)
+3. If YES → select "answer" immediately
+4. If NO → identify what is STILL MISSING
+5. Select a DIFFERENT tool NOT in the forbidden list
 
-What critical information is MISSING that requires a NEW tool?
+**IMPORTANT: Negative results ARE complete answers!**
+- "not reachable from entry point" = Complete answer ✓
+- "no callers found" = Complete answer ✓
+- "not found in index" = Complete answer ✓
+- DO NOT call more tools hoping for a different result
+
+Does the information above FULLY answer the query (yes/no)?
+If yes, select "answer". If no, what critical information is MISSING?
 {{- else if .Context.RecentTools}}
 Recent tools used: {{join .Context.RecentTools ", "}}
 Prefer DIFFERENT tools unless absolutely necessary.

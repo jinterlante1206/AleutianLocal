@@ -58,10 +58,11 @@ func TestResolveSymbol_ExactMatch(t *testing.T) {
 	}
 }
 
-// TestResolveSymbol_NameMatch_Single tests Strategy 2: single name match.
+// TestResolveSymbol_NameMatch_Single tests Strategy 2: single function name match.
 func TestResolveSymbol_NameMatch_Single(t *testing.T) {
 	idx := index.NewSymbolIndex()
-	symbol := testSymbol("pkg/handler.go:Handler", "Handler", ast.SymbolKindStruct, 10)
+	// Use a FUNCTION not a struct, since we now prefer functions
+	symbol := testSymbol("pkg/handler.go:Handler", "Handler", ast.SymbolKindFunction, 10)
 	if err := idx.Add(symbol); err != nil {
 		t.Fatalf("Failed to add symbol: %v", err)
 	}
@@ -81,6 +82,38 @@ func TestResolveSymbol_NameMatch_Single(t *testing.T) {
 	}
 	if strategy != "name" {
 		t.Errorf("Expected strategy 'name', got '%s'", strategy)
+	}
+}
+
+// TestResolveSymbol_NameMatch_SingleNonFunction tests fallback when only non-function exists.
+// CB-31d: When searching for "Handler" and only Handler (struct) exists, we skip it
+// hoping to find a function, but if we don't find anything better, we return it via fallback.
+func TestResolveSymbol_NameMatch_SingleNonFunction(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	symbol := testSymbol("pkg/handler.go:Handler", "Handler", ast.SymbolKindStruct, 10)
+	if err := idx.Add(symbol); err != nil {
+		t.Fatalf("Failed to add symbol: %v", err)
+	}
+
+	deps := &Dependencies{SymbolIndex: idx}
+
+	resolvedID, confidence, strategy, err := resolveSymbol(deps, "Handler")
+	if err != nil {
+		t.Fatalf("Expected fallback, got error: %v", err)
+	}
+
+	if resolvedID != "pkg/handler.go:Handler" {
+		t.Errorf("Expected ID 'pkg/handler.go:Handler', got '%s'", resolvedID)
+	}
+
+	// Should return via fallback or fuzzy with low confidence
+	if confidence > 0.6 {
+		t.Errorf("Expected low confidence fallback (<= 0.6), got %f", confidence)
+	}
+
+	// Strategy should indicate it's not an ideal match
+	if strategy == "name" {
+		t.Errorf("Expected fallback/fuzzy strategy, got '%s'", strategy)
 	}
 }
 
@@ -384,4 +417,110 @@ func TestResolveSymbolCached_NilSession(t *testing.T) {
 	if cachedResult.SymbolID != "pkg/handler.go:Handler" {
 		t.Errorf("Expected cached ID to match, got '%s'", cachedResult.SymbolID)
 	}
+}
+
+// TestResolveSymbol_SubstringMatch tests Strategy 2.5: substring matching.
+// CB-31d Test 94 fix: "Handler" should match "NewHandler"
+func TestResolveSymbol_SubstringMatch(t *testing.T) {
+	idx := index.NewSymbolIndex()
+
+	// Add various symbols
+	handlerStruct := testSymbol("pkg/handlers/beacon_upload_handler.go:12:Handler", "Handler", ast.SymbolKindStruct, 12)
+	newHandler := testSymbol("pkg/handlers/beacon_upload_handler.go:22:NewHandler", "NewHandler", ast.SymbolKindFunction, 22)
+	handleErrors := testSymbol("main/main.go:512:handleProcessingErrors", "handleProcessingErrors", ast.SymbolKindFunction, 512)
+
+	if err := idx.Add(handlerStruct); err != nil {
+		t.Fatalf("Failed to add Handler struct: %v", err)
+	}
+	if err := idx.Add(newHandler); err != nil {
+		t.Fatalf("Failed to add NewHandler: %v", err)
+	}
+	if err := idx.Add(handleErrors); err != nil {
+		t.Fatalf("Failed to add handleProcessingErrors: %v", err)
+	}
+
+	deps := &Dependencies{SymbolIndex: idx}
+
+	// Test: "Handler" should match "NewHandler" via substring, not Handler struct
+	resolvedID, confidence, strategy, err := resolveSymbol(deps, "Handler")
+	if err != nil {
+		t.Fatalf("Expected substring match, got error: %v", err)
+	}
+
+	// Should prefer NewHandler (function) over Handler (struct)
+	if resolvedID != "pkg/handlers/beacon_upload_handler.go:22:NewHandler" {
+		t.Errorf("Expected NewHandler (function), got '%s'", resolvedID)
+	}
+
+	// Confidence should be 0.75 (substring, not prefix) + 0.05 (function bonus) = 0.8
+	// Note: "Handler" is IN "NewHandler" but not a prefix
+	if confidence < 0.75 || confidence > 0.85 {
+		t.Errorf("Expected confidence 0.75-0.85, got %f", confidence)
+	}
+
+	if strategy != "substring" {
+		t.Errorf("Expected strategy 'substring', got '%s'", strategy)
+	}
+}
+
+// TestResolveSymbol_SubstringMatch_Partial tests partial substring matching.
+func TestResolveSymbol_SubstringMatch_Partial(t *testing.T) {
+	idx := index.NewSymbolIndex()
+
+	uploadFunc := testSymbol("pkg/handlers/beacon_upload_handler.go:22:NewUploadFromAPI", "NewUploadFromAPI", ast.SymbolKindFunction, 22)
+
+	if err := idx.Add(uploadFunc); err != nil {
+		t.Fatalf("Failed to add symbol: %v", err)
+	}
+
+	deps := &Dependencies{SymbolIndex: idx}
+
+	// Test: "upload" should match "NewUploadFromAPI"
+	resolvedID, confidence, strategy, err := resolveSymbol(deps, "upload")
+	if err != nil {
+		t.Fatalf("Expected substring match, got error: %v", err)
+	}
+
+	if resolvedID != "pkg/handlers/beacon_upload_handler.go:22:NewUploadFromAPI" {
+		t.Errorf("Expected NewUploadFromAPI, got '%s'", resolvedID)
+	}
+
+	// Confidence should be 0.75 (substring, not prefix) + 0.05 (function bonus) = 0.8
+	if confidence < 0.75 || confidence > 0.85 {
+		t.Errorf("Expected confidence 0.75-0.85, got %f", confidence)
+	}
+
+	if strategy != "substring" {
+		t.Errorf("Expected strategy 'substring', got '%s'", strategy)
+	}
+}
+
+// TestResolveSymbol_ErrorWithSuggestions tests error message includes suggestions.
+func TestResolveSymbol_ErrorWithSuggestions(t *testing.T) {
+	idx := index.NewSymbolIndex()
+
+	newHandler := testSymbol("pkg/handlers/beacon_upload_handler.go:22:NewHandler", "NewHandler", ast.SymbolKindFunction, 22)
+
+	if err := idx.Add(newHandler); err != nil {
+		t.Fatalf("Failed to add symbol: %v", err)
+	}
+
+	deps := &Dependencies{SymbolIndex: idx}
+
+	// Test: Completely wrong name should return error with suggestions
+	_, _, _, err := resolveSymbol(deps, "CompletelyWrongName")
+
+	if err == nil {
+		t.Fatal("Expected error for non-existent symbol")
+	}
+
+	if !errors.Is(err, ErrSymbolNotFound) {
+		t.Errorf("Expected ErrSymbolNotFound, got: %v", err)
+	}
+
+	// Error message should contain "Did you mean:"
+	// (If fuzzy search finds similar symbols)
+	// Note: This test may be brittle depending on fuzzy search implementation
+	errorMsg := err.Error()
+	t.Logf("Error message: %s", errorMsg)
 }

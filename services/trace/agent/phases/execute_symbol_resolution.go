@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,14 +146,28 @@ func resolveSymbol(
 
 	// Strategy 2: Fuzzy match by name (O(1) with secondary index)
 	matches := deps.SymbolIndex.GetByName(name)
+	var skippedNonFunction *ast.Symbol // Track non-function match to exclude from substring search
+
 	if len(matches) == 1 {
+		// Single match - but only return if it's a function/method or if no better matches exist
+		match := matches[0]
+		if match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod {
+			// Perfect: single function match
+			span.SetAttributes(
+				attribute.String("match_type", "name_single_function"),
+				attribute.Int("match_count", 1),
+			)
+			return match.ID, 0.95, "name", nil
+		}
+		// Single non-function match (struct/interface) - continue to substring/fuzzy search
+		// to see if there's a better function match (e.g., "Handler" struct vs "NewHandler" function)
+		skippedNonFunction = match
 		span.SetAttributes(
-			attribute.String("match_type", "name_single"),
-			attribute.Int("match_count", 1),
+			attribute.String("match_type", "name_single_non_function"),
+			attribute.Int("skipped_kind", int(match.Kind)),
 		)
-		return matches[0].ID, 0.95, "name", nil
-	}
-	if len(matches) > 1 {
+		// Don't return yet - fall through to substring matching
+	} else if len(matches) > 1 {
 		span.SetAttributes(
 			attribute.String("match_type", "name_multiple"),
 			attribute.Int("match_count", len(matches)),
@@ -163,13 +179,69 @@ func resolveSymbol(
 				return match.ID, 0.8, "name_disambiguated", nil
 			}
 		}
-		// No functions found, return first match with lower confidence
+		// No functions found in multiple matches, return first with lower confidence
 		span.SetAttributes(attribute.Bool("function_preferred", false))
 		return matches[0].ID, 0.6, "name_ambiguous", nil
 	}
 
-	// Strategy 3: Partial/fuzzy search using Search API
-	searchCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	// Strategy 2.5: Substring matching (CB-31d Test 94 fix)
+	// Finds symbols whose names CONTAIN the search term
+	// Example: "Handler" matches "NewHandler", "handleProcessingErrors"
+	searchCtx2, cancel2 := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel2()
+	substringResults, _ := deps.SymbolIndex.Search(searchCtx2, name, 50) // More results for substring scan
+
+	type substringMatch struct {
+		symbol *ast.Symbol
+		score  float64
+	}
+	substringMatches := []substringMatch{}
+
+	for _, result := range substringResults {
+		// Skip the non-function match we found in Strategy 2 (avoid returning same symbol)
+		if skippedNonFunction != nil && result.ID == skippedNonFunction.ID {
+			continue
+		}
+
+		nameLower := strings.ToLower(result.Name)
+		searchLower := strings.ToLower(name)
+
+		// Check if symbol name contains search term
+		if strings.Contains(nameLower, searchLower) {
+			score := 0.75 // Base score for substring match
+
+			// Bonus for prefix match ("Handler" in "HandlerFunc")
+			if strings.HasPrefix(nameLower, searchLower) {
+				score = 0.85
+			}
+
+			// Bonus for functions/methods (prefer over types)
+			if result.Kind == ast.SymbolKindFunction || result.Kind == ast.SymbolKindMethod {
+				score += 0.05
+			}
+
+			substringMatches = append(substringMatches, substringMatch{result, score})
+		}
+	}
+
+	// Return best substring match if any found
+	if len(substringMatches) > 0 {
+		// Sort by score descending
+		sort.Slice(substringMatches, func(i, j int) bool {
+			return substringMatches[i].score > substringMatches[j].score
+		})
+
+		best := substringMatches[0]
+		span.SetAttributes(
+			attribute.String("match_type", "substring"),
+			attribute.Float64("match_score", best.score),
+			attribute.Int("substring_candidates", len(substringMatches)),
+		)
+		return best.symbol.ID, best.score, "substring", nil
+	}
+
+	// Strategy 3: Partial/fuzzy search using Search API (fallback)
+	searchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond) // Increased from 100ms
 	defer cancel()
 	searchResults, searchErr := deps.SymbolIndex.Search(searchCtx, name, 10) // Limit to top 10
 	if searchErr == nil && len(searchResults) > 0 {
@@ -189,7 +261,43 @@ func resolveSymbol(
 		return searchResults[0].ID, 0.5, "fuzzy_ambiguous", nil
 	}
 
-	span.SetAttributes(attribute.String("match_type", "none"))
+	// Build suggestion list from fuzzy search results (even if none matched preferences)
+	suggestions := []string{}
+	if searchErr == nil && len(searchResults) > 0 {
+		for i, result := range searchResults {
+			if i >= 3 {
+				break
+			} // Max 3 suggestions
+			kindStr := ""
+			if result.Kind == ast.SymbolKindStruct || result.Kind == ast.SymbolKindInterface {
+				kindStr = fmt.Sprintf(" (%s)", result.Kind)
+			}
+			suggestions = append(suggestions, result.Name+kindStr)
+		}
+	}
+
+	// Last resort: If we skipped a non-function match earlier and found nothing better,
+	// return it with low confidence rather than failing completely
+	if skippedNonFunction != nil {
+		span.SetAttributes(
+			attribute.String("match_type", "name_fallback"),
+			attribute.String("fallback_reason", "no_function_match_found"),
+		)
+		return skippedNonFunction.ID, 0.5, "name_fallback", nil
+	}
+
+	span.SetAttributes(
+		attribute.String("match_type", "none"),
+		attribute.Int("suggestions_count", len(suggestions)),
+	)
+
+	if len(suggestions) > 0 {
+		return "", 0.0, "failed", fmt.Errorf(
+			"%w: %q. Did you mean: %s?",
+			ErrSymbolNotFound, name, strings.Join(suggestions, ", "),
+		)
+	}
+
 	return "", 0.0, "failed", fmt.Errorf("%w: %q", ErrSymbolNotFound, name)
 }
 
