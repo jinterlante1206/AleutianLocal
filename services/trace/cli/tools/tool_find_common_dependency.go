@@ -314,20 +314,42 @@ func (t *findCommonDependencyTool) Execute(ctx context.Context, params map[strin
 // parseParams validates and extracts typed parameters from the raw map.
 func (t *findCommonDependencyTool) parseParams(params map[string]any) (FindCommonDependencyParams, error) {
 	var p FindCommonDependencyParams
+	var targets []string
 
-	// Extract targets (required)
-	targetsRaw, ok := params["targets"]
-	if !ok {
-		return p, fmt.Errorf("targets parameter is required")
+	// Strategy 1: Try new format (targets array)
+	if targetsRaw, ok := params["targets"]; ok {
+		parsedTargets, ok := parseStringArray(targetsRaw)
+		if ok {
+			targets = parsedTargets
+		}
 	}
 
-	targets, ok := parseStringArray(targetsRaw)
-	if !ok {
-		return p, fmt.Errorf("targets must be an array of strings")
+	// Strategy 2: Fallback to old format (function_a, function_b) for backward compatibility
+	// This handles LLM-generated calls that might use the old parameter names
+	if len(targets) == 0 {
+		var legacyTargets []string
+		if funcA, okA := params["function_a"]; okA {
+			if str, ok := parseStringParam(funcA); ok && str != "" {
+				legacyTargets = append(legacyTargets, str)
+			}
+		}
+		if funcB, okB := params["function_b"]; okB {
+			if str, ok := parseStringParam(funcB); ok && str != "" {
+				legacyTargets = append(legacyTargets, str)
+			}
+		}
+
+		if len(legacyTargets) >= 2 {
+			targets = legacyTargets
+			t.logger.Debug("find_common_dependency: using legacy parameter format",
+				slog.String("function_a", legacyTargets[0]),
+				slog.String("function_b", legacyTargets[1]))
+		}
 	}
 
+	// Validate we have at least 2 targets
 	if len(targets) < 2 {
-		return p, fmt.Errorf("targets must contain at least 2 function names")
+		return p, fmt.Errorf("targets must be an array of at least 2 function names (got %d). Use 'targets' array or 'function_a'/'function_b' parameters", len(targets))
 	}
 
 	p.Targets = targets

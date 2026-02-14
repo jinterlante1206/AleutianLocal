@@ -326,6 +326,15 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 				slog.Int("nodes", g.NodeCount()),
 				slog.Int("edges", g.EdgeCount()),
 			)
+
+			// P3: Log explicit graph readiness for easier debugging
+			slog.Info("graph ready for queries",
+				slog.String("project_root", projectRoot),
+				slog.Int("nodes", g.NodeCount()),
+				slog.Int("edges", g.EdgeCount()),
+				slog.Int64("build_time_us", buildResult.Stats.DurationMicro),
+				slog.Bool("complete", !buildResult.Incomplete),
+			)
 		}
 	}
 

@@ -24,7 +24,8 @@ SSH_KEY="$HOME/.ssh/aleutiandevops_ansible_key"
 SSH_CONTROL_SOCKET="$HOME/.ssh/crs_test_multiplex_%h_%p_%r"
 
 # Model configuration (must match test_trace_agent_remote.sh)
-OLLAMA_MODEL="glm-4.7-flash"
+# Testing gpt-oss:20b for synthesis (larger model, better reasoning)
+OLLAMA_MODEL="gpt-oss:20b"
 ROUTER_MODEL="granite4:micro-h"
 
 # Project to analyze on remote

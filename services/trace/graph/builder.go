@@ -281,7 +281,9 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 
 	// Phase 3: Finalize
 	state.graph.Freeze()
-	state.result.Stats.DurationMilli = time.Since(state.startTime).Milliseconds()
+	duration := time.Since(state.startTime)
+	state.result.Stats.DurationMilli = duration.Milliseconds()
+	state.result.Stats.DurationMicro = duration.Microseconds()
 
 	b.reportProgress(state, ProgressPhaseFinalizing, len(results), len(results))
 

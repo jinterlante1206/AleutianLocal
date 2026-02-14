@@ -1492,7 +1492,7 @@ func (p *ExecutePhase) extractToolParameters(
 		return params, nil
 
 	case "find_common_dependency":
-		// CB-31d: Extract two function names
+		// CB-31d: Extract two or more function names
 		// Patterns: "common dependency between X and Y", "shared by X and Y", "LCD of X and Y"
 		from, to, ok := extractPathSymbolsFromQuery(query)
 		if !ok || from == "" || to == "" {
@@ -1505,43 +1505,65 @@ func (p *ExecutePhase) extractToolParameters(
 			return nil, fmt.Errorf("could not extract two function names from query for find_common_dependency")
 		}
 
-		// CB-31d: Resolve both symbols if possible
+		// Build targets array
+		targets := []string{from, to}
+
+		// CB-31d: Resolve symbols if possible
 		if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			// Resolve function_a
-			resolvedFrom, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, from, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved function_a symbol for find_common_dependency",
-					slog.String("raw", from),
-					slog.String("resolved", resolvedFrom),
-					slog.Float64("confidence", confidence),
-				)
-				from = resolvedFrom
+			// Resolve both targets
+			resolvedTargets := make([]string, 0, len(targets))
+			for i, target := range targets {
+				resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_common_dependency",
+						slog.Int("index", i),
+						slog.String("raw", target),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+					)
+					resolvedTargets = append(resolvedTargets, resolvedTarget)
+				} else {
+					// Keep original if resolution fails
+					resolvedTargets = append(resolvedTargets, target)
+				}
 			}
-			// Resolve function_b
-			resolvedTo, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, to, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved function_b symbol for find_common_dependency",
-					slog.String("raw", to),
-					slog.String("resolved", resolvedTo),
-					slog.Float64("confidence", confidence),
-				)
-				to = resolvedTo
+			targets = resolvedTargets
+		}
+
+		// Extract optional entry point from query
+		// Patterns: "from main", "starting at X", "entry point Y"
+		var entry string
+		lowerQuery := strings.ToLower(query)
+		if strings.Contains(lowerQuery, "from") {
+			parts := strings.Split(query, "from")
+			if len(parts) > 1 {
+				// Extract first word after "from"
+				words := strings.Fields(parts[len(parts)-1])
+				if len(words) > 0 {
+					entry = words[0]
+					// Clean up punctuation
+					entry = strings.Trim(entry, ".,;:!?")
+				}
 			}
+		}
+
+		params := map[string]interface{}{
+			"targets": targets, // Array of strings
+		}
+		if entry != "" {
+			params["entry"] = entry
 		}
 
 		slog.Debug("CB-31d: extracted find_common_dependency params",
 			slog.String("tool", toolName),
-			slog.String("function_a", from),
-			slog.String("function_b", to),
+			slog.Any("targets", targets),
+			slog.String("entry", entry),
 		)
-		return map[string]interface{}{
-			"function_a": from,
-			"function_b": to,
-		}, nil
+		return params, nil
 
 	case "find_critical_path":
 		// CB-31d: Extract target and optional entry point
